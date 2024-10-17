@@ -42,7 +42,10 @@ pub struct BlockStore {
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
-    own_blocks: BTreeMap<RoundNumber, BlockDigest>,
+    // Byzantine nodes will create different blocks intended for the different validators
+    own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
+    // number of authorities in committee
+    committee_size: usize,
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     last_seen_by_authority: Vec<RoundNumber>,
@@ -72,6 +75,7 @@ impl BlockStore {
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
+            committee_size: committee.len(),
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -233,10 +237,11 @@ impl BlockStore {
 
     pub fn get_own_blocks(
         &self,
+        to_whom_authority_index: AuthorityIndex,
         from_excluded: RoundNumber,
         limit: usize,
     ) -> Vec<Data<StatementBlock>> {
-        let entries = self.inner.read().get_own_blocks(from_excluded, limit);
+        let entries = self.inner.read().get_own_blocks(to_whom_authority_index, from_excluded, limit);
         self.read_index_vec(entries)
     }
 
@@ -420,11 +425,13 @@ impl BlockStoreInner {
         }
     }
 
-    pub fn get_own_blocks(&self, from_excluded: RoundNumber, limit: usize) -> Vec<IndexEntry> {
+    // Function returns which own blocks are intended to which authority
+    pub fn get_own_blocks(&self, to_whom_index: AuthorityIndex, from_excluded: RoundNumber, limit: usize) -> Vec<IndexEntry> {
         self.own_blocks
-            .range((from_excluded + 1)..)
+            .range((from_excluded + 1, 0 as AuthorityIndex)..)
+            .filter(|((_round, authority_index) , _digest)| *authority_index == to_whom_index)
             .take(limit)
-            .map(|(round, digest)| {
+            .map(|((round, _authority_index) , digest)| {
                 let reference = BlockReference {
                     authority: self.authority,
                     round: *round,
@@ -471,10 +478,13 @@ impl BlockStoreInner {
         if reference.round > self.last_own_block.map(|r| r.round).unwrap_or_default() {
             self.last_own_block = Some(*reference);
         }
-        assert!(self
-            .own_blocks
-            .insert(reference.round, reference.digest)
-            .is_none());
+        for authority_index in 0..self.committee_size {
+            assert!(self
+                .own_blocks
+                .insert((reference.round, authority_index as AuthorityIndex), reference.digest)
+                .is_none());
+        }
+
     }
 
     pub fn last_own_block(&self) -> Option<BlockReference> {

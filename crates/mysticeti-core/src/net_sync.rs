@@ -191,6 +191,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .ok()?;
 
         let mut disseminator = BlockDisseminator::new(
+            connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),
             SynchronizerParameters::default(),

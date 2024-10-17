@@ -50,6 +50,7 @@ impl Default for SynchronizerParameters {
 }
 
 pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
+    to_whom_authority_index: AuthorityIndex,
     /// The sender to the network.
     sender: mpsc::Sender<NetworkMessage>,
     /// The inner state of the network syncer.
@@ -70,12 +71,14 @@ where
     C: CommitObserver + 'static,
 {
     pub fn new(
+        to_whom_authority_index: AuthorityIndex,
         sender: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
+            to_whom_authority_index,
             sender,
             inner,
             own_blocks: None,
@@ -130,6 +133,7 @@ where
         }
 
         let handle = Handle::current().spawn(Self::stream_own_blocks(
+            self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
             round,
@@ -139,6 +143,7 @@ where
     }
 
     async fn stream_own_blocks(
+        to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
@@ -146,7 +151,7 @@ where
     ) -> Option<()> {
         loop {
             let notified = inner.notify.notified();
-            let blocks = inner.block_store.get_own_blocks(round, batch_size);
+            let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
             for block in blocks {
                 round = block.round();
                 to.send(NetworkMessage::Block(block)).await.ok()?;
