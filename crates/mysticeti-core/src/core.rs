@@ -38,6 +38,9 @@ use crate::{
     wal::{WalPosition, WalSyncer, WalWriter},
 };
 
+enum ByzantineStrategies {
+    EquivocatingBlocks,
+}
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: VecDeque<(WalPosition, MetaStatement)>,
@@ -57,6 +60,7 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
+    byzantine_strategy: Option<ByzantineStrategies>
 }
 
 pub struct CoreOptions {
@@ -119,7 +123,7 @@ impl<H: BlockHandler> Core<H> {
                 next_entry: WalPosition::MAX,
                 block: own_genesis_block,
             };
-            block_writer.insert_own_block(&own_block_data);
+            block_writer.insert_own_block(&own_block_data, 0, committee.len() as AuthorityIndex);
             own_block_data
         };
         let block_manager = BlockManager::new(block_store.clone(), &committee);
@@ -162,6 +166,7 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
+            byzantine_strategy: None,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -274,6 +279,23 @@ impl<H: BlockHandler> Core<H> {
 
         assert!(!includes.is_empty());
         let time_ns = timestamp_utc().as_nanos();
+
+        let mut blocks = vec![];
+        match self.byzantine_strategy {
+            Some(ByzantineStrategies::EquivocatingBlocks) => {
+                let second_block = StatementBlock::new_with_signer(
+                    self.authority,
+                    clock_round,
+                    includes.clone(),
+                    statements.clone(),
+                    time_ns,
+                    self.epoch_changing(),
+                    &self.signer,
+                );
+                blocks.push(second_block);
+            }
+            _ => {}
+        }
         let block = StatementBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -283,44 +305,56 @@ impl<H: BlockHandler> Core<H> {
             self.epoch_changing(),
             &self.signer,
         );
-        assert_eq!(
-            block.includes().get(0).unwrap().authority,
-            self.authority,
-            "Invalid block {}",
-            block
-        );
+        blocks.push(block);
 
-        let block = Data::new(block);
-        if block.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
-            // Sanity check for now
-            panic!(
-                "Created an oversized block (check all limits set properly: {} > {}): {:?}",
-                block.serialized_bytes().len(),
-                crate::wal::MAX_ENTRY_SIZE / 2,
-                block.detailed()
+        let mut return_blocks = vec![];
+        let mut authority_bounds = vec![0];
+        for i in 1..=blocks.len() {
+            authority_bounds.push(i * self.committee.len() / blocks.len());
+        }
+
+        for block_id in 0..blocks.len() {
+            let block = blocks[block_id].clone();
+            assert_eq!(
+                block.includes().get(0).unwrap().authority,
+                self.authority,
+                "Invalid block {}",
+                block
             );
-        }
-        self.threshold_clock
-            .add_block(*block.reference(), &self.committee);
-        self.block_handler.handle_proposal(&block);
-        self.proposed_block_stats(&block);
-        let next_entry = if let Some((pos, _)) = self.pending.get(0) {
-            *pos
-        } else {
-            WalPosition::MAX
-        };
-        self.last_own_block = OwnBlockData {
-            next_entry,
-            block: block.clone(),
-        };
-        (&mut self.wal_writer, &self.block_store).insert_own_block(&self.last_own_block);
 
-        if self.options.fsync {
-            self.wal_writer.sync().expect("Wal sync failed");
-        }
+            let block = Data::new(block);
+            if block.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
+                // Sanity check for now
+                panic!(
+                    "Created an oversized block (check all limits set properly: {} > {}): {:?}",
+                    block.serialized_bytes().len(),
+                    crate::wal::MAX_ENTRY_SIZE / 2,
+                    block.detailed()
+                );
+            }
+            self.threshold_clock
+                .add_block(*block.reference(), &self.committee);
+            self.block_handler.handle_proposal(&block);
+            self.proposed_block_stats(&block);
+            let next_entry = if let Some((pos, _)) = self.pending.get(0) {
+                *pos
+            } else {
+                WalPosition::MAX
+            };
+            self.last_own_block = OwnBlockData {
+                next_entry,
+                block: block.clone(),
+            };
+            (&mut self.wal_writer, &self.block_store).insert_own_block(&self.last_own_block, authority_bounds[block_id] as AuthorityIndex, authority_bounds[block_id + 1] as AuthorityIndex);
 
-        tracing::debug!("Created block {block:?}");
-        Some(block)
+            if self.options.fsync {
+                self.wal_writer.sync().expect("Wal sync failed");
+            }
+
+            tracing::debug!("Created block {block:?}");
+            return_blocks.push(block);
+        }
+        return Some(return_blocks[0].clone());
     }
 
     pub fn wal_syncer(&self) -> WalSyncer {

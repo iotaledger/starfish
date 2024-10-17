@@ -368,7 +368,7 @@ impl TestBlockWriter {
             .wal_writer
             .write(WAL_ENTRY_BLOCK, &bincode::serialize(&block).unwrap())
             .unwrap();
-        self.block_store.insert_block(block, pos);
+        self.block_store.insert_block(block, pos, 0, self.block_store.committee_size as AuthorityIndex);
         pos
     }
 
@@ -392,8 +392,8 @@ impl BlockWriter for TestBlockWriter {
         (&mut self.wal_writer, &self.block_store).insert_block(block)
     }
 
-    fn insert_own_block(&mut self, block: &OwnBlockData) {
-        (&mut self.wal_writer, &self.block_store).insert_own_block(block)
+    fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+        (&mut self.wal_writer, &self.block_store).insert_own_block(block, authority_index_start, authority_index_end)
     }
 }
 

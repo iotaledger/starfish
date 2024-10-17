@@ -32,11 +32,13 @@ use crate::{
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 
+
 #[derive(Clone)]
 pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
     block_wal_reader: Arc<WalReader>,
     metrics: Arc<Metrics>,
+    pub(crate) committee_size: usize,
 }
 
 #[derive(Default)]
@@ -54,7 +56,7 @@ struct BlockStoreInner {
 
 pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition;
-    fn insert_own_block(&mut self, block: &OwnBlockData);
+    fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex);
 }
 
 #[derive(Clone)]
@@ -117,7 +119,7 @@ impl BlockStore {
             };
             // todo - we want to keep some last blocks in the cache
             block_count += 1;
-            inner.add_unloaded(block.reference(), pos);
+            inner.add_unloaded(block.reference(), pos, 0, committee.len() as AuthorityIndex);
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
@@ -129,13 +131,14 @@ impl BlockStore {
             block_wal_reader,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
+            committee_size: committee.len(),
         };
         builder.build(this)
     }
 
-    pub fn insert_block(&self, block: Data<StatementBlock>, position: WalPosition) {
+    pub fn insert_block(&self, block: Data<StatementBlock>, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         self.metrics.block_store_entries.inc();
-        self.inner.write().add_loaded(position, block);
+        self.inner.write().add_loaded(position, block, authority_index_start, authority_index_end);
     }
 
     pub fn get_block(&self, reference: BlockReference) -> Option<Data<StatementBlock>> {
@@ -389,17 +392,17 @@ impl BlockStoreInner {
         unloaded
     }
 
-    pub fn add_unloaded(&mut self, reference: &BlockReference, position: WalPosition) {
+    pub fn add_unloaded(&mut self, reference: &BlockReference, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         self.highest_round = max(self.highest_round, reference.round());
         let map = self.index.entry(reference.round()).or_default();
         map.insert(reference.author_digest(), IndexEntry::WalPosition(position));
-        self.add_own_index(reference);
+        self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
     }
 
-    pub fn add_loaded(&mut self, position: WalPosition, block: Data<StatementBlock>) {
+    pub fn add_loaded(&mut self, position: WalPosition, block: Data<StatementBlock>, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         self.highest_round = max(self.highest_round, block.round());
-        self.add_own_index(block.reference());
+        self.add_own_index(block.reference(), authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(block.reference());
         let map = self.index.entry(block.round()).or_default();
         map.insert(
@@ -471,14 +474,14 @@ impl BlockStoreInner {
             .collect()
     }
 
-    fn add_own_index(&mut self, reference: &BlockReference) {
+    fn add_own_index(&mut self, reference: &BlockReference, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         if reference.authority != self.authority {
             return;
         }
         if reference.round > self.last_own_block.map(|r| r.round).unwrap_or_default() {
             self.last_own_block = Some(*reference);
         }
-        for authority_index in 0..self.committee_size {
+        for authority_index in authority_index_start..authority_index_end {
             assert!(self
                 .own_blocks
                 .insert((reference.round, authority_index as AuthorityIndex), reference.digest)
@@ -506,13 +509,13 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
             .0
             .write(WAL_ENTRY_BLOCK, block.serialized_bytes())
             .expect("Writing to wal failed");
-        self.1.insert_block(block, pos);
+        self.1.insert_block(block, pos, 0, self.1.committee_size as AuthorityIndex);
         pos
     }
 
-    fn insert_own_block(&mut self, data: &OwnBlockData) {
+    fn insert_own_block(&mut self, data: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         let block_pos = data.write_to_wal(self.0);
-        self.1.insert_block(data.block.clone(), block_pos);
+        self.1.insert_block(data.block.clone(), block_pos, authority_index_start, authority_index_end);
     }
 }
 
