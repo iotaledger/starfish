@@ -520,6 +520,7 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
 }
 
 // This data structure has a special serialization in/from Bytes, see OwnBlockData::from_bytes/write_to_wal
+#[derive(Clone)]
 pub struct OwnBlockData {
     pub next_entry: WalPosition,
     pub block: Data<StatementBlock>,

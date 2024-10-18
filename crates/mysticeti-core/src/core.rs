@@ -44,7 +44,8 @@ enum ByzantineStrategies {
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: VecDeque<(WalPosition, MetaStatement)>,
-    last_own_block: OwnBlockData,
+    // For Byzantine node, last_own_block contains a vector of blocks
+    last_own_block: Vec<OwnBlockData>,
     block_handler: H,
     authority: AuthorityIndex,
     threshold_clock: ThresholdClockAggregator,
@@ -67,7 +68,7 @@ pub struct CoreOptions {
     fsync: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MetaStatement {
     Include(BlockReference),
     Payload(Vec<BaseStatement>),
@@ -151,7 +152,7 @@ impl<H: BlockHandler> Core<H> {
         let mut this = Self {
             block_manager,
             pending,
-            last_own_block,
+            last_own_block: vec![last_own_block],
             block_handler,
             authority,
             threshold_clock,
@@ -166,7 +167,11 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
-            byzantine_strategy: None,
+            byzantine_strategy: if authority == (0 as AuthorityIndex) {
+                Some(ByzantineStrategies::EquivocatingBlocks)
+            } else {
+                None
+            },
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -249,77 +254,83 @@ impl<H: BlockHandler> Core<H> {
         let mut taken = self.pending.split_off(first_include_index);
         // Split off returns the "tail", what we want is keep the tail in "pending" and get the head
         mem::swap(&mut taken, &mut self.pending);
-        // Compress the references in the block
-        // Iterate through all the include statements in the block, and make a set of all the references in their includes.
-        let mut references_in_block: HashSet<BlockReference> = HashSet::new();
-        references_in_block.extend(self.last_own_block.block.includes());
-        for (_, statement) in &taken {
-            if let MetaStatement::Include(block_ref) = statement {
-                // for all the includes in the block, add the references in the block to the set
-                if let Some(block) = self.block_store.get_block(*block_ref) {
-                    references_in_block.extend(block.includes());
-                }
-            }
-        }
-        includes.push(*self.last_own_block.block.reference());
-        for (_, statement) in taken.into_iter() {
-            match statement {
-                MetaStatement::Include(include) => {
-                    if !references_in_block.contains(&include) {
-                        includes.push(include);
-                    }
-                }
-                MetaStatement::Payload(payload) => {
-                    if !self.epoch_changing() {
-                        statements.extend(payload);
-                    }
-                }
-            }
-        }
 
-        assert!(!includes.is_empty());
-        let time_ns = timestamp_utc().as_nanos();
+
+
+
 
         let mut blocks = vec![];
         match self.byzantine_strategy {
             Some(ByzantineStrategies::EquivocatingBlocks) => {
-                let second_block = StatementBlock::new_with_signer(
-                    self.authority,
-                    clock_round,
-                    includes.clone(),
-                    statements.clone(),
-                    time_ns,
-                    self.epoch_changing(),
-                    &self.signer,
-                );
-                blocks.push(second_block);
+                if  self.last_own_block.len() < self.committee.len() {
+                    for _j in self.last_own_block.len()..self.committee.len() {
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
             }
             _ => {}
         }
-        let block = StatementBlock::new_with_signer(
-            self.authority,
-            clock_round,
-            includes,
-            statements,
-            time_ns,
-            self.epoch_changing(),
-            &self.signer,
-        );
-        blocks.push(block);
+
+        for j in 0.. self.last_own_block.len() {
+            // Compress the references in the block
+            // Iterate through all the include statements in the block, and make a set of all the references in their includes.
+            let mut references_in_block: HashSet<BlockReference> = HashSet::new();
+            references_in_block.extend(self.last_own_block[j].block.includes());
+            for (_, statement) in &taken {
+                if let MetaStatement::Include(block_ref) = statement {
+                    // for all the includes in the block, add the references in the block to the set
+                    if let Some(block) = self.block_store.get_block(*block_ref) {
+                        references_in_block.extend(block.includes());
+                    }
+                }
+            }
+            includes.push(*self.last_own_block[j].block.reference());
+            for (_, statement) in taken.clone().into_iter() {
+                match statement {
+                    MetaStatement::Include(include) => {
+                        if !references_in_block.contains(&include) && include.authority != self.authority {
+                            includes.push(include);
+                        }
+                    }
+                    MetaStatement::Payload(payload) => {
+                        if self.byzantine_strategy.is_none() {
+                            if !self.epoch_changing() {
+                                statements.extend(payload);
+                            }
+                        }
+                    }
+
+                }
+            }
+
+            assert!(!includes.is_empty());
+            let time_ns = timestamp_utc().as_nanos();
+            let new_block = StatementBlock::new_with_signer(
+                self.authority,
+                clock_round,
+                includes.clone(),
+                statements.clone(),
+                time_ns,
+                self.epoch_changing(),
+                &self.signer,
+            );
+            blocks.push(new_block);
+
+        }
 
         let mut return_blocks = vec![];
         let mut authority_bounds = vec![0];
         for i in 1..=blocks.len() {
             authority_bounds.push(i * self.committee.len() / blocks.len());
         }
-
-        for block_id in 0..blocks.len() {
-            let block = blocks[block_id].clone();
+        self.last_own_block = vec![];
+        let mut block_id = 0;
+        for block in blocks {
             assert_eq!(
                 block.includes().get(0).unwrap().authority,
                 self.authority,
                 "Invalid block {}",
-                block
+                block.clone()
             );
 
             let block = Data::new(block);
@@ -341,11 +352,16 @@ impl<H: BlockHandler> Core<H> {
             } else {
                 WalPosition::MAX
             };
-            self.last_own_block = OwnBlockData {
+            self.last_own_block.push(OwnBlockData {
                 next_entry,
                 block: block.clone(),
-            };
-            (&mut self.wal_writer, &self.block_store).insert_own_block(&self.last_own_block, authority_bounds[block_id] as AuthorityIndex, authority_bounds[block_id + 1] as AuthorityIndex);
+            });
+            (&mut self.wal_writer, &self.block_store).
+                insert_own_block(
+                    &self.last_own_block.last().unwrap(),
+   authority_bounds[block_id] as AuthorityIndex,
+    authority_bounds[block_id + 1] as AuthorityIndex
+                );
 
             if self.options.fsync {
                 self.wal_writer.sync().expect("Wal sync failed");
@@ -353,6 +369,7 @@ impl<H: BlockHandler> Core<H> {
 
             tracing::debug!("Created block {block:?}");
             return_blocks.push(block);
+            block_id += 1;
         }
         return Some(return_blocks[0].clone());
     }
@@ -487,12 +504,14 @@ impl<H: BlockHandler> Core<H> {
         &self.block_store
     }
 
+    // This function is needed only for signalling that we created a new block
     pub fn last_own_block(&self) -> &Data<StatementBlock> {
-        &self.last_own_block.block
+        &self.last_own_block[0].block
     }
 
+    // This function is needed only for retrieving the last round of a block we proposed
     pub fn last_proposed(&self) -> RoundNumber {
-        self.last_own_block.block.round()
+        self.last_own_block[0].block.round()
     }
 
     pub fn authority(&self) -> AuthorityIndex {

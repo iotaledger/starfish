@@ -448,7 +448,6 @@ mod sim_tests {
     use crate::{
         block_handler::{TestBlockHandler, TestCommitHandler},
         config,
-        config::NodePublicConfig,
         finalization_interpreter::FinalizationInterpreter,
         future_simulator::SimulatedExecutorState,
         runtime,
