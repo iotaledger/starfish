@@ -208,7 +208,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     disseminator.disseminate_own_blocks(round).await
                 }
                 NetworkMessage::Block(block) => {
-                    tracing::debug!("Received {} from {}", block.reference(), peer);
+                    tracing::debug!("Received {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee) {
                         tracing::warn!(
                             "Rejected incorrect block {} from {}: {:?}",
@@ -272,7 +272,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             }
             select! {
                 _sleep = runtime::sleep(leader_timeout) => {
-                    tracing::debug!("Timeout {round}");
+                    tracing::debug!("Timeout in round {round}");
                     // todo - more then one round timeout can happen, need to fix this
                     inner.syncer.force_new_block(round).await;
                 }
