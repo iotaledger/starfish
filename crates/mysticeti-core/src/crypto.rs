@@ -276,13 +276,15 @@ impl AsBytes for SignatureBytes {
 
 impl fmt::Debug for BlockDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}", hex::encode(self.0))
+        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2])      // Slice the first 2 characters and print
     }
 }
 
 impl fmt::Display for BlockDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "@{}", hex::encode(&self.0[..4]))
+        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2])
     }
 }
 

@@ -239,7 +239,6 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let mut includes = vec![];
         let mut statements = vec![];
 
         let first_include_index = self
@@ -284,6 +283,7 @@ impl<H: BlockHandler> Core<H> {
                     }
                 }
             }
+            let mut includes = vec![];
             includes.push(*self.last_own_block[j].block.reference());
             for (_, statement) in taken.clone().into_iter() {
                 match statement {

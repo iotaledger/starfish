@@ -454,9 +454,10 @@ impl fmt::Display for BlockReference {
         if self.authority < 26 {
             write!(
                 f,
-                "{}{}",
+                "{}{}{}",
                 format_authority_index(self.authority),
-                self.round
+                self.round,
+                self.digest
             )
         } else {
             write!(f, "[{:02}]{}", self.authority, self.round)
