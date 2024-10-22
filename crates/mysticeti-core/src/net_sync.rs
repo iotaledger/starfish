@@ -554,8 +554,8 @@ mod sim_tests {
         SimulatedExecutorState::run(rng_at_seed(0), test_network_sync_sim_all_up_async());
     }
 
-    async fn test_network_sync_sim_all_up_async() {
-        let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(10);
+   async fn test_network_sync_sim_all_up_async() {
+        let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(4);
         simulated_network.connect_all().await;
         runtime::sleep(Duration::from_secs(20)).await;
         let mut syncers = vec![];
@@ -577,7 +577,7 @@ mod sim_tests {
     // All peers except for peer A are connected in this test
     // Peer A is disconnected from everything
     async fn test_network_sync_sim_one_down_async() {
-        let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(10);
+        let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(4);
         simulated_network.connect_some(|a, _b| a != 0).await;
         println!("Started");
         runtime::sleep(Duration::from_secs(40)).await;

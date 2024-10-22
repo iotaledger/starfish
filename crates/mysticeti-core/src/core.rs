@@ -167,7 +167,7 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
-            byzantine_strategy: if authority == (5 as AuthorityIndex) {
+            byzantine_strategy: if authority == (0 as AuthorityIndex) {
                 Some(ByzantineStrategies::EquivocatingBlocks)
             } else {
                 None
