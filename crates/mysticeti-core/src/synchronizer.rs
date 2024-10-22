@@ -17,6 +17,7 @@ use crate::{
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
 
+
 // TODO: A central controller will eventually dynamically update these parameters.
 pub struct SynchronizerParameters {
     /// The maximum number of helpers (across all nodes).
@@ -314,7 +315,8 @@ where
         }
 
         let now = timestamp_utc();
-        let mut to_request = Vec::new();
+        let mut to_request = vec![];
+
         let missing_blocks = self.inner.syncer.get_missing_blocks().await;
         for (authority, missing) in missing_blocks.into_iter().enumerate() {
             self.metrics
@@ -325,7 +327,10 @@ where
             for reference in missing {
                 let time = self.missing.entry(reference).or_insert(now);
                 if now.checked_sub(*time).unwrap_or_default() >= self.parameters.grace_period {
-                    to_request.push(reference);
+                    if authority >= to_request.len() {
+                        to_request.resize(authority + 1, vec![]);
+                    }
+                    to_request[authority].push(reference);
                     self.missing.remove(&reference); // todo - ensure we receive the block
                 }
             }
@@ -338,18 +343,22 @@ where
         // (`missing.len() > self.parameters.new_stream_threshold`), it is likely that
         // we have a network partition. We should try to find an other peer from which
         // to (temporarily) sync the blocks from that authority.
+        for authority in 0..to_request.len() {
+            for chunks in to_request[authority].chunks(net_sync::MAXIMUM_BLOCK_REQUEST) {
+                //let Some((peer, permit)) = self.sample_peer(&[self.id]) else {
+                    //break;
+                //};
+                let peer = authority;
+                let sender = &self.senders[&(peer as u64)];
+                let Ok(permit) = sender.try_reserve() else { continue; };
+                let message = NetworkMessage::RequestBlocks(chunks.to_vec());
+                permit.send(message);
 
-        for chunks in to_request.chunks(net_sync::MAXIMUM_BLOCK_REQUEST) {
-            let Some((peer, permit)) = self.sample_peer(&[self.id]) else {
-                break;
-            };
-            let message = NetworkMessage::RequestBlocks(chunks.to_vec());
-            permit.send(message);
-
-            self.metrics
-                .block_sync_requests_sent
-                .with_label_values(&[&peer.to_string()])
-                .inc();
+                self.metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&peer.to_string()])
+                    .inc();
+            }
         }
     }
 
