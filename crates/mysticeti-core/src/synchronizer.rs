@@ -42,8 +42,8 @@ impl Default for SynchronizerParameters {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
             batch_size: 10,
-            sample_precision: Duration::from_secs(1),
-            grace_period: Duration::from_secs(1),
+            sample_precision: Duration::from_millis(100),
+            grace_period: Duration::from_millis(100),
             stream_interval: Duration::from_secs(1),
             new_stream_threshold: 10,
         }
@@ -351,6 +351,17 @@ where
                 let peer = authority;
                 let sender = &self.senders[&(peer as u64)];
                 let Ok(permit) = sender.try_reserve() else { continue; };
+                let message = NetworkMessage::RequestBlocks(chunks.to_vec());
+                permit.send(message);
+
+                self.metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&peer.to_string()])
+                    .inc();
+                //we request the missing block second time from a random authority
+                let Some((peer, permit)) = self.sample_peer(&[self.id, authority as AuthorityIndex]) else {
+                    break;
+                };
                 let message = NetworkMessage::RequestBlocks(chunks.to_vec());
                 permit.send(message);
 
