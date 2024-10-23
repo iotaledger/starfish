@@ -16,6 +16,7 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::block_store::ByzantineStrategy;
 use crate::consensus::universal_committer::UniversalCommitter;
 
 
@@ -139,6 +140,7 @@ where
         }
 
         let handle = Handle::current().spawn(Self::stream_own_blocks(
+            self.universal_committer.clone(),
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
@@ -149,20 +151,40 @@ where
     }
 
     async fn stream_own_blocks(
+        universal_committer: UniversalCommitter,
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
         batch_size: usize,
     ) -> Option<()> {
+        let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
+        let mut current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
         loop {
             let notified = inner.notify.notified();
-            let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
-            for block in blocks {
-                round = block.round();
-                to.send(NetworkMessage::Block(block)).await.ok()?;
+            match byzantine_strategy {
+                // Send own blocks to the authority when it is the leader in the next round
+                Some(ByzantineStrategy::EquivocatingBlocks) => {
+                    let leaders_next_round = universal_committer.get_leaders(current_round+1);
+                    if leaders_next_round.contains(&to_whom_authority_index) {
+                        let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
+                        for block in blocks {
+                            round = block.round();
+                            to.send(NetworkMessage::Block(block)).await.ok()?;
+                        }
+                    }
+                    notified.await;
+                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+                }
+                _ => {
+                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
+                    for block in blocks {
+                        round = block.round();
+                        to.send(NetworkMessage::Block(block)).await.ok()?;
+                    }
+                    notified.await;
+                }
             }
-            notified.await
         }
     }
 

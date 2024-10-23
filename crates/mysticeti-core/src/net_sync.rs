@@ -31,6 +31,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
+use crate::block_store::ByzantineStrategy;
 use crate::consensus::universal_committer::UniversalCommitter;
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -229,18 +230,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     inner.syncer.add_blocks(vec![block]).await;
                 }
                 NetworkMessage::RequestBlocks(references) => {
-                    if references.len() > MAXIMUM_BLOCK_REQUEST {
-                        // Terminate connection on receiving invalid message.
-                        break;
+                    // When Byzantine don't send your blocks to others
+                    match inner.block_store.byzantine_strategy {
+                        Some(ByzantineStrategy::EquivocatingBlocks) => { }
+                        _ => {
+                            if references.len() > MAXIMUM_BLOCK_REQUEST {
+                                // Terminate connection on receiving invalid message.
+                                break;
+                            }
+                            let authority = connection.peer_id as AuthorityIndex;
+                            if disseminator
+                                .send_blocks(authority, references)
+                                .await
+                                .is_none()
+                            {
+                                break;
+                            }
+                        }
                     }
-                    let authority = connection.peer_id as AuthorityIndex;
-                    if disseminator
-                        .send_blocks(authority, references)
-                        .await
-                        .is_none()
-                    {
-                        break;
-                    }
+
                 }
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
