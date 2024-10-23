@@ -37,10 +37,9 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
+use crate::block_store::ByzantineStrategy;
 
-enum ByzantineStrategies {
-    EquivocatingBlocks,
-}
+
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: VecDeque<(WalPosition, MetaStatement)>,
@@ -61,7 +60,6 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    byzantine_strategy: Option<ByzantineStrategies>
 }
 
 pub struct CoreOptions {
@@ -167,11 +165,6 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
-            byzantine_strategy: if authority == (0 as AuthorityIndex) {
-                Some(ByzantineStrategies::EquivocatingBlocks)
-            } else {
-                None
-            },
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -183,6 +176,10 @@ impl<H: BlockHandler> Core<H> {
         }
 
         this
+    }
+
+    pub fn get_universal_committer(&self) -> UniversalCommitter {
+        self.committer.clone()
     }
 
     pub fn with_options(mut self, options: CoreOptions) -> Self {
@@ -259,8 +256,8 @@ impl<H: BlockHandler> Core<H> {
 
 
         let mut blocks = vec![];
-        match self.byzantine_strategy {
-            Some(ByzantineStrategies::EquivocatingBlocks) => {
+        match self.block_store.byzantine_strategy {
+            Some(ByzantineStrategy::EquivocatingBlocks) => {
                 if  self.last_own_block.len() < self.committee.len() {
                     for _j in self.last_own_block.len()..self.committee.len() {
                         self.last_own_block.push(self.last_own_block[0].clone());
@@ -293,7 +290,7 @@ impl<H: BlockHandler> Core<H> {
                         }
                     }
                     MetaStatement::Payload(payload) => {
-                        if self.byzantine_strategy.is_none() {
+                        if self.block_store.byzantine_strategy.is_none() {
                             if !self.epoch_changing() {
                                 statements.extend(payload);
                             }

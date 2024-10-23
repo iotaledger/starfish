@@ -15,6 +15,7 @@ use crate::{
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
 /// It can be configured to use a combination of different commit strategies, including
 /// multi-leaders, backup leaders, and pipelines.
+#[derive(Clone)]
 pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,

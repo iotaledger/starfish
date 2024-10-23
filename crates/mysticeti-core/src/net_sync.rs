@@ -31,6 +31,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
+use crate::consensus::universal_committer::UniversalCommitter;
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -72,6 +73,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let wal_syncer = core.wal_syncer();
         let block_store = core.block_store().clone();
         let epoch_closing_time = core.epoch_closing_time();
+        let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(
             core,
             commit_period,
@@ -102,6 +104,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         ));
         let main_task = handle.spawn(Self::run(
             network,
+            universal_committer,
             inner.clone(),
             epoch_receiver,
             shutdown_grace_period,
@@ -130,6 +133,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
     async fn run(
         mut network: Network,
+        universal_committer: UniversalCommitter,
         inner: Arc<NetworkSyncerInner<H, C>>,
         epoch_close_signal: mpsc::Receiver<()>,
         shutdown_grace_period: Duration,
@@ -157,6 +161,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
             let task = handle.spawn(Self::connection_task(
                 connection,
+                universal_committer.clone(),
                 inner.clone(),
                 block_fetcher.clone(),
                 metrics.clone(),
@@ -177,6 +182,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
     async fn connection_task(
         mut connection: Connection,
+        universal_committer: UniversalCommitter,
         inner: Arc<NetworkSyncerInner<H, C>>,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
@@ -193,6 +199,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut disseminator = BlockDisseminator::new(
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
+            universal_committer,
             inner.clone(),
             SynchronizerParameters::default(),
             metrics.clone(),

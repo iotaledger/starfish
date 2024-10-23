@@ -16,6 +16,7 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::consensus::universal_committer::UniversalCommitter;
 
 
 // TODO: A central controller will eventually dynamically update these parameters.
@@ -54,6 +55,8 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     to_whom_authority_index: AuthorityIndex,
     /// The sender to the network.
     sender: mpsc::Sender<NetworkMessage>,
+    /// Universal Committer. This is needed for Byzantine nodes to control when to send the blocks
+    universal_committer: UniversalCommitter,
     /// The inner state of the network syncer.
     inner: Arc<NetworkSyncerInner<H, C>>,
     /// The handle of the task disseminating our own blocks.
@@ -74,6 +77,7 @@ where
     pub fn new(
         to_whom_authority_index: AuthorityIndex,
         sender: mpsc::Sender<NetworkMessage>,
+        universal_committer: UniversalCommitter,
         inner: Arc<NetworkSyncerInner<H, C>>,
         parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
@@ -81,6 +85,7 @@ where
         Self {
             to_whom_authority_index,
             sender,
+            universal_committer,
             inner,
             own_blocks: None,
             other_blocks: Vec::new(),

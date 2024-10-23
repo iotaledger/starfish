@@ -32,13 +32,17 @@ use crate::{
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 
-
+#[derive(Clone)]
+pub enum ByzantineStrategy {
+    EquivocatingBlocks,
+}
 #[derive(Clone)]
 pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
     block_wal_reader: Arc<WalReader>,
     metrics: Arc<Metrics>,
     pub(crate) committee_size: usize,
+    pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
 
 #[derive(Default)]
@@ -129,6 +133,11 @@ impl BlockStore {
         }
         let this = Self {
             block_wal_reader,
+            byzantine_strategy: if authority == (1000 as AuthorityIndex) {
+                Some(ByzantineStrategy::EquivocatingBlocks)
+            } else {
+                None
+            },
             inner: Arc::new(RwLock::new(inner)),
             metrics,
             committee_size: committee.len(),
