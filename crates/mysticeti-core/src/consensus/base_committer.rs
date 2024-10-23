@@ -155,7 +155,7 @@ impl BaseCommitter {
                 .expect("We should have the whole sub-dag by now");
 
             if self.is_vote(&potential_vote, leader_block) {
-                tracing::trace!("[{self}] {potential_vote:?} is a vote for {leader_block:?}");
+                //tracing::trace!("[{self}] {potential_vote:?} is a vote for {leader_block:?}");
                 if votes_stake_aggregator.add(reference.authority, &self.committee) {
                     return true;
                 }
@@ -225,10 +225,10 @@ impl BaseCommitter {
                 .iter()
                 .all(|include| include.authority != leader)
             {
-                tracing::trace!(
-                    "[{self}] {voting_block:?} is a blame for leader {}",
-                    format_authority_round(leader, voting_round - 1)
-                );
+                //tracing::trace!(
+                //    "[{self}] {voting_block:?} is a blame for leader {}",
+                //    format_authority_round(leader, voting_round - 1)
+                //);
                 if blame_stake_aggregator.add(voter, &self.committee) {
                     return true;
                 }

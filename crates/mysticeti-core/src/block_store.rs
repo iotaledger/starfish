@@ -50,8 +50,6 @@ struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
-    // number of authorities in committee
-    committee_size: usize,
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     last_seen_by_authority: Vec<RoundNumber>,
@@ -81,7 +79,6 @@ impl BlockStore {
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
-            committee_size: committee.len(),
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
