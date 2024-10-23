@@ -250,9 +250,9 @@ impl BaseCommitter {
         for decision_block in &decision_blocks {
             let authority = decision_block.reference().authority;
             if self.is_certificate(decision_block, leader_block) {
-                tracing::trace!(
-                    "[{self}] {decision_block:?} is a certificate for leader {leader_block:?}"
-                );
+                //tracing::trace!(
+                //    "[{self}] {decision_block:?} is a certificate for leader {leader_block:?}"
+                //);
                 if certificate_stake_aggregator.add(authority, &self.committee) {
                     return true;
                 }
@@ -275,10 +275,10 @@ impl BaseCommitter {
         let anchors = leaders.filter(|x| leader_round + self.options.wave_length <= x.round());
 
         for anchor in anchors {
-            tracing::trace!(
-                "[{self}] Trying to indirect-decide {} using anchor {anchor}",
-                format_authority_round(leader, leader_round),
-            );
+            //tracing::trace!(
+            //    "[{self}] Trying to indirect-decide {} using anchor {anchor}",
+            //    format_authority_round(leader, leader_round),
+            //);
             match anchor {
                 LeaderStatus::Commit(anchor) => {
                     return self.decide_leader_from_anchor(anchor, leader, leader_round);
