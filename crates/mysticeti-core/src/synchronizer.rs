@@ -163,8 +163,28 @@ where
         loop {
             let notified = inner.notify.notified();
             match byzantine_strategy {
-                // Send own blocks to the authority when it is the leader in the next round
+                // TODO: Don't send your leader block for at least timeout
+                Some(ByzantineStrategy::TimeoutLeader) => {
+                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
+                    for block in blocks {
+                        round = block.round();
+                        to.send(NetworkMessage::Block(block)).await.ok()?;
+                    }
+                    notified.await;
+                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+                }
+                // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::EquivocatingBlocks) => {
+                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
+                    for block in blocks {
+                        round = block.round();
+                        to.send(NetworkMessage::Block(block)).await.ok()?;
+                    }
+                    notified.await;
+                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+                }
+                // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
+                Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round+1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
                         let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
@@ -176,6 +196,7 @@ where
                     notified.await;
                     current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
                 }
+                // Send block to the authority whenever equivocating block is created
                 _ => {
                     let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
                     for block in blocks {

@@ -18,5 +18,5 @@ tmux new -d -s "v7" "cargo run --bin mysticeti -- dry-run --committee-size 10 --
 tmux new -d -s "v8" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 8 > v8.log.ansi"
 tmux new -d -s "v9" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 9 > v9.log.ansi"
 
-sleep 30
+sleep 60
 tmux kill-server

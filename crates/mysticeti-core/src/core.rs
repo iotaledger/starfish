@@ -256,15 +256,12 @@ impl<H: BlockHandler> Core<H> {
 
 
         let mut blocks = vec![];
-        match self.block_store.byzantine_strategy {
-            Some(ByzantineStrategy::EquivocatingBlocks) => {
-                if  self.last_own_block.len() < self.committee.len() {
-                    for _j in self.last_own_block.len()..self.committee.len() {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
+        if self.block_store.byzantine_strategy.is_some() {
+            if  self.last_own_block.len() < self.committee.len() {
+                for _j in self.last_own_block.len()..self.committee.len() {
+                    self.last_own_block.push(self.last_own_block[0].clone());
                 }
             }
-            _ => {}
         }
 
         for j in 0.. self.last_own_block.len() {

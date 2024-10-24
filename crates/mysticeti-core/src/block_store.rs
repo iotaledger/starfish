@@ -34,7 +34,9 @@ use crate::{
 
 #[derive(Clone)]
 pub enum ByzantineStrategy {
+    TimeoutLeader,
     EquivocatingBlocks,
+    DelayedEquivocatingBlocks,
 }
 #[derive(Clone)]
 pub struct BlockStore {

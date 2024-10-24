@@ -231,9 +231,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::RequestBlocks(references) => {
                     // When Byzantine don't send your blocks to others
-                    match inner.block_store.byzantine_strategy {
-                        Some(ByzantineStrategy::EquivocatingBlocks) => { }
-                        _ => {
+                    if inner.block_store.byzantine_strategy.is_none() {
+
                             if references.len() > MAXIMUM_BLOCK_REQUEST {
                                 // Terminate connection on receiving invalid message.
                                 break;
@@ -246,9 +245,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             {
                                 break;
                             }
-                        }
                     }
-
                 }
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
