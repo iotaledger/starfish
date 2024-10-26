@@ -133,7 +133,7 @@ impl BlockStore {
         let this = Self {
             block_wal_reader,
             byzantine_strategy: if authority == (0 as AuthorityIndex) {
-                Some(ByzantineStrategy::EquivocatingBlocks)
+                Some(ByzantineStrategy::DelayedEquivocatingBlocks)
             } else {
                 None
             },

@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 1s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['prometheus:9090']
+
+  - job_name: 'mysticeti-metrics'
+    static_configs:
+      - targets:
+          - '192.168.2.119:1511'
+          - '192.168.2.119:1512'
+          - '192.168.2.119:1513'
+          - '192.168.2.119:1514'
+          - '192.168.2.119:1515'
+          - '192.168.2.119:1516'
+          - '192.168.2.119:1517'
+          - '192.168.2.119:1518'
+          - '192.168.2.119:1519'
+          - '192.168.2.119:1520'
