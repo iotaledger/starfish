@@ -412,8 +412,8 @@ where
                     senders.reverse();
                 }
                 for (peer, sender) in senders {
-                    eprintln!("peer={}", peer);
-                    eprintln!("self.sender = {:?}", self.senders);
+                    //eprintln!("peer={}", peer);
+                    //eprintln!("self.sender = {:?}", self.senders);
                     let Ok(permit) = sender.try_reserve() else { continue; };
 
                     let message = NetworkMessage::RequestBlocks(chunks.to_vec());
