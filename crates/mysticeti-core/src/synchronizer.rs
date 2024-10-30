@@ -4,7 +4,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::future::join_all;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -44,7 +44,7 @@ impl Default for SynchronizerParameters {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
             batch_size: 10,
-            sample_precision: Duration::from_millis(5000),
+            sample_precision: Duration::from_millis(50),
             grace_period: Duration::from_millis(15000),
             stream_interval: Duration::from_secs(1),
             new_stream_threshold: 10,
@@ -386,7 +386,6 @@ where
         self.missing.retain(|_, time| {
             now.checked_sub(*time).unwrap_or_default() < self.parameters.grace_period
         });
-
         // TODO: If we are missing many blocks from the same authority
         // (`missing.len() > self.parameters.new_stream_threshold`), it is likely that
         // we have a network partition. We should try to find an other peer from which
@@ -396,27 +395,37 @@ where
                 //let Some((peer, permit)) = self.sample_peer(&[self.id]) else {
                     //break;
                 //};
-                let peer = authority;
-                let sender = &self.senders[&(peer as u64)];
-                let Ok(permit) = sender.try_reserve() else { continue; };
-                let message = NetworkMessage::RequestBlocks(chunks.to_vec());
-                permit.send(message);
+                //we request the missing block one time from the authority and the second time from a random authority
+                let except = [authority as AuthorityIndex, self.id];
+                let mut senders = self
+                    .senders
+                    .iter()
+                    .filter(|&(index, _)| !except.contains(index))
+                    .collect::<Vec<_>>();
 
-                self.metrics
-                    .block_sync_requests_sent
-                    .with_label_values(&[&peer.to_string()])
-                    .inc();
-                //we request the missing block second time from a random authority
-                let Some((peer, permit)) = self.sample_peer(&[self.id, authority as AuthorityIndex]) else {
-                    break;
-                };
-                let message = NetworkMessage::RequestBlocks(chunks.to_vec());
-                permit.send(message);
+                senders.shuffle(&mut thread_rng());
+                let mut up = 1;
+                let authority_index = authority as AuthorityIndex;
+                if let Some(x) = self.senders.get(&(authority as AuthorityIndex)) {
+                    senders.push((&authority_index, x));
+                    up += 1;
+                    senders.reverse();
+                }
+                for (peer, sender) in senders {
+                    eprintln!("peer={}", peer);
+                    eprintln!("self.sender = {:?}", self.senders);
+                    let Ok(permit) = sender.try_reserve() else { continue; };
 
-                self.metrics
-                    .block_sync_requests_sent
-                    .with_label_values(&[&peer.to_string()])
-                    .inc();
+                    let message = NetworkMessage::RequestBlocks(chunks.to_vec());
+                    permit.send(message);
+                    self.metrics
+                        .block_sync_requests_sent
+                        .with_label_values(&[&peer.to_string()])
+                        .inc();
+                    up -= 1;
+                    if (up == 0) {break;}
+                }
+
             }
         }
     }
@@ -440,4 +449,18 @@ where
         }
         None
     }
+
+
 }
+
+fn random_usize_exclude(min: usize, max: usize, exclude: usize) -> usize {
+    let mut rng = rand::thread_rng();
+
+    loop {
+        let num = rng.gen_range(min..=max);
+        if num != exclude {
+            return num;
+        }
+    }
+}
+
