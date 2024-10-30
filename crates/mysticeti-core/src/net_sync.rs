@@ -31,7 +31,6 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
-use crate::block_store::ByzantineStrategy;
 use crate::consensus::universal_committer::UniversalCommitter;
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -500,7 +499,7 @@ mod sim_tests {
     }
 
     async fn test_exact_commits_in_epoch_async() {
-        let n = 4;
+        let n = 6;
         let rounds_in_epoch = 1000;
         let (simulated_network, network_syncers, mut reporters) =
             simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);

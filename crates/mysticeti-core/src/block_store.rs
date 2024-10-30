@@ -32,6 +32,7 @@ use crate::{
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 
+#[allow(unused)]
 #[derive(Clone)]
 pub enum ByzantineStrategy {
     TimeoutLeader,
@@ -133,7 +134,7 @@ impl BlockStore {
         let this = Self {
             block_wal_reader,
             byzantine_strategy: if authority == (1 as AuthorityIndex) {
-                Some(ByzantineStrategy::DelayedEquivocatingBlocks)
+                Some(ByzantineStrategy::EquivocatingBlocks)
             } else {
                 None
             },

@@ -4,7 +4,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::future::join_all;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{seq::SliceRandom, thread_rng};
 use tokio::sync::mpsc;
 
 use crate::{block_handler::BlockHandler, metrics::Metrics, net_sync::{self, NetworkSyncerInner}, network::NetworkMessage, runtime::{sleep, timestamp_utc, Handle, JoinHandle}, runtime, syncer::CommitObserver, types::{AuthorityIndex, BlockReference, RoundNumber}};
@@ -422,44 +422,15 @@ where
                         .with_label_values(&[&peer.to_string()])
                         .inc();
                     up -= 1;
-                    if (up == 0) {break;}
+                    if up == 0 {
+                        break;
+                    }
                 }
 
             }
         }
     }
 
-    fn sample_peer(
-        &self,
-        except: &[AuthorityIndex],
-    ) -> Option<(AuthorityIndex, mpsc::Permit<NetworkMessage>)> {
-        let mut senders = self
-            .senders
-            .iter()
-            .filter(|&(index, _)| !except.contains(index))
-            .collect::<Vec<_>>();
 
-        senders.shuffle(&mut thread_rng());
-
-        for (peer, sender) in senders {
-            if let Ok(permit) = sender.try_reserve() {
-                return Some((*peer, permit));
-            }
-        }
-        None
-    }
-
-
-}
-
-fn random_usize_exclude(min: usize, max: usize, exclude: usize) -> usize {
-    let mut rng = rand::thread_rng();
-
-    loop {
-        let num = rng.gen_range(min..=max);
-        if num != exclude {
-            return num;
-        }
-    }
 }
 

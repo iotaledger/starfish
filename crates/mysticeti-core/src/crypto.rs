@@ -153,7 +153,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        statements: &[BaseStatement],
+        _statements: &[BaseStatement],
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
     ) {

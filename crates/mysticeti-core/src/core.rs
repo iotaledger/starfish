@@ -37,7 +37,6 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
-use crate::block_store::ByzantineStrategy;
 
 
 pub struct Core<H: BlockHandler> {
