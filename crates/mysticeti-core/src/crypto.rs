@@ -44,6 +44,9 @@ pub struct Signer(Box<ed25519_consensus::SigningKey>);
 #[cfg(not(test))]
 type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
+#[cfg(test)]
+type BlockHasher = blake2::Blake2b<digest::consts::U32>;
+
 impl BlockDigest {
     #[cfg(not(test))]
     pub fn new(
@@ -71,15 +74,26 @@ impl BlockDigest {
 
     #[cfg(test)]
     pub fn new(
-        _authority: AuthorityIndex,
-        _round: RoundNumber,
-        _includes: &[BlockReference],
-        _statements: &[BaseStatement],
-        _meta_creation_time_ns: TimestampNs,
-        _epoch_marker: EpochStatus,
-        _signature: &SignatureBytes,
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: &[BlockReference],
+        statements: &[BaseStatement],
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+        signature: &SignatureBytes,
     ) -> Self {
-        Default::default()
+        let mut hasher = BlockHasher::default();
+        Self::digest_without_signature(
+            &mut hasher,
+            authority,
+            round,
+            includes,
+            statements,
+            meta_creation_time_ns,
+            epoch_marker,
+        );
+        hasher.update(signature);
+        Self(hasher.finalize().into())
     }
 
     /// There is a bit of a complexity around what is considered block digest and what is being signed
@@ -129,6 +143,26 @@ impl BlockDigest {
                 }
             }
         }
+        meta_creation_time_ns.crypto_hash(hasher);
+        epoch_marker.crypto_hash(hasher);
+    }
+
+    #[cfg(test)]
+    fn digest_without_signature(
+        hasher: &mut BlockHasher,
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: &[BlockReference],
+        statements: &[BaseStatement],
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+    ) {
+        authority.crypto_hash(hasher);
+        round.crypto_hash(hasher);
+        for include in includes {
+            include.crypto_hash(hasher);
+        }
+
         meta_creation_time_ns.crypto_hash(hasher);
         epoch_marker.crypto_hash(hasher);
     }
