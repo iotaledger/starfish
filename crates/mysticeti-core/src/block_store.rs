@@ -132,7 +132,7 @@ impl BlockStore {
         }
         let this = Self {
             block_wal_reader,
-            byzantine_strategy: if authority == (0 as AuthorityIndex) {
+            byzantine_strategy: if authority == (1 as AuthorityIndex) {
                 Some(ByzantineStrategy::DelayedEquivocatingBlocks)
             } else {
                 None
@@ -142,6 +142,10 @@ impl BlockStore {
             committee_size: committee.len(),
         };
         builder.build(this)
+    }
+
+    pub fn get_own_authority_index(&self) -> AuthorityIndex {
+        self.inner.read().authority.clone()
     }
 
     pub fn insert_block(&self, block: Data<StatementBlock>, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
@@ -309,6 +313,7 @@ impl BlockStore {
             .map(|pos| self.read_index(pos))
             .collect()
     }
+
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
     pub fn linked(

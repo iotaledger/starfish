@@ -7,15 +7,7 @@ use futures::future::join_all;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use tokio::sync::mpsc;
 
-use crate::{
-    block_handler::BlockHandler,
-    metrics::Metrics,
-    net_sync::{self, NetworkSyncerInner},
-    network::NetworkMessage,
-    runtime::{sleep, timestamp_utc, Handle, JoinHandle},
-    syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, RoundNumber},
-};
+use crate::{block_handler::BlockHandler, metrics::Metrics, net_sync::{self, NetworkSyncerInner}, network::NetworkMessage, runtime::{sleep, timestamp_utc, Handle, JoinHandle}, runtime, syncer::CommitObserver, types::{AuthorityIndex, BlockReference, RoundNumber}};
 use crate::block_store::ByzantineStrategy;
 use crate::consensus::universal_committer::UniversalCommitter;
 
@@ -44,8 +36,8 @@ impl Default for SynchronizerParameters {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
             batch_size: 10,
-            sample_precision: Duration::from_millis(50),
-            grace_period: Duration::from_millis(15000),
+            sample_precision: Duration::from_millis(150),
+            grace_period: Duration::from_millis(150),
             stream_interval: Duration::from_secs(1),
             new_stream_threshold: 10,
         }
@@ -159,12 +151,19 @@ where
         batch_size: usize,
     ) -> Option<()> {
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
+        let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+        let leader_timeout = Duration::from_secs(1);
         loop {
             let notified = inner.notify.notified();
             match byzantine_strategy {
                 // TODO: Don't send your leader block for at least timeout
                 Some(ByzantineStrategy::TimeoutLeader) => {
+                    let leaders_current_round = universal_committer.get_leaders(current_round);
+                    if leaders_current_round.contains(&own_authority_index) {
+                        let _sleep = runtime::sleep(leader_timeout)
+                            .await;
+                    }
                     let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
                     for block in blocks {
                         round = block.round();

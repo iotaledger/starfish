@@ -501,7 +501,7 @@ mod sim_tests {
 
     async fn test_exact_commits_in_epoch_async() {
         let n = 4;
-        let rounds_in_epoch = 50;
+        let rounds_in_epoch = 1000;
         let (simulated_network, network_syncers, mut reporters) =
             simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
         simulated_network.connect_all().await;
