@@ -3,16 +3,15 @@ version: '3.8'
 services:
   prometheus:
     image: prom/prometheus
-    network_mode: "host"
     ports:
       - "9090:9090"
     volumes:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
-
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   grafana:
     image: grafana/grafana
-    network_mode: "host"
     ports:
       - "3000:3000"
     depends_on:
