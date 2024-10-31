@@ -706,7 +706,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -812,11 +813,15 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "editorMode": "builder",
-          "expr": "committed_leaders_total",
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "sum by(authority) (committed_leaders_total{instance=\"localhost:1511\"})",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
           "legendFormat": "Node {{authority}}",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         }
       ],
       "title": "Committed Leaders (view of Node 0)",
@@ -869,7 +874,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -962,7 +968,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1016,7 +1023,7 @@
     "list": []
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
