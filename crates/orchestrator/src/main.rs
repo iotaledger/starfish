@@ -4,7 +4,6 @@
 //! Orchestrator entry point.
 
 use std::path::PathBuf;
-
 use benchmark::BenchmarkParameters;
 use clap::Parser;
 use client::{aws::AwsClient, vultr::VultrClient, ServerProviderClient};
@@ -70,6 +69,14 @@ pub enum Operation {
         /// The committee size to deploy.
         #[clap(long, value_name = "INT", default_value_t = 4, global = true)]
         committee: usize,
+
+        /// The number of byzantine nodes to deploy.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        byzantine_nodes: usize,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
+        byzantine_strategy: String,
 
         /// The set of loads to submit to the system (tx/s). Each load triggers a separate
         /// benchmark run. Setting a load to zero will not deploy any benchmark clients
@@ -200,6 +207,8 @@ async fn run<C: ServerProviderClient>(
         // Run benchmarks.
         Operation::Benchmark {
             committee,
+            byzantine_nodes,
+            byzantine_strategy,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -238,6 +247,8 @@ async fn run<C: ServerProviderClient>(
                 client_parameters,
                 committee,
                 loads,
+                byzantine_nodes,
+                byzantine_strategy,
             );
 
             Orchestrator::new(

@@ -139,7 +139,7 @@ impl ProtocolCommands for MysticetiProtocol {
     fn node_command<I>(
         &self,
         instances: I,
-        _parameters: &BenchmarkParameters,
+        parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
@@ -155,6 +155,8 @@ impl ProtocolCommands for MysticetiProtocol {
                     .working_dir
                     .join(format!("private-config-{authority}.yaml"));
                 let client_parameters_path = self.working_dir.join("client-parameters.yaml");
+                let byzantine_nodes = parameters.byzantine_nodes;
+                let byzantine_strategy = parameters.byzantine_strategy.clone();
 
                 let run = [
                     &format!("./{BINARY_PATH}/mysticeti"),
@@ -167,6 +169,8 @@ impl ProtocolCommands for MysticetiProtocol {
                         "--client-parameters-path {}",
                         client_parameters_path.display()
                     ),
+                    &format!("--byzantine_nodes {}", byzantine_nodes),
+                    &format!("--byzantine_strategy {}", byzantine_strategy),
                 ]
                 .join(" ");
 
