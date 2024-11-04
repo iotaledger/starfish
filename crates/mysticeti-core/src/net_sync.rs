@@ -469,9 +469,10 @@ mod sim_tests {
             print_stats,
             rng_at_seed,
             simulated_network_syncers,
-            simulated_network_syncers_with_epoch_duration,
+            honest_simulated_network_syncers_with_epoch_duration,
         },
     };
+    use crate::test_util::byzantine_simulated_network_syncers_with_epoch_duration;
 
     async fn wait_for_epoch_to_close(
         network_syncers: Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
@@ -493,22 +494,39 @@ mod sim_tests {
         }
         syncers
     }
+
     #[test]
-    fn test_exact_commits_in_epoch() {
-        SimulatedExecutorState::run(rng_at_seed(0), test_exact_commits_in_epoch_async());
+    fn test_byzantine_committee_epoch() {
+        let n = 20;
+        let number_byzantine = 1;
+        let byzantine_strategy = "timeout".to_string();
+        SimulatedExecutorState::run(rng_at_seed(0), test_byzantine_committee_latency_measure(n, number_byzantine, byzantine_strategy));
     }
 
-    async fn test_exact_commits_in_epoch_async() {
-        let n = 6;
-        let rounds_in_epoch = 1000;
+    async fn test_byzantine_committee_latency_measure(n: usize, number_byzantine: usize, byzantine_strategy: String) {
+        let rounds_in_epoch = 50;
         let (simulated_network, network_syncers, mut reporters) =
-            simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
+            byzantine_simulated_network_syncers_with_epoch_duration(n, number_byzantine, byzantine_strategy, rounds_in_epoch);
+        simulated_network.connect_all().await;
+        let syncers = wait_for_epoch_to_close(network_syncers).await;
+        print_stats(&syncers, &mut reporters);
+    }
+    #[test]
+    fn test_honest_committee_exact_commits_in_epoch() {
+        SimulatedExecutorState::run(rng_at_seed(0), test_honest_committee_exact_commits_in_epoch_async());
+    }
+
+    async fn test_honest_committee_exact_commits_in_epoch_async() {
+        let n = 4;
+        let rounds_in_epoch = 100;
+        let (simulated_network, network_syncers, mut reporters) =
+            honest_simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
         simulated_network.connect_all().await;
         let syncers = wait_for_epoch_to_close(network_syncers).await;
         let canonical_commit_seq = syncers[0].commit_observer().committed_leaders().clone();
         for syncer in &syncers {
             let commit_seq = syncer.commit_observer().committed_leaders().clone();
-            //assert_eq!(canonical_commit_seq, commit_seq);
+            assert_eq!(canonical_commit_seq, commit_seq);
         }
         print_stats(&syncers, &mut reporters);
     }
@@ -523,7 +541,7 @@ mod sim_tests {
         let n = 4;
         let rounds_in_epoch = 10;
         let (simulated_network, network_syncers, mut reporters) =
-            simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
+            honest_simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
         simulated_network.connect_all().await;
         let syncers = wait_for_epoch_to_close(network_syncers).await;
         for syncer in &syncers {

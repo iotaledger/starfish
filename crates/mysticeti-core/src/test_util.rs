@@ -29,6 +29,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
+use crate::block_store::ByzantineStrategy;
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -38,6 +39,19 @@ pub fn committee(n: usize) -> Arc<Committee> {
     Committee::new_test(vec![1; n])
 }
 
+
+
+pub fn mixed_committee_and_cores(
+    n: usize,
+    number_byzantine: usize,
+    byzantine_strategy: String,
+) -> (
+    Arc<Committee>,
+    Vec<Core<TestBlockHandler>>,
+    Vec<MetricReporter>,
+) {
+    committee_and_cores_persisted_epoch_duration(n, number_byzantine, byzantine_strategy, None, &&NodePublicConfig::new_for_tests(n))
+}
 pub fn honest_committee_and_cores(
     n: usize,
 ) -> (
@@ -48,6 +62,21 @@ pub fn honest_committee_and_cores(
     committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), None, &&NodePublicConfig::new_for_tests(n))
 }
 
+
+pub fn byzantine_committee_and_cores_epoch_duration(
+    n: usize,
+    number_byzantine: usize,
+    byzantine_strategy: String,
+    rounds_in_epoch: RoundNumber,
+) -> (
+    Arc<Committee>,
+    Vec<Core<TestBlockHandler>>,
+    Vec<MetricReporter>,
+) {
+    let mut config = NodePublicConfig::new_for_tests(n);
+    config.parameters.rounds_in_epoch = rounds_in_epoch;
+    committee_and_cores_persisted_epoch_duration(n, number_byzantine,byzantine_strategy, None, &config)
+}
 pub fn honest_committee_and_cores_epoch_duration(
     n: usize,
     rounds_in_epoch: RoundNumber,
@@ -188,14 +217,50 @@ pub fn simulated_network_syncers(
     Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
     Vec<MetricReporter>,
 ) {
-    simulated_network_syncers_with_epoch_duration(
+    honest_simulated_network_syncers_with_epoch_duration(
         n,
         config::node_defaults::default_rounds_in_epoch(),
     )
 }
 
 #[cfg(feature = "simulator")]
-pub fn simulated_network_syncers_with_epoch_duration(
+pub fn byzantine_simulated_network_syncers_with_epoch_duration(
+    n: usize,
+    number_byzantine: usize,
+    byzantine_strategy: String,
+    rounds_in_epoch: RoundNumber,
+) -> (
+    SimulatedNetwork,
+    Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
+    Vec<MetricReporter>,
+) {
+    let (committee, cores, reporters) = byzantine_committee_and_cores_epoch_duration(n, number_byzantine,byzantine_strategy, rounds_in_epoch);
+    let (simulated_network, networks) = SimulatedNetwork::new(&committee);
+    let mut network_syncers = vec![];
+    for (network, core) in networks.into_iter().zip(cores.into_iter()) {
+        let commit_handler = TestCommitHandler::new(
+            committee.clone(),
+            core.block_handler().transaction_time.clone(),
+            core.metrics.clone(),
+        );
+        let node_context = OverrideNodeContext::enter(Some(core.authority()));
+        let network_syncer = NetworkSyncer::start(
+            network,
+            core,
+            3,
+            commit_handler,
+            config::node_defaults::default_shutdown_grace_period(),
+            test_metrics(),
+            &NodePublicConfig::new_for_tests(n),
+        );
+        drop(node_context);
+        network_syncers.push(network_syncer);
+    }
+    (simulated_network, network_syncers, reporters)
+}
+
+#[cfg(feature = "simulator")]
+pub fn honest_simulated_network_syncers_with_epoch_duration(
     n: usize,
     rounds_in_epoch: RoundNumber,
 ) -> (

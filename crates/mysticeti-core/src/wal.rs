@@ -107,9 +107,9 @@ const MAP_SIZE: u64 = 0x10_000_000;
 #[cfg(not(test))]
 const MAP_MASK: u64 = !0xfffffff;
 #[cfg(test)]
-const MAP_SIZE: u64 = 0x10_000; // 16 pages
+const MAP_SIZE: u64 = 0x100_000; // 256 pages
 #[cfg(test)]
-const MAP_MASK: u64 = !0xffff;
+const MAP_MASK: u64 = !0xfffff; // 1 MB boundary alignment
 const ZERO_MAP: [u8; MAP_SIZE as usize] = [0u8; MAP_SIZE as usize];
 const _: () = assert_constants();
 
