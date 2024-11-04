@@ -564,13 +564,13 @@ mod test {
 
     use super::*;
     use crate::{
-        test_util::{committee_and_cores, committee_and_cores_persisted},
+        test_util::{honest_committee_and_cores, honest_committee_and_cores_persisted},
         threshold_clock,
     };
 
     #[test]
     fn test_core_simple_exchange() {
-        let (_committee, mut cores, _) = committee_and_cores(4);
+        let (_committee, mut cores, _) = honest_committee_and_cores(4);
 
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
@@ -624,7 +624,7 @@ mod test {
     fn test_randomized_simple_exchange() {
         'l: for seed in 0..100 {
             let mut rng = StdRng::from_seed([seed; 32]);
-            let (committee, mut cores, _) = committee_and_cores(4);
+            let (committee, mut cores, _) = honest_committee_and_cores(4);
 
             let mut proposed_transactions = vec![];
             let mut pending: Vec<_> = committee.authorities().map(|_| vec![]).collect();
@@ -707,7 +707,7 @@ mod test {
     #[test]
     fn test_core_recovery() {
         let tmp = tempdir::TempDir::new("test_core_recovery").unwrap();
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = honest_committee_and_cores_persisted(4, Some(tmp.path()));
 
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
@@ -725,7 +725,7 @@ mod test {
         cores.iter_mut().for_each(Core::write_state);
         drop(cores);
 
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = honest_committee_and_cores_persisted(4, Some(tmp.path()));
 
         let more_blocks = blocks.split_off(2);
 
@@ -750,7 +750,7 @@ mod test {
 
         eprintln!("===");
 
-        let (_committee, mut cores, _) = committee_and_cores_persisted(4, Some(tmp.path()));
+        let (_committee, mut cores, _) = honest_committee_and_cores_persisted(4, Some(tmp.path()));
 
         for core in &mut cores {
             core.add_blocks(blocks_r2.clone());

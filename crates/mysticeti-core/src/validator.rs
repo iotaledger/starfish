@@ -215,6 +215,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();
@@ -260,6 +261,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();
@@ -288,6 +290,7 @@ mod smoke_tests {
             public_config.clone(),
             private_config,
             client_parameters,
+            "honest".to_string(),
         )
         .await
         .unwrap();
@@ -333,6 +336,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();

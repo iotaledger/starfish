@@ -38,17 +38,17 @@ pub fn committee(n: usize) -> Arc<Committee> {
     Committee::new_test(vec![1; n])
 }
 
-pub fn committee_and_cores(
+pub fn honest_committee_and_cores(
     n: usize,
 ) -> (
     Arc<Committee>,
     Vec<Core<TestBlockHandler>>,
     Vec<MetricReporter>,
 ) {
-    committee_and_cores_persisted_epoch_duration(n, None, &&NodePublicConfig::new_for_tests(n))
+    committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), None, &&NodePublicConfig::new_for_tests(n))
 }
 
-pub fn committee_and_cores_epoch_duration(
+pub fn honest_committee_and_cores_epoch_duration(
     n: usize,
     rounds_in_epoch: RoundNumber,
 ) -> (
@@ -58,10 +58,10 @@ pub fn committee_and_cores_epoch_duration(
 ) {
     let mut config = NodePublicConfig::new_for_tests(n);
     config.parameters.rounds_in_epoch = rounds_in_epoch;
-    committee_and_cores_persisted_epoch_duration(n, None, &config)
+    committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), None, &config)
 }
 
-pub fn committee_and_cores_persisted(
+pub fn honest_committee_and_cores_persisted(
     n: usize,
     path: Option<&Path>,
 ) -> (
@@ -69,11 +69,13 @@ pub fn committee_and_cores_persisted(
     Vec<Core<TestBlockHandler>>,
     Vec<MetricReporter>,
 ) {
-    committee_and_cores_persisted_epoch_duration(n, path, &&NodePublicConfig::new_for_tests(n))
+    committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), path, &&NodePublicConfig::new_for_tests(n))
 }
 
 pub fn committee_and_cores_persisted_epoch_duration(
     n: usize,
+    number_byzantine: usize,
+    byzantine_strategy: String,
     path: Option<&Path>,
     public_config: &NodePublicConfig,
 ) -> (
@@ -100,12 +102,17 @@ pub fn committee_and_cores_persisted_epoch_duration(
                 tempfile::tempfile().unwrap()
             };
             let (wal_writer, wal_reader) = walf(wal_file).expect("Failed to open wal");
+            let mut byzantine_strategy_string = "honest".to_string();
+            if authority < number_byzantine as u64 {
+                byzantine_strategy_string = byzantine_strategy.clone();
+            }
             let recovered = BlockStore::open(
                 authority,
                 Arc::new(wal_reader),
                 &wal_writer,
                 metrics.clone(),
                 &committee,
+                byzantine_strategy_string,
             );
 
             let private_config = NodePrivateConfig::new_for_tests(authority);
@@ -139,7 +146,7 @@ pub fn committee_and_syncers(
     Arc<Committee>,
     Vec<Syncer<TestBlockHandler, bool, TestCommitHandler>>,
 ) {
-    let (committee, cores, _) = committee_and_cores(n);
+    let (committee, cores, _) = honest_committee_and_cores(n);
     (
         committee.clone(),
         cores
@@ -196,7 +203,7 @@ pub fn simulated_network_syncers_with_epoch_duration(
     Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
     Vec<MetricReporter>,
 ) {
-    let (committee, cores, reporters) = committee_and_cores_epoch_duration(n, rounds_in_epoch);
+    let (committee, cores, reporters) = honest_committee_and_cores_epoch_duration(n, rounds_in_epoch);
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
@@ -229,7 +236,7 @@ pub async fn network_syncers_with_epoch_duration(
     n: usize,
     rounds_in_epoch: RoundNumber,
 ) -> Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>> {
-    let (committee, cores, _) = committee_and_cores_epoch_duration(n, rounds_in_epoch);
+    let (committee, cores, _) = honest_committee_and_cores_epoch_duration(n, rounds_in_epoch);
     let metrics: Vec<_> = cores.iter().map(|c| c.metrics.clone()).collect();
     let (networks, _) = networks_and_addresses(&metrics).await;
     let mut network_syncers = vec![];
@@ -356,6 +363,7 @@ impl TestBlockWriter {
             &wal_writer,
             test_metrics(),
             committee,
+            "honest".to_string(),
         );
         let block_store = state.block_store;
         Self {
