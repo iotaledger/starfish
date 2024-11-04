@@ -7,7 +7,7 @@ export RUST_LOG=warn,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DE
 
 tmux kill-server || true
 
-tmux new -d -s "v0" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 0 > v0.log.ansi"
+tmux new -d -s "v0" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 0 --byzantine-strategy timeout > v0.log.ansi"
 tmux new -d -s "v1" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 1 > v1.log.ansi"
 tmux new -d -s "v2" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 2 > v2.log.ansi"
 tmux new -d -s "v3" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 3 > v3.log.ansi"
@@ -18,5 +18,5 @@ tmux new -d -s "v7" "cargo run --bin mysticeti -- dry-run --committee-size 10 --
 tmux new -d -s "v8" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 8 > v8.log.ansi"
 tmux new -d -s "v9" "cargo run --bin mysticeti -- dry-run --committee-size 10 --authority 9 > v9.log.ansi"
 
-sleep 3000
+sleep 1000
 tmux kill-server

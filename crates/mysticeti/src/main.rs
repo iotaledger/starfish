@@ -57,6 +57,10 @@ enum Operation {
         /// Path to the file holding the client parameters (for benchmarks).
         #[clap(long, value_name = "FILE")]
         client_parameters_path: String,
+        /// Which Byzantine Strategy to deploy
+        #[clap(long, value_name = "STRING", default_value = "")]
+        byzantine_strategy: String,
+
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
@@ -66,6 +70,9 @@ enum Operation {
         /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
+        /// Which Byzantine Strategy to deploy
+        #[clap(long, value_name = "STRING", default_value = "")]
+        byzantine_strategy: String,
     },
 }
 
@@ -91,6 +98,7 @@ async fn main() -> Result<()> {
             public_config_path,
             private_config_path,
             client_parameters_path,
+            byzantine_strategy,
         } => {
             run(
                 authority,
@@ -98,13 +106,15 @@ async fn main() -> Result<()> {
                 public_config_path,
                 private_config_path,
                 client_parameters_path,
+                byzantine_strategy,
             )
             .await?
         }
         Operation::DryRun {
             authority,
             committee_size,
-        } => dryrun(authority, committee_size).await?,
+            byzantine_strategy,
+        } => dryrun(authority, committee_size,byzantine_strategy).await?,
     }
 
     Ok(())
@@ -173,6 +183,7 @@ async fn run(
     public_config_path: String,
     private_config_path: String,
     client_parameters_path: String,
+    byzantine_strategy: String,
 ) -> Result<()> {
     tracing::info!("Starting validator {authority}");
 
@@ -211,6 +222,7 @@ async fn run(
         public_config.clone(),
         private_config,
         client_parameters,
+        byzantine_strategy,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;
@@ -218,7 +230,7 @@ async fn run(
     Ok(())
 }
 
-async fn dryrun(authority: AuthorityIndex, committee_size: usize) -> Result<()> {
+async fn dryrun(authority: AuthorityIndex, committee_size: usize, byzantine_strategy: String) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
     );
@@ -258,6 +270,7 @@ async fn dryrun(authority: AuthorityIndex, committee_size: usize) -> Result<()> 
         public_config,
         private_config,
         client_parameters,
+        byzantine_strategy,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;

@@ -77,6 +77,7 @@ impl BlockStore {
         wal_writer: &WalWriter,
         metrics: Arc<Metrics>,
         committee: &Committee,
+        byzantine_strategy: String,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let mut inner = BlockStoreInner {
@@ -131,13 +132,16 @@ impl BlockStore {
         } else {
             tracing::info!("Wal is empty, will start from genesis");
         }
+        let byzantine_strategy = match byzantine_strategy.as_str() {
+            "honest" => None,
+            "equivocate" => Some(ByzantineStrategy::EquivocatingBlocks),
+            "delayed" => Some(ByzantineStrategy::DelayedEquivocatingBlocks),
+            "timeout" => Some(ByzantineStrategy::TimeoutLeader),
+            _ => None,
+        };
         let this = Self {
             block_wal_reader,
-            byzantine_strategy: if authority == (1 as AuthorityIndex) {
-                Some(ByzantineStrategy::EquivocatingBlocks)
-            } else {
-                None
-            },
+            byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
             committee_size: committee.len(),

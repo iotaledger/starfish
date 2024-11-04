@@ -38,6 +38,7 @@ impl Validator {
         public_config: NodePublicConfig,
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
+        byzantine_strategy: String,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -71,6 +72,7 @@ impl Validator {
             &wal_writer,
             metrics.clone(),
             &committee,
+            byzantine_strategy,
         );
 
         // Boot the validator node.
