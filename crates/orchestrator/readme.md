@@ -66,6 +66,12 @@ Running benchmarks involves installing the specified version of the codebase on 
 cargo run --bin orchestrator -- benchmark --committee 10 --loads 200
 ```
 
+To run with Byzantine validators:
+```bash
+cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy [equivocate|delayed|timeout] 
+```
+
+
 In a network of 10 validators, each with a corresponding load generator, each load generator submits a fixed load of 20 tx/s. Performance measurements are collected by regularly scraping the Prometheus metrics exposed by the load generators. The `orchestrator` binary provides additional commands to run a specific number of load generators on separate machines.
 
 ## Step 5. Monitoring
