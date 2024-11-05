@@ -133,11 +133,10 @@ impl BlockStore {
             tracing::info!("Wal is empty, will start from genesis");
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
-            "honest" => None,
             "equivocate" => Some(ByzantineStrategy::EquivocatingBlocks),
             "delayed" => Some(ByzantineStrategy::DelayedEquivocatingBlocks),
             "timeout" => Some(ByzantineStrategy::TimeoutLeader),
-            _ => None,
+            _ => None, // honest by default
         };
         let this = Self {
             block_wal_reader,
