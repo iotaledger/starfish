@@ -161,7 +161,7 @@ impl ProtocolCommands for MysticetiProtocol {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
 
-                let run = [
+                let mut run = vec![
                     &format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
@@ -172,9 +172,24 @@ impl ProtocolCommands for MysticetiProtocol {
                         "--client-parameters-path {}",
                         client_parameters_path.display()
                     ),
-                    &format!("--byzantine-strategy {}", byzantine_strategy),
-                ]
-                    .join(" ");
+                ].join(" ");
+
+                if byzantine_strategy != "honest" {
+                    run = [
+                        &format!("./{BINARY_PATH}/mysticeti"),
+                        "run",
+                        &format!("--authority {authority}"),
+                        &format!("--committee-path {}", committee_path.display()),
+                        &format!("--public-config-path {}", public_config_path.display()),
+                        &format!("--private-config-path {}", private_config_path.display()),
+                        &format!(
+                            "--client-parameters-path {}",
+                            client_parameters_path.display()
+                        ),
+                        &format!("--byzantine-strategy {}", byzantine_strategy),
+                    ].join(" ");
+                }
+
 
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
                 (instance, command)
