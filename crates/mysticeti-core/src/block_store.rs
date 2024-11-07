@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use std::collections::HashSet;
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -57,10 +58,14 @@ struct BlockStoreInner {
     authority: AuthorityIndex,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
+    not_known_by_authority: Vec<HashSet<BlockReference>>
 }
 
 pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition;
+
+    fn update_unknown_block(&mut self, block_reference: &BlockReference);
+
     fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex);
 }
 
@@ -80,9 +85,11 @@ impl BlockStore {
         byzantine_strategy: String,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
+        let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
+            not_known_by_authority,
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -155,6 +162,13 @@ impl BlockStore {
     pub fn insert_block(&self, block: Data<StatementBlock>, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         self.metrics.block_store_entries.inc();
         self.inner.write().add_loaded(position, block, authority_index_start, authority_index_end);
+    }
+
+    pub fn update_unknown_block(&self, block_reference: &BlockReference) {
+        self.inner.write().update_unknown_block(block_reference);
+    }
+    pub fn remove_unknown_block(&self, block_reference: &BlockReference, authority: &AuthorityIndex) {
+        self.inner.write().remove_unknown_block(block_reference, authority);
     }
 
     pub fn get_block(&self, reference: BlockReference) -> Option<Data<StatementBlock>> {
@@ -428,6 +442,23 @@ impl BlockStoreInner {
         );
     }
 
+    // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
+    // of the block and we assume that others are not aware of this block.
+    // TODO: store in not_known_by_authority not just BlockReference of a block, but also, BlockReferences pointing to previous blocks
+    // this way one can traverse the DAG and remove blocks that are supposed to be sent.
+    pub fn update_unknown_block(&mut self, block_reference: &BlockReference) {
+        for authority in 0..self.not_known_by_authority.len() {
+            if authority == self.authority as usize {
+                continue;
+            }
+            self.not_known_by_authority[authority].insert(block_reference.clone());
+        }
+    }
+
+    pub fn remove_unknown_block(&mut self, block_reference: &BlockReference, authority: &AuthorityIndex) {
+        self.not_known_by_authority[authority.clone() as usize].remove(block_reference);
+    }
+
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
         *self
             .last_seen_by_authority
@@ -521,6 +552,10 @@ pub const WAL_ENTRY_STATE: Tag = 4;
 pub const WAL_ENTRY_COMMIT: Tag = 5;
 
 impl BlockWriter for (&mut WalWriter, &BlockStore) {
+    fn update_unknown_block(&mut self, reference: &BlockReference) {
+        self.1.update_unknown_block(reference);
+    }
+
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
         let pos = self
             .0
