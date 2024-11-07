@@ -49,6 +49,8 @@ pub struct BlockStore {
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
 
+
+
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
@@ -58,13 +60,15 @@ struct BlockStoreInner {
     authority: AuthorityIndex,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    not_known_by_authority: Vec<HashSet<BlockReference>>
+    not_known_by_authority: Vec<HashSet<BlockReference>>,
+    // this dag structure store for each block its predecessors and who knows the block
+    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>
 }
 
 pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition;
 
-    fn update_unknown_block(&mut self, block_reference: &BlockReference);
+    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
 
     fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex);
 }
@@ -164,18 +168,22 @@ impl BlockStore {
         self.inner.write().add_loaded(position, block, authority_index_start, authority_index_end);
     }
 
-    pub fn update_unknown_block(&self, block_reference: &BlockReference) {
-        self.inner.write().update_unknown_block(block_reference);
-    }
-    pub fn remove_unknown_block(&self, block_reference: &BlockReference, authority: &AuthorityIndex) {
-        self.inner.write().remove_unknown_block(block_reference, authority);
-    }
-
     pub fn get_block(&self, reference: BlockReference) -> Option<Data<StatementBlock>> {
         let entry = self.inner.read().get_block(reference);
         // todo - consider adding loaded entries back to cache
         entry.map(|pos| self.read_index(pos))
     }
+
+    // this function should be called when we add a block to the local DAG for the first time
+    pub fn update_dag(&self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+        self.inner.write().update_dag(block_reference, parents);
+    }
+
+    // This function should be called when we send a block to a certain authority
+    pub fn update_known_by_authority(&self, block_reference: BlockReference, authority: AuthorityIndex) {
+        self.inner.write().update_known_by_authority(block_reference, authority);
+    }
+
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<StatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
@@ -441,22 +449,43 @@ impl BlockStoreInner {
             IndexEntry::Loaded(position, block),
         );
     }
-
     // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
-    // of the block and we assume that others are not aware of this block.
-    // TODO: store in not_known_by_authority not just BlockReference of a block, but also, BlockReferences pointing to previous blocks
-    // this way one can traverse the DAG and remove blocks that are supposed to be sent.
-    pub fn update_unknown_block(&mut self, block_reference: &BlockReference) {
+    // of the block, and we assume that others are not aware of this block
+    pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+        // update information about block_reference
+        self.dag.insert(block_reference.clone(), (parents, vec![block_reference.authority, self.authority]
+            .into_iter()
+            .collect::<HashSet<_>>()));
         for authority in 0..self.not_known_by_authority.len() {
-            if authority == self.authority as usize {
+            if authority == self.authority as usize || authority == block_reference.authority as usize {
                 continue;
             }
             self.not_known_by_authority[authority].insert(block_reference.clone());
         }
+        // traverse the DAG from block_reference and update the blocks known by block_reference.authority
+        let authority = block_reference.authority;
+        let mut buffer = vec![block_reference];
+
+        while buffer.len() > 0 {
+            let block_reference = buffer.pop().unwrap();
+            let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
+            for parent in parents {
+                if parent.round == 0 {
+                    continue;
+                }
+                let (_, known_by) = self.dag.get_mut(&parent).unwrap();
+                if known_by.insert(authority) {
+                    self.not_known_by_authority[authority as usize].remove(&parent);
+                    buffer.push(parent.clone());
+                }
+            }
+        }
     }
 
-    pub fn remove_unknown_block(&mut self, block_reference: &BlockReference, authority: &AuthorityIndex) {
-        self.not_known_by_authority[authority.clone() as usize].remove(block_reference);
+    pub fn update_known_by_authority(&mut self, block_reference: BlockReference, authority: AuthorityIndex) {
+        self.not_known_by_authority[authority as usize].remove(&block_reference);
+        let (_, known_by) = self.dag.get_mut(&block_reference).unwrap();
+        known_by.insert(authority);
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -552,8 +581,8 @@ pub const WAL_ENTRY_STATE: Tag = 4;
 pub const WAL_ENTRY_COMMIT: Tag = 5;
 
 impl BlockWriter for (&mut WalWriter, &BlockStore) {
-    fn update_unknown_block(&mut self, reference: &BlockReference) {
-        self.1.update_unknown_block(reference);
+    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+        self.1.update_dag(block_reference, parents);
     }
 
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {

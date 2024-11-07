@@ -36,8 +36,8 @@ impl Default for SynchronizerParameters {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
             batch_size: 10,
-            sample_precision: Duration::from_millis(15000),
-            grace_period: Duration::from_millis(2000),
+            sample_precision: Duration::from_millis(150),
+            grace_period: Duration::from_millis(150),
             stream_interval: Duration::from_secs(1),
             new_stream_threshold: 10,
         }
@@ -157,7 +157,7 @@ where
         loop {
             let notified = inner.notify.notified();
             match byzantine_strategy {
-                // TODO: Don't send your leader block for at least timeout
+                // Don't send your leader block for at least timeout
                 Some(ByzantineStrategy::TimeoutLeader) => {
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
@@ -166,6 +166,7 @@ where
                     }
                     let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
                     for block in blocks {
+                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
                         round = block.round();
                         to.send(NetworkMessage::Block(block)).await.ok()?;
                     }
@@ -176,6 +177,7 @@ where
                 Some(ByzantineStrategy::EquivocatingBlocks) => {
                     let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
                     for block in blocks {
+                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
                         round = block.round();
                         to.send(NetworkMessage::Block(block)).await.ok()?;
                     }
@@ -188,6 +190,7 @@ where
                     if leaders_next_round.contains(&to_whom_authority_index) {
                         let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
                         for block in blocks {
+                            inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
                             round = block.round();
                             to.send(NetworkMessage::Block(block)).await.ok()?;
                         }
@@ -195,10 +198,11 @@ where
                     notified.await;
                     current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
                 }
-                // Send block to the authority whenever equivocating block is created
+                // Send block to the authority whenever a new block is created
                 _ => {
                     let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
                     for block in blocks {
+                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
                         round = block.round();
                         to.send(NetworkMessage::Block(block)).await.ok()?;
                     }

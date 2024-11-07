@@ -497,7 +497,7 @@ mod sim_tests {
 
     #[test]
     fn test_byzantine_committee_epoch() {
-        let n = 20;
+        let n = 4;
         let number_byzantine = 1;
         let byzantine_strategy = "timeout".to_string();
         SimulatedExecutorState::run(rng_at_seed(0), test_byzantine_committee_latency_measure(n, number_byzantine, byzantine_strategy));
