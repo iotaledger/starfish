@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -60,7 +60,7 @@ struct BlockStoreInner {
     authority: AuthorityIndex,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    not_known_by_authority: Vec<HashSet<BlockReference>>,
+    not_known_by_authority: Vec<BTreeSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>
 }
@@ -89,7 +89,7 @@ impl BlockStore {
         byzantine_strategy: String,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
-        let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
+        let not_known_by_authority = committee.authorities().map(|_| BTreeSet::new()).collect();
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
@@ -137,8 +137,7 @@ impl BlockStore {
             block_count += 1;
             inner.add_unloaded(block.reference(), pos, 0, committee.len() as AuthorityIndex);
 
-            // todo - we might need to sort all unprocessed blocks by rounds and run
-            // update with a loop
+            // todo - we might need to sort all unprocessed blocks by rounds and run update with a loop
             inner.update_dag(block.reference().clone(), block.includes().clone());
 
         }
@@ -288,6 +287,15 @@ impl BlockStore {
         limit: usize,
     ) -> Vec<Data<StatementBlock>> {
         let entries = self.inner.read().get_own_blocks(to_whom_authority_index, from_excluded, limit);
+        self.read_index_vec(entries)
+    }
+
+    pub fn get_unknown_causal_history(
+        &self,
+        to_whom_authority_index: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<Data<StatementBlock>> {
+        let entries = self.inner.read().get_unknown_causal_history(to_whom_authority_index,  limit);
         self.read_index_vec(entries)
     }
 
@@ -529,6 +537,20 @@ impl BlockStoreInner {
                 }
             })
             .collect()
+    }
+
+    pub fn get_unknown_causal_history(&self, to_whom: AuthorityIndex, limit: usize) -> Vec<IndexEntry> {
+        self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .take(limit)
+            .map(|block_reference| {
+                if let Some(index_entry) = self.get_block(block_reference.clone()) {
+                    index_entry
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }}
+                )
+                .collect()
     }
 
     pub fn get_others_blocks(
