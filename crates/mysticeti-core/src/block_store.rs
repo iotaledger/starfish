@@ -624,6 +624,7 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
     fn insert_own_block(&mut self, data: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
         let block_pos = data.write_to_wal(self.0);
         self.1.insert_block(data.block.clone(), block_pos, authority_index_start, authority_index_end);
+        self.1.update_dag(data.block.reference().clone(), data.block.includes().clone());
     }
 }
 
