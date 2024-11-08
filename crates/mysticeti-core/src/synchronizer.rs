@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use futures::future::join_all;
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 
 use crate::{block_handler::BlockHandler, metrics::Metrics, net_sync::{self, NetworkSyncerInner}, network::NetworkMessage, runtime::{sleep, timestamp_utc, Handle, JoinHandle}, runtime, syncer::CommitObserver, types::{AuthorityIndex, BlockReference, RoundNumber}};
 use crate::block_store::ByzantineStrategy;
@@ -164,53 +165,30 @@ where
                         let _sleep = runtime::sleep(leader_timeout)
                             .await;
                     }
-                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
-                    for block in blocks {
-                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
-                        round = block.round();
-                        to.send(NetworkMessage::Block(block)).await.ok()?;
-                    }
-                    notified.await;
-                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut  round, 10*batch_size).await?;
                 }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::EquivocatingBlocks) => {
-                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
-                    for block in blocks {
-                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
-                        round = block.round();
-                        to.send(NetworkMessage::Block(block)).await.ok()?;
-                    }
-                    notified.await;
-                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
+                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
                 }
                 // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
                 Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round+1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
-                        let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, 10*batch_size);
-                        for block in blocks {
-                            inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
-                            round = block.round();
-                            to.send(NetworkMessage::Block(block)).await.ok()?;
-                        }
+                        sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
                     }
-                    notified.await;
-                    current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
                 }
                 // Send block to the authority whenever a new block is created
                 _ => {
-                    let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round, batch_size);
-                    for block in blocks {
-                        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
-                        round = block.round();
-                        to.send(NetworkMessage::Block(block)).await.ok()?;
-                    }
-                    notified.await;
+                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, batch_size).await?;
                 }
             }
+            notified.await;
+            current_round = inner.block_store.last_own_block_ref().unwrap_or_default().round();
         }
     }
+
+
 
     // TODO:
     // * There should be a new protocol message that indicate when we should stop this task.
@@ -251,6 +229,17 @@ where
             sleep(stream_interval).await;
         }
     }
+}
+
+async fn sending_batch_blocks<H, C>(inner: Arc<NetworkSyncerInner<H, C>>, to: Sender<NetworkMessage>, to_whom_authority_index: AuthorityIndex, round: &mut RoundNumber, batch_size: usize) ->  Option<()>
+    where C: 'static + CommitObserver, H: 'static + BlockHandler {
+        let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round.clone(), batch_size);
+        for block in blocks {
+            inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+            *round = block.round();
+            to.send(NetworkMessage::Block(block)).await.ok()?;
+        }
+        Some(())
 }
 
 enum BlockFetcherMessage {
