@@ -29,7 +29,6 @@ use crate::{
     types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
-use crate::block_store::ByzantineStrategy;
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -464,6 +463,10 @@ impl TestBlockWriter {
 impl BlockWriter for TestBlockWriter {
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
         (&mut self.wal_writer, &self.block_store).insert_block(block)
+    }
+
+    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+        (&mut self.wal_writer, &self.block_store).update_dag(block_reference, parents);
     }
 
     fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
