@@ -82,7 +82,7 @@ impl BlockManager {
                 newly_blocks_processed.push((position, block.clone()));
 
                 // Block can be added to the compact local DAG structure and update known/unknown blocks
-                self.block_store.update_dag(block.reference().clone(), block.includes().clone());
+                block_writer.update_dag(block.reference().clone(), block.includes().clone());
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =

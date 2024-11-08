@@ -136,6 +136,11 @@ impl BlockStore {
             // todo - we want to keep some last blocks in the cache
             block_count += 1;
             inner.add_unloaded(block.reference(), pos, 0, committee.len() as AuthorityIndex);
+
+            // todo - we might need to sort all unprocessed blocks by rounds and run
+            // update with a loop
+            inner.update_dag(block.reference().clone(), block.includes().clone());
+
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
