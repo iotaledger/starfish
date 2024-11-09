@@ -234,6 +234,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     inner.syncer.add_blocks(vec![block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
+                    let mut verified_blocks = Vec::new();
                     for block in blocks {
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee) {
@@ -246,7 +247,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // Terminate connection upon receiving incorrect block.
                             break;
                         }
-                        inner.syncer.add_blocks(vec![block]).await;
+                        verified_blocks.push(block);
+                    }
+                    if !verified_blocks.is_empty() {
+                        inner.syncer.add_blocks(verified_blocks).await;
                     }
                 }
 
