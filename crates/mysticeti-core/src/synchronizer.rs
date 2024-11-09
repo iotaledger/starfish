@@ -36,7 +36,7 @@ impl Default for SynchronizerParameters {
         Self {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
-            batch_size: 10,
+            batch_size: 40,
             sample_precision: Duration::from_millis(150),
             grace_period: Duration::from_millis(150),
             stream_interval: Duration::from_secs(1),
@@ -55,6 +55,8 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     /// The handle of the task disseminating our own blocks.
     own_blocks: Option<JoinHandle<Option<()>>>,
+    /// The handle of the task disseminating all unknown blocks.
+    push_blocks: Option<JoinHandle<Option<()>>>,
     /// The handles of tasks disseminating other nodes' blocks.
     other_blocks: Vec<JoinHandle<Option<()>>>,
     /// The parameters of the synchronizer.
@@ -82,6 +84,7 @@ where
             universal_committer,
             inner,
             own_blocks: None,
+            push_blocks: None,
             other_blocks: Vec::new(),
             parameters,
             metrics,
@@ -91,6 +94,10 @@ where
     pub async fn shutdown(mut self) {
         let mut waiters = Vec::with_capacity(1 + self.other_blocks.len());
         if let Some(handle) = self.own_blocks.take() {
+            handle.abort();
+            waiters.push(handle);
+        }
+        if let Some(handle) = self.push_blocks.take() {
             handle.abort();
             waiters.push(handle);
         }
@@ -126,13 +133,13 @@ where
             .ok()
     }
 
-    pub async fn disseminate_own_blocks(&mut self, round: RoundNumber) {
+    pub async fn disseminate_own_blocks_v1(&mut self, round: RoundNumber) {
         if let Some(existing) = self.own_blocks.take() {
             existing.abort();
             existing.await.ok();
         }
 
-        let handle = Handle::current().spawn(Self::stream_own_blocks(
+        let handle = Handle::current().spawn(Self::stream_own_blocks_v1(
             self.universal_committer.clone(),
             self.to_whom_authority_index,
             self.sender.clone(),
@@ -143,7 +150,22 @@ where
         self.own_blocks = Some(handle);
     }
 
-    async fn stream_own_blocks(
+    pub async fn disseminate_own_blocks_v2(&mut self) {
+        if let Some(existing) = self.push_blocks.take() {
+            existing.abort();
+            existing.await.ok();
+        }
+
+        let handle = Handle::current().spawn(Self::stream_own_blocks_v2(
+            self.to_whom_authority_index,
+            self.sender.clone(),
+            self.inner.clone(),
+            self.parameters.batch_size,
+        ));
+        self.push_blocks = Some(handle);
+    }
+
+    async fn stream_own_blocks_v1(
         universal_committer: UniversalCommitter,
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
@@ -165,22 +187,22 @@ where
                         let _sleep = runtime::sleep(leader_timeout)
                             .await;
                     }
-                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut  round, 10*batch_size).await?;
+                    sending_batch_blocks_v1(inner.clone(), to.clone(), to_whom_authority_index, &mut  round, 10*batch_size).await?;
                 }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::EquivocatingBlocks) => {
-                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
+                    sending_batch_blocks_v1(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
                 }
                 // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
                 Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round+1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
-                        sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
+                        sending_batch_blocks_v1(inner.clone(), to.clone(), to_whom_authority_index, &mut round, 10*batch_size).await?;
                     }
                 }
                 // Send block to the authority whenever a new block is created
                 _ => {
-                    sending_batch_blocks(inner.clone(), to.clone(), to_whom_authority_index, &mut round, batch_size).await?;
+                    sending_batch_blocks_v1(inner.clone(), to.clone(), to_whom_authority_index, &mut round, batch_size).await?;
                 }
             }
             notified.await;
@@ -188,50 +210,22 @@ where
         }
     }
 
-
-
-    // TODO:
-    // * There should be a new protocol message that indicate when we should stop this task.
-    // * Decide when to subscribe to a stream versus requesting specific blocks by ids.
-    #[allow(dead_code)]
-    pub fn disseminate_others_blocks(&mut self, round: RoundNumber, author: AuthorityIndex) {
-        if self.other_blocks.len() >= self.parameters.maximum_helpers_per_authority {
-            return;
-        }
-
-        let handle = Handle::current().spawn(Self::stream_others_blocks(
-            self.sender.clone(),
-            self.inner.clone(),
-            round,
-            author,
-            self.parameters.batch_size,
-            self.parameters.stream_interval,
-        ));
-        self.other_blocks.push(handle);
-    }
-
-    async fn stream_others_blocks(
+    async fn stream_own_blocks_v2(
+        to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        mut round: RoundNumber,
-        author: AuthorityIndex,
         batch_size: usize,
-        stream_interval: Duration,
     ) -> Option<()> {
         loop {
-            let blocks = inner
-                .block_store
-                .get_others_blocks(round, author, batch_size);
-            for block in blocks {
-                round = block.round();
-                to.send(NetworkMessage::Block(block)).await.ok()?;
-            }
-            sleep(stream_interval).await;
+            let notified = inner.notify.notified();
+            sending_batch_blocks_v2(inner.clone(), to.clone(), to_whom_authority_index, batch_size).await?;
+            notified.await;
         }
     }
+
 }
 
-async fn sending_batch_blocks<H, C>(inner: Arc<NetworkSyncerInner<H, C>>, to: Sender<NetworkMessage>, to_whom_authority_index: AuthorityIndex, round: &mut RoundNumber, batch_size: usize) ->  Option<()>
+async fn sending_batch_blocks_v1<H, C>(inner: Arc<NetworkSyncerInner<H, C>>, to: Sender<NetworkMessage>, to_whom_authority_index: AuthorityIndex, round: &mut RoundNumber, batch_size: usize) ->  Option<()>
     where C: 'static + CommitObserver, H: 'static + BlockHandler {
         let blocks = inner.block_store.get_own_blocks(to_whom_authority_index, round.clone(), batch_size);
         for block in blocks {
@@ -240,6 +234,16 @@ async fn sending_batch_blocks<H, C>(inner: Arc<NetworkSyncerInner<H, C>>, to: Se
             to.send(NetworkMessage::Block(block)).await.ok()?;
         }
         Some(())
+}
+
+async fn sending_batch_blocks_v2<H, C>(inner: Arc<NetworkSyncerInner<H, C>>, to: Sender<NetworkMessage>, to_whom_authority_index: AuthorityIndex, batch_size: usize) ->  Option<()>
+    where C: 'static + CommitObserver, H: 'static + BlockHandler {
+    let blocks = inner.block_store.get_unknown_causal_history(to_whom_authority_index, batch_size);
+    for block in &blocks {
+        inner.block_store.update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+    }
+    to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+    Some(())
 }
 
 enum BlockFetcherMessage {

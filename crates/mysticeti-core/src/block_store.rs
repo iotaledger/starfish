@@ -34,7 +34,7 @@ use crate::{
 };
 
 #[allow(unused)]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
     TimeoutLeader,
     EquivocatingBlocks,
@@ -161,6 +161,10 @@ impl BlockStore {
             committee_size: committee.len(),
         };
         builder.build(this)
+    }
+
+    pub fn get_dag(&self) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
+        self.inner.read().dag.clone()
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
@@ -465,6 +469,9 @@ impl BlockStoreInner {
     // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
     // of the block, and we assume that others are not aware of this block
     pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+        if block_reference.round == 0 {
+            return;
+        }
         // update information about block_reference
         self.dag.insert(block_reference.clone(), (parents, vec![block_reference.authority, self.authority]
             .into_iter()
