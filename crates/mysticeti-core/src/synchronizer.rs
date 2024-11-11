@@ -150,7 +150,7 @@ where
         self.own_blocks = Some(handle);
     }
 
-    pub async fn disseminate_own_blocks_v2(&mut self) {
+    pub async fn disseminate_all_blocks_push(&mut self) {
         if let Some(existing) = self.push_blocks.take() {
             existing.abort();
             existing.await.ok();

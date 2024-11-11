@@ -215,7 +215,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     if inner.block_store.byzantine_strategy.is_some() {
                         disseminator.disseminate_own_blocks_v1(round).await;
                     } else {
-                        disseminator.disseminate_own_blocks_v2().await;
+                        disseminator.disseminate_all_blocks_push().await;
                     }
                 }
                 NetworkMessage::Block(block) => {
@@ -227,7 +227,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             peer,
                             e
                         );
-                        // Terminate connection upon receiving incorrect block.
+                        // todo: Terminate connection upon receiving incorrect block.
                         break;
                     }
                     inner.syncer.add_blocks(vec![block]).await;
@@ -243,7 +243,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             peer,
                             e
                         );
-                            // Terminate connection upon receiving incorrect block.
+                            // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
                         verified_blocks.push(block);
@@ -287,7 +287,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut epoch_close_signal: mpsc::Receiver<()>,
         shutdown_grace_period: Duration,
     ) -> Option<()> {
-        let leader_timeout = Duration::from_millis(600);
+        let leader_timeout = Duration::from_millis(1000);
         loop {
             let notified = inner.notify.notified();
             let round = inner
@@ -529,7 +529,7 @@ mod sim_tests {
     }
 
     async fn test_byzantine_committee_latency_measure(n: usize, number_byzantine: usize, byzantine_strategy: String) {
-        let rounds_in_epoch = 100;
+        let rounds_in_epoch = 50;
         let (simulated_network, network_syncers, mut reporters) =
             byzantine_simulated_network_syncers_with_epoch_duration(n, number_byzantine, byzantine_strategy, rounds_in_epoch);
         simulated_network.connect_all().await;

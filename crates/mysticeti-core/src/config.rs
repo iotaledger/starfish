@@ -59,7 +59,7 @@ pub mod node_defaults {
     }
 
     pub fn default_leader_timeout() -> std::time::Duration {
-        std::time::Duration::from_millis(600)
+        std::time::Duration::from_millis(1000)
     }
 
     pub fn default_max_block_size() -> usize {
