@@ -36,7 +36,7 @@ impl Default for SynchronizerParameters {
         Self {
             absolute_maximum_helpers: 10,
             maximum_helpers_per_authority: 2,
-            batch_size: 40,
+            batch_size: 300,
             sample_precision: Duration::from_millis(500),
             grace_period: Duration::from_millis(0),
             stream_interval: Duration::from_secs(1),
