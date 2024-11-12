@@ -237,6 +237,48 @@ impl BaseCommitter {
         false
     }
 
+
+    fn decide_skip(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
+        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+        let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for voting_block in &voting_blocks {
+            let voter = voting_block.reference().authority;
+            blame_stake_aggregator.add(voter, &self.committee);
+        }
+        let all_stake_above_quorum = blame_stake_aggregator.get_stake_above_quorum_threshold(&self.committee);
+        if all_stake_above_quorum <= 0 {
+            return false
+        }
+
+        let leader_round = voting_round - 1;
+        let leader_blocks = self.block_store.get_blocks_at_authority_round(leader, leader_round);
+        let mut to_skip = true;
+        for leader_block in &leader_blocks {
+            let mut vote_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
+            let leader_block_reference = leader_block.reference();
+            for voting_block in &voting_blocks {
+                let voter = voting_block.reference().authority;
+                if voting_block
+                    .includes()
+                    .iter()
+                    .any(|include| *include == *leader_block_reference)
+                {
+                    //tracing::trace!(
+                    //    "[{self}] {voting_block:?} is a blame for leader {}",
+                    //    format_authority_round(leader, voting_round - 1)
+                    //);
+                    vote_stake_aggregator.add(voter, &self.committee);
+                }
+            }
+            let current_stake = vote_stake_aggregator.get_stake();
+            if  current_stake > all_stake_above_quorum {
+                to_skip = false;
+                break;
+            }
+        }
+        to_skip
+    }
+
     /// Check whether the specified leader has enough support (that is, 2f+1 certificates)
     /// to be directly committed.
     fn enough_leader_support(
@@ -302,7 +344,7 @@ impl BaseCommitter {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
-        if self.enough_leader_blame(voting_round, leader) {
+        if self.decide_skip(voting_round, leader) {
             return LeaderStatus::Skip(leader, leader_round);
         }
 

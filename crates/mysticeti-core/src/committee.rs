@@ -273,6 +273,14 @@ impl<TH: CommitteeThreshold> StakeAggregator<TH> {
         TH::is_threshold(committee, self.stake)
     }
 
+    pub fn get_stake_above_quorum_threshold(&self, committee: &Committee) -> Stake {
+        self.stake.saturating_sub(committee.quorum_threshold)
+    }
+
+    pub fn get_stake(&self) -> Stake {
+        self.stake
+    }
+
     pub fn clear(&mut self) {
         self.votes.clear();
         self.stake = 0;

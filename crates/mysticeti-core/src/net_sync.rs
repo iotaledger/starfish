@@ -287,7 +287,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut epoch_close_signal: mpsc::Receiver<()>,
         shutdown_grace_period: Duration,
     ) -> Option<()> {
-        let leader_timeout = Duration::from_millis(1000);
+        let leader_timeout = Duration::from_millis(600);
         loop {
             let notified = inner.notify.notified();
             let round = inner
