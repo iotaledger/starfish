@@ -271,7 +271,7 @@ impl BaseCommitter {
                 }
             }
             let current_stake = vote_stake_aggregator.get_stake();
-            if  current_stake > all_stake_above_quorum {
+            if  current_stake >= all_stake_above_quorum {
                 to_skip = false;
                 break;
             }

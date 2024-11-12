@@ -6,6 +6,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
+use std::collections::{HashMap, HashSet};
 
 use futures::future::join_all;
 use prometheus::Registry;
@@ -436,7 +437,19 @@ impl TestBlockWriter {
         }
     }
 
+    pub fn get_dag(&self) -> Vec<(BlockReference, Vec<BlockReference>)> {
+        let mut dag: Vec<(BlockReference, Vec<BlockReference>)> = self.block_store
+            .get_dag()
+            .iter()
+            .map(|(block_reference, refs_and_indices)| (block_reference.clone(), refs_and_indices.0.clone()))
+            .collect();
+
+        dag.sort_by_key(|(block_reference, _)| block_reference.round());
+        dag
+    }
+
     pub fn add_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
+        self.update_dag(block.reference().clone(), block.includes().clone());
         let pos = self
             .wal_writer
             .write(WAL_ENTRY_BLOCK, &bincode::serialize(&block).unwrap())
