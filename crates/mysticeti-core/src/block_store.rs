@@ -9,6 +9,7 @@ use std::{
     time::Instant,
 };
 use std::collections::{BTreeSet, HashSet};
+use digest::core_api::Block;
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -547,9 +548,23 @@ impl BlockStoreInner {
     }
 
     pub fn get_unknown_causal_history(&self, to_whom: AuthorityIndex, limit: usize) -> Vec<IndexEntry> {
-        self.not_known_by_authority[to_whom as usize]
+        let own_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
             .iter()
+            .filter(|block_reference| block_reference.authority == self.authority)
             .take(limit)
+            .map(|block_reference| {
+            if let Some(index_entry) = self.get_block(block_reference.clone()) {
+                index_entry
+            } else {
+                panic!("Block index corrupted, not found: {block_reference}");
+            }}
+        )
+            .collect();
+        let new_limit = limit.saturating_sub(own_blocks.len()) ;
+        let other_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|block_reference| block_reference.authority != self.authority)
+            .take(new_limit)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(block_reference.clone()) {
                     index_entry
@@ -557,7 +572,9 @@ impl BlockStoreInner {
                     panic!("Block index corrupted, not found: {block_reference}");
                 }}
                 )
-                .collect()
+                .collect();
+
+        own_blocks.into_iter().chain(other_blocks).collect()
     }
 
     pub fn get_others_blocks(
