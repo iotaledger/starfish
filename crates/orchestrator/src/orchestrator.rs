@@ -203,8 +203,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 .collect::<Vec<_>>()[..],
             &self.protocol_commands.protocol_dependencies()[..],
         ]
-        .concat()
-        .join(" && ");
+            .concat()
+            .join(" && ");
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
         let context = CommandContext::default();
@@ -223,12 +223,12 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // many ssh connections for too long.
         let commit = &self.settings.repository.commit;
         let command = [
-            "git fetch origin",
-            &format!("git checkout -B {commit} origin/{commit}"),
+            &format!("git fetch origin {commit}"),
+            &format!("(git checkout -b {commit} origin/{commit} || git checkout -f {commit})"),
             "source $HOME/.cargo/env",
             "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
         ]
-        .join(" && ");
+            .join(" && ");
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
 
@@ -511,8 +511,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             &format!("logs-{commit}").into(),
             &format!("logs-{parameters:?}").into(),
         ]
-        .iter()
-        .collect();
+            .iter()
+            .collect();
         fs::create_dir_all(&path).expect("Failed to create log directory");
 
         // NOTE: Our ssh library does not seem to be able to transfers files in parallel reliably.
