@@ -185,6 +185,7 @@ pub fn committee_and_syncers(
                     committee.clone(),
                     core.block_handler().transaction_time.clone(),
                     test_metrics(),
+                    false,
                 );
                 Syncer::new(core, 3, Default::default(), commit_handler, test_metrics())
             })
@@ -242,6 +243,7 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
             committee.clone(),
             core.block_handler().transaction_time.clone(),
             core.metrics.clone(),
+            false,
         );
         let node_context = OverrideNodeContext::enter(Some(core.authority()));
         let network_syncer = NetworkSyncer::start(
@@ -310,6 +312,7 @@ pub async fn network_syncers_with_epoch_duration(
             committee.clone(),
             core.block_handler().transaction_time.clone(),
             test_metrics(),
+            false,
         );
         let network_syncer = NetworkSyncer::start(
             network,

@@ -100,6 +100,7 @@ impl Validator {
             block_handler.transaction_time.clone(),
             metrics.clone(),
             committed_transaction_log,
+            public_config.parameters.consensus_only,
         );
         let core = Core::open(
             block_handler,

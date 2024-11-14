@@ -353,8 +353,15 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHan
         committee: Arc<Committee>,
         transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
         metrics: Arc<Metrics>,
+        consensus_only: bool,
     ) -> Self {
-        Self::new_with_handler(committee, transaction_time, metrics, Default::default())
+        Self::new_with_handler(
+            committee,
+            transaction_time,
+            metrics,
+            Default::default(),
+            consensus_only,
+        )
     }
 }
 
@@ -364,8 +371,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
         metrics: Arc<Metrics>,
         handler: H,
+        consensus_only: bool,
     ) -> Self {
-        let consensus_only = env::var("CONSENSUS_ONLY").is_ok();
         Self {
             commit_interpreter: Linearizer::new(),
             transaction_votes: TransactionAggregator::with_handler(handler),
