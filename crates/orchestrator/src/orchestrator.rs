@@ -223,8 +223,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // many ssh connections for too long.
         let commit = &self.settings.repository.commit;
         let command = [
-            &format!("git fetch origin {commit}"),
-            &format!("(git checkout -b {commit} origin/{commit} || git checkout -f {commit})"),
+            "git fetch origin",
+            &format!("git checkout -B {commit} origin/{commit}"),
             "source $HOME/.cargo/env",
             "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
         ]
