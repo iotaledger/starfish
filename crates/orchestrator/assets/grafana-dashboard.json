@@ -184,7 +184,9 @@
       "id": 2,
       "options": {
         "legend": {
-          "calcs": [],
+          "calcs": [
+            "mean"
+          ],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
@@ -225,7 +227,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "avg(transaction_committed_latency{v=\"p50\"}) / 1000",
+          "expr": "avg(transaction_committed_latency{v=\"p50\", job=\"instance-node-0\"}) / 1000",
           "hide": false,
           "legendFormat": "Tx Commit p50",
           "range": true,
@@ -890,8 +892,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -986,8 +987,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
