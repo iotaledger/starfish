@@ -227,7 +227,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "avg(transaction_committed_latency{v=\"p50\", job=\"instance-node-0\"}) / 1000",
+          "expr": "avg(transaction_committed_latency{v=\"p50\"}) / 1000",
           "hide": false,
           "legendFormat": "Tx Commit p50",
           "range": true,
@@ -361,6 +361,7 @@
           },
           "editorMode": "code",
           "expr": "sum(rate(submitted_transactions[1m]))",
+          "hide": true,
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
@@ -373,11 +374,28 @@
           },
           "editorMode": "code",
           "expr": "rate(submitted_transactions[1m])",
-          "hide": false,
+          "hide": true,
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "submitted_transactions{job=\"instance-node-1\"}",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "C",
+          "useBackend": false
         }
       ],
       "title": "Total Submitted Transactions",
@@ -892,7 +910,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -987,7 +1006,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -1043,13 +1063,13 @@
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "Mysticeti",
   "uid": "bdd54ee7-84de-4018-8bb7-92af2defc041",
-  "version": 3,
+  "version": 2,
   "weekStart": ""
 }
