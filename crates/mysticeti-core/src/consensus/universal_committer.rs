@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::VecDeque, sync::Arc};
-
+use std::collections::HashSet;
 use super::{base_committer::BaseCommitter, LeaderStatus, DEFAULT_WAVE_LENGTH};
 use crate::{
     block_store::BlockStore,
@@ -20,13 +20,14 @@ pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
+    decided_leaders: HashSet<(AuthorityIndex, RoundNumber)>,
 }
 
 impl UniversalCommitter {
     /// Try to commit part of the dag. This function is idempotent and returns a list of
     /// ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
-    pub fn try_commit(&self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+    pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
         let highest_known_round = self.block_store.highest_round();
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
@@ -39,6 +40,7 @@ impl UniversalCommitter {
                 let Some(leader) = committer.elect_leader(round) else {
                     continue;
                 };
+
                 tracing::debug!(
                     "Trying to decide {} with {committer}",
                     format_authority_round(leader, round)
@@ -46,15 +48,24 @@ impl UniversalCommitter {
 
                 // Try to directly decide the leader.
                 let mut status = committer.try_direct_decide(leader, round);
-                self.update_metrics(&status, true);
+                if !self.decided_leaders.contains(&(leader, round)) {
+                    self.update_metrics(&status, true);
+                }
                 tracing::debug!("Outcome of direct rule: {status}");
 
                 // If we can't directly decide the leader, try to indirectly decide it.
                 if !status.is_decided() {
                     status = committer.try_indirect_decide(leader, round, leaders.iter());
-                    self.update_metrics(&status, false);
+                    if !self.decided_leaders.contains(&(leader, round)) {
+                        self.update_metrics(&status, false);
+                    }
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
+
+                if status.is_decided() {
+                    self.decided_leaders.insert((leader, round));
+                }
+
 
                 leaders.push_front(status);
             }
@@ -160,6 +171,7 @@ impl UniversalCommitterBuilder {
             block_store: self.block_store,
             committers,
             metrics: self.metrics,
+            decided_leaders: Default::default(),
         }
     }
 }
