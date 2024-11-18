@@ -51,7 +51,7 @@ pub struct NodeParameters {
     pub consensus_only: bool,
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
-    #[serde(default = "node_defaults::default_mimic_latency")]
+    #[serde(default = "node_defaults::default_mimic_extra_latency_seed")]
     pub mimic_extra_latency_seed: u64,
 }
 
@@ -64,7 +64,7 @@ pub mod node_defaults {
         std::time::Duration::from_millis(1000)
     }
 
-    pub fn default_mimic_latency() -> u64 {
+    pub fn default_mimic_extra_latency_seed() -> u64 {
         0
     }
 
@@ -109,7 +109,7 @@ impl Default for NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
-            mimic_extra_latency_seed: node_defaults::default_mimic_latency()
+            mimic_extra_latency_seed: node_defaults::default_mimic_extra_latency_seed()
         }
     }
 }
