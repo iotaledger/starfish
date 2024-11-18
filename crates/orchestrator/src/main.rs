@@ -3,6 +3,7 @@
 
 //! Orchestrator entry point.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use benchmark::BenchmarkParameters;
 use clap::Parser;
@@ -77,6 +78,10 @@ pub enum Operation {
         /// The Byzantine strategy to deploy on byzantine nodes.
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, action, default_value_t = false, global = true)]
+        mimic_latency: bool,
 
         /// The set of loads to submit to the system (tx/s). Each load triggers a separate
         /// benchmark run. Setting a load to zero will not deploy any benchmark clients
@@ -209,6 +214,7 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
+            mimic_latency,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -232,7 +238,29 @@ async fn run<C: ServerProviderClient>(
                 Some(path) => {
                     NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
                 }
-                None => NodeParameters::default(),
+                None => if mimic_latency {
+                    let input = (
+                        committee.clone(),
+                        byzantine_nodes.clone(),
+                        byzantine_strategy.clone(),
+                        mimic_latency.clone(),
+                        loads.clone(),
+                        skip_testbed_update.clone(),
+                        skip_testbed_configuration.clone(),
+                    );
+
+                    // Create a hasher
+                    let mut hasher = DefaultHasher::new();
+
+                    // Hash the input tuple
+                    input.hash(&mut hasher);
+
+                    // Return the hashed value as a seed
+                    let latency_seed = hasher.finish();
+                    NodeParameters::almost_default(latency_seed)
+                } else {
+                    NodeParameters::default()
+                }
             };
             let client_parameters = match &settings.client_parameters_path {
                 Some(path) => {

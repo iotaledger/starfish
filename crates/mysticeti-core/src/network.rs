@@ -7,7 +7,8 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
-use rand::{prelude::ThreadRng, Rng};
+use rand::{prelude::ThreadRng, Rng, SeedableRng};
+use rand::prelude::StdRng;
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -71,7 +72,8 @@ impl Network {
     ) -> Self {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
-        Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
+        let mimic_latency_seed = parameters.parameters.mimic_latency_seed;
+        Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics, mimic_latency_seed).await
     }
 
     pub fn connection_receiver(&mut self) -> &mut mpsc::Receiver<Connection> {
@@ -83,6 +85,7 @@ impl Network {
         our_id: usize,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
+        mimic_latency_seed: u64,
     ) -> Self {
         if our_id >= addresses.len() {
             panic!(
@@ -90,6 +93,7 @@ impl Network {
                 addresses.len()
             );
         }
+        let latency_table = Self::generate_latency_table(addresses.len(), mimic_latency_seed);
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");
@@ -114,7 +118,8 @@ impl Network {
                     connection_sender: connection_sender.clone(),
                     bind_addr: bind_addr(local_addr),
                     active_immediately: id < our_id,
-                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone()
+                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone(),
+                    connection_latency: latency_table[id][our_id],
                 }
                 .run(receiver),
             );
@@ -130,6 +135,8 @@ impl Network {
             connection_receiver,
         }
     }
+
+
 }
 
 struct Server {
@@ -183,6 +190,7 @@ struct Worker {
     bind_addr: SocketAddr,
     active_immediately: bool,
     latency_sender: HistogramSender<Duration>,
+    connection_latency: f64,
 }
 
 struct WorkerConnection {
@@ -252,7 +260,7 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection).await
+        Self::handle_stream(stream, connection, self.connection_latency).await
     }
 
     async fn handle_passive_stream(&self, mut stream: TcpStream) -> io::Result<()> {
@@ -267,10 +275,10 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection).await
+        Self::handle_stream(stream, connection, self.connection_latency).await
     }
 
-    async fn handle_stream(stream: TcpStream, connection: WorkerConnection) -> io::Result<()> {
+    async fn handle_stream(stream: TcpStream, connection: WorkerConnection, connection_latency: f64) -> io::Result<()> {
         let WorkerConnection {
             sender,
             receiver,
@@ -281,7 +289,7 @@ impl Worker {
         let (reader, writer) = stream.into_split();
         let (pong_sender, pong_receiver) = mpsc::channel(16);
         let write_fut =
-            Self::handle_write_stream(writer, receiver, pong_receiver, latency_sender).boxed();
+            Self::handle_write_stream(writer, receiver, pong_receiver, latency_sender, connection_latency).boxed();
         let read_fut = Self::handle_read_stream(reader, sender, pong_sender).boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
@@ -293,6 +301,7 @@ impl Worker {
         mut receiver: mpsc::Receiver<NetworkMessage>,
         mut pong_receiver: mpsc::Receiver<i64>,
         latency_sender: HistogramSender<Duration>,
+        connection_latency: f64,
     ) -> io::Result<()> {
         let start = Instant::now();
         let mut ping_deadline = start + PING_INTERVAL;
@@ -304,6 +313,8 @@ impl Worker {
                     // because we wait for PING_INTERVAL the interval it can't be 0
                     assert!(ping_time > 0);
                     let ping = encode_ping(ping_time);
+                    let latency = generate_latency(connection_latency);
+                    tokio::time::sleep(latency).await;
                     writer.write_all(&ping).await?;
                 }
                 received = pong_receiver.recv() => {
@@ -323,6 +334,8 @@ impl Worker {
                         match ping.checked_neg() {
                             Some(pong) => {
                                 let pong = encode_ping(pong);
+                                let latency = generate_latency(connection_latency);
+                                tokio::time::sleep(latency).await;
                                 writer.write_all(&pong).await?;
                             },
                             None => {
@@ -356,6 +369,8 @@ impl Worker {
                     // todo - pass signal to break main loop
                     let Some(message) = received else {return Ok(())};
                     let serialized = bincode::serialize(&message).expect("Serialization should not fail");
+                    let latency = generate_latency(connection_latency);
+                    tokio::time::sleep(latency).await;
                     writer.write_u32(serialized.len() as u32).await?;
                     writer.write_all(&serialized).await?;
                 }
@@ -423,6 +438,67 @@ impl Worker {
             latency_sender: self.latency_sender.clone(),
         })
     }
+}
+
+
+/// Generates a latency table for a geodistributed network.
+/// `n` is the number of nodes.
+/// `seed` is a global seed used for deterministic generation.
+/// If `seed == 0`, the table is initialized with all zeros.
+fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
+    if seed == 0 {
+        // If seed is 0, return a table of all zeros
+        return vec![vec![0.0; n]; n];
+    }
+
+    // Simulated regional latency ranges (in milliseconds)
+    let intra_region_latency = 1..50; // Typical latency within the same region
+    let inter_region_latency = 100..300; // Latency between different regions
+
+    // Initialize the RNG
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // Placeholder for the table
+    let mut table = vec![vec![0.0; n]; n];
+
+    // Generate latencies
+    for i in 0..n {
+        for j in i..n {
+            if i == j {
+                table[i][j] = 0.0; // Latency to itself is 0
+            } else {
+                // Use probabilities to simulate inter- and intra-region communication
+                let latency = if rng.gen_bool(0.3) {
+                    // Intra-region latency
+                    rng.gen_range(intra_region_latency.clone())
+                } else {
+                    // Inter-region latency
+                    rng.gen_range(inter_region_latency.clone())
+                } as f64;
+
+                // Fill both [i][j] and [j][i] for symmetry
+                table[i][j] = latency;
+                table[j][i] = latency;
+            }
+        }
+    }
+
+    table
+}
+fn generate_latency(mean: f64) -> Duration {
+    let mut rng = rand::thread_rng();
+
+// Define a constant deviation percentage (e.g., ±10% of the mean)
+    let deviation_percentage = 0.10; // 10%
+
+// Calculate the deviation based on the mean
+    let deviation = mean * deviation_percentage;
+
+// Generate latency by adding the random deviation to the mean
+    let latency = mean + rng.gen_range(-deviation..=deviation);
+
+// Return the latency as a Duration (in milliseconds)
+    Duration::from_millis(latency as u64)
 }
 
 fn sample_delay(range: Range<Duration>) -> Duration {

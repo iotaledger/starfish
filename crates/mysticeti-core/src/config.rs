@@ -51,6 +51,8 @@ pub struct NodeParameters {
     pub consensus_only: bool,
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
+    #[serde(default = "node_defaults::default_mimic_latency")]
+    pub mimic_latency_seed: u64,
 }
 
 pub mod node_defaults {
@@ -60,6 +62,10 @@ pub mod node_defaults {
 
     pub fn default_leader_timeout() -> std::time::Duration {
         std::time::Duration::from_millis(1000)
+    }
+
+    pub fn default_mimic_latency() -> usize {
+        0
     }
 
     pub fn default_max_block_size() -> usize {
