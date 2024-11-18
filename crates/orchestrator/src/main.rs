@@ -81,7 +81,7 @@ pub enum Operation {
 
         /// The Byzantine strategy to deploy on byzantine nodes.
         #[clap(long, action, default_value_t = false, global = true)]
-        mimic_latency: bool,
+        mimic_extra_latency: bool,
 
         /// The set of loads to submit to the system (tx/s). Each load triggers a separate
         /// benchmark run. Setting a load to zero will not deploy any benchmark clients
@@ -214,7 +214,7 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
-            mimic_latency,
+            mimic_extra_latency: mimic_latency,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,

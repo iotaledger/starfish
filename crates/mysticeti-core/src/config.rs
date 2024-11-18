@@ -52,7 +52,7 @@ pub struct NodeParameters {
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
     #[serde(default = "node_defaults::default_mimic_latency")]
-    pub mimic_latency_seed: u64,
+    pub mimic_extra_latency_seed: u64,
 }
 
 pub mod node_defaults {
@@ -109,7 +109,7 @@ impl Default for NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
-            mimic_latency_seed: node_defaults::default_mimic_latency()
+            mimic_extra_latency_seed: node_defaults::default_mimic_latency()
         }
     }
 }
@@ -117,7 +117,7 @@ impl Default for NodeParameters {
 impl NodeParameters {
     pub fn almost_default(seed: u64) -> Self {
         Self {
-            mimic_latency_seed: seed,
+            mimic_extra_latency_seed: seed,
             wave_length: node_defaults::default_wave_length(),
             leader_timeout: node_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),

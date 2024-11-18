@@ -72,7 +72,7 @@ impl Network {
     ) -> Self {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
-        let mimic_latency_seed = parameters.parameters.mimic_latency_seed;
+        let mimic_latency_seed = parameters.parameters.mimic_extra_latency_seed;
         Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics, mimic_latency_seed).await
     }
 
@@ -469,7 +469,7 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
                 table[i][j] = 0.0; // Latency to itself is 0
             } else {
                 // Use probabilities to simulate inter- and intra-region communication
-                let latency = if rng.gen_bool(0.3) {
+                let latency = if rng.gen_bool(0.7) {
                     // Intra-region latency
                     rng.gen_range(intra_region_latency.clone())
                 } else {

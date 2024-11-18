@@ -74,7 +74,7 @@ enum Operation {
         byzantine_strategy: String,
         /// Seed for mimicing latency between nodes, 0 for zero latency
         #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
-        mimic_latency: u64,
+        mimic_extra_latency: u64,
     },
 }
 
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
             authority,
             committee_size,
             byzantine_strategy,
-            mimic_latency,
+            mimic_extra_latency: mimic_latency,
         } => dryrun(authority, committee_size,byzantine_strategy, mimic_latency).await?,
     }
 
