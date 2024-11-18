@@ -60,7 +60,6 @@ enum Operation {
         /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
-
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
@@ -73,6 +72,9 @@ enum Operation {
         /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
+        /// Seed for mimicing latency between nodes, 0 for zero latency
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        mimic_latency: u64,
     },
 }
 
@@ -98,7 +100,7 @@ async fn main() -> Result<()> {
             public_config_path,
             private_config_path,
             client_parameters_path,
-            byzantine_strategy,
+            byzantine_strategy
         } => {
             run(
                 authority,
@@ -106,7 +108,7 @@ async fn main() -> Result<()> {
                 public_config_path,
                 private_config_path,
                 client_parameters_path,
-                byzantine_strategy,
+                byzantine_strategy
             )
             .await?
         }
@@ -114,7 +116,8 @@ async fn main() -> Result<()> {
             authority,
             committee_size,
             byzantine_strategy,
-        } => dryrun(authority, committee_size,byzantine_strategy).await?,
+            mimic_latency,
+        } => dryrun(authority, committee_size,byzantine_strategy, mimic_latency).await?,
     }
 
     Ok(())
@@ -230,14 +233,14 @@ async fn run(
     Ok(())
 }
 
-async fn dryrun(authority: AuthorityIndex, committee_size: usize, byzantine_strategy: String) -> Result<()> {
+async fn dryrun(authority: AuthorityIndex, committee_size: usize, byzantine_strategy: String, mimic_latency: u64) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
     );
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     let client_parameters = ClientParameters::default();
-    let node_parameters = NodeParameters::default();
+    let node_parameters = NodeParameters::almost_default(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
     let working_dir = PathBuf::from(format!("dryrun-validator-{authority}"));

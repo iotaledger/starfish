@@ -162,6 +162,7 @@ impl ProtocolCommands for MysticetiProtocol {
                     .join(format!("private-config-{authority}.yaml"));
                 let client_parameters_path = self.working_dir.join("client-parameters.yaml");
                 let byzantine_nodes = parameters.byzantine_nodes;
+                let mimic_latency_seed = parameters.node_parameters.mimic_latency_seed;
                 let mut byzantine_strategy = "honest".to_string();
                 if i < byzantine_nodes {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
@@ -177,7 +178,7 @@ impl ProtocolCommands for MysticetiProtocol {
                     &format!(
                         "--client-parameters-path {}",
                         client_parameters_path.display()
-                    ),
+                    )
                 ].join(" ");
 
                 if byzantine_strategy != "honest" {
@@ -192,7 +193,7 @@ impl ProtocolCommands for MysticetiProtocol {
                             "--client-parameters-path {}",
                             client_parameters_path.display()
                         ),
-                        &format!("--byzantine-strategy {}", byzantine_strategy),
+                        &format!("--byzantine-strategy {}", byzantine_strategy)
                     ].join(" ");
                 }
 
