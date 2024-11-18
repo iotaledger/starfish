@@ -23,10 +23,7 @@ pub struct MysticetiNodeParameters(NodeParameters);
 
 impl MysticetiNodeParameters {
     pub fn almost_default(seed: u64) -> MysticetiNodeParameters {
-        MysticetiNodeParameters(NodeParameters {
-            mimic_latency_seed: seed,
-            ..Default::default() // Use default values for the rest
-        })
+        MysticetiNodeParameters(NodeParameters::almost_default(seed))
     }
 }
 

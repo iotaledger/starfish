@@ -93,7 +93,7 @@ impl Network {
                 addresses.len()
             );
         }
-        let latency_table = Self::generate_latency_table(addresses.len(), mimic_latency_seed);
+        let latency_table = generate_latency_table(addresses.len(), mimic_latency_seed);
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");

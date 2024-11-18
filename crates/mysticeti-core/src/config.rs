@@ -64,7 +64,7 @@ pub mod node_defaults {
         std::time::Duration::from_millis(1000)
     }
 
-    pub fn default_mimic_latency() -> usize {
+    pub fn default_mimic_latency() -> u64 {
         0
     }
 
@@ -100,6 +100,24 @@ pub mod node_defaults {
 impl Default for NodeParameters {
     fn default() -> Self {
         Self {
+            wave_length: node_defaults::default_wave_length(),
+            leader_timeout: node_defaults::default_leader_timeout(),
+            max_block_size: node_defaults::default_max_block_size(),
+            rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
+            shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
+            number_of_leaders: node_defaults::default_number_of_leaders(),
+            enable_pipelining: node_defaults::default_enable_pipelining(),
+            consensus_only: node_defaults::default_consensus_only(),
+            enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            mimic_latency_seed: node_defaults::default_mimic_latency()
+        }
+    }
+}
+
+impl NodeParameters {
+    pub fn almost_default(seed: u64) -> Self {
+        Self {
+            mimic_latency_seed: seed,
             wave_length: node_defaults::default_wave_length(),
             leader_timeout: node_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),
