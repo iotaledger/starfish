@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-
+use std::fs::File;
+use std::io::Write;
 use futures::{
     future::{select, select_all, Either},
     FutureExt,
@@ -94,7 +95,9 @@ impl Network {
             );
         }
         let latency_table = generate_latency_table(addresses.len(), mimic_latency_seed);
-        tracing::warn!("Generated latency {:?}", latency_table);
+        if our_id == 0 {
+            write_latency_delays(latency_table.clone()).unwrap();
+        }
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");
@@ -138,6 +141,25 @@ impl Network {
     }
 
 
+}
+
+fn write_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
+    // Open (or create) the file "latency_delays"
+    let mut file = File::create("latency_delays.log")?;
+
+    // Write the header (optional)
+    writeln!(file, "Latency Delays")?;
+
+    // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line in the file
+    for row in latency_delays {
+        let row_string: String = row.iter()
+            .map(|x| x.to_string())  // Convert each f64 to a string
+            .collect::<Vec<String>>()
+            .join(", ");  // Join them with a comma and space
+        writeln!(file, "{}", row_string)?;  // Write the row to the file
+    }
+
+    Ok(())
 }
 
 struct Server {
