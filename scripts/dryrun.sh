@@ -10,7 +10,7 @@ find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
 find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
 
 # Get the number of validators from the user
-NUM_VALIDATORS=${1:-4}
+NUM_VALIDATORS=${1:-6}
 echo "Number of validators: $NUM_VALIDATORS"
 
 echo "Updating prometheus.yaml for $NUM_VALIDATORS validators..."
@@ -43,18 +43,28 @@ echo "Updated prometheus.yaml successfully!"
 
 # Check if any containers are running in the monitoring directory
 if (cd monitoring && docker compose ps -q | grep -q .); then
-    echo "Monitoring services are already running."
-else
-    echo "Starting monitoring services..."
-    (cd monitoring && docker compose up -d)
-
+    echo "Monitoring services are already running. Stopping and removing them..."
+    (cd monitoring && docker compose down)
     if [ $? -eq 0 ]; then
-        echo "Monitoring services started successfully!"
+        echo "Monitoring services stopped successfully!"
     else
-        echo "Failed to start monitoring services. Please check the logs."
+        echo "Failed to stop monitoring services."
         exit 1
     fi
+else
+    echo "No monitoring services are currently running."
 fi
+
+# Remove the Grafana and Prometheus data volumes
+docker volume rm monitoring_grafana_data || echo "Grafana data volume not found or could not be removed."
+docker volume rm monitoring_prometheus_data || echo "Prometheus data volume not found or could not be removed."
+
+echo "Cleaned up previous Grafana and Prometheus data."
+
+
+# Start Docker Compose to bring up monitoring services
+echo "Starting monitoring services..."
+(cd monitoring && docker compose up -d)
 
 # Environment setup
 export RUST_LOG=warn,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG

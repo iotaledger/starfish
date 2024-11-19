@@ -24,6 +24,7 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
+use tokio::sync::Mutex;
 
 use crate::{
     config::NodePublicConfig,
@@ -320,85 +321,106 @@ impl Worker {
     }
 
     async fn handle_write_stream(
-        mut writer: OwnedWriteHalf,
+        writer: OwnedWriteHalf,
         mut receiver: mpsc::Receiver<NetworkMessage>,
         mut pong_receiver: mpsc::Receiver<i64>,
         latency_sender: HistogramSender<Duration>,
         connection_latency: f64,
     ) -> io::Result<()> {
+        // Use Arc and Mutex to share the writer safely across multiple tasks
+        let writer = Arc::new(Mutex::new(writer));
         let start = Instant::now();
-        let mut ping_deadline = start + PING_INTERVAL;
-        loop {
-            select! {
-                _deadline = tokio::time::sleep_until(ping_deadline) => {
-                    ping_deadline += PING_INTERVAL;
-                    let ping_time = start.elapsed().as_micros() as i64;
-                    // because we wait for PING_INTERVAL the interval it can't be 0
-                    assert!(ping_time > 0);
-                    let ping = encode_ping(ping_time);
-                    let latency = generate_latency(connection_latency);
-                    tokio::time::sleep(latency).await;
-                    writer.write_all(&ping).await?;
-                }
-                received = pong_receiver.recv() => {
-                    // We have an embedded ping-pong protocol for measuring RTT:
-                    //
-                    // Every PING_INTERVAL node emits a "ping", positive number encoding some local time
-                    // On receiving positive ping, node replies with "pong" which is negative number (e.g. "ping".neg())
-                    // On receiving negative number we can calculate RTT(by negating it again and getting original ping time)
-                    // todo - we trust remote peer here, might want to enforce ping (not critical for safety though)
 
-                    let Some(ping) = received else {return Ok(())}; // todo - pass signal? (pong_sender closed)
-                    if ping == 0 {
-                        tracing::warn!("Invalid ping: {ping}");
-                        return Ok(());
-                    }
-                    if ping > 0 {
-                        match ping.checked_neg() {
-                            Some(pong) => {
-                                let pong = encode_ping(pong);
-                                let latency = generate_latency(connection_latency);
-                                tokio::time::sleep(latency).await;
-                                writer.write_all(&pong).await?;
-                            },
-                            None => {
-                                tracing::warn!("Invalid ping: {ping}");
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        match ping.checked_neg().and_then(|n|u64::try_from(n).ok()) {
-                            Some(our_ping) => {
-                                let time = start.elapsed().as_micros() as u64;
-                                match time.checked_sub(our_ping) {
-                                    Some(delay) => {
-                                        latency_sender.observe(Duration::from_micros(delay));
-                                    },
-                                    None => {
-                                        tracing::warn!("Invalid ping: {ping}, greater then current time {time}");
-                                        return Ok(());
-                                    }
-                                }
+        // Spawn the first task for handling pings
+        let writer_clone = Arc::clone(&writer);
+        let ping_task = tokio::spawn(async move {
+            let mut ping_deadline = start + PING_INTERVAL;
+            loop {
+                tokio::time::sleep_until(ping_deadline).await;
+                ping_deadline += PING_INTERVAL;
 
-                            },
-                            None => {
-                                tracing::warn!("Invalid pong: {ping}");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                received = receiver.recv() => {
-                    // todo - pass signal to break main loop
-                    let Some(message) = received else {return Ok(())};
-                    let serialized = bincode::serialize(&message).expect("Serialization should not fail");
-                    let latency = generate_latency(connection_latency);
-                    tokio::time::sleep(latency).await;
-                    writer.write_u32(serialized.len() as u32).await?;
-                    writer.write_all(&serialized).await?;
+                let ping_time = start.elapsed().as_micros() as i64;
+                assert!(ping_time > 0); // interval can't be 0
+
+                let ping = encode_ping(ping_time);
+                let latency = generate_latency(connection_latency);
+                tokio::time::sleep(latency).await;
+
+                if let Err(e) = writer_clone.lock().await.write_all(&ping).await {
+                    tracing::error!("Failed to write ping: {e}");
+                    break;
                 }
             }
-        }
+        });
+
+        // Spawn the second task for handling pong responses
+        let writer_clone = Arc::clone(&writer);
+        let pong_task = tokio::spawn(async move {
+            while let Some(ping) = pong_receiver.recv().await {
+                if ping == 0 {
+                    tracing::warn!("Invalid ping: {ping}");
+                    break;
+                }
+                if ping > 0 {
+                    match ping.checked_neg() {
+                        Some(pong) => {
+                            let pong = encode_ping(pong);
+                            let latency = generate_latency(connection_latency);
+                            tokio::time::sleep(latency).await;
+
+                            if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
+                                tracing::error!("Failed to write pong: {e}");
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Invalid ping: {ping}");
+                            break;
+                        }
+                    }
+                } else {
+                    match ping.checked_neg().and_then(|n| u64::try_from(n).ok()) {
+                        Some(our_ping) => {
+                            let time = start.elapsed().as_micros() as u64;
+                            if let Some(delay) = time.checked_sub(our_ping) {
+                                latency_sender.observe(Duration::from_micros(delay));
+                            } else {
+                                tracing::warn!("Invalid ping: {ping}, greater than current time");
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Invalid pong: {ping}");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Spawn the third task for handling message sending
+        let message_task = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                let serialized = bincode::serialize(&message)
+                    .expect("Serialization should not fail");
+                let latency = generate_latency(connection_latency);
+                tokio::time::sleep(latency).await;
+
+                if let Err(e) = writer.lock().await.write_u32(serialized.len() as u32).await {
+                    tracing::error!("Failed to write message length: {e}");
+                    break;
+                }
+                if let Err(e) = writer.lock().await.write_all(&serialized).await {
+                    tracing::error!("Failed to write message: {e}");
+                    break;
+                }
+            }
+        });
+
+        // Wait for all tasks to complete
+        let _ = tokio::try_join!(ping_task, pong_task, message_task);
+
+        Ok(())
     }
 
     async fn handle_read_stream(
@@ -468,51 +490,74 @@ impl Worker {
 /// `n` is the number of nodes.
 /// `seed` is a global seed used for deterministic generation.
 /// If `seed == 0`, the table is initialized with all zeros.
+/// expected mean latency for a quorum of nodes should be below within expected thresholds
 fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
-    if seed == 0 {
-        // If seed is 0, return a table of all zeros
-        return vec![vec![0.0; n]; n];
-    }
+    // Hard-coded parameters
+    const INTRA_REGION_LATENCY_MIN: u64 = 1;
+    const INTRA_REGION_LATENCY_MAX: u64 = 50;
+    const INTER_REGION_LATENCY_MIN: u64 = 100;
+    const INTER_REGION_LATENCY_MAX: u64 = 300;
+    const LATENCY_MIN: f64 = 110.0;
+    const LATENCY_MAX: f64 = 130.0;
 
-    // Simulated regional latency ranges (in milliseconds)
-    let intra_region_latency = 1..50; // Typical latency within the same region
-    let inter_region_latency = 100..300; // Latency between different regions
+    // Quorum requirement (at least 2/3 + 1 of the rows with the quantile within range)
+    let quorum_count = ((2.0 / 3.0) * n as f64).floor() + 1.0;
 
     // Initialize the RNG
     let mut rng = StdRng::seed_from_u64(seed);
 
-    // Placeholder for the table
-    let mut table = vec![vec![0.0; n]; n];
+    loop {
+        // Placeholder for the table
+        let mut table = vec![vec![0.0; n]; n];
 
-    // Generate latencies
-    for i in 0..n {
-        for j in i..n {
-            if i == j {
-                table[i][j] = 0.0; // Latency to itself is 0
-            } else {
-                // Use probabilities to simulate inter- and intra-region communication
-                let latency = if rng.gen_bool(0.7) {
-                    // Intra-region latency
-                    rng.gen_range(intra_region_latency.clone())
+        // Generate latencies
+        for i in 0..n {
+            for j in i..n {
+                if i == j {
+                    table[i][j] = 0.0; // Latency to itself is 0
                 } else {
-                    // Inter-region latency
-                    rng.gen_range(inter_region_latency.clone())
-                } as f64;
+                    // Use probabilities to simulate inter- and intra-region communication
+                    let latency = if rng.gen_bool(0.7) {
+                        // Intra-region latency
+                        rng.gen_range(INTRA_REGION_LATENCY_MIN..=INTRA_REGION_LATENCY_MAX)
+                    } else {
+                        // Inter-region latency
+                        rng.gen_range(INTER_REGION_LATENCY_MIN..=INTER_REGION_LATENCY_MAX)
+                    } as f64;
 
-                // Fill both [i][j] and [j][i] for symmetry
-                table[i][j] = latency;
-                table[j][i] = latency;
+                    // Fill both [i][j] and [j][i] for symmetry
+                    table[i][j] = latency;
+                    table[j][i] = latency;
+                }
             }
         }
-    }
 
-    table
+        // Check how many rows have the 2/3 quantile within the latency range
+        let num_rows_within_latency_range = table.iter().filter(|row| {
+            // Clone the row and sort it to calculate the quantile
+            let mut sorted_row = row.clone().clone(); // Clone the row to sort
+            sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap()); // Sort the cloned row
+
+            // Calculate the 2/3 quantile
+            let quantile_index = quorum_count as usize; // 2/3 quantile index
+            let quantile_value = sorted_row[quantile_index - 1]; // Get the value at 2/3 quantile index
+
+            quantile_value >= LATENCY_MIN && quantile_value <= LATENCY_MAX
+        }).count();
+
+        // Check if the number of rows with the quantile within the threshold meets the quorum requirement
+        if num_rows_within_latency_range as f64 >= quorum_count {
+            // If we have at least the quorum of rows with the quantile within the range, return the table
+            return table;
+        }
+    }
 }
+
 fn generate_latency(mean: f64) -> Duration {
     let mut rng = rand::thread_rng();
 
-// Define a constant deviation percentage (e.g., ±10% of the mean)
-    let deviation_percentage = 0.10; // 10%
+// Define a constant deviation percentage (e.g., ±3% of the mean)
+    let deviation_percentage = 0.03; // 3%
 
 // Calculate the deviation based on the mean
     let deviation = mean * deviation_percentage;
