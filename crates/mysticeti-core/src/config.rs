@@ -305,7 +305,7 @@ mod client_defaults {
     }
 
     pub fn default_initial_delay() -> Duration {
-        Duration::from_secs(30)
+        Duration::from_secs(10)
     }
 }
 
