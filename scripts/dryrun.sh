@@ -1,8 +1,8 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-4}
+NUM_VALIDATORS=${NUM_VALIDATORS:-5}
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocate} #possible "honest" | "delayed" | "equivocate" | "timeout"
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 
 
 
@@ -57,7 +57,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
   if [[ $i -eq 0 ]]; then
-    echo -e "${RED}Starting Byzantine validator ${YELLOW}$i${RESET}..."
+    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET}..."
     tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
   else
     echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET}..."

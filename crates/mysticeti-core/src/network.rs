@@ -494,9 +494,9 @@ impl Worker {
 fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
     // Hard-coded parameters
     const INTRA_REGION_LATENCY_MIN: u64 = 1;
-    const INTRA_REGION_LATENCY_MAX: u64 = 50;
+    const INTRA_REGION_LATENCY_MAX: u64 = 100;
     const INTER_REGION_LATENCY_MIN: u64 = 100;
-    const INTER_REGION_LATENCY_MAX: u64 = 250;
+    const INTER_REGION_LATENCY_MAX: u64 = 200;
     const QUANTILE_LATENCY_MIN: f64 = 75.0;
     const QUANTILE_LATENCY_MAX: f64 = 100.0;
     const MEAN_LATENCY_MIN: f64 = 75.0;
