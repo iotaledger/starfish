@@ -496,9 +496,11 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
     const INTRA_REGION_LATENCY_MIN: u64 = 1;
     const INTRA_REGION_LATENCY_MAX: u64 = 50;
     const INTER_REGION_LATENCY_MIN: u64 = 100;
-    const INTER_REGION_LATENCY_MAX: u64 = 300;
-    const LATENCY_MIN: f64 = 110.0;
-    const LATENCY_MAX: f64 = 130.0;
+    const INTER_REGION_LATENCY_MAX: u64 = 250;
+    const QUANTILE_LATENCY_MIN: f64 = 75.0;
+    const QUANTILE_LATENCY_MAX: f64 = 100.0;
+    const MEAN_LATENCY_MIN: f64 = 75.0;
+    const MEAN_LATENCY_MAX: f64 = 100.0;
 
     // Quorum requirement (at least 2/3 + 1 of the rows with the quantile within range)
     let quorum_count = ((2.0 / 3.0) * n as f64).floor() + 1.0;
@@ -533,7 +535,7 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
         }
 
         // Check how many rows have the 2/3 quantile within the latency range
-        let num_rows_within_latency_range = table.iter().filter(|row| {
+        let num_rows_within_quantile_latency_range = table.iter().filter(|row| {
             // Clone the row and sort it to calculate the quantile
             let mut sorted_row = row.clone().clone(); // Clone the row to sort
             sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap()); // Sort the cloned row
@@ -542,11 +544,20 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
             let quantile_index = quorum_count as usize; // 2/3 quantile index
             let quantile_value = sorted_row[quantile_index - 1]; // Get the value at 2/3 quantile index
 
-            quantile_value >= LATENCY_MIN && quantile_value <= LATENCY_MAX
+            quantile_value >= QUANTILE_LATENCY_MIN && quantile_value <= QUANTILE_LATENCY_MAX
+        }).count();
+
+        // Check how many rows have the 2/3 quantile within the latency range
+        let num_rows_within_mean_latency_range = table.iter().filter(|row| {
+            // Clone the row and sort it to calculate the quantile
+            let mut sorted_row = row.clone().clone(); // Clone the row to sort
+            let sum: f64= sorted_row.iter().sum();
+            let mean = sum / (sorted_row.len() as f64 - 1.0);
+            mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
         }).count();
 
         // Check if the number of rows with the quantile within the threshold meets the quorum requirement
-        if num_rows_within_latency_range as f64 >= quorum_count {
+        if num_rows_within_quantile_latency_range as f64 >= quorum_count && num_rows_within_mean_latency_range as f64 >= quorum_count {
             // If we have at least the quorum of rows with the quantile within the range, return the table
             return table;
         }

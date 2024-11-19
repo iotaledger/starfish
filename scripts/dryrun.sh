@@ -10,7 +10,7 @@ find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
 find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
 
 # Get the number of validators from the user
-NUM_VALIDATORS=${1:-6}
+NUM_VALIDATORS=${1:-7}
 echo "Number of validators: $NUM_VALIDATORS"
 
 echo "Updating prometheus.yaml for $NUM_VALIDATORS validators..."
@@ -34,7 +34,7 @@ scrape_configs:
 EOL
 
 # Generate the target list for mysticeti-metrics
-for ((i=1; i<=NUM_VALIDATORS; i++)); do
+for ((i=0; i<NUM_VALIDATORS; i++)); do
   PORT=$((1500 + NUM_VALIDATORS+ i))
   echo "          - 'host.docker.internal:$PORT'" >> $PROMETHEUS_CONFIG
 done
@@ -54,12 +54,6 @@ if (cd monitoring && docker compose ps -q | grep -q .); then
 else
     echo "No monitoring services are currently running."
 fi
-
-# Remove the Grafana and Prometheus data volumes
-docker volume rm monitoring_grafana_data || echo "Grafana data volume not found or could not be removed."
-docker volume rm monitoring_prometheus_data || echo "Prometheus data volume not found or could not be removed."
-
-echo "Cleaned up previous Grafana and Prometheus data."
 
 
 # Start Docker Compose to bring up monitoring services
