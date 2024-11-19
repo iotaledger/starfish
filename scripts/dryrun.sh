@@ -1,86 +1,76 @@
 #!/bin/bash
+# Parameters
+NUM_VALIDATORS=${NUM_VALIDATORS:-4}
+SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocate} #possible "honest" | "delayed" | "equivocate" | "timeout"
 
-# Cleanup step: Remove all .ansi files and directories with the prefix "dryrun-validator"
-echo "Cleaning up .ansi files and dryrun-validator directories..."
 
-# Remove all .ansi files in the current directory and subdirectories, suppress output
+
+# Colors using tput
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+CYAN=$(tput setaf 6)
+RESET=$(tput sgr0)
+
+
+# Output Validators
+echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
+# Output Seed for latency
+echo -e "${GREEN}Seed for extra latency: ${YELLOW}$SEED_FOR_EXTRA_LATENCY${RESET}"
+# Output Byzantine strategy
+echo -e "${GREEN}Byzantine strategy: ${YELLOW}$BYZANTINE_STRATEGY${RESET}"
+
+# Cleanup
+echo -e "${CYAN}Cleaning up .ansi files and dryrun-validator directories...${RESET}"
 find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
-
-# Remove directories with prefix "dryrun-validator", suppress output
 find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
 
-# Get the number of validators from the user
-NUM_VALIDATORS=${1:-7}
-echo "Number of validators: $NUM_VALIDATORS"
 
-echo "Updating prometheus.yaml for $NUM_VALIDATORS validators..."
-
-# File path to prometheus.yaml
+# Prometheus Update
 PROMETHEUS_CONFIG="monitoring/prometheus.yaml"
-
-# Header for prometheus.yaml
 cat <<EOL > $PROMETHEUS_CONFIG
 global:
   scrape_interval: 1s
-
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['prometheus:9090']
-
   - job_name: 'mysticeti-metrics'
     static_configs:
       - targets:
 EOL
 
-# Generate the target list for mysticeti-metrics
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-  PORT=$((1500 + NUM_VALIDATORS+ i))
+  PORT=$((1500 + NUM_VALIDATORS + i))
   echo "          - 'host.docker.internal:$PORT'" >> $PROMETHEUS_CONFIG
 done
 
-echo "Updated prometheus.yaml successfully!"
+echo -e "${GREEN}Updated prometheus.yaml successfully!${RESET}"
 
-# Check if any containers are running in the monitoring directory
-if (cd monitoring && docker compose ps -q | grep -q .); then
-    echo "Monitoring services are already running. Stopping and removing them..."
-    (cd monitoring && docker compose down)
-    if [ $? -eq 0 ]; then
-        echo "Monitoring services stopped successfully!"
-    else
-        echo "Failed to stop monitoring services."
-        exit 1
-    fi
-else
-    echo "No monitoring services are currently running."
-fi
+# Docker Compose
+(cd monitoring && docker compose down && docker compose up -d)
 
-
-# Start Docker Compose to bring up monitoring services
-echo "Starting monitoring services..."
-(cd monitoring && docker compose up -d)
-
-# Environment setup
-export RUST_LOG=warn,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG
-
-# Kill any running tmux sessions
+# Start Validators
 tmux kill-server || true
-
-# Start tmux sessions for each validator
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-    SESSION_NAME="v$i"
-    LOG_FILE="v${i}.log.ansi"
-    echo "Starting validator $i in tmux session $SESSION_NAME..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency 1 --authority $i > $LOG_FILE"
+  SESSION_NAME="validator_$i"
+  LOG_FILE="validator_${i}.log.ansi"
+  if [[ $i -eq 0 ]]; then
+    echo -e "${RED}Starting Byzantine validator ${YELLOW}$i${RESET}..."
+    tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
+  else
+    echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET}..."
+    tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
+  fi
 done
 
-LONG_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-30m&to=now&refresh=5s"
-SHORT_URL=$(curl -s "http://tinyurl.com/api-create.php?url=$LONG_URL")
-
-echo "Grafana monitoring is available at $SHORT_URL"
+SHORT_URL=$(curl -s "http://tinyurl.com/api-create.php?url=http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-30m&to=now&refresh=5s")
+echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}"
 
 # Wait for the validators to run (e.g., 600 seconds)
 sleep 600
 
 # Kill all tmux sessions
+echo -e "${RED}Killing all tmux sessions...${RESET}"
 tmux kill-server
