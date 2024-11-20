@@ -1,6 +1,6 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-5}
+NUM_VALIDATORS=${NUM_VALIDATORS:-4}
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 
@@ -48,8 +48,19 @@ done
 
 echo -e "${GREEN}Updated prometheus.yaml successfully!${RESET}"
 
-# Docker Compose
-(cd monitoring && docker compose down && docker compose up -d)
+
+# Docker Compose Down
+(cd monitoring && docker compose down)
+
+
+# Remove the Grafana and Prometheus data volumes
+docker volume rm monitoring_grafana_data || echo "Grafana data volume not found or could not be removed."
+docker volume rm monitoring_prometheus_data || echo "Prometheus data volume not found or could not be removed."
+
+
+# Docker Compose Up
+(cd monitoring && docker compose up -d)
+
 
 # Start Validators
 tmux kill-server || true

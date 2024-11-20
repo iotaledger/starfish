@@ -22,7 +22,7 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml
       - ./grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml
-      - ../crates/orchestrator/assets/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json
+      - ./grafana/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json
 
 volumes:
   prometheus_data:

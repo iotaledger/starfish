@@ -400,19 +400,41 @@ impl Worker {
 
         // Spawn the third task for handling message sending
         let message_task = tokio::spawn(async move {
-            while let Some(message) = receiver.recv().await {
-                let serialized = bincode::serialize(&message)
-                    .expect("Serialization should not fail");
-                let latency = generate_latency(connection_latency);
-                tokio::time::sleep(latency).await;
+            let mut inner_task_handles = Vec::new();
 
-                if let Err(e) = writer.lock().await.write_u32(serialized.len() as u32).await {
-                    tracing::error!("Failed to write message length: {e}");
-                    break;
-                }
-                if let Err(e) = writer.lock().await.write_all(&serialized).await {
-                    tracing::error!("Failed to write message: {e}");
-                    break;
+            while let Some(message) = receiver.recv().await {
+                let writer = writer.clone();
+                let latency = generate_latency(connection_latency);
+
+                // Spawn an inner task and collect its handle
+                let handle = tokio::spawn(async move {
+                    let serialized = match bincode::serialize(&message) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::error!("Serialization failed: {e}");
+                            return;
+                        }
+                    };
+
+                    tokio::time::sleep(latency).await;
+
+                    if let Err(e) = writer.lock().await.write_u32(serialized.len() as u32).await {
+                        tracing::error!("Failed to write message length: {e}");
+                        return;
+                    }
+
+                    if let Err(e) = writer.lock().await.write_all(&serialized).await {
+                        tracing::error!("Failed to write message: {e}");
+                    }
+                });
+
+                inner_task_handles.push(handle);
+            }
+
+            // Await all inner tasks
+            for handle in inner_task_handles {
+                if let Err(e) = handle.await {
+                    tracing::error!("An inner task failed: {e:?}");
                 }
             }
         });
