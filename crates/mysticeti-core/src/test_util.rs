@@ -204,7 +204,7 @@ pub async fn networks_and_addresses(metrics: &[Arc<Metrics>]) -> (Vec<Network>, 
             .zip(metrics.iter())
             .enumerate()
             .map(|(i, (address, metrics))| {
-                Network::from_socket_addresses(&addresses, i, *address, metrics.clone())
+                Network::from_socket_addresses(&addresses, i, *address, metrics.clone(), 0)
             });
     let networks = join_all(networks).await;
     (networks, addresses)
