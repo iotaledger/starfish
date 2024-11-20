@@ -37,7 +37,7 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
-
+use crate::crypto::BlockDigest;
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -298,11 +298,13 @@ impl<H: BlockHandler> Core<H> {
 
             assert!(!includes.is_empty());
             let time_ns = timestamp_utc().as_nanos() + j as u128;
+            let acknowledgement_statements = includes.clone().into_iter().collect::<_>();
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
                 includes.clone(),
-                statements.clone(),
+                acknowledgement_statements,
+                Some(statements.clone()),
                 time_ns,
                 self.epoch_changing(),
                 &self.signer,

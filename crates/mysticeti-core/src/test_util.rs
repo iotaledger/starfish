@@ -204,7 +204,7 @@ pub async fn networks_and_addresses(metrics: &[Arc<Metrics>]) -> (Vec<Network>, 
             .zip(metrics.iter())
             .enumerate()
             .map(|(i, (address, metrics))| {
-                Network::from_socket_addresses(&addresses, i, *address, metrics.clone())
+                Network::from_socket_addresses(&addresses, i, *address, metrics.clone(), 0)
             });
     let networks = join_all(networks).await;
     (networks, addresses)
@@ -523,11 +523,13 @@ pub fn build_dag(
         let (references, blocks): (Vec<_>, Vec<_>) = committee
             .authorities()
             .map(|authority| {
+                let acknowledgement_statements = includes.clone().into_iter().collect();
                 let block = Data::new(StatementBlock::new(
                     authority,
                     round,
                     includes.clone(),
-                    vec![],
+                    acknowledgement_statements,
+                    Some(vec![]),
                     0,
                     false,
                     Default::default(),
@@ -551,11 +553,13 @@ pub fn build_dag_layer(
     let mut references = Vec::new();
     for (authority, parents) in connections {
         let round = parents.first().unwrap().round + 1;
+        let acknowledgement_statements = parents.clone().into_iter().collect();
         let block = Data::new(StatementBlock::new(
             authority,
             round,
             parents,
-            vec![],
+            acknowledgement_statements,
+            Some(vec![]),
             0,
             false,
             Default::default(),

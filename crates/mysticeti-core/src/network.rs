@@ -628,7 +628,6 @@ mod test {
 
     use crate::{committee::Committee, metrics::Metrics, test_util::networks_and_addresses};
 
-    #[ignore]
     #[tokio::test]
     async fn network_connect_test() {
         let committee = Committee::new_test(vec![1, 1, 1]);

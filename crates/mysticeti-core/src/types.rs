@@ -28,12 +28,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::{
-    committee::{Committee, VoteRangeBuilder},
-    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
-    data::Data,
-    threshold_clock::threshold_clock_valid_non_genesis,
-};
+use crate::{committee::{Committee, VoteRangeBuilder}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data, threshold_clock::threshold_clock_valid_non_genesis};
 use crate::crypto::StatementDigest;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -88,7 +83,7 @@ pub struct StatementBlock {
     includes: Vec<BlockReference>,
 
     // Transaction data acknowledgment
-    acknowledgment_statements: HashSet<BlockReference>,
+    acknowledgement_statements: HashSet<BlockReference>,
 
     // Hash of statements
     hash_statements: StatementDigest,
@@ -132,7 +127,8 @@ impl StatementBlock {
             authority,
             GENESIS_ROUND,
             vec![],
-            vec![],
+            HashSet::default(),
+            Some(vec![]),
             0,
             false,
             SignatureBytes::default(),
@@ -143,7 +139,8 @@ impl StatementBlock {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: Vec<BlockReference>,
-        statements: Vec<BaseStatement>,
+        acknowledgement_statements: HashSet<BlockReference>,
+        statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
@@ -152,6 +149,7 @@ impl StatementBlock {
             authority,
             round,
             &includes,
+            &acknowledgement_statements,
             &statements,
             meta_creation_time_ns,
             epoch_marker,
@@ -160,6 +158,7 @@ impl StatementBlock {
             authority,
             round,
             includes,
+            acknowledgement_statements,
             statements,
             meta_creation_time_ns,
             epoch_marker,
@@ -171,32 +170,41 @@ impl StatementBlock {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: Vec<BlockReference>,
-        statements: Vec<BaseStatement>,
+        acknowledgement_statements: HashSet<BlockReference>,
+        statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
     ) -> Self {
+        let hash_statements = StatementDigest::new_from_statements(&statements);
         Self {
             reference: BlockReference {
                 authority,
                 round,
-                digest: BlockDigest::new(
+                digest: BlockDigest::new_without_statements(
                     authority,
                     round,
                     &includes,
-                    &statements,
+                    &acknowledgement_statements,
+                    hash_statements,
                     meta_creation_time_ns,
                     epoch_marker,
                     &signature,
                 ),
             },
             includes,
+            acknowledgement_statements,
+            hash_statements,
             statements,
             meta_creation_time_ns,
             epoch_marker,
             signature,
         }
     }
+
+    pub fn hash_statements(&self) -> StatementDigest {self.hash_statements.clone()}
+
+    pub fn acknowledgement_statements(&self) -> &HashSet<BlockReference> {&self.acknowledgement_statements}
 
     pub fn reference(&self) -> &BlockReference {
         &self.reference
@@ -207,7 +215,7 @@ impl StatementBlock {
     }
 
     pub fn statements(&self) -> &Vec<BaseStatement> {
-        &self.statements
+        &self.statements.as_ref().expect("Statement should not be empty")
     }
 
     // Todo - we should change the block so that it has all shared transactions in one vec
@@ -215,7 +223,7 @@ impl StatementBlock {
     pub fn shared_ranges(&self) -> Vec<TransactionLocatorRange> {
         let mut ranges = Vec::new();
         let mut vote_range_builder = VoteRangeBuilder::default();
-        for (offset, statement) in self.statements.iter().enumerate() {
+        for (offset, statement) in self.statements().iter().enumerate() {
             if let BaseStatement::Share(_) = statement {
                 if let Some(range) = vote_range_builder.add(offset as u64) {
                     let range = TransactionLocatorRange::new(self.reference, range);
@@ -232,7 +240,7 @@ impl StatementBlock {
 
     pub fn shared_transactions(&self) -> impl Iterator<Item = (TransactionLocator, &Transaction)> {
         let reference = *self.reference();
-        self.statements
+        self.statements()
             .iter()
             .enumerate()
             .filter_map(move |(pos, statement)| {
@@ -282,11 +290,22 @@ impl StatementBlock {
 
     pub fn verify(&self, committee: &Committee) -> eyre::Result<()> {
         let round = self.round();
+        if self.statements.is_some() {
+            let hash_statements = StatementDigest::new_from_statements(&self.statements);
+            ensure!(
+            hash_statements == self.hash_statements(),
+            "Hash statement calculated {:?}, provided {:?}",
+            hash_statements,
+            self.hash_statements()
+        );
+        }
+
         let digest = BlockDigest::new(
             self.author(),
             round,
             &self.includes,
-            &self.statements,
+            &self.acknowledgement_statements,
+            self.hash_statements,
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
@@ -321,7 +340,7 @@ impl StatementBlock {
                 round
             );
         }
-        for statement in &self.statements {
+        for statement in self.statements() {
             // Also check duplicate statements?
             match statement {
                 BaseStatement::Share(_) => {}
@@ -520,12 +539,20 @@ impl<'a> fmt::Debug for Detailed<'a> {
             self.0.includes().len(),
             self.0.includes()
         )?;
-        write!(
-            f,
-            "statements({})={:?}",
-            self.0.statements.len(),
-            self.0.statements()
-        )?;
+        if self.0.statements.is_some() {
+            write!(
+                f,
+                "statements({})={:?}",
+                self.0.statements().len(),
+                self.0.statements()
+            )?;
+        }
+        else {
+            write!(
+                f,
+                "statements=None"
+            )?;
+        }
         writeln!(f, "}}")
     }
 }
@@ -604,6 +631,34 @@ impl CryptoHash for EpochStatus {
         match self {
             false => [0].crypto_hash(state),
             true => [1].crypto_hash(state),
+        }
+    }
+}
+
+impl CryptoHash for BaseStatement {
+    fn crypto_hash(&self, state: &mut impl Digest) {
+        match self {
+            BaseStatement::Share(tx) => {
+                [0].crypto_hash(state);
+                tx.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Accept) => {
+                [1].crypto_hash(state);
+                id.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Reject(None)) => {
+                [2].crypto_hash(state);
+                id.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Reject(Some(other))) => {
+                [3].crypto_hash(state);
+                id.crypto_hash(state);
+                other.crypto_hash(state);
+            }
+            BaseStatement::VoteRange(range) => {
+                [4].crypto_hash(state);
+                range.crypto_hash(state);
+            }
         }
     }
 }
@@ -688,10 +743,13 @@ mod test {
                 let includes = includes.split(',');
                 includes.map(Self::parse_name).collect()
             };
+            let acknowledgement_statements = includes.clone().into_iter().collect::<HashSet<BlockReference>>();
             StatementBlock {
                 reference,
                 includes,
-                statements: vec![],
+                acknowledgement_statements,
+                hash_statements: StatementDigest::new_from_statements(&Some(vec![])),
+                statements: Some(vec![]),
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),

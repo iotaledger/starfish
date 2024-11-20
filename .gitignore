@@ -1,5 +1,6 @@
 # Orchestrator settings
 crates/orchestrator/assets/settings.yml
+monitoring/prometheus.yaml
 #crates/orchestrator/assets/node-parameters.yml
 #crates/orchestrator/assets/client-parameters.yml
 

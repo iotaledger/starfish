@@ -1,10 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fmt;
 
 use digest::Digest;
-#[cfg(not(test))]
 use ed25519_consensus::Signature;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -12,18 +12,15 @@ use zeroize::Zeroize;
 
 #[cfg(not(test))]
 use crate::types::Vote;
-use crate::{
-    serde::{ByteRepr, BytesVisitor},
-    types::{
-        AuthorityIndex,
-        BaseStatement,
-        BlockReference,
-        EpochStatus,
-        RoundNumber,
-        StatementBlock,
-        TimestampNs,
-    },
-};
+use crate::{crypto, serde::{ByteRepr, BytesVisitor}, types::{
+    AuthorityIndex,
+    BaseStatement,
+    BlockReference,
+    EpochStatus,
+    RoundNumber,
+    StatementBlock,
+    TimestampNs,
+}};
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
@@ -52,113 +49,81 @@ type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 #[cfg(test)]
 type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
-impl BlockDigest {
-    #[cfg(not(test))]
-    pub fn new(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: &[BlockReference],
-        statements: &[BaseStatement],
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signature: &SignatureBytes,
-    ) -> Self {
-        let mut hasher = BlockHasher::default();
-        Self::digest_without_signature(
-            &mut hasher,
-            authority,
-            round,
-            includes,
-            statements,
-            meta_creation_time_ns,
-            epoch_marker,
-        );
-        hasher.update(signature);
-        Self(hasher.finalize().into())
-    }
 
-    #[cfg(test)]
-    pub fn new(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: &[BlockReference],
-        statements: &[BaseStatement],
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signature: &SignatureBytes,
-    ) -> Self {
-        let mut hasher = BlockHasher::default();
-        Self::digest_without_signature(
-            &mut hasher,
-            authority,
-            round,
-            includes,
-            statements,
-            meta_creation_time_ns,
-            epoch_marker,
-        );
-        hasher.update(signature);
-        Self(hasher.finalize().into())
-    }
-
-    /// There is a bit of a complexity around what is considered block digest and what is being signed
-    ///
-    /// * Block signature covers all the fields in the block, except for signature and reference.digest
-    /// * Block digest(e.g. block.reference.digest) covers all the above **and** block signature
-    ///
-    /// This is not very beautiful, but it allows to optimize block synchronization,
-    /// by skipping signature verification for all the descendants of the certified block.
-    #[cfg(not(test))]
-    fn digest_without_signature(
-        hasher: &mut BlockHasher,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: &[BlockReference],
-        statements: &[BaseStatement],
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-    ) {
-        authority.crypto_hash(hasher);
-        round.crypto_hash(hasher);
-        for include in includes {
-            include.crypto_hash(hasher);
-        }
-        for statement in statements {
-            match statement {
-                BaseStatement::Share(tx) => {
-                    [0].crypto_hash(hasher);
-                    tx.crypto_hash(hasher);
-                }
-                BaseStatement::Vote(id, Vote::Accept) => {
-                    [1].crypto_hash(hasher);
-                    id.crypto_hash(hasher);
-                }
-                BaseStatement::Vote(id, Vote::Reject(None)) => {
-                    [2].crypto_hash(hasher);
-                    id.crypto_hash(hasher);
-                }
-                BaseStatement::Vote(id, Vote::Reject(Some(other))) => {
-                    [3].crypto_hash(hasher);
-                    id.crypto_hash(hasher);
-                    other.crypto_hash(hasher);
-                }
-                BaseStatement::VoteRange(range) => {
-                    [4].crypto_hash(hasher);
-                    range.crypto_hash(hasher);
-                }
+impl StatementDigest {
+    pub fn new_from_statements(statements: &Option<Vec<BaseStatement>>) -> Self {
+        let mut hasher = crypto::BlockHasher::default();
+        if statements.is_some() {
+            for statement in statements.as_ref().expect("Should be non-empty") {
+                statement.crypto_hash(&mut hasher);
             }
+        } else {
+            panic!("Should not be called when statements are None");
         }
-        meta_creation_time_ns.crypto_hash(hasher);
-        epoch_marker.crypto_hash(hasher);
+        Self(hasher.finalize().into())
+    }
+}
+impl BlockDigest {
+    pub fn new_without_statements(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: &[BlockReference],
+        acknowledgement_statements: &HashSet<BlockReference>,
+        hash_statements: StatementDigest,
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+        signature: &SignatureBytes,
+    ) -> Self {
+        let mut hasher = BlockHasher::default();
+        Self::digest_without_signature(
+            &mut hasher,
+            authority,
+            round,
+            includes,
+            acknowledgement_statements,
+            hash_statements,
+            meta_creation_time_ns,
+            epoch_marker,
+        );
+        hasher.update(signature);
+        Self(hasher.finalize().into())
     }
 
-    #[cfg(test)]
+
+    pub fn new(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: &[BlockReference],
+        acknowledgement_statements: &HashSet<BlockReference>,
+        hash_statements: StatementDigest,
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+        signature: &SignatureBytes,
+    ) -> Self {
+        let mut hasher = BlockHasher::default();
+        Self::digest_without_signature(
+            &mut hasher,
+            authority,
+            round,
+            includes,
+            acknowledgement_statements,
+            hash_statements,
+            meta_creation_time_ns,
+            epoch_marker,
+        );
+        hasher.update(signature);
+        Self(hasher.finalize().into())
+    }
+
+
+
     fn digest_without_signature(
         hasher: &mut BlockHasher,
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        _statements: &[BaseStatement],
+        acknowledgement_statements: &HashSet<BlockReference>,
+        hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
     ) {
@@ -167,10 +132,17 @@ impl BlockDigest {
         for include in includes {
             include.crypto_hash(hasher);
         }
-
+        let mut vec: Vec<_> = acknowledgement_statements.iter().collect();
+        vec.sort();
+        for blockRef in vec {
+            blockRef.crypto_hash(hasher);
+        }
+        hash_statements.crypto_hash(hasher);
         meta_creation_time_ns.crypto_hash(hasher);
         epoch_marker.crypto_hash(hasher);
     }
+
+
 }
 
 pub trait AsBytes {
@@ -202,6 +174,12 @@ impl CryptoHash for u64 {
     }
 }
 
+/*impl CryptoHash for StatementDigest {
+    fn crypto_hash(&self, state: &mut impl Digest) {
+        state.update(self.as_ref());
+    }
+}*/
+
 impl CryptoHash for u128 {
     fn crypto_hash(&self, state: &mut impl Digest) {
         state.update(self.to_be_bytes());
@@ -215,7 +193,6 @@ impl<T: AsBytes> CryptoHash for T {
 }
 
 impl PublicKey {
-    #[cfg(not(test))]
     pub fn verify_block(&self, block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
         let mut hasher = BlockHasher::default();
@@ -224,17 +201,13 @@ impl PublicKey {
             block.author(),
             block.round(),
             block.includes(),
-            block.statements(),
+            block.acknowledgement_statements(),
+            block.hash_statements(),
             block.meta_creation_time_ns(),
             block.epoch_changed(),
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())
-    }
-
-    #[cfg(test)]
-    pub fn verify_block(&self, _block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
-        Ok(())
     }
 }
 
@@ -246,23 +219,25 @@ impl Signer {
             .collect()
     }
 
-    #[cfg(not(test))]
     pub fn sign_block(
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        statements: &[BaseStatement],
+        acknowledgement_statements: &HashSet<BlockReference>,
+        statements: &Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
     ) -> SignatureBytes {
         let mut hasher = BlockHasher::default();
+        let hash_statements = StatementDigest::new_from_statements(statements);
         BlockDigest::digest_without_signature(
             &mut hasher,
             authority,
             round,
             includes,
-            statements,
+            acknowledgement_statements,
+            hash_statements,
             meta_creation_time_ns,
             epoch_marker,
         );
@@ -271,21 +246,15 @@ impl Signer {
         SignatureBytes(signature.to_bytes())
     }
 
-    #[cfg(test)]
-    pub fn sign_block(
-        &self,
-        _authority: AuthorityIndex,
-        _round: RoundNumber,
-        _includes: &[BlockReference],
-        _statements: &[BaseStatement],
-        _meta_creation_time_ns: TimestampNs,
-        _epoch_marker: EpochStatus,
-    ) -> SignatureBytes {
-        Default::default()
-    }
 
     pub fn public_key(&self) -> PublicKey {
         PublicKey(self.0.verification_key())
+    }
+}
+
+impl AsRef<[u8]> for StatementDigest {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -297,6 +266,12 @@ impl AsRef<[u8]> for BlockDigest {
 
 impl AsRef<[u8]> for SignatureBytes {
     fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsBytes for StatementDigest {
+    fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -383,13 +358,50 @@ impl ByteRepr for BlockDigest {
     }
 }
 
+impl ByteRepr for StatementDigest {
+    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
+        if v.len() != BLOCK_DIGEST_SIZE {
+            return Err(E::custom(format!(
+                "Invalid block digest length: {}",
+                v.len()
+            )));
+        }
+        let mut inner = [0u8; BLOCK_DIGEST_SIZE];
+        inner.copy_from_slice(v);
+        Ok(Self(inner))
+    }
+}
+
+impl fmt::Debug for StatementDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2])      // Slice the first 2 characters and print
+    }
+}
+
+impl fmt::Display for StatementDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2])
+    }
+}
+impl Serialize for StatementDigest {
+    #[inline]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
 impl Serialize for BlockDigest {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(&self.0)
     }
 }
-
+impl<'de> Deserialize<'de> for StatementDigest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_bytes(BytesVisitor::new())
+    }
+}
 impl<'de> Deserialize<'de> for BlockDigest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_bytes(BytesVisitor::new())
