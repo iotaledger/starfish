@@ -20,6 +20,7 @@ use std::{
     ops::Range,
     time::Duration,
 };
+use std::collections::HashSet;
 
 use digest::Digest;
 use eyre::{bail, ensure};
@@ -33,6 +34,7 @@ use crate::{
     data::Data,
     threshold_clock::threshold_clock_valid_non_genesis,
 };
+use crate::crypto::StatementDigest;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Vote {
@@ -85,8 +87,15 @@ pub struct StatementBlock {
     //  are included, then the first reference is the one that this block conceptually votes for.
     includes: Vec<BlockReference>,
 
+    // Transaction data acknowledgment
+    acknowledgment_statements: HashSet<BlockReference>,
+
+    // Hash of statements
+    hash_statements: StatementDigest,
+
+
     // A list of base statements in order.
-    statements: Vec<BaseStatement>,
+    statements: Option<Vec<BaseStatement>>,
 
     // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,

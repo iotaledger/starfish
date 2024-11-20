@@ -28,8 +28,13 @@ use crate::{
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 
+pub const STATEMENT_DIGEST_SIZE: usize = 32;
+
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Default, Hash)]
 pub struct BlockDigest([u8; BLOCK_DIGEST_SIZE]);
+
+#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Default, Hash)]
+pub struct StatementDigest([u8; STATEMENT_DIGEST_SIZE]);
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct PublicKey(ed25519_consensus::VerificationKey);
