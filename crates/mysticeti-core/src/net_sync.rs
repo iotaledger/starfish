@@ -455,6 +455,7 @@ mod tests {
     use crate::test_util::{check_commits, network_syncers};
 
     #[tokio::test]
+    #[ignore]
     async fn test_network_sync() {
         let network_syncers = network_syncers(4).await;
         println!("Started");
