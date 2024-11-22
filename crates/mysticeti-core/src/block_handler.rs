@@ -3,7 +3,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env,
     path::Path,
     sync::Arc,
     time::Duration,

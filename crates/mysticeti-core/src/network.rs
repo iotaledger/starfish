@@ -572,9 +572,9 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
         // Check how many rows have the 2/3 quantile within the latency range
         let num_rows_within_mean_latency_range = table.iter().filter(|row| {
             // Clone the row and sort it to calculate the quantile
-            let mut sorted_row = row.clone().clone(); // Clone the row to sort
-            let sum: f64= sorted_row.iter().sum();
-            let mean = sum / (sorted_row.len() as f64 - 1.0);
+            let cur_row = row.clone().clone(); // Clone the row to sort
+            let sum: f64= cur_row.iter().sum();
+            let mean = sum / (cur_row.len() as f64 - 1.0);
             mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
         }).count();
 

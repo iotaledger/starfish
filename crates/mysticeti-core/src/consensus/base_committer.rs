@@ -212,31 +212,6 @@ impl BaseCommitter {
         }
     }
 
-    /// Check whether the specified leader has enough blames (that is, 2f+1 non-votes) to be
-    /// directly skipped.
-    fn enough_leader_blame(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
-        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
-
-        let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for voting_block in &voting_blocks {
-            let voter = voting_block.reference().authority;
-            if voting_block
-                .includes()
-                .iter()
-                .all(|include| include.authority != leader)
-            {
-                //tracing::trace!(
-                //    "[{self}] {voting_block:?} is a blame for leader {}",
-                //    format_authority_round(leader, voting_round - 1)
-                //);
-                if blame_stake_aggregator.add(voter, &self.committee) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
 
     fn decide_skip(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);

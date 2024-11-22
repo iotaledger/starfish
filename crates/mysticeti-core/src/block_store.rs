@@ -9,7 +9,6 @@ use std::{
     time::Instant,
 };
 use std::collections::{BTreeSet, HashSet};
-use digest::core_api::Block;
 
 use minibytes::Bytes;
 use parking_lot::RwLock;

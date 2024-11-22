@@ -134,8 +134,8 @@ impl BlockDigest {
         }
         let mut vec: Vec<_> = acknowledgement_statements.iter().collect();
         vec.sort();
-        for blockRef in vec {
-            blockRef.crypto_hash(hasher);
+        for block_ref in vec {
+            block_ref.crypto_hash(hasher);
         }
         hash_statements.crypto_hash(hasher);
         meta_creation_time_ns.crypto_hash(hasher);
