@@ -233,8 +233,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     inner.syncer.add_blocks(vec![block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
-                    let mut verified_blocks = Vec::new();
+                    let mut required_blocks = Vec::new();
                     for block in blocks {
+                        if !inner.block_store.block_exists(block.reference().clone()) {
+                            required_blocks.push(block);
+                        }
+                    }
+                    let mut verified_blocks = Vec::new();
+                    for block in required_blocks {
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee) {
                             tracing::warn!(
