@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, fmt};
-
+use std::cmp::max;
+use std::collections::HashMap;
+use libc::kCCRNGFailure;
 use crate::{
     block_store::BlockStore,
     data::Data,
     types::{BlockReference, StatementBlock},
 };
+use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -31,15 +34,18 @@ impl CommittedSubDag {
 }
 
 /// Expand a committed sequence of leader into a sequence of sub-dags.
-#[derive(Default)]
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
     pub committed: HashSet<BlockReference>,
+    pub committee: Committee,
 }
 
 impl Linearizer {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(committee: Committee) -> Self {
+        Self {
+            committed:  HashSet::new(),
+            committee,
+        }
     }
 
     /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
@@ -72,6 +78,51 @@ impl Linearizer {
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
+    // Collect all blocks in the history of committed leader that have a quorum of blocks
+    // acknowledging them.
+    fn collect_committed_blocks_in_history(
+        &mut self,
+        block_store: &BlockStore,
+        leader_block: Data<StatementBlock>,
+    ) -> CommittedSubDag {
+        let maximal_depth_below_leader: u64 = 50;
+        let leader_block_ref = *leader_block.reference();
+        let minimal_round_to_collect = max(1, leader_block.round() - maximal_depth_below_leader);
+        let mut buffer = vec![leader_block];
+        let mut votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
+        assert!(self.committed.insert(leader_block_ref));
+        while let Some(x) = buffer.pop() {
+            let who_votes = x.reference().authority;
+            for acknowledgement in x.acknowledgement_statements() {
+                // Todo the authority creating the block might automatically acknowledge for its block
+                votes.entry(*acknowledgement).or_insert_with(StakeAggregator::new).add(who_votes, &self.committee);
+            }
+            for reference in x.includes() {
+                // Skip the block if it is too far back
+                if reference.round < minimal_round_to_collect {
+                    continue;
+                }
+                let block = block_store
+                    .get_block(*reference)
+                    .expect("We should have the whole sub-dag by now");
+                buffer.push(block);
+            }
+        }
+        let mut to_commit = Vec::new();
+        for x in votes {
+            if x.1.is_quorum(&self.committee){
+                if self.committed.insert(x.0) {
+                    let block = block_store
+                        .get_block(x.0)
+                        .expect("We should have the whole sub-dag by now");
+                    to_commit.push(block);
+                }
+
+            }
+        }
+        CommittedSubDag::new(leader_block_ref, to_commit)
+    }
+
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
@@ -81,7 +132,7 @@ impl Linearizer {
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
             let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
-
+            //let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
             committed.push(sub_dag);

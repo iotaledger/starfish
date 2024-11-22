@@ -26,7 +26,7 @@ use crate::{
     },
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Committee {
     authorities: Vec<Authority>,
     validity_threshold: Stake, // The minimum stake required for validity
@@ -268,6 +268,10 @@ impl<TH: CommitteeThreshold> StakeAggregator<TH> {
 
     pub fn get_stake_above_quorum_threshold(&self, committee: &Committee) -> Stake {
         self.stake.saturating_sub(committee.quorum_threshold)
+    }
+
+    pub fn is_quorum(&self, committee: &Committee) -> bool {
+        TH::is_threshold(committee, self.stake)
     }
 
     pub fn get_stake(&self) -> Stake {

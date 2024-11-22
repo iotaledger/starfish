@@ -369,7 +369,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         consensus_only: bool,
     ) -> Self {
         Self {
-            commit_interpreter: Linearizer::new(),
+            commit_interpreter: Linearizer::new((*committee).clone()),
             transaction_votes: TransactionAggregator::with_handler(handler),
             committee,
             committed_leaders: vec![],

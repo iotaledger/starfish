@@ -20,7 +20,8 @@ pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
-    decided_leaders: HashSet<(AuthorityIndex, RoundNumber)>,
+    /// Keep track of all committed blocks to avoid computing the metrics for the same block twice.
+    committed: HashSet<(AuthorityIndex, RoundNumber)>,
 }
 
 impl UniversalCommitter {
@@ -48,7 +49,7 @@ impl UniversalCommitter {
 
                 // Try to directly decide the leader.
                 let mut status = committer.try_direct_decide(leader, round);
-                if !self.decided_leaders.contains(&(leader, round)) {
+                if !self.committed.contains(&(leader, round)) {
                     self.update_metrics(&status, true);
                 }
                 tracing::debug!("Outcome of direct rule: {status}");
@@ -56,14 +57,14 @@ impl UniversalCommitter {
                 // If we can't directly decide the leader, try to indirectly decide it.
                 if !status.is_decided() {
                     status = committer.try_indirect_decide(leader, round, leaders.iter());
-                    if !self.decided_leaders.contains(&(leader, round)) {
+                    if !self.committed.contains(&(leader, round)) {
                         self.update_metrics(&status, false);
                     }
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
 
                 if status.is_decided() {
-                    self.decided_leaders.insert((leader, round));
+                    self.committed.insert((leader, round));
                 }
 
                 leaders.push_front(status);
@@ -170,7 +171,7 @@ impl UniversalCommitterBuilder {
             block_store: self.block_store,
             committers,
             metrics: self.metrics,
-            decided_leaders: Default::default(),
+            committed: Default::default(),
         }
     }
 }

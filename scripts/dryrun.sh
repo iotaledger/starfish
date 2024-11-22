@@ -1,8 +1,8 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
-SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-delayed} #possible "honest" | "delayed" | "equivocate" | "timeout"
+NUM_VALIDATORS=${NUM_VALIDATORS:-5} #With N physical cores, it is recommended to have less than N validators
+SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-5}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 
@@ -65,7 +65,10 @@ fi
 
 # Docker Compose Up
 (cd monitoring && docker compose up -d)
-
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to start Docker Compose in the 'monitoring' directory."
+  exit 1
+fi
 
 # Start Validators
 tmux kill-server || true
