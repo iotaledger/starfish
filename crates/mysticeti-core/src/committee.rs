@@ -21,15 +21,8 @@ use crate::{
     data::Data,
     range_map::RangeMap,
     types::{
-        AuthorityIndex,
-        AuthoritySet,
-        BaseStatement,
-        BlockReference,
-        Stake,
-        StatementBlock,
-        TransactionLocator,
-        TransactionLocatorRange,
-        Vote,
+        AuthorityIndex, AuthoritySet, BaseStatement, BlockReference, Stake, StatementBlock,
+        TransactionLocator, TransactionLocatorRange, Vote,
     },
 };
 

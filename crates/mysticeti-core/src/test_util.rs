@@ -1,12 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::Path,
     sync::Arc,
 };
-use std::collections::{HashMap, HashSet};
 
 use futures::future::join_all;
 use prometheus::Registry;
@@ -39,8 +39,6 @@ pub fn committee(n: usize) -> Arc<Committee> {
     Committee::new_test(vec![1; n])
 }
 
-
-
 pub fn mixed_committee_and_cores(
     n: usize,
     number_byzantine: usize,
@@ -50,7 +48,13 @@ pub fn mixed_committee_and_cores(
     Vec<Core<TestBlockHandler>>,
     Vec<MetricReporter>,
 ) {
-    committee_and_cores_persisted_epoch_duration(n, number_byzantine, byzantine_strategy, None, &&NodePublicConfig::new_for_tests(n))
+    committee_and_cores_persisted_epoch_duration(
+        n,
+        number_byzantine,
+        byzantine_strategy,
+        None,
+        &&NodePublicConfig::new_for_tests(n),
+    )
 }
 pub fn honest_committee_and_cores(
     n: usize,
@@ -59,9 +63,14 @@ pub fn honest_committee_and_cores(
     Vec<Core<TestBlockHandler>>,
     Vec<MetricReporter>,
 ) {
-    committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), None, &&NodePublicConfig::new_for_tests(n))
+    committee_and_cores_persisted_epoch_duration(
+        n,
+        0,
+        "honest".to_string(),
+        None,
+        &&NodePublicConfig::new_for_tests(n),
+    )
 }
-
 
 pub fn byzantine_committee_and_cores_epoch_duration(
     n: usize,
@@ -75,7 +84,13 @@ pub fn byzantine_committee_and_cores_epoch_duration(
 ) {
     let mut config = NodePublicConfig::new_for_tests(n);
     config.parameters.rounds_in_epoch = rounds_in_epoch;
-    committee_and_cores_persisted_epoch_duration(n, number_byzantine,byzantine_strategy, None, &config)
+    committee_and_cores_persisted_epoch_duration(
+        n,
+        number_byzantine,
+        byzantine_strategy,
+        None,
+        &config,
+    )
 }
 pub fn honest_committee_and_cores_epoch_duration(
     n: usize,
@@ -98,7 +113,13 @@ pub fn honest_committee_and_cores_persisted(
     Vec<Core<TestBlockHandler>>,
     Vec<MetricReporter>,
 ) {
-    committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), path, &&NodePublicConfig::new_for_tests(n))
+    committee_and_cores_persisted_epoch_duration(
+        n,
+        0,
+        "honest".to_string(),
+        path,
+        &&NodePublicConfig::new_for_tests(n),
+    )
 }
 
 pub fn committee_and_cores_persisted_epoch_duration(
@@ -235,7 +256,12 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
     Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
     Vec<MetricReporter>,
 ) {
-    let (committee, cores, reporters) = byzantine_committee_and_cores_epoch_duration(n, number_byzantine,byzantine_strategy, rounds_in_epoch);
+    let (committee, cores, reporters) = byzantine_committee_and_cores_epoch_duration(
+        n,
+        number_byzantine,
+        byzantine_strategy,
+        rounds_in_epoch,
+    );
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
@@ -270,7 +296,8 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
     Vec<MetricReporter>,
 ) {
-    let (committee, cores, reporters) = honest_committee_and_cores_epoch_duration(n, rounds_in_epoch);
+    let (committee, cores, reporters) =
+        honest_committee_and_cores_epoch_duration(n, rounds_in_epoch);
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
@@ -278,6 +305,7 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
             committee.clone(),
             core.block_handler().transaction_time.clone(),
             core.metrics.clone(),
+            false,
         );
         let node_context = OverrideNodeContext::enter(Some(core.authority()));
         let network_syncer = NetworkSyncer::start(
@@ -441,10 +469,13 @@ impl TestBlockWriter {
     }
 
     pub fn get_dag(&self) -> Vec<(BlockReference, Vec<BlockReference>)> {
-        let mut dag: Vec<(BlockReference, Vec<BlockReference>)> = self.block_store
+        let mut dag: Vec<(BlockReference, Vec<BlockReference>)> = self
+            .block_store
             .get_dag()
             .iter()
-            .map(|(block_reference, refs_and_indices)| (block_reference.clone(), refs_and_indices.0.clone()))
+            .map(|(block_reference, refs_and_indices)| {
+                (block_reference.clone(), refs_and_indices.0.clone())
+            })
             .collect();
 
         dag.sort_by_key(|(block_reference, _)| block_reference.round());
@@ -457,7 +488,12 @@ impl TestBlockWriter {
             .wal_writer
             .write(WAL_ENTRY_BLOCK, &bincode::serialize(&block).unwrap())
             .unwrap();
-        self.block_store.insert_block(block, pos, 0, self.block_store.committee_size as AuthorityIndex);
+        self.block_store.insert_block(
+            block,
+            pos,
+            0,
+            self.block_store.committee_size as AuthorityIndex,
+        );
         pos
     }
 
@@ -485,8 +521,17 @@ impl BlockWriter for TestBlockWriter {
         (&mut self.wal_writer, &self.block_store).update_dag(block_reference, parents);
     }
 
-    fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
-        (&mut self.wal_writer, &self.block_store).insert_own_block(block, authority_index_start, authority_index_end)
+    fn insert_own_block(
+        &mut self,
+        block: &OwnBlockData,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
+        (&mut self.wal_writer, &self.block_store).insert_own_block(
+            block,
+            authority_index_start,
+            authority_index_end,
+        )
     }
 }
 

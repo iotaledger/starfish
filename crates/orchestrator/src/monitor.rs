@@ -107,7 +107,7 @@ impl Prometheus {
         parameters: &BenchmarkParameters,
     ) -> String
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
         P: ProtocolMetrics,
     {
         // Generate the prometheus configuration.
@@ -145,7 +145,7 @@ impl Prometheus {
             "  evaluation_interval: 5s",
             "scrape_configs:",
         ]
-            .join("\n")
+        .join("\n")
     }
 
     /// Generate the prometheus configuration from the given metrics path.
@@ -168,7 +168,7 @@ impl Prometheus {
             "      - targets:",
             &format!("        - {ip}:9200"),
         ]
-            .join("\n")
+        .join("\n")
     }
 }
 
@@ -208,7 +208,7 @@ impl Grafana {
             ),
             "sudo service grafana-server restart",
         ]
-            .join(" && ")
+        .join(" && ")
     }
 
     /// Generate the content of the datasource file for the given instance.
@@ -228,7 +228,7 @@ impl Grafana {
             "    editable: true",
             "    uid: Fixed-UID-testbed",
         ]
-            .join("\n")
+        .join("\n")
     }
 }
 
@@ -252,7 +252,7 @@ impl LocalGrafana {
     /// Configure grafana to connect to the given instances. Only for macOS.
     pub fn run<I>(instances: I) -> MonitorResult<()>
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
     {
         let path: PathBuf = [Self::DEFAULT_GRAFANA_HOME, Self::DATASOURCES_PATH]
             .iter()
@@ -305,7 +305,7 @@ impl LocalGrafana {
             "    editable: true",
             &format!("    uid: UID-{index}"),
         ]
-            .join("\n")
+        .join("\n")
     }
 }
 
@@ -346,8 +346,8 @@ impl NodeExporter {
             "sudo systemctl start node_exporter",
             "sudo systemctl enable node_exporter",
         ]
-            .map(|x| x.to_string())
-            .to_vec()
+        .map(|x| x.to_string())
+        .to_vec()
     }
 
     fn service_config() -> String {
@@ -366,6 +366,6 @@ impl NodeExporter {
             "[Install]",
             "WantedBy=multi-user.target",
         ]
-            .join("\n")
+        .join("\n")
     }
 }

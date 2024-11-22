@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    fs,
-    io,
+    fs, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
@@ -109,7 +108,7 @@ impl Default for NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
-            mimic_extra_latency_seed: node_defaults::default_mimic_extra_latency_seed()
+            mimic_extra_latency_seed: node_defaults::default_mimic_extra_latency_seed(),
         }
     }
 }

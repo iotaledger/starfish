@@ -2,7 +2,7 @@
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-delayed} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 

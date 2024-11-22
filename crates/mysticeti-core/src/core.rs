@@ -13,12 +13,7 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     block_store::{
-        BlockStore,
-        BlockWriter,
-        CommitData,
-        OwnBlockData,
-        WAL_ENTRY_COMMIT,
-        WAL_ENTRY_PAYLOAD,
+        BlockStore, BlockWriter, CommitData, OwnBlockData, WAL_ENTRY_COMMIT, WAL_ENTRY_PAYLOAD,
         WAL_ENTRY_STATE,
     },
     committee::Committee,
@@ -37,7 +32,6 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
-use crate::crypto::BlockDigest;
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -250,20 +244,14 @@ impl<H: BlockHandler> Core<H> {
         // Split off returns the "tail", what we want is keep the tail in "pending" and get the head
         mem::swap(&mut taken, &mut self.pending);
 
-
-
-
-
         let mut blocks = vec![];
-        if self.block_store.byzantine_strategy.is_some() {
-            if  self.last_own_block.len() < self.committee.len() {
-                for _j in self.last_own_block.len()..self.committee.len() {
-                    self.last_own_block.push(self.last_own_block[0].clone());
-                }
+        if self.block_store.byzantine_strategy.is_some() && self.last_own_block.len() < self.committee.len() {
+            for _j in self.last_own_block.len()..self.committee.len() {
+                self.last_own_block.push(self.last_own_block[0].clone());
             }
         }
 
-        for j in 0.. self.last_own_block.len() {
+        for j in 0..self.last_own_block.len() {
             // Compress the references in the block
             // Iterate through all the include statements in the block, and make a set of all the references in their includes.
             let mut references_in_block: HashSet<BlockReference> = HashSet::new();
@@ -281,18 +269,17 @@ impl<H: BlockHandler> Core<H> {
             for (_, statement) in taken.clone().into_iter() {
                 match statement {
                     MetaStatement::Include(include) => {
-                        if !references_in_block.contains(&include) && include.authority != self.authority {
+                        if !references_in_block.contains(&include)
+                            && include.authority != self.authority
+                        {
                             includes.push(include);
                         }
                     }
                     MetaStatement::Payload(payload) => {
-                        if self.block_store.byzantine_strategy.is_none() {
-                            if !self.epoch_changing() {
-                                statements.extend(payload);
-                            }
+                        if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
+                            statements.extend(payload);
                         }
                     }
-
                 }
             }
 
@@ -310,7 +297,6 @@ impl<H: BlockHandler> Core<H> {
                 &self.signer,
             );
             blocks.push(new_block);
-
         }
 
         let mut return_blocks = vec![];
@@ -351,12 +337,11 @@ impl<H: BlockHandler> Core<H> {
                 next_entry,
                 block: block.clone(),
             });
-            (&mut self.wal_writer, &self.block_store).
-                insert_own_block(
-                    &self.last_own_block.last().unwrap(),
-   authority_bounds[block_id] as AuthorityIndex,
-    authority_bounds[block_id + 1] as AuthorityIndex
-                );
+            (&mut self.wal_writer, &self.block_store).insert_own_block(
+                &self.last_own_block.last().unwrap(),
+                authority_bounds[block_id] as AuthorityIndex,
+                authority_bounds[block_id + 1] as AuthorityIndex,
+            );
 
             if self.options.fsync {
                 self.wal_writer.sync().expect("Wal sync failed");
@@ -366,7 +351,7 @@ impl<H: BlockHandler> Core<H> {
             return_blocks.push(block);
             block_id += 1;
         }
-        return Some(return_blocks[0].clone());
+        Some(return_blocks[0].clone())
     }
 
     pub fn wal_syncer(&self) -> WalSyncer {

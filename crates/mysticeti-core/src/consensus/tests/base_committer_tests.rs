@@ -3,9 +3,7 @@
 
 use crate::{
     consensus::{
-        universal_committer::UniversalCommitterBuilder,
-        LeaderStatus,
-        DEFAULT_WAVE_LENGTH,
+        universal_committer::UniversalCommitterBuilder, LeaderStatus, DEFAULT_WAVE_LENGTH,
     },
     test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
     types::BlockReference,
@@ -20,7 +18,7 @@ fn direct_commit() {
     let mut block_writer = TestBlockWriter::new(&committee);
     build_dag(&committee, &mut block_writer, None, 5);
 
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -80,7 +78,7 @@ fn multiple_direct_commit() {
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, enough_blocks);
 
-        let mut committer= UniversalCommitterBuilder::new(
+        let mut committer = UniversalCommitterBuilder::new(
             committee.clone(),
             block_writer.into_block_store(),
             test_metrics(),
@@ -116,7 +114,7 @@ fn direct_commit_late_call() {
     let mut block_writer = TestBlockWriter::new(&committee);
     build_dag(&committee, &mut block_writer, None, enough_blocks);
 
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -151,7 +149,7 @@ fn no_genesis_commit() {
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, r);
 
-        let mut committer= UniversalCommitterBuilder::new(
+        let mut committer = UniversalCommitterBuilder::new(
             committee.clone(),
             block_writer.into_block_store(),
             test_metrics(),
@@ -198,7 +196,7 @@ fn no_leader() {
     );
 
     // Ensure no blocks are committed.
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -248,7 +246,7 @@ fn direct_skip() {
     );
 
     // Ensure the leader is skipped.
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -344,7 +342,7 @@ fn indirect_commit() {
     );
 
     // Ensure we commit the 1st leader.
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -420,7 +418,7 @@ fn indirect_skip() {
     );
 
     // Ensure we commit the leaders of wave 1 and 3
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -501,7 +499,7 @@ fn undecided() {
         decision_round_1,
     );
     // Ensure no blocks are committed.
-    let mut committer= UniversalCommitterBuilder::new(
+    let mut committer = UniversalCommitterBuilder::new(
         committee.clone(),
         block_writer.into_block_store(),
         test_metrics(),
@@ -509,9 +507,8 @@ fn undecided() {
     .with_wave_length(wave_length)
     .build();
 
-
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
-   // assert!(sequence.is_empty());
+    // assert!(sequence.is_empty());
 }

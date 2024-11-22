@@ -212,7 +212,6 @@ impl BaseCommitter {
         }
     }
 
-
     fn decide_skip(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
@@ -220,13 +219,16 @@ impl BaseCommitter {
             let voter = voting_block.reference().authority;
             blame_stake_aggregator.add(voter, &self.committee);
         }
-        let all_stake_above_quorum = blame_stake_aggregator.get_stake_above_quorum_threshold(&self.committee);
-        if all_stake_above_quorum <= 0 {
-            return false
+        let all_stake_above_quorum =
+            blame_stake_aggregator.get_stake_above_quorum_threshold(&self.committee);
+        if all_stake_above_quorum == 0 {
+            return false;
         }
 
         let leader_round = voting_round - 1;
-        let leader_blocks = self.block_store.get_blocks_at_authority_round(leader, leader_round);
+        let leader_blocks = self
+            .block_store
+            .get_blocks_at_authority_round(leader, leader_round);
         let mut to_skip = true;
         for leader_block in &leader_blocks {
             let mut vote_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
@@ -246,7 +248,7 @@ impl BaseCommitter {
                 }
             }
             let current_stake = vote_stake_aggregator.get_stake();
-            if  current_stake >= all_stake_above_quorum {
+            if current_stake >= all_stake_above_quorum {
                 to_skip = false;
                 break;
             }

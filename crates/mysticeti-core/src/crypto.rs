@@ -9,18 +9,14 @@ use ed25519_consensus::Signature;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroize;
-
-#[cfg(not(test))]
-use crate::types::Vote;
-use crate::{crypto, serde::{ByteRepr, BytesVisitor}, types::{
-    AuthorityIndex,
-    BaseStatement,
-    BlockReference,
-    EpochStatus,
-    RoundNumber,
-    StatementBlock,
-    TimestampNs,
-}};
+use crate::{
+    crypto,
+    serde::{ByteRepr, BytesVisitor},
+    types::{
+        AuthorityIndex, BaseStatement, BlockReference, EpochStatus, RoundNumber, StatementBlock,
+        TimestampNs,
+    },
+};
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
@@ -48,7 +44,6 @@ type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
 #[cfg(test)]
 type BlockHasher = blake2::Blake2b<digest::consts::U32>;
-
 
 impl StatementDigest {
     pub fn new_from_statements(statements: &Option<Vec<BaseStatement>>) -> Self {
@@ -89,7 +84,6 @@ impl BlockDigest {
         Self(hasher.finalize().into())
     }
 
-
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -115,8 +109,6 @@ impl BlockDigest {
         Self(hasher.finalize().into())
     }
 
-
-
     fn digest_without_signature(
         hasher: &mut BlockHasher,
         authority: AuthorityIndex,
@@ -141,8 +133,6 @@ impl BlockDigest {
         meta_creation_time_ns.crypto_hash(hasher);
         epoch_marker.crypto_hash(hasher);
     }
-
-
 }
 
 pub trait AsBytes {
@@ -246,7 +236,6 @@ impl Signer {
         SignatureBytes(signature.to_bytes())
     }
 
-
     pub fn public_key(&self) -> PublicKey {
         PublicKey(self.0.verification_key())
     }
@@ -290,14 +279,14 @@ impl AsBytes for SignatureBytes {
 
 impl fmt::Debug for BlockDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
-        write!(f, "@{}", &hex_string[..2])      // Slice the first 2 characters and print
+        let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2]) // Slice the first 2 characters and print
     }
 }
 
 impl fmt::Display for BlockDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
         write!(f, "@{}", &hex_string[..2])
     }
 }
@@ -374,14 +363,14 @@ impl ByteRepr for StatementDigest {
 
 impl fmt::Debug for StatementDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
-        write!(f, "@{}", &hex_string[..2])      // Slice the first 2 characters and print
+        let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
+        write!(f, "@{}", &hex_string[..2]) // Slice the first 2 characters and print
     }
 }
 
 impl fmt::Display for StatementDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_string = hex::encode(self.0);  // Encode the byte array into a hex string
+        let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
         write!(f, "@{}", &hex_string[..2])
     }
 }

@@ -9,19 +9,10 @@ use std::{
 };
 
 use prometheus::{
-    register_counter_vec_with_registry,
-    register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry,
-    register_int_counter_with_registry,
-    register_int_gauge_vec_with_registry,
-    register_int_gauge_with_registry,
-    CounterVec,
-    HistogramVec,
-    IntCounter,
-    IntCounterVec,
-    IntGauge,
-    IntGaugeVec,
-    Registry,
+    register_counter_vec_with_registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_counter_with_registry,
+    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, CounterVec,
+    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
 };
 use tabled::{Table, Tabled};
 use tokio::time::Instant;

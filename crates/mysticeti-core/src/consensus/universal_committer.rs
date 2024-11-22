@@ -1,8 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::VecDeque, sync::Arc};
-use std::collections::HashSet;
 use super::{base_committer::BaseCommitter, LeaderStatus, DEFAULT_WAVE_LENGTH};
 use crate::{
     block_store::BlockStore,
@@ -11,6 +9,8 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
+use std::collections::HashSet;
+use std::{collections::VecDeque, sync::Arc};
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
 /// It can be configured to use a combination of different commit strategies, including
@@ -65,7 +65,6 @@ impl UniversalCommitter {
                 if status.is_decided() {
                     self.decided_leaders.insert((leader, round));
                 }
-
 
                 leaders.push_front(status);
             }

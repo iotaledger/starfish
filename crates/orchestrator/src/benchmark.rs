@@ -51,7 +51,11 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
         write!(
             f,
             "{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s",
-            self.nodes, self.byzantine_nodes, self.byzantine_strategy, self.settings.faults, self.load
+            self.nodes,
+            self.byzantine_nodes,
+            self.byzantine_strategy,
+            self.settings.faults,
+            self.load
         )
     }
 }
@@ -75,7 +79,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 client_parameters: client_parameters.clone(),
                 nodes,
                 load,
-                byzantine_nodes: byzantine_nodes.clone(),
+                byzantine_nodes,
                 byzantine_strategy: byzantine_strategy.clone(),
             })
             .collect()

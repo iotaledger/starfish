@@ -14,13 +14,13 @@ pub type Stake = u64;
 pub type KeyPair = u64;
 pub type PublicKey = crate::crypto::PublicKey;
 
+use std::collections::HashSet;
 use std::{
     fmt,
     hash::{Hash, Hasher},
     ops::Range,
     time::Duration,
 };
-use std::collections::HashSet;
 
 use digest::Digest;
 use eyre::{bail, ensure};
@@ -28,8 +28,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::{committee::{Committee, VoteRangeBuilder}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data, threshold_clock::threshold_clock_valid_non_genesis};
 use crate::crypto::StatementDigest;
+use crate::{
+    committee::{Committee, VoteRangeBuilder},
+    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
+    data::Data,
+    threshold_clock::threshold_clock_valid_non_genesis,
+};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Vote {
@@ -87,7 +92,6 @@ pub struct StatementBlock {
 
     // Hash of statements
     hash_statements: StatementDigest,
-
 
     // A list of base statements in order.
     statements: Option<Vec<BaseStatement>>,
@@ -202,9 +206,13 @@ impl StatementBlock {
         }
     }
 
-    pub fn hash_statements(&self) -> StatementDigest {self.hash_statements.clone()}
+    pub fn hash_statements(&self) -> StatementDigest {
+        self.hash_statements.clone()
+    }
 
-    pub fn acknowledgement_statements(&self) -> &HashSet<BlockReference> {&self.acknowledgement_statements}
+    pub fn acknowledgement_statements(&self) -> &HashSet<BlockReference> {
+        &self.acknowledgement_statements
+    }
 
     pub fn reference(&self) -> &BlockReference {
         &self.reference
@@ -215,7 +223,10 @@ impl StatementBlock {
     }
 
     pub fn statements(&self) -> &Vec<BaseStatement> {
-        &self.statements.as_ref().expect("Statement should not be empty")
+        &self
+            .statements
+            .as_ref()
+            .expect("Statement should not be empty")
     }
 
     // Todo - we should change the block so that it has all shared transactions in one vec
@@ -293,11 +304,11 @@ impl StatementBlock {
         if self.statements.is_some() {
             let hash_statements = StatementDigest::new_from_statements(&self.statements);
             ensure!(
-            hash_statements == self.hash_statements(),
-            "Hash statement calculated {:?}, provided {:?}",
-            hash_statements,
-            self.hash_statements()
-        );
+                hash_statements == self.hash_statements(),
+                "Hash statement calculated {:?}, provided {:?}",
+                hash_statements,
+                self.hash_statements()
+            );
         }
 
         let digest = BlockDigest::new(
@@ -546,12 +557,8 @@ impl<'a> fmt::Debug for Detailed<'a> {
                 self.0.statements().len(),
                 self.0.statements()
             )?;
-        }
-        else {
-            write!(
-                f,
-                "statements=None"
-            )?;
+        } else {
+            write!(f, "statements=None")?;
         }
         writeln!(f, "}}")
     }
@@ -743,7 +750,10 @@ mod test {
                 let includes = includes.split(',');
                 includes.map(Self::parse_name).collect()
             };
-            let acknowledgement_statements = includes.clone().into_iter().collect::<HashSet<BlockReference>>();
+            let acknowledgement_statements = includes
+                .clone()
+                .into_iter()
+                .collect::<HashSet<BlockReference>>();
             StatementBlock {
                 reference,
                 includes,

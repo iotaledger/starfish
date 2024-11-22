@@ -23,11 +23,7 @@ use crate::{
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
     types::{
-        AuthorityIndex,
-        BaseStatement,
-        BlockReference,
-        StatementBlock,
-        Transaction,
+        AuthorityIndex, BaseStatement, BlockReference, StatementBlock, Transaction,
         TransactionLocator,
     },
 };

@@ -12,8 +12,7 @@ use tokio::time::{self, Instant};
 use crate::{
     benchmark::BenchmarkParameters,
     client::Instance,
-    display,
-    ensure,
+    display, ensure,
     error::{TestbedError, TestbedResult},
     faults::CrashRecoverySchedule,
     logs::LogsAnalyzer,
@@ -203,8 +202,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 .collect::<Vec<_>>()[..],
             &self.protocol_commands.protocol_dependencies()[..],
         ]
-            .concat()
-            .join(" && ");
+        .concat()
+        .join(" && ");
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
         let context = CommandContext::default();
@@ -228,7 +227,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             "source $HOME/.cargo/env",
             "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
         ]
-            .join(" && ");
+        .join(" && ");
 
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
 
@@ -257,10 +256,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Select instances to configure.
         let (clients, nodes, _) = self.select_instances(parameters)?;
         for (i, node) in nodes.iter().enumerate() {
-            display::config(format!("  - node {i}"), &node.ssh_address());
+            display::config(format!("  - node {i}"), node.ssh_address());
         }
         for (i, client) in clients.iter().enumerate() {
-            display::config(format!("  - client {i}"), &client.ssh_address());
+            display::config(format!("  - client {i}"), client.ssh_address());
         }
 
         // Generate the genesis configuration file and the keystore allowing access to gas objects.
@@ -511,8 +510,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             &format!("logs-{commit}").into(),
             &format!("logs-{parameters:?}").into(),
         ]
-            .iter()
-            .collect();
+        .iter()
+        .collect();
         fs::create_dir_all(&path).expect("Failed to create log directory");
 
         // NOTE: Our ssh library does not seem to be able to transfers files in parallel reliably.

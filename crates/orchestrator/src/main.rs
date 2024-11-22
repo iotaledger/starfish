@@ -3,8 +3,6 @@
 
 //! Orchestrator entry point.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
 use benchmark::BenchmarkParameters;
 use clap::Parser;
 use client::{aws::AwsClient, vultr::VultrClient, ServerProviderClient};
@@ -14,6 +12,8 @@ use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::SshConnectionManager;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use testbed::Testbed;
 
 mod benchmark;
@@ -238,28 +238,30 @@ async fn run<C: ServerProviderClient>(
                 Some(path) => {
                     NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
                 }
-                None => if mimic_latency {
-                    let input = (
-                        committee.clone(),
-                        byzantine_nodes.clone(),
-                        byzantine_strategy.clone(),
-                        mimic_latency.clone(),
-                        loads.clone(),
-                        skip_testbed_update.clone(),
-                        skip_testbed_configuration.clone(),
-                    );
+                None => {
+                    if mimic_latency {
+                        let input = (
+                            committee,
+                            byzantine_nodes,
+                            byzantine_strategy.clone(),
+                            mimic_latency,
+                            loads.clone(),
+                            skip_testbed_update,
+                            skip_testbed_configuration,
+                        );
 
-                    // Create a hasher
-                    let mut hasher = DefaultHasher::new();
+                        // Create a hasher
+                        let mut hasher = DefaultHasher::new();
 
-                    // Hash the input tuple
-                    input.hash(&mut hasher);
+                        // Hash the input tuple
+                        input.hash(&mut hasher);
 
-                    // Return the hashed value as a seed
-                    let latency_seed = hasher.finish();
-                    NodeParameters::almost_default(latency_seed)
-                } else {
-                    NodeParameters::default()
+                        // Return the hashed value as a seed
+                        let latency_seed = hasher.finish();
+                        NodeParameters::almost_default(latency_seed)
+                    } else {
+                        NodeParameters::default()
+                    }
                 }
             };
             let client_parameters = match &settings.client_parameters_path {

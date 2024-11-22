@@ -16,6 +16,7 @@ use tokio::{
     sync::{mpsc, oneshot, Notify},
 };
 
+use crate::consensus::universal_committer::UniversalCommitter;
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -31,7 +32,6 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
-use crate::consensus::universal_committer::UniversalCommitter;
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -244,11 +244,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee) {
                             tracing::warn!(
-                            "Rejected incorrect block {} from {}: {:?}",
-                            block.reference(),
-                            peer,
-                            e
-                        );
+                                "Rejected incorrect block {} from {}: {:?}",
+                                block.reference(),
+                                peer,
+                                e
+                            );
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
@@ -262,19 +262,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::RequestBlocks(references) => {
                     // When Byzantine don't send your blocks to others
                     if inner.block_store.byzantine_strategy.is_none() {
-
-                            if references.len() > MAXIMUM_BLOCK_REQUEST {
-                                // Terminate connection on receiving invalid message.
-                                break;
-                            }
-                            let authority = connection.peer_id as AuthorityIndex;
-                            if disseminator
-                                .send_blocks(authority, references)
-                                .await
-                                .is_none()
-                            {
-                                break;
-                            }
+                        if references.len() > MAXIMUM_BLOCK_REQUEST {
+                            // Terminate connection on receiving invalid message.
+                            break;
+                        }
+                        let authority = connection.peer_id as AuthorityIndex;
+                        if disseminator
+                            .send_blocks(authority, references)
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
                     }
                 }
                 NetworkMessage::BlockNotFound(_references) => {
@@ -488,6 +487,7 @@ mod sim_tests {
     use tokio::sync::Notify;
 
     use super::NetworkSyncer;
+    use crate::test_util::byzantine_simulated_network_syncers_with_epoch_duration;
     use crate::{
         block_handler::{TestBlockHandler, TestCommitHandler},
         config,
@@ -497,14 +497,10 @@ mod sim_tests {
         simulator_tracing::setup_simulator_tracing,
         syncer::Syncer,
         test_util::{
-            check_commits,
-            print_stats,
-            rng_at_seed,
-            simulated_network_syncers,
-            honest_simulated_network_syncers_with_epoch_duration,
+            check_commits, honest_simulated_network_syncers_with_epoch_duration, print_stats,
+            rng_at_seed, simulated_network_syncers,
         },
     };
-    use crate::test_util::byzantine_simulated_network_syncers_with_epoch_duration;
 
     async fn wait_for_epoch_to_close(
         network_syncers: Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
@@ -532,20 +528,35 @@ mod sim_tests {
         let n = 10;
         let number_byzantine = 1;
         let byzantine_strategy = "delayed".to_string(); // timeout, equivocate, delayed
-        SimulatedExecutorState::run(rng_at_seed(0), test_byzantine_committee_latency_measure(n, number_byzantine, byzantine_strategy));
+        SimulatedExecutorState::run(
+            rng_at_seed(0),
+            test_byzantine_committee_latency_measure(n, number_byzantine, byzantine_strategy),
+        );
     }
 
-    async fn test_byzantine_committee_latency_measure(n: usize, number_byzantine: usize, byzantine_strategy: String) {
+    async fn test_byzantine_committee_latency_measure(
+        n: usize,
+        number_byzantine: usize,
+        byzantine_strategy: String,
+    ) {
         let rounds_in_epoch = 50;
         let (simulated_network, network_syncers, mut reporters) =
-            byzantine_simulated_network_syncers_with_epoch_duration(n, number_byzantine, byzantine_strategy, rounds_in_epoch);
+            byzantine_simulated_network_syncers_with_epoch_duration(
+                n,
+                number_byzantine,
+                byzantine_strategy,
+                rounds_in_epoch,
+            );
         simulated_network.connect_all().await;
         let syncers = wait_for_epoch_to_close(network_syncers).await;
         print_stats(&syncers, &mut reporters);
     }
     #[test]
     fn test_honest_committee_exact_commits_in_epoch() {
-        SimulatedExecutorState::run(rng_at_seed(0), test_honest_committee_exact_commits_in_epoch_async());
+        SimulatedExecutorState::run(
+            rng_at_seed(0),
+            test_honest_committee_exact_commits_in_epoch_async(),
+        );
     }
 
     async fn test_honest_committee_exact_commits_in_epoch_async() {
@@ -615,7 +626,7 @@ mod sim_tests {
         SimulatedExecutorState::run(rng_at_seed(0), test_network_sync_sim_all_up_async());
     }
 
-   async fn test_network_sync_sim_all_up_async() {
+    async fn test_network_sync_sim_all_up_async() {
         let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(4);
         simulated_network.connect_all().await;
         runtime::sleep(Duration::from_secs(20)).await;

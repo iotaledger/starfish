@@ -98,7 +98,7 @@ impl ProtocolCommands for MysticetiProtocol {
 
     async fn genesis_command<'a, I>(&self, instances: I, parameters: &BenchmarkParameters) -> String
     where
-        I: Iterator<Item=&'a Instance>,
+        I: Iterator<Item = &'a Instance>,
     {
         let ips = instances
             .map(|x| x.main_ip.to_string())
@@ -131,7 +131,7 @@ impl ProtocolCommands for MysticetiProtocol {
                 node_parameters_path.display(),
             ),
         ]
-            .join(" ");
+        .join(" ");
 
         [
             "source $HOME/.cargo/env",
@@ -139,7 +139,7 @@ impl ProtocolCommands for MysticetiProtocol {
             &upload_client_parameters,
             &genesis,
         ]
-            .join(" && ")
+        .join(" && ")
     }
 
     fn node_command<I>(
@@ -148,7 +148,7 @@ impl ProtocolCommands for MysticetiProtocol {
         parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
     {
         instances
             .into_iter()
@@ -167,8 +167,7 @@ impl ProtocolCommands for MysticetiProtocol {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
 
-                let mut run = vec![
-                    &format!("./{BINARY_PATH}/mysticeti"),
+                let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--committee-path {}", committee_path.display()),
@@ -177,8 +176,9 @@ impl ProtocolCommands for MysticetiProtocol {
                     &format!(
                         "--client-parameters-path {}",
                         client_parameters_path.display()
-                    )
-                ].join(" ");
+                    ),
+                ]
+                .join(" ");
 
                 if byzantine_strategy != "honest" {
                     run = [
@@ -192,10 +192,10 @@ impl ProtocolCommands for MysticetiProtocol {
                             "--client-parameters-path {}",
                             client_parameters_path.display()
                         ),
-                        &format!("--byzantine-strategy {}", byzantine_strategy)
-                    ].join(" ");
+                        &format!("--byzantine-strategy {}", byzantine_strategy),
+                    ]
+                    .join(" ");
                 }
-
 
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
                 (instance, command)
@@ -209,7 +209,7 @@ impl ProtocolCommands for MysticetiProtocol {
         _parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
     {
         // TODO: Isolate clients from the node (#9).
         vec![]
@@ -229,7 +229,7 @@ impl ProtocolMetrics for MysticetiProtocol {
         parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
     {
         let (ips, instances): (_, Vec<_>) = instances
             .into_iter()
@@ -251,7 +251,7 @@ impl ProtocolMetrics for MysticetiProtocol {
         parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
-        I: IntoIterator<Item=Instance>,
+        I: IntoIterator<Item = Instance>,
     {
         // NOTE: Hack to avoid clients metrics.
         self.nodes_metrics_path(instances, parameters)

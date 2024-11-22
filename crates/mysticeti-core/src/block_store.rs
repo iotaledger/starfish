@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{BTreeSet, HashSet};
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
@@ -8,7 +9,6 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use std::collections::{BTreeSet, HashSet};
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -21,14 +21,8 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     state::{RecoveredState, RecoveredStateBuilder},
     types::{
-        AuthorityIndex,
-        BaseStatement,
-        BlockDigest,
-        BlockReference,
-        RoundNumber,
-        StatementBlock,
-        Transaction,
-        TransactionLocator,
+        AuthorityIndex, BaseStatement, BlockDigest, BlockReference, RoundNumber, StatementBlock,
+        Transaction, TransactionLocator,
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
@@ -49,8 +43,6 @@ pub struct BlockStore {
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
 
-
-
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
@@ -62,7 +54,7 @@ struct BlockStoreInner {
     last_own_block: Option<BlockReference>,
     not_known_by_authority: Vec<BTreeSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
-    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>
+    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
 }
 
 pub trait BlockWriter {
@@ -70,7 +62,12 @@ pub trait BlockWriter {
 
     fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
 
-    fn insert_own_block(&mut self, block: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex);
+    fn insert_own_block(
+        &mut self,
+        block: &OwnBlockData,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    );
 }
 
 #[derive(Clone)]
@@ -139,7 +136,6 @@ impl BlockStore {
 
             // todo - we might need to sort all unprocessed blocks by rounds and run update with a loop
             inner.update_dag(block.reference().clone(), block.includes().clone());
-
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
@@ -163,17 +159,27 @@ impl BlockStore {
         builder.build(this)
     }
 
-    pub fn get_dag(&self) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
+    pub fn get_dag(
+        &self,
+    ) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
         self.inner.read().dag.clone()
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
-        self.inner.read().authority.clone()
+        self.inner.read().authority
     }
 
-    pub fn insert_block(&self, block: Data<StatementBlock>, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+    pub fn insert_block(
+        &self,
+        block: Data<StatementBlock>,
+        position: WalPosition,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
         self.metrics.block_store_entries.inc();
-        self.inner.write().add_loaded(position, block, authority_index_start, authority_index_end);
+        self.inner
+            .write()
+            .add_loaded(position, block, authority_index_start, authority_index_end);
     }
 
     pub fn get_block(&self, reference: BlockReference) -> Option<Data<StatementBlock>> {
@@ -188,10 +194,15 @@ impl BlockStore {
     }
 
     // This function should be called when we send a block to a certain authority
-    pub fn update_known_by_authority(&self, block_reference: BlockReference, authority: AuthorityIndex) {
-        self.inner.write().update_known_by_authority(block_reference, authority);
+    pub fn update_known_by_authority(
+        &self,
+        block_reference: BlockReference,
+        authority: AuthorityIndex,
+    ) {
+        self.inner
+            .write()
+            .update_known_by_authority(block_reference, authority);
     }
-
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<StatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
@@ -290,7 +301,10 @@ impl BlockStore {
         from_excluded: RoundNumber,
         limit: usize,
     ) -> Vec<Data<StatementBlock>> {
-        let entries = self.inner.read().get_own_blocks(to_whom_authority_index, from_excluded, limit);
+        let entries =
+            self.inner
+                .read()
+                .get_own_blocks(to_whom_authority_index, from_excluded, limit);
         self.read_index_vec(entries)
     }
 
@@ -299,7 +313,10 @@ impl BlockStore {
         to_whom_authority_index: AuthorityIndex,
         limit: usize,
     ) -> Vec<Data<StatementBlock>> {
-        let entries = self.inner.read().get_unknown_causal_history(to_whom_authority_index,  limit);
+        let entries = self
+            .inner
+            .read()
+            .get_unknown_causal_history(to_whom_authority_index, limit);
         self.read_index_vec(entries)
     }
 
@@ -356,7 +373,6 @@ impl BlockStore {
             .map(|pos| self.read_index(pos))
             .collect()
     }
-
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
     pub fn linked(
@@ -448,7 +464,13 @@ impl BlockStoreInner {
         unloaded
     }
 
-    pub fn add_unloaded(&mut self, reference: &BlockReference, position: WalPosition, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+    pub fn add_unloaded(
+        &mut self,
+        reference: &BlockReference,
+        position: WalPosition,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
         self.highest_round = max(self.highest_round, reference.round());
         let map = self.index.entry(reference.round()).or_default();
         map.insert(reference.author_digest(), IndexEntry::WalPosition(position));
@@ -456,9 +478,19 @@ impl BlockStoreInner {
         self.update_last_seen_by_authority(reference);
     }
 
-    pub fn add_loaded(&mut self, position: WalPosition, block: Data<StatementBlock>, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+    pub fn add_loaded(
+        &mut self,
+        position: WalPosition,
+        block: Data<StatementBlock>,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
         self.highest_round = max(self.highest_round, block.round());
-        self.add_own_index(block.reference(), authority_index_start, authority_index_end);
+        self.add_own_index(
+            block.reference(),
+            authority_index_start,
+            authority_index_end,
+        );
         self.update_last_seen_by_authority(block.reference());
         let map = self.index.entry(block.round()).or_default();
         map.insert(
@@ -473,20 +505,28 @@ impl BlockStoreInner {
             return;
         }
         // update information about block_reference
-        self.dag.insert(block_reference.clone(), (parents, vec![block_reference.authority, self.authority]
-            .into_iter()
-            .collect::<HashSet<_>>()));
+        self.dag.insert(
+            block_reference,
+            (
+                parents,
+                vec![block_reference.authority, self.authority]
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+            ),
+        );
         for authority in 0..self.not_known_by_authority.len() {
-            if authority == self.authority as usize || authority == block_reference.authority as usize {
+            if authority == self.authority as usize
+                || authority == block_reference.authority as usize
+            {
                 continue;
             }
-            self.not_known_by_authority[authority].insert(block_reference.clone());
+            self.not_known_by_authority[authority].insert(block_reference);
         }
         // traverse the DAG from block_reference and update the blocks known by block_reference.authority
         let authority = block_reference.authority;
         let mut buffer = vec![block_reference];
 
-        while buffer.len() > 0 {
+        while !buffer.is_empty() {
             let block_reference = buffer.pop().unwrap();
             let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
             for parent in parents {
@@ -496,13 +536,17 @@ impl BlockStoreInner {
                 let (_, known_by) = self.dag.get_mut(&parent).unwrap();
                 if known_by.insert(authority) {
                     self.not_known_by_authority[authority as usize].remove(&parent);
-                    buffer.push(parent.clone());
+                    buffer.push(parent);
                 }
             }
         }
     }
 
-    pub fn update_known_by_authority(&mut self, block_reference: BlockReference, authority: AuthorityIndex) {
+    pub fn update_known_by_authority(
+        &mut self,
+        block_reference: BlockReference,
+        authority: AuthorityIndex,
+    ) {
         self.not_known_by_authority[authority as usize].remove(&block_reference);
         let (_, known_by) = self.dag.get_mut(&block_reference).unwrap();
         known_by.insert(authority);
@@ -526,12 +570,17 @@ impl BlockStoreInner {
     }
 
     // Function returns which own blocks are intended to which authority
-    pub fn get_own_blocks(&self, to_whom_index: AuthorityIndex, from_excluded: RoundNumber, limit: usize) -> Vec<IndexEntry> {
+    pub fn get_own_blocks(
+        &self,
+        to_whom_index: AuthorityIndex,
+        from_excluded: RoundNumber,
+        limit: usize,
+    ) -> Vec<IndexEntry> {
         self.own_blocks
             .range((from_excluded + 1, 0 as AuthorityIndex)..)
-            .filter(|((_round, authority_index) , _digest)| *authority_index == to_whom_index)
+            .filter(|((_round, authority_index), _digest)| *authority_index == to_whom_index)
             .take(limit)
-            .map(|((round, _authority_index) , digest)| {
+            .map(|((round, _authority_index), digest)| {
                 let reference = BlockReference {
                     authority: self.authority,
                     round: *round,
@@ -546,32 +595,36 @@ impl BlockStoreInner {
             .collect()
     }
 
-    pub fn get_unknown_causal_history(&self, to_whom: AuthorityIndex, limit: usize) -> Vec<IndexEntry> {
+    pub fn get_unknown_causal_history(
+        &self,
+        to_whom: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<IndexEntry> {
         let own_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| block_reference.authority == self.authority)
             .take(limit)
             .map(|block_reference| {
-            if let Some(index_entry) = self.get_block(block_reference.clone()) {
-                index_entry
-            } else {
-                panic!("Block index corrupted, not found: {block_reference}");
-            }}
-        )
+                if let Some(index_entry) = self.get_block(*block_reference) {
+                    index_entry
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }
+            })
             .collect();
-        let new_limit = limit.saturating_sub(own_blocks.len()) ;
+        let new_limit = limit.saturating_sub(own_blocks.len());
         let other_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| block_reference.authority != self.authority)
             .take(new_limit)
             .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(block_reference.clone()) {
+                if let Some(index_entry) = self.get_block(*block_reference) {
                     index_entry
                 } else {
                     panic!("Block index corrupted, not found: {block_reference}");
-                }}
-                )
-                .collect();
+                }
+            })
+            .collect();
 
         own_blocks.into_iter().chain(other_blocks).collect()
     }
@@ -601,7 +654,12 @@ impl BlockStoreInner {
             .collect()
     }
 
-    fn add_own_index(&mut self, reference: &BlockReference, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+    fn add_own_index(
+        &mut self,
+        reference: &BlockReference,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
         if reference.authority != self.authority {
             return;
         }
@@ -611,10 +669,12 @@ impl BlockStoreInner {
         for authority_index in authority_index_start..authority_index_end {
             assert!(self
                 .own_blocks
-                .insert((reference.round, authority_index as AuthorityIndex), reference.digest)
+                .insert(
+                    (reference.round, authority_index as AuthorityIndex),
+                    reference.digest
+                )
                 .is_none());
         }
-
     }
 
     pub fn last_own_block(&self) -> Option<BlockReference> {
@@ -640,14 +700,28 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
             .0
             .write(WAL_ENTRY_BLOCK, block.serialized_bytes())
             .expect("Writing to wal failed");
-        self.1.insert_block(block, pos, 0, self.1.committee_size as AuthorityIndex);
+        self.1
+            .insert_block(block, pos, 0, self.1.committee_size as AuthorityIndex);
         pos
     }
 
-    fn insert_own_block(&mut self, data: &OwnBlockData, authority_index_start: AuthorityIndex, authority_index_end: AuthorityIndex) {
+    fn insert_own_block(
+        &mut self,
+        data: &OwnBlockData,
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) {
         let block_pos = data.write_to_wal(self.0);
-        self.1.insert_block(data.block.clone(), block_pos, authority_index_start, authority_index_end);
-        self.1.update_dag(data.block.reference().clone(), data.block.includes().clone());
+        self.1.insert_block(
+            data.block.clone(),
+            block_pos,
+            authority_index_start,
+            authority_index_end,
+        );
+        self.1.update_dag(
+            *data.block.reference(),
+            data.block.includes().clone(),
+        );
     }
 }
 

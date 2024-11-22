@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
             public_config_path,
             private_config_path,
             client_parameters_path,
-            byzantine_strategy
+            byzantine_strategy,
         } => {
             run(
                 authority,
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                 public_config_path,
                 private_config_path,
                 client_parameters_path,
-                byzantine_strategy
+                byzantine_strategy,
             )
             .await?
         }
@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
             committee_size,
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
-        } => dryrun(authority, committee_size,byzantine_strategy, mimic_latency).await?,
+        } => dryrun(authority, committee_size, byzantine_strategy, mimic_latency).await?,
     }
 
     Ok(())
@@ -233,7 +233,12 @@ async fn run(
     Ok(())
 }
 
-async fn dryrun(authority: AuthorityIndex, committee_size: usize, byzantine_strategy: String, mimic_latency: u64) -> Result<()> {
+async fn dryrun(
+    authority: AuthorityIndex,
+    committee_size: usize,
+    byzantine_strategy: String,
+    mimic_latency: u64,
+) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
     );

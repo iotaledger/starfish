@@ -14,10 +14,7 @@ use std::{
 use minibytes::Bytes;
 use serde::{
     de::{DeserializeOwned, Error},
-    Deserialize,
-    Deserializer,
-    Serialize,
-    Serializer,
+    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 /// Data<T> carries both the value and it's serialized bytes.

@@ -1,30 +1,27 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-use std::fs::File;
-use std::io::Write;
 use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
-use rand::{prelude::ThreadRng, Rng, SeedableRng};
 use rand::prelude::StdRng;
+use rand::{prelude::ThreadRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
+use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpListener,
-        TcpSocket,
-        TcpStream,
+        TcpListener, TcpSocket, TcpStream,
     },
     runtime::Handle,
-    select,
     sync::mpsc,
     time::Instant,
 };
-use tokio::sync::Mutex;
 
 use crate::{
     config::NodePublicConfig,
@@ -75,7 +72,14 @@ impl Network {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
         let mimic_latency_seed = parameters.parameters.mimic_extra_latency_seed;
-        Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics, mimic_latency_seed).await
+        Self::from_socket_addresses(
+            &addresses,
+            our_id as usize,
+            local_addr,
+            metrics,
+            mimic_latency_seed,
+        )
+        .await
     }
 
     pub fn connection_receiver(&mut self) -> &mut mpsc::Receiver<Connection> {
@@ -140,8 +144,6 @@ impl Network {
             connection_receiver,
         }
     }
-
-
 }
 
 fn write_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
@@ -153,11 +155,12 @@ fn write_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
 
     // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line in the file
     for row in latency_delays {
-        let row_string: String = row.iter()
-            .map(|x| x.to_string())  // Convert each f64 to a string
+        let row_string: String = row
+            .iter()
+            .map(|x| x.to_string()) // Convert each f64 to a string
             .collect::<Vec<String>>()
-            .join(", ");  // Join them with a comma and space
-        writeln!(file, "{}", row_string)?;  // Write the row to the file
+            .join(", "); // Join them with a comma and space
+        writeln!(file, "{}", row_string)?; // Write the row to the file
     }
 
     Ok(())
@@ -302,7 +305,11 @@ impl Worker {
         Self::handle_stream(stream, connection, self.connection_latency).await
     }
 
-    async fn handle_stream(stream: TcpStream, connection: WorkerConnection, connection_latency: f64) -> io::Result<()> {
+    async fn handle_stream(
+        stream: TcpStream,
+        connection: WorkerConnection,
+        connection_latency: f64,
+    ) -> io::Result<()> {
         let WorkerConnection {
             sender,
             receiver,
@@ -312,8 +319,14 @@ impl Worker {
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
         let (pong_sender, pong_receiver) = mpsc::channel(16);
-        let write_fut =
-            Self::handle_write_stream(writer, receiver, pong_receiver, latency_sender, connection_latency).boxed();
+        let write_fut = Self::handle_write_stream(
+            writer,
+            receiver,
+            pong_receiver,
+            latency_sender,
+            connection_latency,
+        )
+        .boxed();
         let read_fut = Self::handle_read_stream(reader, sender, pong_sender).boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
@@ -507,7 +520,6 @@ impl Worker {
     }
 }
 
-
 /// Generates a latency table for a geodistributed network.
 /// `n` is the number of nodes.
 /// `seed` is a global seed used for deterministic generation.
@@ -557,29 +569,37 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
         }
 
         // Check how many rows have the 2/3 quantile within the latency range
-        let num_rows_within_quantile_latency_range = table.iter().filter(|row| {
-            // Clone the row and sort it to calculate the quantile
-            let mut sorted_row = row.clone().clone(); // Clone the row to sort
-            sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap()); // Sort the cloned row
+        let num_rows_within_quantile_latency_range = table
+            .iter()
+            .filter(|row| {
+                // Clone the row and sort it to calculate the quantile
+                let mut sorted_row = row.clone().clone(); // Clone the row to sort
+                sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap()); // Sort the cloned row
 
-            // Calculate the 2/3 quantile
-            let quantile_index = quorum_count as usize; // 2/3 quantile index
-            let quantile_value = sorted_row[quantile_index - 1]; // Get the value at 2/3 quantile index
+                // Calculate the 2/3 quantile
+                let quantile_index = quorum_count as usize; // 2/3 quantile index
+                let quantile_value = sorted_row[quantile_index - 1]; // Get the value at 2/3 quantile index
 
-            quantile_value >= QUANTILE_LATENCY_MIN && quantile_value <= QUANTILE_LATENCY_MAX
-        }).count();
+                quantile_value >= QUANTILE_LATENCY_MIN && quantile_value <= QUANTILE_LATENCY_MAX
+            })
+            .count();
 
         // Check how many rows have the 2/3 quantile within the latency range
-        let num_rows_within_mean_latency_range = table.iter().filter(|row| {
-            // Clone the row and sort it to calculate the quantile
-            let cur_row = row.clone().clone(); // Clone the row to sort
-            let sum: f64= cur_row.iter().sum();
-            let mean = sum / (cur_row.len() as f64 - 1.0);
-            mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
-        }).count();
+        let num_rows_within_mean_latency_range = table
+            .iter()
+            .filter(|row| {
+                // Clone the row and sort it to calculate the quantile
+                let cur_row = row.clone().clone(); // Clone the row to sort
+                let sum: f64 = cur_row.iter().sum();
+                let mean = sum / (cur_row.len() as f64 - 1.0);
+                mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
+            })
+            .count();
 
         // Check if the number of rows with the quantile within the threshold meets the quorum requirement
-        if num_rows_within_quantile_latency_range as f64 >= quorum_count && num_rows_within_mean_latency_range as f64 >= quorum_count {
+        if num_rows_within_quantile_latency_range as f64 >= quorum_count
+            && num_rows_within_mean_latency_range as f64 >= quorum_count
+        {
             // If we have at least the quorum of rows with the quantile within the range, return the table
             return table;
         }
@@ -589,17 +609,17 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
 fn generate_latency(mean: f64) -> Duration {
     let mut rng = rand::thread_rng();
 
-// Define a constant deviation percentage (e.g., ±3% of the mean)
+    // Define a constant deviation percentage (e.g., ±3% of the mean)
     let deviation_percentage = 0.03; // 3%
 
-// Calculate the deviation based on the mean
+    // Calculate the deviation based on the mean
     let deviation = mean * deviation_percentage;
 
-// Generate latency by adding the random deviation to the mean
+    // Generate latency by adding the random deviation to the mean
     let latency = mean + rng.gen_range(-deviation..=deviation);
 
     tracing::info!("Generated latency {latency}");
-// Return the latency as a Duration (in milliseconds)
+    // Return the latency as a Duration (in milliseconds)
     Duration::from_millis(latency as u64)
 }
 
