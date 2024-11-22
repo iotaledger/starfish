@@ -1,8 +1,9 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-4}
+NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-2}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
+REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 
 
@@ -53,9 +54,13 @@ echo -e "${GREEN}Updated prometheus.yaml successfully!${RESET}"
 (cd monitoring && docker compose down)
 
 
-# Remove the Grafana and Prometheus data volumes
-docker volume rm monitoring_grafana_data || echo "Grafana data volume not found or could not be removed."
-docker volume rm monitoring_prometheus_data || echo "Prometheus data volume not found or could not be removed."
+if [ "$REMOVE_VOLUMES" = 1 ]; then
+    echo "Removing Grafana and Prometheus data volumes..."
+    docker volume rm monitoring_grafana_data || echo "Grafana data volume not found or could not be removed."
+    docker volume rm monitoring_prometheus_data || echo "Prometheus data volume not found or could not be removed."
+else
+    echo "Skipping removal of Grafana and Prometheus data volumes."
+fi
 
 
 # Docker Compose Up
@@ -77,7 +82,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
 done
 
 SHORT_URL=$(curl -s "http://tinyurl.com/api-create.php?url=http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-30m&to=now&refresh=5s")
-echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}"
+echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}; user/password = admin"
 
 # Wait for the validators to run (e.g., 600 seconds)
 sleep 600
