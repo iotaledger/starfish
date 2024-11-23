@@ -37,6 +37,8 @@ impl CommittedSubDag {
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
     pub committed: HashSet<BlockReference>,
+    pub traversed_blocks: HashSet<BlockReference>,
+    pub votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     pub committee: Committee,
 }
 
@@ -44,6 +46,8 @@ impl Linearizer {
     pub fn new(committee: Committee) -> Self {
         Self {
             committed:  HashSet::new(),
+            traversed_blocks: HashSet::new(),
+            votes: HashMap::new(),
             committee,
         }
     }
@@ -86,45 +90,41 @@ impl Linearizer {
         leader_block: Data<StatementBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
-        let maximal_depth_below_leader: u64 = 50;
         let leader_block_ref = *(leader_block.reference());
-        let minimal_round_to_collect: RoundNumber =  leader_block.round().saturating_sub(maximal_depth_below_leader);
         let mut buffer = vec![leader_block];
-        let mut buffer_track = HashSet::new();
-        buffer_track.insert(leader_block_ref);
-        let mut votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
+        let mut new_acknowledgements = vec![];
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
             for acknowledgement in x.acknowledgement_statements() {
-                if acknowledgement.round < minimal_round_to_collect {
-                    continue;
-                }
                 // Todo the authority creating the block might automatically acknowledge for its block
-                votes.entry(*acknowledgement).or_insert_with(StakeAggregator::new).add(who_votes, &self.committee);
+
+                let s = self.votes.entry(*acknowledgement).or_insert_with(StakeAggregator::new);
+                if !s.is_quorum(&self.committee) {
+                    if s.add(who_votes, &self.committee) {
+                        new_acknowledgements.push(*acknowledgement);
+                    }
+                }
             }
+            self.traversed_blocks.insert(*x.reference());
             for reference in x.includes() {
                 // Skip the block if it is too far back
-                if reference.round < minimal_round_to_collect || buffer_track.contains(reference){
+                if  self.traversed_blocks.contains(reference){
                     continue;
                 }
                 let block = block_store
                     .get_block(*reference)
                     .expect("We should have the whole sub-dag by now");
-                buffer_track.insert(*block.reference());
                 buffer.push(block);
             }
         }
         let mut to_commit = Vec::new();
-        for x in votes {
-            if x.1.is_quorum(&self.committee){
-                if self.committed.insert(x.0) {
-                    let block = block_store
-                        .get_block(x.0)
-                        .expect("We should have the whole sub-dag by now");
-                    to_commit.push(block);
-                }
-
+        for x in new_acknowledgements {
+            if self.committed.insert(x) {
+                let block = block_store
+                    .get_block(x)
+                    .expect("We should have the whole sub-dag by now");
+                to_commit.push(block);
             }
         }
         CommittedSubDag::new(leader_block_ref, to_commit)
@@ -138,8 +138,8 @@ impl Linearizer {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
+           //let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);
