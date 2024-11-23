@@ -4,13 +4,13 @@
 use std::{collections::HashSet, fmt};
 use std::cmp::max;
 use std::collections::HashMap;
-use libc::kCCRNGFailure;
 use crate::{
     block_store::BlockStore,
     data::Data,
     types::{BlockReference, StatementBlock},
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
+use crate::types::RoundNumber;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -85,26 +85,33 @@ impl Linearizer {
         block_store: &BlockStore,
         leader_block: Data<StatementBlock>,
     ) -> CommittedSubDag {
+        tracing::debug!("Starting collection with leader {:?}", leader_block);
         let maximal_depth_below_leader: u64 = 50;
-        let leader_block_ref = *leader_block.reference();
-        let minimal_round_to_collect = max(1, leader_block.round() - maximal_depth_below_leader);
+        let leader_block_ref = *(leader_block.reference());
+        let minimal_round_to_collect: RoundNumber =  leader_block.round().saturating_sub(maximal_depth_below_leader);
         let mut buffer = vec![leader_block];
+        let mut buffer_track = HashSet::new();
+        buffer_track.insert(leader_block_ref);
         let mut votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
-        assert!(self.committed.insert(leader_block_ref));
         while let Some(x) = buffer.pop() {
+            tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
             for acknowledgement in x.acknowledgement_statements() {
+                if acknowledgement.round < minimal_round_to_collect {
+                    continue;
+                }
                 // Todo the authority creating the block might automatically acknowledge for its block
                 votes.entry(*acknowledgement).or_insert_with(StakeAggregator::new).add(who_votes, &self.committee);
             }
             for reference in x.includes() {
                 // Skip the block if it is too far back
-                if reference.round < minimal_round_to_collect {
+                if reference.round < minimal_round_to_collect || buffer_track.contains(reference){
                     continue;
                 }
                 let block = block_store
                     .get_block(*reference)
                     .expect("We should have the whole sub-dag by now");
+                buffer_track.insert(*block.reference());
                 buffer.push(block);
             }
         }
@@ -131,10 +138,11 @@ impl Linearizer {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
-            //let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
+            //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
+            let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
+            tracing::debug!("Committed sub DAG {:?}", sub_dag);
             committed.push(sub_dag);
         }
         committed
