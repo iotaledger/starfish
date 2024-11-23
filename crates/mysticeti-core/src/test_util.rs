@@ -568,7 +568,7 @@ pub fn build_dag(
         let (references, blocks): (Vec<_>, Vec<_>) = committee
             .authorities()
             .map(|authority| {
-                let acknowledgement_statements = includes.clone().into_iter().collect();
+                let acknowledgement_statements = includes.clone();
                 let block = Data::new(StatementBlock::new(
                     authority,
                     round,
@@ -598,7 +598,7 @@ pub fn build_dag_layer(
     let mut references = Vec::new();
     for (authority, parents) in connections {
         let round = parents.first().unwrap().round + 1;
-        let acknowledgement_statements = parents.clone().into_iter().collect();
+        let acknowledgement_statements = parents.clone();
         let block = Data::new(StatementBlock::new(
             authority,
             round,

@@ -63,7 +63,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        acknowledgement_statements: &HashSet<BlockReference>,
+        acknowledgement_statements: &Vec<BlockReference>,
         hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
@@ -88,7 +88,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        acknowledgement_statements: &HashSet<BlockReference>,
+        acknowledgement_statements: &Vec<BlockReference>,
         hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
@@ -114,7 +114,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        acknowledgement_statements: &HashSet<BlockReference>,
+        acknowledgement_statements: &Vec<BlockReference>,
         hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
@@ -124,9 +124,7 @@ impl BlockDigest {
         for include in includes {
             include.crypto_hash(hasher);
         }
-        let mut vec: Vec<_> = acknowledgement_statements.iter().collect();
-        vec.sort();
-        for block_ref in vec {
+        for block_ref in acknowledgement_statements {
             block_ref.crypto_hash(hasher);
         }
         hash_statements.crypto_hash(hasher);
@@ -214,7 +212,7 @@ impl Signer {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
-        acknowledgement_statements: &HashSet<BlockReference>,
+        acknowledgement_statements: &Vec<BlockReference>,
         statements: &Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,

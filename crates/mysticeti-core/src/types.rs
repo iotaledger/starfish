@@ -88,7 +88,7 @@ pub struct StatementBlock {
     includes: Vec<BlockReference>,
 
     // Transaction data acknowledgment
-    acknowledgement_statements: HashSet<BlockReference>,
+    acknowledgement_statements: Vec<BlockReference>,
 
     // Hash of statements
     hash_statements: StatementDigest,
@@ -131,7 +131,7 @@ impl StatementBlock {
             authority,
             GENESIS_ROUND,
             vec![],
-            HashSet::default(),
+            vec![],
             Some(vec![]),
             0,
             false,
@@ -143,7 +143,7 @@ impl StatementBlock {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: Vec<BlockReference>,
-        acknowledgement_statements: HashSet<BlockReference>,
+        acknowledgement_statements: Vec<BlockReference>,
         statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
@@ -174,7 +174,7 @@ impl StatementBlock {
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: Vec<BlockReference>,
-        acknowledgement_statements: HashSet<BlockReference>,
+        acknowledgement_statements: Vec<BlockReference>,
         statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
@@ -210,7 +210,7 @@ impl StatementBlock {
         self.hash_statements.clone()
     }
 
-    pub fn acknowledgement_statements(&self) -> &HashSet<BlockReference> {
+    pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
         &self.acknowledgement_statements
     }
 
@@ -751,9 +751,7 @@ mod test {
                 includes.map(Self::parse_name).collect()
             };
             let acknowledgement_statements = includes
-                .clone()
-                .into_iter()
-                .collect::<HashSet<BlockReference>>();
+                .clone();
             StatementBlock {
                 reference,
                 includes,
