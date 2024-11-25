@@ -431,14 +431,18 @@ impl Worker {
 
                     tokio::time::sleep(latency).await;
 
-                    if let Err(e) = writer.lock().await.write_u32(serialized.len() as u32).await {
-                        tracing::error!("Failed to write message length: {e}");
-                        return;
-                    }
-
-                    if let Err(e) = writer.lock().await.write_all(&serialized).await {
+                    if let Err(e) = async {
+                        let mut writer_guard = writer.lock().await;
+                        // Write the length
+                        writer_guard.write_u32(serialized.len() as u32).await?;
+                        // Write the serialized data
+                        writer_guard.write_all(&serialized).await
+                    }.await {
                         tracing::error!("Failed to write message: {e}");
                     }
+
+
+
                 });
 
                 inner_task_handles.push(handle);
