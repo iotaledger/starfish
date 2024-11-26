@@ -63,6 +63,8 @@ pub struct Metrics {
     pub block_sync_requests_sent: IntCounterVec,
     pub block_sync_requests_received: IntCounterVec,
 
+    pub block_committed_latency: HistogramSender<Duration>,
+
     pub transaction_certified_latency: HistogramSender<Duration>,
     pub certificate_committed_latency: HistogramSender<Duration>,
     pub transaction_committed_latency: HistogramSender<Duration>,
@@ -83,6 +85,7 @@ pub struct MetricReporter {
     pub transaction_certified_latency: HistogramReporter<Duration>,
     pub certificate_committed_latency: HistogramReporter<Duration>,
     pub transaction_committed_latency: HistogramReporter<Duration>,
+    pub block_committed_latency: HistogramReporter<Duration>,
 
     pub proposed_block_size_bytes: HistogramReporter<usize>,
     pub proposed_block_transaction_count: HistogramReporter<usize>,
@@ -109,6 +112,7 @@ impl Metrics {
         let (transaction_certified_latency_hist, transaction_certified_latency) = histogram();
         let (certificate_committed_latency_hist, certificate_committed_latency) = histogram();
         let (transaction_committed_latency_hist, transaction_committed_latency) = histogram();
+        let (block_committed_latency_hist, block_committed_latency) = histogram();
 
         let (proposed_block_size_bytes_hist, proposed_block_size_bytes) = histogram();
         let (proposed_block_transaction_count_hist, proposed_block_transaction_count) = histogram();
@@ -142,6 +146,12 @@ impl Metrics {
                 transaction_committed_latency_hist,
                 registry,
                 "transaction_committed_latency",
+            ),
+
+            block_committed_latency: HistogramReporter::new_in_registry(
+                block_committed_latency_hist,
+                registry,
+                "block_committed_latency",
             ),
 
             proposed_block_size_bytes: HistogramReporter::new_in_registry(
@@ -329,7 +339,7 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-
+            block_committed_latency,
             transaction_certified_latency,
             certificate_committed_latency,
             transaction_committed_latency,
@@ -449,6 +459,7 @@ impl MetricReporter {
         self.transaction_certified_latency.clear_receive_all();
         self.certificate_committed_latency.clear_receive_all();
         self.transaction_committed_latency.clear_receive_all();
+        self.block_committed_latency.clear_receive_all();
 
         self.proposed_block_size_bytes.clear_receive_all();
         self.proposed_block_transaction_count.clear_receive_all();
@@ -479,6 +490,7 @@ impl MetricReporter {
         self.transaction_certified_latency.report();
         self.certificate_committed_latency.report();
         self.transaction_committed_latency.report();
+        self.block_committed_latency.report();
 
         self.proposed_block_size_bytes.report();
         self.proposed_block_transaction_count.report();

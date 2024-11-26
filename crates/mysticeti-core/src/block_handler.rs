@@ -443,6 +443,10 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         for commit in &committed {
             self.committed_leaders.push(commit.anchor);
             for block in &commit.blocks {
+                let block_creation_time = block.meta_creation_time();
+                let block_timestamp = runtime::timestamp_utc() - block_creation_time;
+
+                self.metrics.block_committed_latency.observe(block_timestamp);
                 if !self.consensus_only {
                     let processed =
                         self.transaction_votes
