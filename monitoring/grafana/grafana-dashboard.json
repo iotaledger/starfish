@@ -23,8 +23,8 @@
   "panels": [
     {
       "datasource": {
-        "type": "datasource",
-        "uid": "-- Mixed --"
+        "type": "prometheus",
+        "uid": "PA70C939801DFE0D2"
       },
       "fieldConfig": {
         "defaults": {
@@ -65,13 +65,16 @@
             }
           },
           "mappings": [],
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
               }
             ]
           }
@@ -84,7 +87,7 @@
         "x": 0,
         "y": 0
       },
-      "id": 3,
+      "id": 11,
       "options": {
         "legend": {
           "calcs": [],
@@ -100,18 +103,18 @@
       "pluginVersion": "11.3.0",
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "editorMode": "code",
-          "expr": "rate(latency_s_count[1m])",
-          "instant": false,
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "avg by(proc) (rate(utilization_timer[1m]) / 1000)",
+          "fullMetaSearch": false,
+          "includeNullMetadata": true,
+          "legendFormat": "__auto",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         }
       ],
-      "title": "TPS (per node)",
+      "title": "Core functions [ms]",
       "type": "timeseries"
     },
     {
@@ -275,8 +278,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
+        "type": "datasource",
+        "uid": "-- Mixed --"
       },
       "fieldConfig": {
         "defaults": {
@@ -317,16 +320,13 @@
             }
           },
           "mappings": [],
+          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
               }
             ]
           }
@@ -339,7 +339,7 @@
         "x": 0,
         "y": 8
       },
-      "id": 10,
+      "id": 3,
       "options": {
         "legend": {
           "calcs": [],
@@ -360,45 +360,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(submitted_transactions[1m]))",
-          "hide": true,
+          "expr": "rate(latency_s_count[1m])",
           "instant": false,
-          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "editorMode": "code",
-          "expr": "rate(submitted_transactions[1m])",
-          "hide": true,
-          "instant": false,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "submitted_transactions{job=\"instance-node-1\"}",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "C",
-          "useBackend": false
         }
       ],
-      "title": "Total Submitted Transactions",
+      "title": "TPS (per node)",
       "type": "timeseries"
     },
     {
@@ -563,7 +531,7 @@
         "x": 0,
         "y": 16
       },
-      "id": 9,
+      "id": 10,
       "options": {
         "legend": {
           "calcs": [],
@@ -584,13 +552,45 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "avg(connection_latency{v=\"p50\"} / 1000) by (peer)",
+          "expr": "sum(rate(submitted_transactions[1m]))",
+          "hide": true,
           "instant": false,
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "rate(submitted_transactions[1m])",
+          "hide": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "builder",
+          "expr": "submitted_transactions{job=\"instance-node-1\"}",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "C",
+          "useBackend": false
         }
       ],
-      "title": "Avg connection latency (by peer)",
+      "title": "Total Submitted Transactions",
       "type": "timeseries"
     },
     {
@@ -755,7 +755,7 @@
         "x": 0,
         "y": 24
       },
-      "id": 8,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -776,13 +776,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "core_lock_enqueued - core_lock_dequeued",
+          "expr": "avg(connection_latency{v=\"p50\"} / 1000) by (peer)",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Core queue",
+      "title": "Avg connection latency (by peer)",
       "type": "timeseries"
     },
     {
@@ -928,7 +928,7 @@
         "x": 0,
         "y": 32
       },
-      "id": 4,
+      "id": 8,
       "options": {
         "legend": {
           "calcs": [],
@@ -949,13 +949,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1024 / 1024 /1024",
+          "expr": "core_lock_enqueued - core_lock_dequeued",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Memory usage",
+      "title": "Core queue",
       "type": "timeseries"
     },
     {
@@ -1052,6 +1052,102 @@
         }
       ],
       "title": "Network receive (Mbps)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1024 / 1024 /1024",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Memory usage",
       "type": "timeseries"
     }
   ],
