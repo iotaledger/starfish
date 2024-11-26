@@ -32,6 +32,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
+use crate::metrics::UtilizationTimerVecExt;
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -220,6 +221,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
                 NetworkMessage::Block(block) => {
+                    let mut timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
+
                     tracing::debug!("Received {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee) {
                         tracing::warn!(
@@ -231,9 +234,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         // todo: Terminate connection upon receiving incorrect block.
                         break;
                     }
+
+                    drop(timer);
+
                     inner.syncer.add_blocks(vec![block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
+                    let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
                     let mut required_blocks = Vec::new();
                     for block in blocks {
                         if !inner.block_store.block_exists(block.reference().clone()) {
@@ -255,6 +262,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                         verified_blocks.push(block);
                     }
+                    drop(timer);
                     if !verified_blocks.is_empty() {
                         inner.syncer.add_blocks(verified_blocks).await;
                     }
