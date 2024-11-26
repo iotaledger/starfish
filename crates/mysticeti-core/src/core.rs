@@ -285,7 +285,8 @@ impl<H: BlockHandler> Core<H> {
 
             assert!(!includes.is_empty());
             let time_ns = timestamp_utc().as_nanos() + j as u128;
-            let acknowledgement_statements = includes.clone().into_iter().collect::<_>();
+            // Todo change this once we track known transactions
+            let acknowledgement_statements = includes.clone();
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
                 clock_round,

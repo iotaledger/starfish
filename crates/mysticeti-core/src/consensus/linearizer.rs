@@ -96,13 +96,13 @@ impl Linearizer {
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
-            for acknowledgement in x.acknowledgement_statements() {
+            for acknowledgement_statement in x.acknowledgement_statements() {
                 // Todo the authority creating the block might automatically acknowledge for its block
 
-                let s = self.votes.entry(*acknowledgement).or_insert_with(StakeAggregator::new);
+                let s = self.votes.entry(*acknowledgement_statement).or_insert_with(StakeAggregator::new);
                 if !s.is_quorum(&self.committee) {
                     if s.add(who_votes, &self.committee) {
-                        new_acknowledgements.push(*acknowledgement);
+                        new_acknowledgements.push(*acknowledgement_statement);
                     }
                 }
             }
@@ -138,8 +138,8 @@ impl Linearizer {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
-           //let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
+           let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
+           //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);

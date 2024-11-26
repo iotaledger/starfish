@@ -215,6 +215,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     if inner.block_store.byzantine_strategy.is_some() {
                         disseminator.disseminate_own_blocks_v1(round).await;
                     } else {
+                        //disseminator.disseminate_own_blocks_v1(round).await;
                         disseminator.disseminate_all_blocks_push().await;
                     }
                 }
