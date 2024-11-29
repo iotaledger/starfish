@@ -569,6 +569,7 @@ pub fn build_dag(
             .authorities()
             .map(|authority| {
                 let acknowledgement_statements = includes.clone();
+
                 let block = Data::new(StatementBlock::new(
                     authority,
                     round,
@@ -578,6 +579,8 @@ pub fn build_dag(
                     0,
                     false,
                     Default::default(),
+                    0,
+                    None
                 ));
                 (*block.reference(), block)
             })
@@ -608,6 +611,8 @@ pub fn build_dag_layer(
             0,
             false,
             Default::default(),
+            0,
+            None
         ));
 
         references.push(*block.reference());

@@ -13,6 +13,9 @@ pub type BlockDigest = crate::crypto::BlockDigest;
 pub type Stake = u64;
 pub type KeyPair = u64;
 pub type PublicKey = crate::crypto::PublicKey;
+pub type Shard = Vec<u8>;
+pub type Encoder = ReedSolomonEncoder;
+
 
 use std::collections::HashSet;
 use std::{
@@ -24,6 +27,7 @@ use std::{
 
 use digest::Digest;
 use eyre::{bail, ensure};
+use reed_solomon_simd::ReedSolomonEncoder;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;
@@ -96,6 +100,7 @@ pub struct StatementBlock {
     // A list of base statements in order.
     statements: Option<Vec<BaseStatement>>,
 
+
     // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
 
@@ -103,6 +108,14 @@ pub struct StatementBlock {
 
     // Signature by the block author
     signature: SignatureBytes,
+    //size of shard used in encoding/decoding
+    //should be even
+    //encoder/decoder works with a batch of m=shard_size/2 codewords simultaneously,
+    //so encoder encodes shard_size*k bytes of information, or k*m information symbols, each symbol needs 2 bytes
+    shard_size: u64,
+
+    encoded_statements: Option<Vec<Shard>>,
+
 }
 
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
@@ -136,6 +149,8 @@ impl StatementBlock {
             0,
             false,
             SignatureBytes::default(),
+            64,
+            Some(vec![]),
         ))
     }
 
@@ -148,6 +163,8 @@ impl StatementBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
+        shard_size: u64,
+        encoded_statements: Option<Vec<Shard>>
     ) -> Self {
         let signature = signer.sign_block(
             authority,
@@ -167,6 +184,8 @@ impl StatementBlock {
             meta_creation_time_ns,
             epoch_marker,
             signature,
+            shard_size,
+            encoded_statements,
         )
     }
 
@@ -179,6 +198,8 @@ impl StatementBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
+        shard_size: u64,
+        encoded_statements: Option<Vec<Shard>>
     ) -> Self {
         let hash_statements = StatementDigest::new_from_statements(&statements);
         Self {
@@ -203,11 +224,17 @@ impl StatementBlock {
             meta_creation_time_ns,
             epoch_marker,
             signature,
+            shard_size,
+            encoded_statements,
         }
     }
 
     pub fn hash_statements(&self) -> StatementDigest {
         self.hash_statements.clone()
+    }
+
+    pub fn shard_size(&self) -> u64 {
+        self.shard_size
     }
 
     pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
@@ -761,6 +788,8 @@ mod test {
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),
+                shard_size: 0,
+                encoded_statements: None,
             }
         }
 

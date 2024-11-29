@@ -13,6 +13,7 @@ use std::{
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 
 use crate::{
     committee::Committee,
@@ -26,6 +27,7 @@ use crate::{
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
+use crate::types::{Encoder, Shard};
 
 #[allow(unused)]
 #[derive(Clone, Debug)]
@@ -55,6 +57,8 @@ struct BlockStoreInner {
     not_known_by_authority: Vec<BTreeSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    //coding_engine : reed_solomon_simd::engine::DefaultEngine,
+    encoder : Option<Encoder>,
 }
 
 pub trait BlockWriter {
@@ -393,6 +397,37 @@ impl BlockStore {
                 .collect();
         }
         parents.contains(earlier_block)
+    }
+
+    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Shard> {
+        let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
+        let bytes_length = serialized.len();
+        let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
+        statements_with_len.append(&mut serialized);
+        let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
+        if shard_bytes % 2 == 1 {
+            shard_bytes += 1;
+        }
+        let length_with_padding = shard_bytes * info_length;
+        statements_with_len.resize(length_with_padding, 0);
+        let mut data : Vec<Shard> = statements_with_len.chunks(shard_bytes).map(|chunk| chunk.to_vec()).collect();
+        if self.inner.read().encoder.is_none() {
+            let enc = ReedSolomonEncoder::new(2,
+                                              4,
+                                              64).unwrap();
+            self.inner.write().encoder = Some(enc);
+        }
+        let mut binding = self.inner.write();
+        let mut encoder = binding.encoder.as_mut().unwrap();
+
+        encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
+        for shard in data.clone() {
+            encoder.add_original_shard(shard).expect("Adding shard failed");
+        }
+        let result = encoder.encode().expect("Encoding failed");
+        let recovery: Vec<Shard> = result.recovery_iter().map(|slice| slice.to_vec()).collect();
+        data.extend(recovery);
+        data.clone()
     }
 }
 

@@ -287,6 +287,8 @@ impl<H: BlockHandler> Core<H> {
             let time_ns = timestamp_utc().as_nanos() + j as u128;
             // Todo change this once we track known transactions
             let acknowledgement_statements = includes.clone();
+            let encoded_statements = self.block_store.encode(statements.clone(), self.committee.len() / 3 + 1, self.committee.len() - 1 - self.committee.len() / 3);
+            let shard_size = encoded_statements[0].len();
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
@@ -296,6 +298,8 @@ impl<H: BlockHandler> Core<H> {
                 time_ns,
                 self.epoch_changing(),
                 &self.signer,
+                shard_size as u64,
+                Option::from(encoded_statements)
             );
             blocks.push(new_block);
         }
