@@ -405,8 +405,10 @@ impl BlockStore {
         let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
         statements_with_len.append(&mut serialized);
         let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
-        if shard_bytes % 2 == 1 {
-            shard_bytes += 1;
+        //shard_bytes should be divisible by 64 in version 2.2.2
+        //it only needs to be even in a new version 3.0.1, but it requires a newer version of rust 1.80
+        if shard_bytes % 64 != 0 {
+            shard_bytes += 64 - shard_bytes % 64;
         }
         let length_with_padding = shard_bytes * info_length;
         statements_with_len.resize(length_with_padding, 0);
