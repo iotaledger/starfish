@@ -6,7 +6,7 @@ use std::{
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
-
+use reed_solomon_simd::ReedSolomonEncoder;
 use minibytes::Bytes;
 
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
+use crate::types::{Encoder, Shard};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -53,6 +54,8 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
+    //coding_engine : reed_solomon_simd::engine::DefaultEngine,
+    encoder : Encoder,
 }
 
 pub struct CoreOptions {
@@ -139,7 +142,9 @@ impl<H: BlockHandler> Core<H> {
             "Number of leaders: {}",
             public_config.parameters.number_of_leaders
         );
-
+        let encoder = ReedSolomonEncoder::new(2,
+                                              4,
+                                              64).unwrap();
         let mut this = Self {
             block_manager,
             pending,
@@ -158,6 +163,7 @@ impl<H: BlockHandler> Core<H> {
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
+            encoder,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -287,7 +293,7 @@ impl<H: BlockHandler> Core<H> {
             let time_ns = timestamp_utc().as_nanos() + j as u128;
             // Todo change this once we track known transactions
             let acknowledgement_statements = includes.clone();
-            let encoded_statements = self.block_store.encode(statements.clone(), self.committee.len() / 3 + 1, self.committee.len() - 1 - self.committee.len() / 3);
+            let encoded_statements = self.encode(statements.clone(), self.committee.len() / 3 + 1, self.committee.len() - 1 - self.committee.len() / 3);
             let shard_size = encoded_statements[0].len();
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
@@ -357,6 +363,31 @@ impl<H: BlockHandler> Core<H> {
             block_id += 1;
         }
         Some(return_blocks[0].clone())
+    }
+
+
+    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Shard> {
+        let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
+        let bytes_length = serialized.len();
+        let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
+        statements_with_len.append(&mut serialized);
+        let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
+        //shard_bytes should be divisible by 64 in version 2.2.2
+        //it only needs to be even in a new version 3.0.1, but it requires a newer version of rust 1.80
+        if shard_bytes % 64 != 0 {
+            shard_bytes += 64 - shard_bytes % 64;
+        }
+        let length_with_padding = shard_bytes * info_length;
+        statements_with_len.resize(length_with_padding, 0);
+        let mut data : Vec<Shard> = statements_with_len.chunks(shard_bytes).map(|chunk| chunk.to_vec()).collect();
+        self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
+        for shard in data.clone() {
+            self.encoder.add_original_shard(shard).expect("Adding shard failed");
+        }
+        let result = self.encoder.encode().expect("Encoding failed");
+        let recovery: Vec<Shard> = result.recovery_iter().map(|slice| slice.to_vec()).collect();
+        data.extend(recovery);
+        data
     }
 
     pub fn wal_syncer(&self) -> WalSyncer {
