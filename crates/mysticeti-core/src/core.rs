@@ -171,7 +171,6 @@ impl<H: BlockHandler> Core<H> {
                 "Replaying {} blocks for transaction aggregator",
                 unprocessed_blocks.len()
             );
-            this.run_block_handler(&unprocessed_blocks);
         }
 
         this
@@ -203,27 +202,9 @@ impl<H: BlockHandler> Core<H> {
                 .push_back((position, MetaStatement::Include(*processed.reference())));
             result.push(processed);
         }
-        self.run_block_handler(&result);
         result
     }
 
-    fn run_block_handler(&mut self, processed: &[Data<StatementBlock>]) {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::run_block_handler");
-        let statements = self
-            .block_handler
-            .handle_blocks(processed, !self.epoch_changing());
-        let serialized_statements =
-            bincode::serialize(&statements).expect("Payload serialization failed");
-        let position = self
-            .wal_writer
-            .write(WAL_ENTRY_PAYLOAD, &serialized_statements)
-            .expect("Failed to write statements to wal");
-        self.pending
-            .push_back((position, MetaStatement::Payload(statements)));
-    }
 
     pub fn try_new_block(&mut self) -> Option<Data<StatementBlock>> {
         let _timer = self
@@ -234,9 +215,6 @@ impl<H: BlockHandler> Core<H> {
         if clock_round <= self.last_proposed() {
             return None;
         }
-
-        let mut statements = vec![];
-
         let first_include_index = self
             .pending
             .iter()
@@ -256,7 +234,21 @@ impl<H: BlockHandler> Core<H> {
                 self.last_own_block.push(self.last_own_block[0].clone());
             }
         }
-
+        let mut statements =  Vec::new();
+        for (_, statement) in taken.clone().into_iter() {
+            match statement {
+                MetaStatement::Include(include) => {
+                }
+                MetaStatement::Payload(payload) => {
+                    if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
+                        statements.extend(payload);
+                    }
+                }
+            }
+        }
+        let info_length = self.committee.len() / 3 + 1;
+        let parity_length = self.committee.len() - 1 - self.committee.len() / 3;
+        let encoded_statements = self.encode(statements, info_length, parity_length);
         for j in 0..self.last_own_block.len() {
             // Compress the references in the block
             // Iterate through all the include statements in the block, and make a set of all the references in their includes.
@@ -282,9 +274,7 @@ impl<H: BlockHandler> Core<H> {
                         }
                     }
                     MetaStatement::Payload(payload) => {
-                        if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
-                            statements.extend(payload);
-                        }
+
                     }
                 }
             }
@@ -293,19 +283,15 @@ impl<H: BlockHandler> Core<H> {
             let time_ns = timestamp_utc().as_nanos() + j as u128;
             // Todo change this once we track known transactions
             let acknowledgement_statements = includes.clone();
-            let encoded_statements = self.encode(statements.clone(), self.committee.len() / 3 + 1, self.committee.len() - 1 - self.committee.len() / 3);
-            let shard_size = encoded_statements[0].len();
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
                 includes.clone(),
                 acknowledgement_statements,
-                Some(statements.clone()),
                 time_ns,
                 self.epoch_changing(),
                 &self.signer,
-                shard_size as u64,
-                Option::from(encoded_statements)
+                encoded_statements.clone(),
             );
             blocks.push(new_block);
         }
@@ -337,7 +323,6 @@ impl<H: BlockHandler> Core<H> {
             }
             self.threshold_clock
                 .add_block(*block.reference(), &self.committee);
-            self.block_handler.handle_proposal(&block);
             self.proposed_block_stats(&block);
             let next_entry = if let Some((pos, _)) = self.pending.get(0) {
                 *pos
@@ -366,7 +351,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
 
-    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Shard> {
+    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
         let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
         let bytes_length = serialized.len();
         let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
@@ -379,13 +364,13 @@ impl<H: BlockHandler> Core<H> {
         }
         let length_with_padding = shard_bytes * info_length;
         statements_with_len.resize(length_with_padding, 0);
-        let mut data : Vec<Shard> = statements_with_len.chunks(shard_bytes).map(|chunk| chunk.to_vec()).collect();
+        let mut data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
         self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
         for shard in data.clone() {
-            self.encoder.add_original_shard(shard).expect("Adding shard failed");
+            self.encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
         }
         let result = self.encoder.encode().expect("Encoding failed");
-        let recovery: Vec<Shard> = result.recovery_iter().map(|slice| slice.to_vec()).collect();
+        let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
         data.extend(recovery);
         data
     }
@@ -400,19 +385,6 @@ impl<H: BlockHandler> Core<H> {
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
-        let mut votes = 0usize;
-        let mut transactions = 0usize;
-        for statement in block.statements() {
-            match statement {
-                BaseStatement::Share(_) => transactions += 1,
-                BaseStatement::Vote(_, _) => votes += 1,
-                BaseStatement::VoteRange(range) => votes += range.len(),
-            }
-        }
-        self.metrics
-            .proposed_block_transaction_count
-            .observe(transactions);
-        self.metrics.proposed_block_vote_count.observe(votes);
     }
 
     pub fn try_commit(&mut self) -> Vec<Data<StatementBlock>> {
@@ -598,7 +570,6 @@ mod test {
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
         for core in &mut cores {
-            core.run_block_handler(&[]);
             let block = core
                 .try_new_block()
                 .expect("Must be able to create block after genesis");
@@ -652,7 +623,6 @@ mod test {
             let mut proposed_transactions = vec![];
             let mut pending: Vec<_> = committee.authorities().map(|_| vec![]).collect();
             for core in &mut cores {
-                core.run_block_handler(&[]);
                 let block = core
                     .try_new_block()
                     .expect("Must be able to create block after genesis");
@@ -735,7 +705,6 @@ mod test {
         let mut proposed_transactions = vec![];
         let mut blocks = vec![];
         for core in &mut cores {
-            core.run_block_handler(&[]);
             let block = core
                 .try_new_block()
                 .expect("Must be able to create block after genesis");

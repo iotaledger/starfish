@@ -17,17 +17,22 @@ use crate::{
         TimestampNs,
     },
 };
+use rs_merkle::{Hasher, MerkleProof, MerkleTree};
+use rs_merkle::algorithms::Sha256;
+use crate::types::Shard;
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 
 pub const STATEMENT_DIGEST_SIZE: usize = 32;
 
+pub const MERKLE_DIGEST_SIZE: usize = 32;
+
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Default, Hash)]
 pub struct BlockDigest([u8; BLOCK_DIGEST_SIZE]);
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Default, Hash)]
-pub struct StatementDigest([u8; STATEMENT_DIGEST_SIZE]);
+pub struct MerkleRoot([u8; MERKLE_DIGEST_SIZE]);
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct PublicKey(ed25519_consensus::VerificationKey);
@@ -45,17 +50,60 @@ type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 #[cfg(test)]
 type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
-impl StatementDigest {
-    pub fn new_from_statements(statements: &Option<Vec<BaseStatement>>) -> Self {
-        let mut hasher = crypto::BlockHasher::default();
-        if statements.is_some() {
-            for statement in statements.as_ref().expect("Should be non-empty") {
-                statement.crypto_hash(&mut hasher);
-            }
-        } else {
-            panic!("Should not be called when statements are None");
+
+impl MerkleRoot {
+    pub fn new_from_encoded_statements(encoded_statements: &Vec<Option<Shard>>) -> Self {
+        let mut leaves: Vec<[u8; 32]> = Vec::new();
+        for shard in encoded_statements {
+            let mut hasher = crypto::BlockHasher::default();
+            shard.clone().unwrap().crypto_hash(&mut hasher);
+            let leaf = hasher.finalize().into();
+            leaves.push(leaf);
         }
-        Self(hasher.finalize().into())
+        let merkle_tree = MerkleTree::<Sha256>::from_leaves(&leaves);
+        let merkle_root = merkle_tree
+            .root()
+            .ok_or("couldn't get the merkle root")
+            .unwrap();
+        MerkleRoot(merkle_root)
+    }
+
+    pub fn check_correctness_merkle_root(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot) -> bool {
+        let mut leaves: Vec<[u8; 32]> = Vec::new();
+        for shard in encoded_statements {
+            let mut hasher = crypto::BlockHasher::default();
+            shard.clone().unwrap().crypto_hash(&mut hasher);
+            let leaf = hasher.finalize().into();
+            leaves.push(leaf);
+       }
+        let computed_merkle_tree = MerkleTree::<Sha256>::from_leaves(&leaves);
+        let computed_merkle_root = computed_merkle_tree
+            .root()
+            .ok_or("couldn't get the merkle root")
+            .unwrap();
+        computed_merkle_root == merkle_root.0
+    }
+
+    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize) -> bool {
+        let mut leaf_index = 0;
+        while leaf_index < encoded_statements.len() {
+            if encoded_statements[leaf_index].is_some() {
+                break;
+            }
+            leaf_index += 1;
+        }
+        let shard = encoded_statements[leaf_index].clone().unwrap();
+        let mut hasher = crypto::BlockHasher::default();
+        shard.crypto_hash(&mut hasher);
+        let mut leaf_to_prove: [u8; 32] = hasher.finalize().into();
+        let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
+        let result = proof.verify(
+            merkle_root.0,
+            &[leaf_index],
+            &[leaf_to_prove],
+            tree_size,
+        );
+        result
     }
 }
 impl BlockDigest {
@@ -64,10 +112,10 @@ impl BlockDigest {
         round: RoundNumber,
         includes: &[BlockReference],
         acknowledgement_statements: &Vec<BlockReference>,
-        hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
+        merkle_root: MerkleRoot,
     ) -> Self {
         let mut hasher = BlockHasher::default();
         Self::digest_without_signature(
@@ -76,9 +124,9 @@ impl BlockDigest {
             round,
             includes,
             acknowledgement_statements,
-            hash_statements,
             meta_creation_time_ns,
             epoch_marker,
+            merkle_root
         );
         hasher.update(signature);
         Self(hasher.finalize().into())
@@ -89,10 +137,10 @@ impl BlockDigest {
         round: RoundNumber,
         includes: &[BlockReference],
         acknowledgement_statements: &Vec<BlockReference>,
-        hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
+        merkle_root: MerkleRoot,
     ) -> Self {
         let mut hasher = BlockHasher::default();
         Self::digest_without_signature(
@@ -101,9 +149,9 @@ impl BlockDigest {
             round,
             includes,
             acknowledgement_statements,
-            hash_statements,
             meta_creation_time_ns,
             epoch_marker,
+            merkle_root,
         );
         hasher.update(signature);
         Self(hasher.finalize().into())
@@ -115,9 +163,9 @@ impl BlockDigest {
         round: RoundNumber,
         includes: &[BlockReference],
         acknowledgement_statements: &Vec<BlockReference>,
-        hash_statements: StatementDigest,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
+        merkle_root: MerkleRoot,
     ) {
         authority.crypto_hash(hasher);
         round.crypto_hash(hasher);
@@ -127,9 +175,9 @@ impl BlockDigest {
         for block_ref in acknowledgement_statements {
             block_ref.crypto_hash(hasher);
         }
-        hash_statements.crypto_hash(hasher);
         meta_creation_time_ns.crypto_hash(hasher);
         epoch_marker.crypto_hash(hasher);
+        merkle_root.crypto_hash(hasher);
     }
 }
 
@@ -162,6 +210,8 @@ impl CryptoHash for u64 {
     }
 }
 
+
+
 /*impl CryptoHash for StatementDigest {
     fn crypto_hash(&self, state: &mut impl Digest) {
         state.update(self.as_ref());
@@ -190,9 +240,9 @@ impl PublicKey {
             block.round(),
             block.includes(),
             block.acknowledgement_statements(),
-            block.hash_statements(),
             block.meta_creation_time_ns(),
             block.epoch_changed(),
+            block.merkle_root(),
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())
@@ -213,21 +263,20 @@ impl Signer {
         round: RoundNumber,
         includes: &[BlockReference],
         acknowledgement_statements: &Vec<BlockReference>,
-        statements: &Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
+        merkle_root: MerkleRoot,
     ) -> SignatureBytes {
         let mut hasher = BlockHasher::default();
-        let hash_statements = StatementDigest::new_from_statements(statements);
         BlockDigest::digest_without_signature(
             &mut hasher,
             authority,
             round,
             includes,
             acknowledgement_statements,
-            hash_statements,
             meta_creation_time_ns,
             epoch_marker,
+            merkle_root,
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         let signature = self.0.sign(digest.as_ref());
@@ -239,7 +288,7 @@ impl Signer {
     }
 }
 
-impl AsRef<[u8]> for StatementDigest {
+impl AsRef<[u8]> for MerkleRoot {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
@@ -257,7 +306,7 @@ impl AsRef<[u8]> for SignatureBytes {
     }
 }
 
-impl AsBytes for StatementDigest {
+impl AsBytes for MerkleRoot {
     fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -345,7 +394,7 @@ impl ByteRepr for BlockDigest {
     }
 }
 
-impl ByteRepr for StatementDigest {
+impl ByteRepr for MerkleRoot {
     fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
         if v.len() != BLOCK_DIGEST_SIZE {
             return Err(E::custom(format!(
@@ -359,20 +408,20 @@ impl ByteRepr for StatementDigest {
     }
 }
 
-impl fmt::Debug for StatementDigest {
+impl fmt::Debug for MerkleRoot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
         write!(f, "@{}", &hex_string[..2]) // Slice the first 2 characters and print
     }
 }
 
-impl fmt::Display for StatementDigest {
+impl fmt::Display for MerkleRoot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hex_string = hex::encode(self.0); // Encode the byte array into a hex string
         write!(f, "@{}", &hex_string[..2])
     }
 }
-impl Serialize for StatementDigest {
+impl Serialize for MerkleRoot {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(&self.0)
@@ -384,7 +433,7 @@ impl Serialize for BlockDigest {
         serializer.serialize_bytes(&self.0)
     }
 }
-impl<'de> Deserialize<'de> for StatementDigest {
+impl<'de> Deserialize<'de> for MerkleRoot {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_bytes(BytesVisitor::new())
     }

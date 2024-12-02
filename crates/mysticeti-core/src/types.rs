@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::crypto::StatementDigest;
+use crate::crypto::{MerkleRoot};
 use crate::{
     committee::{Committee, VoteRangeBuilder},
     crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
@@ -94,14 +94,7 @@ pub struct StatementBlock {
     // Transaction data acknowledgment
     acknowledgement_statements: Vec<BlockReference>,
 
-    // Hash of statements
-    hash_statements: StatementDigest,
-
-    // A list of base statements in order.
-    statements: Option<Vec<BaseStatement>>,
-
-
-    // Creation time of the block as reported by creator, currently not enforced
+        // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
 
     epoch_marker: EpochStatus,
@@ -112,9 +105,9 @@ pub struct StatementBlock {
     //should be even
     //encoder/decoder works with a batch of m=shard_size/2 codewords simultaneously,
     //so encoder encodes shard_size*k bytes of information, or k*m information symbols, each symbol needs 2 bytes
-    shard_size: u64,
-
-    encoded_statements: Option<Vec<Shard>>,
+    encoded_statements: Vec<Option<Shard>>,
+    // merkle root is computed for encoded_statements
+    merkle_root: MerkleRoot,
 
 }
 
@@ -145,12 +138,11 @@ impl StatementBlock {
             GENESIS_ROUND,
             vec![],
             vec![],
-            Some(vec![]),
             0,
             false,
             SignatureBytes::default(),
-            64,
-            Some(vec![]),
+            vec![None],
+            MerkleRoot::default(),
         ))
     }
 
@@ -159,33 +151,31 @@ impl StatementBlock {
         round: RoundNumber,
         includes: Vec<BlockReference>,
         acknowledgement_statements: Vec<BlockReference>,
-        statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
-        shard_size: u64,
-        encoded_statements: Option<Vec<Shard>>
+        encoded_statements: Vec<Option<Shard>>
     ) -> Self {
+        let merkle_root = MerkleRoot::new_from_encoded_statements(&encoded_statements);
         let signature = signer.sign_block(
             authority,
             round,
             &includes,
             &acknowledgement_statements,
-            &statements,
             meta_creation_time_ns,
             epoch_marker,
+            merkle_root,
         );
         Self::new(
             authority,
             round,
             includes,
             acknowledgement_statements,
-            statements,
             meta_creation_time_ns,
             epoch_marker,
             signature,
-            shard_size,
             encoded_statements,
+            merkle_root,
         )
     }
 
@@ -194,14 +184,12 @@ impl StatementBlock {
         round: RoundNumber,
         includes: Vec<BlockReference>,
         acknowledgement_statements: Vec<BlockReference>,
-        statements: Option<Vec<BaseStatement>>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
-        shard_size: u64,
-        encoded_statements: Option<Vec<Shard>>
+        encoded_statements: Vec<Option<Shard>>,
+        merkle_root: MerkleRoot,
     ) -> Self {
-        let hash_statements = StatementDigest::new_from_statements(&statements);
         Self {
             reference: BlockReference {
                 authority,
@@ -211,30 +199,24 @@ impl StatementBlock {
                     round,
                     &includes,
                     &acknowledgement_statements,
-                    hash_statements,
                     meta_creation_time_ns,
                     epoch_marker,
                     &signature,
+                    merkle_root,
                 ),
             },
             includes,
             acknowledgement_statements,
-            hash_statements,
-            statements,
             meta_creation_time_ns,
             epoch_marker,
             signature,
-            shard_size,
             encoded_statements,
+            merkle_root,
         }
     }
 
-    pub fn hash_statements(&self) -> StatementDigest {
-        self.hash_statements.clone()
-    }
-
-    pub fn shard_size(&self) -> u64 {
-        self.shard_size
+    pub fn merkle_root(&self) -> MerkleRoot {
+        self.merkle_root.clone()
     }
 
     pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
@@ -249,47 +231,15 @@ impl StatementBlock {
         &self.includes
     }
 
-    pub fn statements(&self) -> &Vec<BaseStatement> {
+
+
+    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
         &self
-            .statements
-            .as_ref()
-            .expect("Statement should not be empty")
+            .encoded_statements
     }
 
-    // Todo - we should change the block so that it has all shared transactions in one vec
-    // This way this function will always return single TransactionLocatorRange instead of a vec
-    pub fn shared_ranges(&self) -> Vec<TransactionLocatorRange> {
-        let mut ranges = Vec::new();
-        let mut vote_range_builder = VoteRangeBuilder::default();
-        for (offset, statement) in self.statements().iter().enumerate() {
-            if let BaseStatement::Share(_) = statement {
-                if let Some(range) = vote_range_builder.add(offset as u64) {
-                    let range = TransactionLocatorRange::new(self.reference, range);
-                    ranges.push(range);
-                }
-            }
-        }
-        if let Some(range) = vote_range_builder.finish() {
-            let range = TransactionLocatorRange::new(self.reference, range);
-            ranges.push(range);
-        }
-        ranges
-    }
 
-    pub fn shared_transactions(&self) -> impl Iterator<Item = (TransactionLocator, &Transaction)> {
-        let reference = *self.reference();
-        self.statements()
-            .iter()
-            .enumerate()
-            .filter_map(move |(pos, statement)| {
-                if let BaseStatement::Share(tx) = statement {
-                    let locator = TransactionLocator::new(reference, pos as u64);
-                    Some((locator, tx))
-                } else {
-                    None
-                }
-            })
-    }
+
 
     pub fn author(&self) -> AuthorityIndex {
         self.reference.authority
@@ -328,25 +278,17 @@ impl StatementBlock {
 
     pub fn verify(&self, committee: &Committee) -> eyre::Result<()> {
         let round = self.round();
-        if self.statements.is_some() {
-            let hash_statements = StatementDigest::new_from_statements(&self.statements);
-            ensure!(
-                hash_statements == self.hash_statements(),
-                "Hash statement calculated {:?}, provided {:?}",
-                hash_statements,
-                self.hash_statements()
-            );
-        }
+        // TODO: check correctness of encoded data/ chunks and merkle_root
 
         let digest = BlockDigest::new(
             self.author(),
             round,
             &self.includes,
             &self.acknowledgement_statements,
-            self.hash_statements,
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
+            self.merkle_root,
         );
         ensure!(
             digest == self.digest(),
@@ -377,14 +319,6 @@ impl StatementBlock {
                 include,
                 round
             );
-        }
-        for statement in self.statements() {
-            // Also check duplicate statements?
-            match statement {
-                BaseStatement::Share(_) => {}
-                BaseStatement::Vote(_, _) => {}
-                BaseStatement::VoteRange(range) => range.verify()?,
-            }
         }
         ensure!(
             threshold_clock_valid_non_genesis(self, committee),
@@ -577,16 +511,7 @@ impl<'a> fmt::Debug for Detailed<'a> {
             self.0.includes().len(),
             self.0.includes()
         )?;
-        if self.0.statements.is_some() {
-            write!(
-                f,
-                "statements({})={:?}",
-                self.0.statements().len(),
-                self.0.statements()
-            )?;
-        } else {
-            write!(f, "statements=None")?;
-        }
+
         writeln!(f, "}}")
     }
 }
@@ -598,9 +523,6 @@ impl fmt::Display for StatementBlock {
             write!(f, "{},", include)?;
         }
         write!(f, "](")?;
-        for statement in self.statements() {
-            write!(f, "{},", statement)?;
-        }
         write!(f, ")")
     }
 }
@@ -649,6 +571,12 @@ impl CryptoHash for TransactionLocator {
     fn crypto_hash(&self, state: &mut impl Digest) {
         self.block.crypto_hash(state);
         self.offset.crypto_hash(state);
+    }
+}
+
+impl CryptoHash for Shard {
+    fn crypto_hash(&self, state: &mut impl Digest) {
+        state.update(self);
     }
 }
 
@@ -783,13 +711,11 @@ mod test {
                 reference,
                 includes,
                 acknowledgement_statements,
-                hash_statements: StatementDigest::new_from_statements(&Some(vec![])),
-                statements: Some(vec![]),
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),
-                shard_size: 0,
-                encoded_statements: None,
+                encoded_statements: vec![],
+                merkle_root: MerkleRoot::default(),
             }
         }
 

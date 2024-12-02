@@ -29,13 +29,7 @@ use crate::{
 };
 
 pub trait BlockHandler: Send + Sync {
-    fn handle_blocks(
-        &mut self,
-        blocks: &[Data<StatementBlock>],
-        require_response: bool,
-    ) -> Vec<BaseStatement>;
 
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>);
 
     fn state(&self) -> Bytes;
 
@@ -142,66 +136,6 @@ impl RealBlockHandler {
 }
 
 impl BlockHandler for RealBlockHandler {
-    fn handle_blocks(
-        &mut self,
-        blocks: &[Data<StatementBlock>],
-        require_response: bool,
-    ) -> Vec<BaseStatement> {
-        let current_timestamp = runtime::timestamp_utc();
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("BlockHandler::handle_blocks");
-        let mut response = vec![];
-        if require_response {
-            while let Some(data) = self.receive_with_limit() {
-                for tx in data {
-                    response.push(BaseStatement::Share(tx));
-                }
-            }
-        }
-        let transaction_time = self.transaction_time.lock();
-        for block in blocks {
-            let response_option: Option<&mut Vec<BaseStatement>> = if require_response {
-                Some(&mut response)
-            } else {
-                None
-            };
-            if !self.consensus_only {
-                let processed =
-                    self.transaction_votes
-                        .process_block(block, response_option, &self.committee);
-                for processed_locator in processed {
-                    let block_creation = transaction_time.get(&processed_locator);
-                    let transaction = self
-                        .block_store
-                        .get_transaction(&processed_locator)
-                        .expect("Failed to get certified transaction");
-                    self.update_metrics(block_creation, &transaction, &current_timestamp);
-                }
-            }
-        }
-        self.metrics
-            .block_handler_pending_certificates
-            .set(self.transaction_votes.len() as i64);
-        response
-    }
-
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
-        // todo - this is not super efficient
-        self.pending_transactions -= block.shared_transactions().count();
-        let mut transaction_time = self.transaction_time.lock();
-        for (locator, _) in block.shared_transactions() {
-            transaction_time.insert(locator, TimeInstant::now());
-        }
-        if !self.consensus_only {
-            for range in block.shared_ranges() {
-                self.transaction_votes
-                    .register(range, self.authority, &self.committee);
-            }
-        }
-    }
-
     fn state(&self) -> Bytes {
         self.transaction_votes.state()
     }
@@ -258,62 +192,8 @@ impl TestBlockHandler {
 }
 
 impl BlockHandler for TestBlockHandler {
-    fn handle_blocks(
-        &mut self,
-        blocks: &[Data<StatementBlock>],
-        require_response: bool,
-    ) -> Vec<BaseStatement> {
-        // todo - this is ugly, but right now we need a way to recover self.last_transaction
-        let mut response = vec![];
-        if require_response {
-            for block in blocks {
-                if block.author() == self.authority {
-                    // We can see our own block in handle_blocks - this can happen during core recovery
-                    // Todo - we might also need to process pending Payload statements as well
-                    for statement in block.statements() {
-                        if let BaseStatement::Share(_) = statement {
-                            self.last_transaction += 1;
-                        }
-                    }
-                }
-            }
-            self.last_transaction += 1;
-            let next_transaction = Self::make_transaction(self.last_transaction);
-            response.push(BaseStatement::Share(next_transaction));
-        }
-        let transaction_time = self.transaction_time.lock();
-        for block in blocks {
-            tracing::debug!("Processing {block:?}");
-            let response_option: Option<&mut Vec<BaseStatement>> = if require_response {
-                Some(&mut response)
-            } else {
-                None
-            };
-            let processed =
-                self.transaction_votes
-                    .process_block(block, response_option, &self.committee);
-            for processed_locator in processed {
-                if let Some(instant) = transaction_time.get(&processed_locator) {
-                    self.metrics
-                        .transaction_certified_latency
-                        .observe(instant.elapsed());
-                }
-            }
-        }
-        response
-    }
 
-    fn handle_proposal(&mut self, block: &Data<StatementBlock>) {
-        let mut transaction_time = self.transaction_time.lock();
-        for (locator, _) in block.shared_transactions() {
-            transaction_time.insert(locator, TimeInstant::now());
-            self.proposed.push(locator);
-        }
-        for range in block.shared_ranges() {
-            self.transaction_votes
-                .register(range, self.authority, &self.committee);
-        }
-    }
+
 
     fn state(&self) -> Bytes {
         let state = (&self.transaction_votes.state(), &self.last_transaction);
@@ -447,26 +327,6 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
-                if !self.consensus_only {
-                    let processed =
-                        self.transaction_votes
-                            .process_block(block, None, &self.committee);
-                    for processed_locator in processed {
-                        if let Some(instant) = transaction_time.get(&processed_locator) {
-                            // todo - batch send data points
-                            self.metrics
-                                .certificate_committed_latency
-                                .observe(instant.elapsed());
-                        }
-                    }
-                }
-                for (locator, transaction) in block.shared_transactions() {
-                    self.update_metrics(
-                        transaction_time.get(&locator),
-                        current_timestamp,
-                        transaction,
-                    );
-                }
             }
             // self.committed_dags.push(commit);
         }

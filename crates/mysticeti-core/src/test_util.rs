@@ -30,6 +30,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
+use crate::crypto::MerkleRoot;
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -575,12 +576,11 @@ pub fn build_dag(
                     round,
                     includes.clone(),
                     acknowledgement_statements,
-                    Some(vec![]),
                     0,
                     false,
                     Default::default(),
-                    0,
-                    None
+                    vec![],
+                    MerkleRoot::default(),
                 ));
                 (*block.reference(), block)
             })
@@ -607,12 +607,11 @@ pub fn build_dag_layer(
             round,
             parents,
             acknowledgement_statements,
-            Some(vec![]),
             0,
             false,
             Default::default(),
-            0,
-            None
+            vec![],
+            MerkleRoot::default(),
         ));
 
         references.push(*block.reference());

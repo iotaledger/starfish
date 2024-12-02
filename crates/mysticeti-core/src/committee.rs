@@ -408,38 +408,7 @@ pub enum TransactionVoteResult {
 impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
     TransactionAggregator<TH, H>
 {
-    pub fn process_block(
-        &mut self,
-        block: &Data<StatementBlock>,
-        mut response: Option<&mut Vec<BaseStatement>>,
-        committee: &Committee,
-    ) -> Vec<TransactionLocator> {
-        let mut processed = vec![];
-        for range in block.shared_ranges() {
-            self.register(range, block.author(), committee);
-            if let Some(ref mut response) = response {
-                response.push(BaseStatement::VoteRange(range));
-            }
-        }
-        for statement in block.statements() {
-            match statement {
-                BaseStatement::Share(_transaction) => {}
-                BaseStatement::Vote(locator, vote) => match vote {
-                    Vote::Accept => self.vote(
-                        TransactionLocatorRange::one(*locator),
-                        block.author(),
-                        committee,
-                        &mut processed,
-                    ),
-                    Vote::Reject(_) => unimplemented!(),
-                },
-                BaseStatement::VoteRange(range) => {
-                    self.vote(*range, block.author(), committee, &mut processed);
-                }
-            }
-        }
-        processed
-    }
+
 }
 
 impl<TH: CommitteeThreshold> Default for StakeAggregator<TH> {

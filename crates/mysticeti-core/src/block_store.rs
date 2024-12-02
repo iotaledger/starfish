@@ -257,24 +257,6 @@ impl BlockStore {
         self.inner.read().block_exists(reference)
     }
 
-    pub fn get_transaction(&self, locator: &TransactionLocator) -> Option<Transaction> {
-        self.get_block(*locator.block())
-            .and_then(|block| {
-                block
-                    .statements()
-                    .get(locator.offset() as usize)
-                    .cloned()
-                    .map(|statement| {
-                        if let BaseStatement::Share(transaction) = statement {
-                            Some(transaction)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .flatten()
-    }
-
     pub fn len_expensive(&self) -> usize {
         let inner = self.inner.read();
         inner.index.values().map(HashMap::len).sum()

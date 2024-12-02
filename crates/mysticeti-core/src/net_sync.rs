@@ -583,51 +583,7 @@ mod sim_tests {
         print_stats(&syncers, &mut reporters);
     }
 
-    #[test]
-    fn test_finalization_epoch_safety() {
-        SimulatedExecutorState::run(rng_at_seed(0), test_finalization_safety_async());
-    }
 
-    async fn test_finalization_safety_async() {
-        // todo - no cleanup of block store
-        let n = 4;
-        let rounds_in_epoch = 10;
-        let (simulated_network, network_syncers, mut reporters) =
-            honest_simulated_network_syncers_with_epoch_duration(n, rounds_in_epoch);
-        simulated_network.connect_all().await;
-        let syncers = wait_for_epoch_to_close(network_syncers).await;
-        for syncer in &syncers {
-            let block_store = syncer.core().block_store();
-            let committee = syncer.core().committee().clone();
-            let latest_committed_leader =
-                syncer.commit_observer().committed_leaders().last().unwrap();
-
-            println!(
-                "Num of Committed leaders: {:?}",
-                syncer.commit_observer().committed_leaders()
-            );
-
-            let mut finalization_interpreter = FinalizationInterpreter::new(block_store, committee);
-            let finalized_tx_certifying_blocks =
-                finalization_interpreter.finalized_tx_certifying_blocks();
-
-            for (_, certificates) in finalized_tx_certifying_blocks {
-                // check if at least one certificate is committed
-                let mut committed = false;
-                for certifying_block in certificates {
-                    if block_store.linked(
-                        &block_store.get_block(*latest_committed_leader).unwrap(),
-                        &block_store.get_block(certifying_block).unwrap(),
-                    ) {
-                        committed = true;
-                        break;
-                    }
-                }
-                assert!(committed);
-            }
-        }
-        print_stats(&syncers, &mut reporters);
-    }
 
     #[test]
     fn test_network_sync_sim_all_up() {
