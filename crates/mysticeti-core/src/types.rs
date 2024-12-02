@@ -27,6 +27,7 @@ use std::{
 use digest::Digest;
 use eyre::{bail, ensure};
 use reed_solomon_simd::ReedSolomonEncoder;
+use rs_merkle::MerkleProof;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;
@@ -100,11 +101,10 @@ pub struct StatementBlock {
 
     // Signature by the block author
     signature: SignatureBytes,
-    //size of shard used in encoding/decoding
-    //should be even
-    //encoder/decoder works with a batch of m=shard_size/2 codewords simultaneously,
-    //so encoder encodes shard_size*k bytes of information, or k*m information symbols, each symbol needs 2 bytes
+    // It could be either vector of Nones, vector of Somes or a vector with one Some
     encoded_statements: Vec<Option<Shard>>,
+    // This is Some only when the above is a vector with 1 Some and all other Nones
+    merkle_proof:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     merkle_root: MerkleRoot,
 
@@ -141,6 +141,7 @@ impl StatementBlock {
             false,
             SignatureBytes::default(),
             vec![None],
+            None,
             MerkleRoot::default(),
         ))
     }
@@ -174,6 +175,7 @@ impl StatementBlock {
             epoch_marker,
             signature,
             encoded_statements,
+            None,
             merkle_root,
         )
     }
@@ -187,6 +189,7 @@ impl StatementBlock {
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
         encoded_statements: Vec<Option<Shard>>,
+        merkle_proof: Option<Vec<u8>>,
         merkle_root: MerkleRoot,
     ) -> Self {
         Self {
@@ -210,6 +213,7 @@ impl StatementBlock {
             epoch_marker,
             signature,
             encoded_statements,
+            merkle_proof,
             merkle_root,
         }
     }
@@ -707,6 +711,7 @@ mod test {
                 epoch_marker: false,
                 signature: Default::default(),
                 encoded_statements: vec![],
+                merkle_proof: None,
                 merkle_root: MerkleRoot::default(),
             }
         }

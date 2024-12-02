@@ -298,7 +298,6 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
         let commit_handler = TestCommitHandler::new(
             committee.clone(),
-            core.block_handler().transaction_time.clone(),
             core.metrics.clone(),
         );
         let node_context = OverrideNodeContext::enter(Some(core.authority()));
@@ -570,6 +569,7 @@ pub fn build_dag(
                     false,
                     Default::default(),
                     vec![],
+                    None,
                     MerkleRoot::default(),
                 ));
                 (*block.reference(), block)
@@ -601,6 +601,7 @@ pub fn build_dag_layer(
             false,
             Default::default(),
             vec![],
+            None,
             MerkleRoot::default(),
         ));
 
