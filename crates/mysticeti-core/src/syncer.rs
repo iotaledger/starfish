@@ -157,8 +157,7 @@ mod tests {
     use crate::{
         block_handler::{TestBlockHandler, TestCommitHandler},
         data::Data,
-        simulator::{Scheduler, Simulator, SimulatorState},
-        test_util::{check_commits, committee_and_syncers, rng_at_seed},
+        simulator::{Scheduler, SimulatorState},
     };
 
     const ROUND_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -207,77 +206,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    pub fn test_syncer() {
-        for seed in 0..10 {
-            test_syncer_at(seed);
-        }
-    }
-
-    pub fn test_syncer_at(seed: u64) {
-        eprintln!("Seed {seed}");
-        let rng = rng_at_seed(seed);
-        let (committee, syncers) = committee_and_syncers(4);
-        let mut simulator = Simulator::new(syncers, rng);
-
-        // Kick off process by asking validators create a block after genesis
-        for authority in committee.authorities() {
-            simulator.schedule_event(
-                Duration::ZERO,
-                authority as usize,
-                SyncerEvent::ForceNewBlock(0),
-            );
-        }
-        // Simulation awaits for first num_txn transactions proposed by each authority to certify
-        let num_txn = 40;
-        let mut await_transactions = vec![];
-        let await_num_txn = num_txn as usize * committee.len();
-
-        let mut iteration = 0u64;
-        loop {
-            iteration += 1;
-            assert!(!simulator.run_one());
-            // todo - we might want to wait for exactly num_txn from each authority, rather then num_txn as usize * committee.len() total
-            if await_transactions.len() < await_num_txn {
-                for state in simulator.states_mut() {
-                    await_transactions.extend(state.core.block_handler_mut().proposed.drain(..))
-                }
-                continue;
-            }
-            let not_certified: Vec<_> = simulator
-                .states()
-                .iter()
-                .map(|syncer| {
-                    await_transactions
-                        .iter()
-                        .map(|txid| {
-                            if syncer.core.block_handler().is_certified(txid) {
-                                0usize
-                            } else {
-                                1usize
-                            }
-                        })
-                        .sum::<usize>()
-                })
-                .collect();
-
-            if not_certified.iter().sum::<usize>() == 0 {
-                let time = simulator.time();
-                let rounds = simulator
-                    .states()
-                    .iter()
-                    .map(|syncer| syncer.core.last_proposed())
-                    .max()
-                    .unwrap();
-                eprintln!("Certified {} transactions in {time:.2?}, {rounds} rounds, {iteration} iterations", await_transactions.len());
-                check_commits(simulator.states());
-                break;
-            } /*else if iteration % 100 == 0 {
-                  eprintln!("Not certified: {not_certified:?}");
-              }*/
         }
     }
 }

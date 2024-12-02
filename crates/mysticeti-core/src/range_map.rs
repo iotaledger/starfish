@@ -140,9 +140,6 @@ impl<K: Ord + Copy + PartialEq, V: Clone> RangeMap<K, V> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
 }
 
 impl<K: fmt::Debug + Ord, V: fmt::Debug> fmt::Debug for RangeMap<K, V> {

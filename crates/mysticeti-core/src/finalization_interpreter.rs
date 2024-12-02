@@ -11,7 +11,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     data::Data,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, StatementBlock, TransactionLocator, Vote,
+        AuthorityIndex, BlockReference, StatementBlock, TransactionLocator,
     },
 };
 

@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::fmt;
 
 use digest::Digest;
@@ -13,18 +12,17 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, EpochStatus, RoundNumber, StatementBlock,
+        AuthorityIndex, BlockReference, EpochStatus, RoundNumber, StatementBlock,
         TimestampNs,
     },
 };
-use rs_merkle::{Hasher, MerkleProof, MerkleTree};
+use rs_merkle::{MerkleProof, MerkleTree};
 use rs_merkle::algorithms::Sha256;
 use crate::types::Shard;
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 
-pub const STATEMENT_DIGEST_SIZE: usize = 32;
 
 pub const MERKLE_DIGEST_SIZE: usize = 32;
 
@@ -95,7 +93,7 @@ impl MerkleRoot {
         let shard = encoded_statements[leaf_index].clone().unwrap();
         let mut hasher = crypto::BlockHasher::default();
         shard.crypto_hash(&mut hasher);
-        let mut leaf_to_prove: [u8; 32] = hasher.finalize().into();
+        let leaf_to_prove: [u8; 32] = hasher.finalize().into();
         let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
         let result = proof.verify(
             merkle_root.0,

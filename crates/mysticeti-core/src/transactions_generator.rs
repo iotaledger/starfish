@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{ClientParameters, NodePublicConfig},
-    crypto::AsBytes,
     metrics::Metrics,
     runtime::{self, timestamp_utc},
     types::{AuthorityIndex, Transaction},
@@ -104,12 +103,5 @@ impl TransactionGenerator {
                 tx_to_report = 0
             }
         }
-    }
-
-    pub fn extract_timestamp(transaction: &Transaction) -> Duration {
-        let bytes = transaction.as_bytes()[0..8]
-            .try_into()
-            .expect("Transactions should be at least 8 bytes");
-        Duration::from_millis(u64::from_le_bytes(bytes))
     }
 }

@@ -21,8 +21,8 @@ use crate::{
     data::Data,
     range_map::RangeMap,
     types::{
-        AuthorityIndex, AuthoritySet, BaseStatement, BlockReference, Stake, StatementBlock,
-        TransactionLocator, TransactionLocatorRange, Vote,
+        AuthorityIndex, AuthoritySet, BlockReference, Stake, StatementBlock,
+        TransactionLocator, TransactionLocatorRange,
     },
 };
 
@@ -342,47 +342,6 @@ impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
                 *aggregator_opt = Some(aggregator);
             }
         });
-    }
-
-    fn vote(
-        &mut self,
-        locator_range: TransactionLocatorRange,
-        vote: AuthorityIndex,
-        committee: &Committee,
-        processed: &mut Vec<TransactionLocator>,
-    ) {
-        if let Some(range_map) = self.pending.get_mut(locator_range.block()) {
-            range_map.mutate_range(locator_range.range(), |range, aggregator_opt| {
-                match aggregator_opt {
-                    None => {
-                        for l in range {
-                            let k = TransactionLocator::new(*locator_range.block(), l);
-                            // todo - make unknown_transaction take TransactionLocatorRange instead
-                            self.handler.unknown_transaction(k, vote);
-                        }
-                    }
-                    Some(aggregator) => {
-                        if aggregator.add(vote, committee) {
-                            for l in range {
-                                let k = TransactionLocator::new(*locator_range.block(), l);
-                                // todo - make transaction_processed take TransactionLocatorRange instead
-                                self.handler.transaction_processed(k);
-                                processed.push(k);
-                            }
-                            *aggregator_opt = None;
-                        }
-                    }
-                }
-            });
-            if range_map.is_empty() {
-                self.pending.remove(locator_range.block());
-            }
-        } else {
-            for l in locator_range.locators() {
-                // todo - make unknown_transaction take TransactionLocatorRange instead
-                self.handler.unknown_transaction(l, vote);
-            }
-        }
     }
 
     pub fn len(&self) -> usize {

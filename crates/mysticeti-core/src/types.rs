@@ -17,7 +17,6 @@ pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
 
 
-use std::collections::HashSet;
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -34,7 +33,7 @@ pub use test::Dag;
 
 use crate::crypto::{MerkleRoot};
 use crate::{
-    committee::{Committee, VoteRangeBuilder},
+    committee::{Committee},
     crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
     data::Data,
     threshold_clock::threshold_clock_valid_non_genesis,
@@ -360,13 +359,6 @@ impl TransactionLocator {
 }
 
 impl TransactionLocatorRange {
-    pub(crate) fn new(block: BlockReference, range: Range<u64>) -> Self {
-        Self {
-            block,
-            offset_start_inclusive: range.start,
-            offset_end_exclusive: range.end,
-        }
-    }
 
     pub fn one(locator: TransactionLocator) -> Self {
         Self {

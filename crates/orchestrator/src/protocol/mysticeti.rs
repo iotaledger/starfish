@@ -50,7 +50,7 @@ impl Display for MysticetiNodeParameters {
         if self.consensus_only {
             write!(f, "Consensus-only mode")
         } else {
-            write!(f, "FPC mode")
+            write!(f, "FPC mode (not supported)")
         }
     }
 }

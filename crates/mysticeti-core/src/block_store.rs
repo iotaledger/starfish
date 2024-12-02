@@ -13,7 +13,6 @@ use std::{
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 
 use crate::{
     committee::Committee,
@@ -22,12 +21,10 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     state::{RecoveredState, RecoveredStateBuilder},
     types::{
-        AuthorityIndex, BaseStatement, BlockDigest, BlockReference, RoundNumber, StatementBlock,
-        Transaction, TransactionLocator,
+        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, StatementBlock,
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
-use crate::types::{Encoder, Shard};
 
 #[allow(unused)]
 #[derive(Clone, Debug)]

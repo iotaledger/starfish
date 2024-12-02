@@ -97,10 +97,8 @@ impl Validator {
                 .expect("Failed to open committed transaction log for write");
         let commit_handler = TestCommitHandler::new_with_handler(
             committee.clone(),
-            block_handler.transaction_time.clone(),
             metrics.clone(),
             committed_transaction_log,
-            public_config.parameters.consensus_only,
         );
         let core = Core::open(
             block_handler,

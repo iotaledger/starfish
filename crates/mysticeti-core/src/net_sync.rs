@@ -221,7 +221,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
                 NetworkMessage::Block(block) => {
-                    let mut timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
+                    let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
 
                     tracing::debug!("Received {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee) {
@@ -500,7 +500,6 @@ mod sim_tests {
     use crate::{
         block_handler::{TestBlockHandler, TestCommitHandler},
         config,
-        finalization_interpreter::FinalizationInterpreter,
         future_simulator::SimulatedExecutorState,
         runtime,
         simulator_tracing::setup_simulator_tracing,
