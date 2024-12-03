@@ -16,6 +16,7 @@ use serde::{
     de::{DeserializeOwned, Error},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use crate::types::StatementBlock;
 
 /// Data<T> carries both the value and it's serialized bytes.
 /// When Data is created, it's value is serialized into a cache variable.
@@ -60,6 +61,13 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
 
     pub fn serialized_bytes(&self) -> &Bytes {
         &self.0.serialized
+    }
+}
+
+impl Into<StatementBlock> for Data<StatementBlock> {
+
+    fn into(self) -> StatementBlock {
+        self.0.t.clone()
     }
 }
 

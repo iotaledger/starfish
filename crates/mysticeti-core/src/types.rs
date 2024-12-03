@@ -292,10 +292,11 @@ impl StatementBlock {
                 ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, Some(authority_index as usize)),
                 "Merkle proof check failed");
                 }
-            information_size => {
+            x if x==information_size => {
                 let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
                 encoder.reset(information_size, committee_size - information_size, shard_size);
-                for shard in self.encoded_statements().clone() {
+                for shard_index in 0..information_size {
+                    let shard = self.encoded_statements()[shard_index].clone();
                     encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
                 }
                 let result = encoder.encode().expect("Encoding failed");

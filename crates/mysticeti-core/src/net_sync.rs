@@ -33,8 +33,9 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
+use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
-use crate::types::Encoder;
+use crate::types::{Encoder, StatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -225,9 +226,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         disseminator.disseminate_all_blocks_push().await;
                     }
                 }
-                NetworkMessage::Block(mut block) => {
+                NetworkMessage::Block(data_block) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-
+                    let mut block: StatementBlock = data_block.into();
                     tracing::debug!("Received {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
                         tracing::warn!(
@@ -241,8 +242,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
 
                     drop(timer);
-
-                    inner.syncer.add_blocks(vec![block]).await;
+                    let data_block = Data::new(block);
+                    inner.syncer.add_blocks(vec![data_block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
@@ -252,8 +253,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             required_blocks.push(block);
                         }
                     }
-                    let mut verified_blocks = Vec::new();
-                    for mut block in required_blocks {
+                    let mut verified_data_blocks = Vec::new();
+                    for data_block in required_blocks {
+                        let mut block: StatementBlock = data_block.into();
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
                             tracing::warn!(
@@ -265,11 +267,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
-                        verified_blocks.push(block);
+                        let data_block = Data::new(block);
+                        verified_data_blocks.push(data_block);
                     }
                     drop(timer);
-                    if !verified_blocks.is_empty() {
-                        inner.syncer.add_blocks(verified_blocks).await;
+                    if !verified_data_blocks.is_empty() {
+                        inner.syncer.add_blocks(verified_data_blocks).await;
                     }
                 }
 
