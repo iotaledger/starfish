@@ -38,6 +38,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 pub enum NetworkMessage {
     SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
     Block(Data<StatementBlock>),
+    // A batch of blocks is sent
     Batch(Vec<Data<StatementBlock>>),
     /// Request a few specific block references (this is not indented for large requests).
     RequestBlocks(Vec<BlockReference>),

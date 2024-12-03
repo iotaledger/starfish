@@ -141,13 +141,13 @@ where
             .ok()
     }
 
-    pub async fn disseminate_own_blocks_v1(&mut self, round: RoundNumber) {
+    pub async fn disseminate_only_own_blocks(&mut self, round: RoundNumber) {
         if let Some(existing) = self.own_blocks.take() {
             existing.abort();
             existing.await.ok();
         }
 
-        let handle = Handle::current().spawn(Self::stream_own_blocks_v1(
+        let handle = Handle::current().spawn(Self::stream_only_own_blocks(
             self.universal_committer.clone(),
             self.to_whom_authority_index,
             self.sender.clone(),
@@ -164,7 +164,7 @@ where
             existing.await.ok();
         }
 
-        let handle = Handle::current().spawn(Self::stream_own_blocks_v2(
+        let handle = Handle::current().spawn(Self::disseminate_own_blocks_and_encoded_past_blocks(
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
@@ -173,7 +173,7 @@ where
         self.push_blocks = Some(handle);
     }
 
-    async fn stream_own_blocks_v1(
+    async fn stream_only_own_blocks(
         universal_committer: UniversalCommitter,
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
@@ -241,7 +241,8 @@ where
                         &mut round,
                         batch_size,
                     )
-                    .await?;
+                        .await?;
+
                 }
             }
             notified.await;
@@ -253,7 +254,7 @@ where
         }
     }
 
-    async fn stream_own_blocks_v2(
+    async fn disseminate_own_blocks_and_encoded_past_blocks(
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
