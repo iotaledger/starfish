@@ -50,7 +50,7 @@ type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
 
 impl MerkleRoot {
-    pub fn new_from_encoded_statements(encoded_statements: &Vec<Option<Shard>>) -> Self {
+    pub fn new_from_encoded_statements(encoded_statements: &Vec<Option<Shard>>, authority_index: AuthorityIndex) -> (MerkleRoot, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
             let mut hasher = crypto::BlockHasher::default();
@@ -63,7 +63,10 @@ impl MerkleRoot {
             .root()
             .ok_or("couldn't get the merkle root")
             .unwrap();
-        MerkleRoot(merkle_root)
+        let indices_to_prove = vec![authority_index as usize];
+        let merkle_proof = merkle_tree.proof(&indices_to_prove);
+        let merkle_proof_bytes =merkle_proof.to_bytes();
+        (MerkleRoot(merkle_root), merkle_proof_bytes)
     }
 
     pub fn check_correctness_merkle_root(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot) -> bool {

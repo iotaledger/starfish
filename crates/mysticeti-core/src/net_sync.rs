@@ -212,10 +212,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                                   4,
                                                   64).unwrap();
 
-        let id = connection.peer_id as AuthorityIndex;
-        inner.syncer.authority_connection(id, true).await;
+        let peer_id = connection.peer_id as AuthorityIndex;
+        inner.syncer.authority_connection(peer_id, true).await;
 
-        let peer = format_authority_index(id);
+        let peer = format_authority_index(peer_id);
+        let own_id = inner.block_store.get_own_authority_index();
+
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
                 NetworkMessage::SubscribeOwnFrom(round) => {
@@ -230,7 +232,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
                     let mut block: StatementBlock = data_block.into();
                     tracing::debug!("Received {} from {}", block, peer);
-                    if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
+                    if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                         tracing::warn!(
                             "Rejected incorrect block {} from {}: {:?}",
                             block.reference(),
@@ -257,7 +259,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     for data_block in required_blocks {
                         let mut block: StatementBlock = data_block.into();
                         tracing::debug!("Received {} from {}", block, peer);
-                        if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
+                        if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),
@@ -298,9 +300,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             }
         }
-        inner.syncer.authority_connection(id, false).await;
+        inner.syncer.authority_connection(peer_id, false).await;
         disseminator.shutdown().await;
-        block_fetcher.remove_authority(id).await;
+        block_fetcher.remove_authority(peer_id).await;
         None
     }
 

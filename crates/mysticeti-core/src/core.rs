@@ -246,9 +246,11 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
         }
-        let info_length = self.committee.len() / 3 + 1;
-        let parity_length = self.committee.len() - 1 - self.committee.len() / 3;
+        let info_length = self.committee.info_length();
+        let parity_length = self.committee.len() - info_length;
         let encoded_statements = self.encode(statements, info_length, parity_length);
+
+
         for j in 0..self.last_own_block.len() {
             // Compress the references in the block
             // Iterate through all the include statements in the block, and make a set of all the references in their includes.
@@ -283,6 +285,7 @@ impl<H: BlockHandler> Core<H> {
             let time_ns = timestamp_utc().as_nanos() + j as u128;
             // Todo change this once we track known transactions
             let acknowledgement_statements = includes.clone();
+
             let new_block = StatementBlock::new_with_signer(
                 self.authority,
                 clock_round,

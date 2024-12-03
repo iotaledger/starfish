@@ -49,6 +49,7 @@ struct BlockStoreInner {
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
     authority: AuthorityIndex,
+    info_length: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     not_known_by_authority: Vec<BTreeSet<BlockReference>>,
@@ -90,6 +91,7 @@ impl BlockStore {
             authority,
             last_seen_by_authority,
             not_known_by_authority,
+            info_length: committee.info_length(),
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -298,8 +300,23 @@ impl BlockStore {
             .inner
             .read()
             .get_unknown_causal_history(to_whom_authority_index, limit);
-        self.read_index_vec(entries)
+        let data_blocks = self.read_index_vec(entries);
+        let mut changed_data_blocks = Vec::new();
+        let own_index = self.inner.read().authority;
+        let info_length = self.inner.read().info_length;
+        for data_block in data_blocks {
+            let mut block: StatementBlock = data_block.into();
+            if block.author() == own_index {
+                block.change_for_own_index(info_length);
+            } else {
+                block.change_for_not_own_index(own_index);
+            }
+            let changed_data_block = Data::new(block);
+            changed_data_blocks.push(changed_data_block);
+        }
+        changed_data_blocks
     }
+
 
     pub fn get_others_blocks(
         &self,

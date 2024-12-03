@@ -146,6 +146,19 @@ impl StatementBlock {
         ))
     }
 
+    pub fn change_for_own_index(&mut self, info_length: usize) {
+        for i in info_length..self.encoded_statements.len() {
+            self.encoded_statements[i] = None;
+        }
+    }
+    pub fn change_for_not_own_index(&mut self, authority_index: AuthorityIndex) {
+        for i in 0..self.encoded_statements.len() {
+            if i as AuthorityIndex != authority_index {
+                self.encoded_statements[i] = None;
+            }
+        }
+    }
+
     pub fn new_with_signer(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -154,9 +167,9 @@ impl StatementBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
-        encoded_statements: Vec<Option<Shard>>
+        encoded_statements: Vec<Option<Shard>>,
     ) -> Self {
-        let merkle_root = MerkleRoot::new_from_encoded_statements(&encoded_statements);
+        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority);
         let signature = signer.sign_block(
             authority,
             round,
@@ -175,7 +188,7 @@ impl StatementBlock {
             epoch_marker,
             signature,
             encoded_statements,
-            None,
+            Some(merkle_proof_bytes),
             merkle_root,
         )
     }
@@ -279,20 +292,19 @@ impl StatementBlock {
         Duration::new(secs as u64, nanos as u32)
     }
 
-    pub fn verify(&mut self, committee: &Committee, authority_index: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
+    pub fn verify(&mut self, committee: &Committee, own_id: AuthorityIndex, peer_id: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
         let round = self.round();
         let committee_size = committee.len();
         let information_size = committee.info_length();
         let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
 
-
         match number_somes {
             0 => {},
             1 => {
-                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, Some(authority_index as usize)),
+                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, Some(peer_id as usize)),
                 "Merkle proof check failed");
                 }
-            x if x==information_size => {
+            x if x>=information_size => {
                 let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
                 encoder.reset(information_size, committee_size - information_size, shard_size);
                 for shard_index in 0..information_size {
@@ -302,11 +314,17 @@ impl StatementBlock {
                 let result = encoder.encode().expect("Encoding failed");
                 let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
                 for i in information_size..committee_size {
-                    self.encoded_statements[i] = recovery[i].clone();
+                    self.encoded_statements[i] = recovery[i-information_size].clone();
                 }
-                ensure!(MerkleRoot::check_correctness_merkle_root(self.encoded_statements(), self.merkle_root), "Incorrect Merkle root");
-            },
-            _ => { bail!("Only three options are possible");}
+                let (computed_merkle_tree, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(self.encoded_statements(), own_id);
+
+                ensure!(computed_merkle_tree== self.merkle_root, "Incorrect Merkle root");
+
+                self.merkle_proof = Some(merkle_proof_bytes);
+            }
+            _ => {
+                bail!("Only three options are possible");
+            }
         }
 
         // TODO: check correctness of encoded data/ chunks and merkle_root
