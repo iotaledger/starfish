@@ -224,7 +224,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
 
                     tracing::debug!("Received {} from {}", block, peer);
-                    if let Err(e) = block.verify(&inner.committee) {
+                    if let Err(e) = block.verify(&inner.committee, id) {
                         tracing::warn!(
                             "Rejected incorrect block {} from {}: {:?}",
                             block.reference(),
@@ -250,7 +250,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let mut verified_blocks = Vec::new();
                     for block in required_blocks {
                         tracing::debug!("Received {} from {}", block, peer);
-                        if let Err(e) = block.verify(&inner.committee) {
+                        if let Err(e) = block.verify(&inner.committee, id) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),

@@ -10,7 +10,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-
+use eyre::bail;
 use minibytes::Bytes;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub struct Committee {
     authorities: Vec<Authority>,
     validity_threshold: Stake, // The minimum stake required for validity
     quorum_threshold: Stake,   // The minimum stake required for quorum
+    info_length: usize, // info length used for encoding
 }
 
 impl Committee {
@@ -39,6 +40,10 @@ impl Committee {
     pub fn new_test(stake: Vec<Stake>) -> Arc<Self> {
         let authorities = stake.into_iter().map(Authority::test_from_stake).collect();
         Self::new(authorities)
+    }
+
+    pub fn info_length(&self) -> usize {
+        self.info_length
     }
 
     pub fn new(authorities: Vec<Authority>) -> Arc<Self> {
@@ -58,10 +63,21 @@ impl Committee {
         }
         let validity_threshold = total_stake / 3;
         let quorum_threshold = 2 * total_stake / 3;
+
+
+        let committee_size = authorities.len();
+        let f = (committee_size - 1) / 3;
+        let info_length = match committee_size % 3 {
+            0 => {f+3},
+            1 => {f+1},
+            _ => {f+2},
+        };
+
         Arc::new(Committee {
             authorities,
             validity_threshold,
             quorum_threshold,
+            info_length,
         })
     }
 

@@ -279,8 +279,25 @@ impl StatementBlock {
         Duration::new(secs as u64, nanos as u32)
     }
 
-    pub fn verify(&self, committee: &Committee) -> eyre::Result<()> {
+    pub fn verify(&self, committee: &Committee, authority_index: AuthorityIndex) -> eyre::Result<()> {
         let round = self.round();
+        let committee_size = committee.len();
+        let f = (committee_size - 1) / 3;
+        let information_size = match committee_size % 3 {
+            0 => {f+3},
+            1 => {f+1},
+            2 => {f+2},
+            _ => { bail!("Only three options are possible");}
+        };
+        let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
+
+        match number_somes {
+            0 => {},
+            1 => {},
+            information_length => {},
+            _ => { bail!("Only three options are possible");}
+        }
+
         // TODO: check correctness of encoded data/ chunks and merkle_root
 
         let digest = BlockDigest::new(
