@@ -11,6 +11,7 @@ use std::{
 };
 
 use futures::future::join_all;
+use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::{
     select,
     sync::{mpsc, oneshot, Notify},
@@ -33,6 +34,7 @@ use crate::{
     wal::WalSyncer,
 };
 use crate::metrics::UtilizationTimerVecExt;
+use crate::types::Encoder;
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -205,6 +207,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             SynchronizerParameters::default(),
             metrics.clone(),
         );
+        let mut encoder = ReedSolomonEncoder::new(2,
+                                                  4,
+                                                  64).unwrap();
 
         let id = connection.peer_id as AuthorityIndex;
         inner.syncer.authority_connection(id, true).await;
@@ -220,11 +225,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         disseminator.disseminate_all_blocks_push().await;
                     }
                 }
-                NetworkMessage::Block(block) => {
+                NetworkMessage::Block(mut block) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
 
                     tracing::debug!("Received {} from {}", block, peer);
-                    if let Err(e) = block.verify(&inner.committee, id) {
+                    if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
                         tracing::warn!(
                             "Rejected incorrect block {} from {}: {:?}",
                             block.reference(),
@@ -248,9 +253,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                     let mut verified_blocks = Vec::new();
-                    for block in required_blocks {
+                    for mut block in required_blocks {
                         tracing::debug!("Received {} from {}", block, peer);
-                        if let Err(e) = block.verify(&inner.committee, id) {
+                        if let Err(e) = block.verify(&inner.committee, id, &mut encoder) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),

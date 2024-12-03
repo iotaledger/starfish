@@ -279,22 +279,32 @@ impl StatementBlock {
         Duration::new(secs as u64, nanos as u32)
     }
 
-    pub fn verify(&self, committee: &Committee, authority_index: AuthorityIndex) -> eyre::Result<()> {
+    pub fn verify(&mut self, committee: &Committee, authority_index: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
         let round = self.round();
         let committee_size = committee.len();
-        let f = (committee_size - 1) / 3;
-        let information_size = match committee_size % 3 {
-            0 => {f+3},
-            1 => {f+1},
-            2 => {f+2},
-            _ => { bail!("Only three options are possible");}
-        };
+        let information_size = committee.info_length();
         let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
+
 
         match number_somes {
             0 => {},
-            1 => {},
-            information_length => {},
+            1 => {
+                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, Some(authority_index as usize)),
+                "Merkle proof check failed");
+                }
+            information_size => {
+                let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
+                encoder.reset(information_size, committee_size - information_size, shard_size);
+                for shard in self.encoded_statements().clone() {
+                    encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
+                }
+                let result = encoder.encode().expect("Encoding failed");
+                let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
+                for i in information_size..committee_size {
+                    self.encoded_statements[i] = recovery[i].clone();
+                }
+                ensure!(MerkleRoot::check_correctness_merkle_root(self.encoded_statements(), self.merkle_root), "Incorrect Merkle root");
+            },
             _ => { bail!("Only three options are possible");}
         }
 

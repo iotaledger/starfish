@@ -82,14 +82,13 @@ impl MerkleRoot {
         computed_merkle_root == merkle_root.0
     }
 
-    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize) -> bool {
-        let mut leaf_index = 0;
-        while leaf_index < encoded_statements.len() {
-            if encoded_statements[leaf_index].is_some() {
-                break;
-            }
-            leaf_index += 1;
-        }
+    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index_wr: Option<usize>) -> bool {
+        let leaf_index = leaf_index_wr.unwrap_or_else(|| {
+            encoded_statements
+                .iter()
+                .position(|e| e.is_some())
+                .unwrap_or(encoded_statements.len())
+        });
         let shard = encoded_statements[leaf_index].clone().unwrap();
         let mut hasher = crypto::BlockHasher::default();
         shard.crypto_hash(&mut hasher);
