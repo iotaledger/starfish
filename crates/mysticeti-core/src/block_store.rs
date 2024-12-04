@@ -203,6 +203,10 @@ impl BlockStore {
         self.inner.write().update_dag(block_reference, parents);
     }
 
+    pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
+        self.inner.write().updated_unknown_by_others(block_reference);
+    }
+
     pub fn update_data_availability_and_cached_blocks(&self, block: &StatementBlock) {
         self.inner.write().update_data_availability_and_cached_blocks(block);
     }
@@ -597,6 +601,19 @@ pub fn get_blocks_at_authority_round(
             IndexEntry::Loaded(position, block),
         );
     }
+    // Update not known by authorities when the block gets recoverable after decoding
+    // This will send the block to others
+    pub fn updated_unknown_by_others(&mut self, block_reference: BlockReference) {
+        for authority in 0..self.not_known_by_authority.len() {
+            if authority == self.authority as usize
+                || authority == block_reference.authority as usize
+            {
+                continue;
+            }
+            self.not_known_by_authority[authority].insert(block_reference);
+        }
+    }
+
     // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
     // of the block, and we assume that others are not aware of this block
     pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {

@@ -280,8 +280,9 @@ impl<H: BlockHandler> Core<H> {
                 block.add_encoded_statements(recovered_statements);
                 block.set_merkle_proof(computed_merkle_proof);
                 let block = Data::new(block);
+                (&mut self.wal_writer, &self.block_store).insert_block(block.clone());
                 self.block_store.update_data_availability_and_cached_blocks(&block);
-                (&mut self.wal_writer, &self.block_store).insert_block(block);
+                self.block_store.updated_unknown_by_others(block.reference().clone());
             }
         }
     }
