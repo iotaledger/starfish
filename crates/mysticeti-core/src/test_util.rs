@@ -475,6 +475,7 @@ impl TestBlockWriter {
 
     pub fn add_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
         self.update_dag(block.reference().clone(), block.includes().clone());
+        self.update_data_availability_and_cached_blocks(&block);
         let pos = self
             .wal_writer
             .write(WAL_ENTRY_BLOCK, &bincode::serialize(&block).unwrap())
@@ -511,6 +512,11 @@ impl BlockWriter for TestBlockWriter {
     fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         (&mut self.wal_writer, &self.block_store).update_dag(block_reference, parents);
     }
+
+    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+        (&mut self.wal_writer, &self.block_store).update_data_availability_and_cached_blocks(block: &StatementBlock);
+    }
+
 
     fn insert_own_block(
         &mut self,

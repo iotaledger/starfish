@@ -45,6 +45,10 @@ pub struct BlockStore {
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
+    // Store the blocks for which we have transaction data
+    data_availability: HashSet<BlockDigest>,
+    // Store the blocks until the transaction data gets recoverable
+    cached_blocks: BTreeMap<BlockDigest, (StatementBlock, usize)>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
@@ -61,6 +65,8 @@ pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition;
 
     fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
+
+    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock);
 
     fn insert_own_block(
         &mut self,
@@ -137,6 +143,7 @@ impl BlockStore {
 
             // todo - we might need to sort all unprocessed blocks by rounds and run update with a loop
             inner.update_dag(block.reference().clone(), block.includes().clone());
+            inner.update_data_availability_and_cached_blocks(&block);
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
@@ -193,6 +200,11 @@ impl BlockStore {
     pub fn update_dag(&self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         self.inner.write().update_dag(block_reference, parents);
     }
+
+    pub fn update_data_availability_and_cached_blocks(&self, block: &StatementBlock) {
+        self.inner.write().update_data_availability_and_cached_blocks(block);
+    }
+
 
     // This function should be called when we send a block to a certain authority
     pub fn update_known_by_authority(
@@ -542,6 +554,20 @@ impl BlockStoreInner {
         }
     }
 
+
+    pub fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+        let committee_size = block.encoded_statements().len();
+        let count = block.encoded_statements().iter().filter(|x|x.is_some()).count();
+        if count < committee_size {
+            if !self.data_availability.contains(&block.digest()) {
+                self.cached_blocks.insert(block.digest(), (block.clone(), count));
+            }
+        } else {
+            self.data_availability.insert(block.digest());
+            self.cached_blocks.remove(&block.digest());
+        }
+    }
+
     pub fn update_known_by_authority(
         &mut self,
         block_reference: BlockReference,
@@ -695,6 +721,10 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
         self.1.update_dag(block_reference, parents);
     }
 
+    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+        self.1.update_data_availability_and_cached_blocks(block);
+    }
+
     fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
         let pos = self
             .0
@@ -722,6 +752,7 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
             *data.block.reference(),
             data.block.includes().clone(),
         );
+        self.1.update_data_availability_and_cached_blocks(&data.block);
     }
 }
 
