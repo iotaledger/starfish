@@ -285,8 +285,8 @@ impl BlockStore {
     }
 
 
-    pub fn is_sufficient_shards(&self, block: &StatementBlock) {
-        self.inner.write().is_sufficient_shards(block);
+    pub fn is_sufficient_shards(&self, block: &StatementBlock) -> bool {
+        self.inner.write().is_sufficient_shards(block)
     }
 
     pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {

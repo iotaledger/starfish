@@ -313,7 +313,7 @@ impl StatementBlock {
                 }
             x if x>=information_size => {
                 let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
-                encoder.reset(information_size, committee_size - information_size, shard_size);
+                encoder.reset(information_size, committee_size - information_size, shard_size).expect("encoder reset failed");
                 for shard_index in 0..information_size {
                     let shard = self.encoded_statements()[shard_index].clone();
                     encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");

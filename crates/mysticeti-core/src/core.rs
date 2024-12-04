@@ -218,7 +218,7 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn encode_shards(&mut self, mut data: Vec<Option<Shard>>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
-        let shard_bytes = data[0].as_ref().len();
+        let shard_bytes = data[0].as_ref().unwrap().len();
         self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
         for shard in data.clone() {
             self.encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
@@ -258,20 +258,21 @@ impl<H: BlockHandler> Core<H> {
             self.decoder.reset(info_length, parity_length, shard_size).expect("decoder reset failed");
             for i in 0..info_length {
                 if block.encoded_statements()[i].is_some() {
-                    self.decoder.add_original_shard(i, block.encoded_statements()[i].take()).expect("adding shard failed")
+                    self.decoder.add_original_shard(i, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
                 }
             }
             for i in info_length..self.committee.len() {
                 if block.encoded_statements()[i].is_some() {
-                    self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].take()).expect("adding shard failed")
+                    self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
                 }
             }
             let result = self.decoder.decode().expect("Decoding should be correct");
-            let data = block.encoded_statements()[..info_length].to_vec();
+            let mut data = block.encoded_statements()[..info_length].to_vec();
             let restored: HashMap<_, _> = result.restored_original_iter().collect();
             for el in restored {
                 data[el.0] = Some(Shard::from(el.1));
             }
+            drop(result);
 
             let recovered_statements = self.encode_shards(data, info_length, parity_length);
             let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority);
@@ -281,7 +282,6 @@ impl<H: BlockHandler> Core<H> {
                 let block = Data::new(block);
                 self.block_store.update_data_availability_and_cached_blocks(&block);
                 &mut (&mut self.wal_writer, &self.block_store).insert_block(block);
-                self.block_store.
             }
         }
     }

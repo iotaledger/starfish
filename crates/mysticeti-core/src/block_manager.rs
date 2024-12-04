@@ -149,7 +149,7 @@ mod tests {
             for block in iter {
                 let processed = bm.add_blocks(vec![block.clone()], &mut block_writer);
                 print!("Adding {:?}:", block.reference());
-                for (_, p) in processed {
+                for (_, p) in processed.0 {
                     print!("{:?},", p.reference());
                     if !processed_blocks.insert(p.reference().clone()) {
                         panic!("Block {:?} processed twice", p.reference());
