@@ -35,7 +35,7 @@ use crate::{
 };
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
-use crate::types::{Encoder, StatementBlock};
+use crate::types::{StatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -218,7 +218,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
 
-        let committee_size = inner.block_store.committee_size;
 
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {

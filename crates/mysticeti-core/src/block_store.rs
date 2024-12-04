@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use digest::Digest;
+
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

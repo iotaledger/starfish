@@ -147,9 +147,9 @@ mod tests {
             let mut bm = BlockManager::new(block_writer.block_store(), &dag.committee());
             let mut processed_blocks = HashSet::new();
             for block in iter {
-                let processed = bm.add_blocks(vec![block.clone()], &mut block_writer);
+                let processed = bm.add_blocks(vec![block.clone()], &mut block_writer).0;
                 print!("Adding {:?}:", block.reference());
-                for (_, p) in processed.0 {
+                for (_, p) in processed {
                     print!("{:?},", p.reference());
                     if !processed_blocks.insert(p.reference().clone()) {
                         panic!("Block {:?} processed twice", p.reference());

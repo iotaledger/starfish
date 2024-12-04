@@ -7,7 +7,6 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 use std::collections::HashMap;
-use eyre::ensure;
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;
@@ -203,6 +202,7 @@ impl<H: BlockHandler> Core<H> {
         let (processed, new_blocks_to_reconstruct) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+        self.reconstruct_data_blocks(new_blocks_to_reconstruct);
 
         let mut result = Vec::with_capacity(processed.len());
         for (position, processed) in processed.into_iter() {
@@ -242,7 +242,7 @@ impl<H: BlockHandler> Core<H> {
         }
         let length_with_padding = shard_bytes * info_length;
         statements_with_len.resize(length_with_padding, 0);
-        let mut data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
+        let data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
         self.encode_shards(data, info_length, parity_length)
     }
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockDigest>) {
@@ -261,7 +261,7 @@ impl<H: BlockHandler> Core<H> {
                     self.decoder.add_original_shard(i, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
                 }
             }
-            for i in info_length..self.committee.len() {
+            for i in info_length..total_length {
                 if block.encoded_statements()[i].is_some() {
                     self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
                 }
@@ -281,7 +281,7 @@ impl<H: BlockHandler> Core<H> {
                 block.set_merkle_proof(computed_merkle_proof);
                 let block = Data::new(block);
                 self.block_store.update_data_availability_and_cached_blocks(&block);
-                &mut (&mut self.wal_writer, &self.block_store).insert_block(block);
+                (&mut self.wal_writer, &self.block_store).insert_block(block);
             }
         }
     }

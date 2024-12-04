@@ -28,7 +28,6 @@ use std::{
 use digest::Digest;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use rs_merkle::MerkleProof;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 pub use test::Dag;

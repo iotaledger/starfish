@@ -121,13 +121,13 @@ impl BlockHandler for RealBlockHandler {
 }
 
 // Immediately votes and generates new transactions
+#[allow(dead_code)]
 pub struct TestBlockHandler {
     last_transaction: u64,
     transaction_votes: TransactionAggregator<QuorumThreshold>,
     pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
     committee: Arc<Committee>,
     authority: AuthorityIndex,
-
     metrics: Arc<Metrics>,
 }
 
