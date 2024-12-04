@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-
+use digest::Digest;
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,7 @@ struct BlockStoreInner {
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     info_length: usize,
+    committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     not_known_by_authority: Vec<BTreeSet<BlockReference>>,
@@ -98,6 +99,7 @@ impl BlockStore {
             last_seen_by_authority,
             not_known_by_authority,
             info_length: committee.info_length(),
+            committee_size: committee.len(),
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -206,6 +208,8 @@ impl BlockStore {
     }
 
 
+
+
     // This function should be called when we send a block to a certain authority
     pub fn update_known_by_authority(
         &self,
@@ -268,6 +272,26 @@ impl BlockStore {
         self.inner.read().block_exists(reference)
     }
 
+    pub fn shard_count(&self, digest: BlockDigest) -> usize {
+        self.inner.read().shard_count(digest)
+    }
+
+    pub fn get_new_shards_ids(&self, block: &StatementBlock) -> Vec<usize> {
+        self.inner.read().get_new_shards_ids(block)
+    }
+
+    pub fn update_with_new_shard(&self, block: &StatementBlock) {
+        self.inner.write().update_with_new_shard(block);
+    }
+
+
+    pub fn is_sufficient_shards(&self, block: &StatementBlock) {
+        self.inner.write().is_sufficient_shards(block);
+    }
+
+    pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {
+        self.inner.read().get_cached_block(digest)
+    }
     pub fn len_expensive(&self) -> usize {
         let inner = self.inner.read();
         inner.index.values().map(HashMap::len).sum()
@@ -416,7 +440,70 @@ impl BlockStoreInner {
         blocks.contains_key(&(reference.authority, reference.digest))
     }
 
-    pub fn get_blocks_at_authority_round(
+    pub fn shard_count(&self, digest: BlockDigest) -> usize {
+        if self.data_availability.contains(&digest) {
+            return self.committee_size;
+        }
+        self.cached_blocks.get(&digest).map_or(0, |x| x.1)
+    }
+
+    pub fn get_new_shards_ids(&self, block: &StatementBlock) -> Vec<usize> {
+        let block_digest = block.digest();
+        if self.data_availability.contains(&block_digest) {
+            return vec![];
+        }
+        // If the block is not in the cache
+        if !self.cached_blocks.contains_key(&block_digest) {
+            // Collect indices of `Some` encoded statements
+            return block
+                .encoded_statements()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, stmt)| if stmt.is_some() { Some(i) } else { None })
+                .collect();
+        }
+        // Get the cached block
+        let cached_block = &self.cached_blocks.get(&block_digest).expect("Cached block missing").0;
+        let cached_statements = cached_block.encoded_statements();
+        let block_statements = block.encoded_statements();
+
+        // Compare the cached and current block to collect new indices
+        let mut res = Vec::new();
+        for (i, (cached_stmt, block_stmt)) in cached_statements.iter().zip(block_statements).enumerate() {
+            if cached_stmt.is_none() && block_stmt.is_some() {
+                res.push(i);
+            }
+        }
+        res
+    }
+
+    pub fn update_with_new_shard(&mut self, block: &StatementBlock) {
+        if let Some(entry) = self.cached_blocks.get_mut(&block.digest()) {
+            let (cached_block, count) = entry;
+            for (index, encoded_shard) in block.encoded_statements().iter().enumerate() {
+                if let Some(encoded_shard) = encoded_shard {
+                    if cached_block.encoded_statements()[index].is_none() {
+                        cached_block.add_encoded_shard(index, encoded_shard.clone());
+                        *count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn is_sufficient_shards(&mut self, block: &StatementBlock) -> bool{
+        let count_shards = self.shard_count(block.digest());
+        if count_shards >= self.info_length {
+            return true;
+        }
+        return false
+    }
+
+    pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {
+        self.cached_blocks.get(&digest).expect("Cached block missing").0.clone()
+    }
+
+pub fn get_blocks_at_authority_round(
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,

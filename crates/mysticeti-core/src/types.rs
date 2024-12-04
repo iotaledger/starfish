@@ -15,6 +15,7 @@ pub type KeyPair = u64;
 pub type PublicKey = crate::crypto::PublicKey;
 pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
+pub type Decoder = ReedSolomonDecoder;
 
 
 use std::{
@@ -26,7 +27,7 @@ use std::{
 
 use digest::Digest;
 use eyre::{bail, ensure};
-use reed_solomon_simd::ReedSolomonEncoder;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use rs_merkle::MerkleProof;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -253,7 +254,13 @@ impl StatementBlock {
         &self
             .encoded_statements
     }
+    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
+        self.encoded_statements[position] = Some(shard);
+    }
 
+    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
+       self.encoded_statements = encoded_statements;
+    }
 
 
 
@@ -378,6 +385,10 @@ impl StatementBlock {
 
     pub fn detailed(&self) -> Detailed {
         Detailed(self)
+    }
+
+    pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
+        self.merkle_proof = Some(merkle_proof);
     }
 }
 

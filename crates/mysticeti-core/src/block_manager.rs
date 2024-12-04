@@ -13,6 +13,7 @@ use crate::{
     types::{BlockReference, StatementBlock},
     wal::WalPosition,
 };
+use crate::crypto::BlockDigest;
 
 /// Block manager suspends incoming blocks until they are connected to the existing graph,
 /// returning newly connected blocks
@@ -41,9 +42,10 @@ impl BlockManager {
         &mut self,
         blocks: Vec<Data<StatementBlock>>,
         block_writer: &mut impl BlockWriter,
-    ) -> Vec<(WalPosition, Data<StatementBlock>)> {
+    ) -> (Vec<(WalPosition, Data<StatementBlock>)>, HashSet<BlockDigest>) {
         let mut blocks: VecDeque<Data<StatementBlock>> = blocks.into();
         let mut newly_blocks_processed: Vec<(WalPosition, Data<StatementBlock>)> = vec![];
+        let mut recoverable_blocks: HashSet<BlockDigest> = HashSet::new();
         while let Some(block) = blocks.pop_front() {
             // Update the highest known round number.
 
@@ -52,6 +54,13 @@ impl BlockManager {
             if self.block_store.block_exists(*block_reference)
                 || self.blocks_pending.contains_key(block_reference)
             {
+                let position_indices =  self.block_store.get_new_shards_ids(&block);
+                if position_indices.len() > 0 {
+                    self.block_store.update_with_new_shard(&block);
+                     if self.block_store.is_sufficient_shards(&block) {
+                         recoverable_blocks.insert(block.digest());
+                     }
+                }
                 continue;
             }
 
@@ -84,7 +93,7 @@ impl BlockManager {
                 // Block can be added to the compact local DAG structure and update known/unknown blocks
                 block_writer.update_dag(block.reference().clone(), block.includes().clone());
 
-                // Block can be added to the compact local DAG structure and update known/unknown blocks
+                // Update data availability and cached blocks for this block for the first time
                 block_writer.update_data_availability_and_cached_blocks(&block);
 
 
@@ -92,7 +101,7 @@ impl BlockManager {
                 if let Some(waiting_references) =
                     self.block_references_waiting.remove(&block_reference)
                 {
-                    // For each reference see if its unblocked.
+                    // For each reference see if it's unblocked.
                     for waiting_block_reference in waiting_references {
                         let block_pointer = self.blocks_pending.get(&waiting_block_reference).expect("Safe since we ensure the block waiting reference has a valid primary key.");
 
@@ -111,7 +120,7 @@ impl BlockManager {
             }
         }
 
-        newly_blocks_processed
+        (newly_blocks_processed, recoverable_blocks)
     }
 
     pub fn missing_blocks(&self) -> &[HashSet<BlockReference>] {

@@ -6,7 +6,10 @@ use std::{
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
+use std::collections::HashMap;
+use eyre::ensure;
 use reed_solomon_simd::ReedSolomonEncoder;
+use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;
 
 use crate::{
@@ -32,7 +35,8 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
-use crate::types::{Encoder, Shard};
+use crate::crypto::{BlockDigest, MerkleRoot};
+use crate::types::{Encoder, Decoder, Shard};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -56,6 +60,7 @@ pub struct Core<H: BlockHandler> {
     committer: UniversalCommitter,
     //coding_engine : reed_solomon_simd::engine::DefaultEngine,
     encoder : Encoder,
+    decoder: Decoder,
 }
 
 pub struct CoreOptions {
@@ -145,6 +150,9 @@ impl<H: BlockHandler> Core<H> {
         let encoder = ReedSolomonEncoder::new(2,
                                               4,
                                               64).unwrap();
+        let decoder = ReedSolomonDecoder::new(2,
+                                              4,
+                                              64).unwrap();
         let this = Self {
             block_manager,
             pending,
@@ -164,6 +172,7 @@ impl<H: BlockHandler> Core<H> {
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
             encoder,
+            decoder,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -191,9 +200,10 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
-        let processed = self
+        let (processed, new_blocks_to_reconstruct) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+
         let mut result = Vec::with_capacity(processed.len());
         for (position, processed) in processed.into_iter() {
             self.threshold_clock
@@ -203,6 +213,77 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         result
+    }
+
+
+
+    pub fn encode_shards(&mut self, mut data: Vec<Option<Shard>>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
+        let shard_bytes = data[0].as_ref().len();
+        self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
+        for shard in data.clone() {
+            self.encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
+        }
+        let result = self.encoder.encode().expect("Encoding failed");
+        let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
+        data.extend(recovery);
+        data
+    }
+
+    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
+        let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
+        let bytes_length = serialized.len();
+        let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
+        statements_with_len.append(&mut serialized);
+        let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
+        //shard_bytes should be divisible by 64 in version 2.2.2
+        //it only needs to be even in a new version 3.0.1, but it requires a newer version of rust 1.80
+        if shard_bytes % 64 != 0 {
+            shard_bytes += 64 - shard_bytes % 64;
+        }
+        let length_with_padding = shard_bytes * info_length;
+        statements_with_len.resize(length_with_padding, 0);
+        let mut data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
+        self.encode_shards(data, info_length, parity_length)
+    }
+    pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockDigest>) {
+        let info_length = self.committee.info_length();
+        let parity_length = self.committee.len() - info_length;
+        let total_length = info_length + parity_length;
+
+        for block_digest in new_blocks_to_reconstruct {
+            let mut block = self.block_store.get_cached_block(block_digest);
+            let position =  block.encoded_statements().iter().position(|x| x.is_some());
+            let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
+            let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();
+            self.decoder.reset(info_length, parity_length, shard_size).expect("decoder reset failed");
+            for i in 0..info_length {
+                if block.encoded_statements()[i].is_some() {
+                    self.decoder.add_original_shard(i, block.encoded_statements()[i].take()).expect("adding shard failed")
+                }
+            }
+            for i in info_length..self.committee.len() {
+                if block.encoded_statements()[i].is_some() {
+                    self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].take()).expect("adding shard failed")
+                }
+            }
+            let result = self.decoder.decode().expect("Decoding should be correct");
+            let data = block.encoded_statements()[..info_length].to_vec();
+            let restored: HashMap<_, _> = result.restored_original_iter().collect();
+            for el in restored {
+                data[el.0] = Some(Shard::from(el.1));
+            }
+
+            let recovered_statements = self.encode_shards(data, info_length, parity_length);
+            let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority);
+            if computed_merkle_root == block.merkle_root() {
+                block.add_encoded_statements(recovered_statements);
+                block.set_merkle_proof(computed_merkle_proof);
+                let block = Data::new(block);
+                self.block_store.update_data_availability_and_cached_blocks(&block);
+                &mut (&mut self.wal_writer, &self.block_store).insert_block(block);
+                self.block_store.
+            }
+        }
     }
 
 
@@ -353,30 +434,6 @@ impl<H: BlockHandler> Core<H> {
         Some(return_blocks[0].clone())
     }
 
-
-    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
-        let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
-        let bytes_length = serialized.len();
-        let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
-        statements_with_len.append(&mut serialized);
-        let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
-        //shard_bytes should be divisible by 64 in version 2.2.2
-        //it only needs to be even in a new version 3.0.1, but it requires a newer version of rust 1.80
-        if shard_bytes % 64 != 0 {
-            shard_bytes += 64 - shard_bytes % 64;
-        }
-        let length_with_padding = shard_bytes * info_length;
-        statements_with_len.resize(length_with_padding, 0);
-        let mut data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
-        self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
-        for shard in data.clone() {
-            self.encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
-        }
-        let result = self.encoder.encode().expect("Encoding failed");
-        let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
-        data.extend(recovery);
-        data
-    }
 
     pub fn wal_syncer(&self) -> WalSyncer {
         self.wal_writer

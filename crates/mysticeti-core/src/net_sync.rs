@@ -218,6 +218,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
 
+        let committee_size = inner.block_store.committee_size;
+
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
                 NetworkMessage::SubscribeOwnFrom(round) => {
@@ -251,7 +253,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
                     let mut required_blocks = Vec::new();
                     for block in blocks {
-                        if !inner.block_store.block_exists(block.reference().clone()) {
+
+                        let new_shards_ids = inner.block_store.get_new_shards_ids(&block);
+                        if new_shards_ids.len() > 0 {
                             required_blocks.push(block);
                         }
                     }

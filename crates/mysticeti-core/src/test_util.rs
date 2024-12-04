@@ -514,7 +514,7 @@ impl BlockWriter for TestBlockWriter {
     }
 
     fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
-        (&mut self.wal_writer, &self.block_store).update_data_availability_and_cached_blocks(block: &StatementBlock);
+        (&mut self.wal_writer, &self.block_store).update_data_availability_and_cached_blocks(block);
     }
 
 
