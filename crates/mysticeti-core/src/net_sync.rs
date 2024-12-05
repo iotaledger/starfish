@@ -276,6 +276,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         verified_data_blocks.push(data_block);
                     }
                     drop(timer);
+                    tracing::debug!("To be processed after verification from {:?}, blocks {:?}", peer, verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }

@@ -730,33 +730,37 @@ pub fn get_blocks_at_authority_round(
         to_whom: AuthorityIndex,
         limit: usize,
     ) -> Vec<IndexEntry> {
-        let own_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
+        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| block_reference.authority == self.authority)
             .take(limit)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
-                    index_entry
+                    (index_entry, block_reference.round())
                 } else {
                     panic!("Block index corrupted, not found: {block_reference}");
                 }
             })
             .collect();
+        let max_round_own_blocks = own_blocks.iter().map(|own_block|own_block.1).max();
         let new_limit = limit.saturating_sub(own_blocks.len());
-        let other_blocks: Vec<IndexEntry> = self.not_known_by_authority[to_whom as usize]
+        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
-            .filter(|block_reference| block_reference.authority != self.authority)
+            .filter(|block_reference| block_reference.authority != self.authority && block_reference.round < max_round_own_blocks.unwrap())
             .take(new_limit)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
-                    index_entry
+                    (index_entry, block_reference.round())
                 } else {
                     panic!("Block index corrupted, not found: {block_reference}");
                 }
             })
             .collect();
 
-        own_blocks.into_iter().chain(other_blocks).collect()
+        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> = own_blocks.into_iter().chain(other_blocks).collect();
+        blocks_to_send.sort_by_key(|x| x.1);
+        blocks_to_send.iter().map(|x|x.0.clone()).collect()
+
     }
 
     pub fn get_others_blocks(

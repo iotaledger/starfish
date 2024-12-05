@@ -202,6 +202,7 @@ impl<H: BlockHandler> Core<H> {
         let (processed, new_blocks_to_reconstruct) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+        tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
         self.reconstruct_data_blocks(new_blocks_to_reconstruct);
 
         let mut result = Vec::with_capacity(processed.len());

@@ -69,35 +69,42 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .utilization_timer("Syncer::add_blocks");
         self.core.add_blocks(blocks);
         self.try_new_block();
+        self.try_new_commit();
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {
         if self.core.last_proposed() == round {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
-            self.try_new_block();
+            if self.try_new_block() {
+                self.try_new_commit();
+            }
             true
         } else {
             false
         }
     }
 
-    fn try_new_block(&mut self) {
+    fn try_new_block(&mut self) -> bool {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Syncer::try_new_block");
         if self.force_new_block
             || self
-                .core
-                .ready_new_block(self.commit_period, &self.connected_authorities)
+            .core
+            .ready_new_block(self.commit_period, &self.connected_authorities)
         {
             if self.core.try_new_block().is_some() {
                 self.signals.new_block_ready();
                 self.force_new_block = false;
+                return true;
             }
         }
-         // No need to commit after epoch is safe to close
+        return false;
+    }
+    fn try_new_commit(&mut self) {
+    // No need to commit after epoch is safe to close
         if self.core.epoch_closed() {
             return;
         };

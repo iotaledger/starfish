@@ -51,13 +51,16 @@ impl BlockManager {
 
             // check whether we have already processed this block and skip it if so.
             let block_reference = block.reference();
-            if self.block_store.block_exists(*block_reference)
+            let block_exists = self.block_store.block_exists(*block_reference);
+            if block_exists
                 || self.blocks_pending.contains_key(block_reference)
             {
                 let position_indices =  self.block_store.get_new_shards_ids(&block);
+                tracing::debug!("Positions {:?}, exists {:?}", position_indices, block_exists);
                 if position_indices.len() > 0 {
                     self.block_store.update_with_new_shard(&block);
                      if self.block_store.is_sufficient_shards(&block) {
+                         tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
                          recoverable_blocks.insert(block.digest());
                      }
                 }
