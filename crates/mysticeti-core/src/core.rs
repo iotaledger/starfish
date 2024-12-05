@@ -39,7 +39,7 @@ use crate::types::{Encoder, Decoder, Shard};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
-    pending: VecDeque<(WalPosition, MetaStatement)>,
+    pending: Vec<(WalPosition, MetaStatement)>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
@@ -115,7 +115,7 @@ impl<H: BlockHandler> Core<H> {
                 let reference = *block.reference();
                 threshold_clock.add_block(reference, &committee);
                 let position = block_writer.insert_block(block);
-                pending.push_back((position, MetaStatement::Include(reference)));
+                pending.push((position, MetaStatement::Include(reference)));
             }
             threshold_clock.add_block(*own_genesis_block.reference(), &committee);
             let own_block_data = OwnBlockData {
@@ -210,7 +210,7 @@ impl<H: BlockHandler> Core<H> {
             self.threshold_clock
                 .add_block(*processed.reference(), &self.committee);
             self.pending
-                .push_back((position, MetaStatement::Include(*processed.reference())));
+                .push((position, MetaStatement::Include(*processed.reference())));
             result.push(processed);
         }
         result
@@ -298,6 +298,35 @@ impl<H: BlockHandler> Core<H> {
         if clock_round <= self.last_proposed() {
             return None;
         }
+
+
+        // Temporarily extract Includes, leaving Payloads untouched
+        let mut include_positions: Vec<usize> = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, meta))| matches!(meta, MetaStatement::Include(_)))
+            .map(|(index, _)| index)
+            .collect();
+
+        // Sort the Include entries by round
+        include_positions.sort_by_key(|&index| {
+            if let MetaStatement::Include(block_ref) = &self.pending[index].1 {
+                block_ref.round()
+            } else {
+                unreachable!() // This should never happen
+            }
+        });
+
+        // Replace the sorted Include entries back into their original positions
+        let mut sorted_pending = self.pending.clone();
+        for (sorted_idx, original_idx) in include_positions.iter().enumerate() {
+            if let MetaStatement::Include(_) = sorted_pending[*original_idx].1 {
+                self.pending[*original_idx] = sorted_pending[include_positions[sorted_idx]].clone();
+            }
+        }
+
+
         let first_include_index = self
             .pending
             .iter()

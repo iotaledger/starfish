@@ -16,7 +16,7 @@ use crate::{
 pub struct RecoveredState {
     pub block_store: BlockStore,
     pub last_own_block: Option<OwnBlockData>,
-    pub pending: VecDeque<(WalPosition, MetaStatement)>,
+    pub pending: Vec<(WalPosition, MetaStatement)>,
     pub state: Option<Bytes>,
     pub unprocessed_blocks: Vec<Data<StatementBlock>>,
 
