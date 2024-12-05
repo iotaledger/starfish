@@ -318,11 +318,22 @@ impl<H: BlockHandler> Core<H> {
             }
         });
 
-        // Replace the sorted Include entries back into their original positions
-        let mut sorted_pending = self.pending.clone();
-        for (sorted_idx, original_idx) in include_positions.iter().enumerate() {
-            if let MetaStatement::Include(_) = sorted_pending[*original_idx].1 {
-                self.pending[*original_idx] = sorted_pending[include_positions[sorted_idx]].clone();
+        // Reorder the Include entries in place
+        for i in 0..include_positions.len() {
+            for j in (i + 1)..include_positions.len() {
+                let i_pos = include_positions[i];
+                let j_pos = include_positions[j];
+
+                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) = (
+                    &self.pending[i_pos].1,
+                    &self.pending[j_pos].1,
+                ) {
+                    if j_meta.round() < i_meta.round() {
+                        // Swap the positions and the entries directly
+                        self.pending.swap(i_pos, j_pos);
+                        include_positions.swap(i, j);
+                    }
+                }
             }
         }
 
