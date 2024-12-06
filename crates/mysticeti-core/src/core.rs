@@ -308,7 +308,7 @@ impl<H: BlockHandler> Core<H> {
             .filter(|(_, (_, meta))| matches!(meta, MetaStatement::Include(_)))
             .map(|(index, _)| index)
             .collect();
-
+        let total_includes = include_positions.len();
         // Sort the Include entries by round
         include_positions.sort_by_key(|&index| {
             if let MetaStatement::Include(block_ref) = &self.pending[index].1 {
@@ -469,7 +469,7 @@ impl<H: BlockHandler> Core<H> {
                 self.wal_writer.sync().expect("Wal sync failed");
             }
 
-            tracing::debug!("Created block {block:?}");
+            tracing::debug!("Created block {block:?} with refs {:?} and total include {:?}", block.includes().len(), total_includes);
             return_blocks.push(block);
             block_id += 1;
         }

@@ -218,7 +218,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
 
-
+        tracing::debug!("Connection from {} to {} is established", own_id, peer_id);
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
                 NetworkMessage::SubscribeOwnFrom(round) => {
@@ -339,6 +339,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("Timeout in round {round}");
                     // todo - more then one round timeout can happen, need to fix this
                     inner.syncer.force_new_block(round).await;
+                    tracing::debug!("DAG ={:?}", inner.block_store.get_dag_sorted());
                 }
                 _notified = notified => {
                     // restart loop

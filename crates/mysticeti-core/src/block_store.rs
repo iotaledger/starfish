@@ -175,6 +175,19 @@ impl BlockStore {
         self.inner.read().dag.clone()
     }
 
+    pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> {
+        let mut dag: Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> = self
+            .get_dag()
+            .iter()
+            .map(|(block_reference, refs_and_indices)| {
+                (block_reference.clone(), refs_and_indices.0.clone(), refs_and_indices.1.clone())
+            })
+            .collect();
+
+        dag.sort_by_key(|(block_reference, _, _)| block_reference.round());
+        dag
+    }
+
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
         self.inner.read().authority
     }
@@ -743,10 +756,11 @@ pub fn get_blocks_at_authority_round(
             })
             .collect();
         let max_round_own_blocks = own_blocks.iter().map(|own_block|own_block.1).max();
+        let max_round_own_blocks = max_round_own_blocks.unwrap_or(0 as RoundNumber);
         let new_limit = limit.saturating_sub(own_blocks.len());
         let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
-            .filter(|block_reference| block_reference.authority != self.authority && block_reference.round < max_round_own_blocks.unwrap())
+            .filter(|block_reference| (block_reference.authority != self.authority) && (block_reference.round < max_round_own_blocks))
             .take(new_limit)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
@@ -758,7 +772,7 @@ pub fn get_blocks_at_authority_round(
             .collect();
 
         let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> = own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1);
+        blocks_to_send.sort_by_key(|x| x.1 as u64);
         blocks_to_send.iter().map(|x|x.0.clone()).collect()
 
     }
