@@ -283,7 +283,7 @@ impl<H: BlockHandler> Core<H> {
                 let block = Data::new(block);
                 (&mut self.wal_writer, &self.block_store).insert_block(block.clone());
                 self.block_store.update_data_availability_and_cached_blocks(&block);
-                self.block_store.updated_unknown_by_others(block.reference().clone());
+                //self.block_store.updated_unknown_by_others(block.reference().clone());
             }
         }
     }

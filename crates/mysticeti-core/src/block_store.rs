@@ -192,6 +192,10 @@ impl BlockStore {
         self.inner.read().authority
     }
 
+    pub fn get_unknown_by_authority(&self, authority_index: AuthorityIndex) -> BTreeSet<BlockReference> {
+        self.inner.read().not_known_by_authority[authority_index as usize].clone()
+    }
+
     pub fn insert_block(
         &self,
         block: Data<StatementBlock>,

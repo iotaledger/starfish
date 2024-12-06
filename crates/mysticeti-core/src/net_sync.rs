@@ -232,7 +232,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::Block(data_block) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
                     let mut block: StatementBlock = data_block.into();
-                    tracing::debug!("Received {} from {}", block, peer);
+                    tracing::debug!("Received one block {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                         tracing::warn!(
                             "Rejected incorrect block {} from {}: {:?}",
@@ -304,6 +304,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             }
         }
+        tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
         inner.syncer.authority_connection(peer_id, false).await;
         disseminator.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;

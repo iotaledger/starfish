@@ -312,6 +312,7 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
+    tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
     let own_index = inner.block_store.get_own_authority_index();
     let blocks = inner
         .block_store
@@ -417,7 +418,7 @@ where
     async fn run(mut self) -> Option<()> {
         loop {
             tokio::select! {
-                _ = sleep(self.parameters.sample_precision) => self.sync_strategy().await,
+                _ = sleep(self.parameters.sample_precision) => {},//self.sync_strategy().await,
                 message = self.receiver.recv() => {
                     match message {
                         Some(BlockFetcherMessage::RegisterAuthority(authority, sender)) => {
