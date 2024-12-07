@@ -341,7 +341,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("Timeout in round {round}");
                     // todo - more then one round timeout can happen, need to fix this
                     inner.syncer.force_new_block(round).await;
-                    tracing::debug!("DAG ={:?}", inner.block_store.get_dag_sorted());
+
                 }
                 _notified = notified => {
                     // restart loop

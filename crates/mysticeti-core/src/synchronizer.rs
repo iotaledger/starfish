@@ -296,7 +296,6 @@ where
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
         *round = block.round();
         tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {block:?}");
-        tracing::debug!("DAG ={:?}", inner.block_store.get_dag_sorted());
         to.send(NetworkMessage::Block(block)).await.ok()?;
     }
     Some(())
@@ -323,7 +322,6 @@ where
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
     }
     tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {blocks:?}");
-    tracing::debug!("DAG ={:?}", inner.block_store.get_dag_sorted());
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
