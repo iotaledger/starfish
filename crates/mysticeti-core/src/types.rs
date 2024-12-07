@@ -916,6 +916,7 @@ mod test {
 
         let first_peer_index: AuthorityIndex = 1 as AuthorityIndex;
         let second_peer_index: AuthorityIndex = 2 as AuthorityIndex;
+        let third_peer_index: AuthorityIndex = 3 as AuthorityIndex;
         let own_index: AuthorityIndex = 0 as AuthorityIndex;
         let mut own_core = &mut cores[own_index as usize];
         let clock_round = 1;
@@ -946,6 +947,7 @@ mod test {
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
                                                   64).unwrap();
+        let mut original_full_block = full_block.clone();
         // Before sending remove Somes from parity symbols
         full_block.change_for_own_index(info_length);
 
@@ -954,15 +956,23 @@ mod test {
         let result_full_block = full_block.verify(&committee, first_peer_index, own_index, &mut encoder);
         assert!(result_full_block.is_ok());
 
-        let mut one_some_block = full_block.clone();
+        let mut one_some_block_from_first = full_block.clone();
         // Before sending between 1->2 leave one some
-        one_some_block.change_for_not_own_index(first_peer_index);
+        one_some_block_from_first.change_for_not_own_index(first_peer_index);
 
-        let result_one_some_block = one_some_block.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
+        let result_one_some_block = one_some_block_from_first.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
+        assert!(result_one_some_block.is_ok());
+
+        let mut one_some_block_from_second = original_full_block.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
+        // Before sending between 1->3 leave one some
+        original_full_block.change_for_not_own_index(second_peer_index);
+        let mut one_some_block_from_second = original_full_block;
+
+        let result_one_some_block = one_some_block_from_second.verify(&committee, third_peer_index, second_peer_index, &mut encoder);
         assert!(result_one_some_block.is_ok());
 
         // Now sending between 2->0
-        let mut none_block = one_some_block.clone();
+        let mut none_block = one_some_block_from_first.clone();
         // Before sending leave one some, but actually remove all of them
         none_block.change_for_not_own_index(second_peer_index);
 
