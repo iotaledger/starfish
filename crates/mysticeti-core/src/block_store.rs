@@ -57,7 +57,7 @@ struct BlockStoreInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    not_known_by_authority: Vec<BTreeSet<BlockReference>>,
+    not_known_by_authority: Vec<HashSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
 }
@@ -93,7 +93,7 @@ impl BlockStore {
         byzantine_strategy: String,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
-        let not_known_by_authority = committee.authorities().map(|_| BTreeSet::new()).collect();
+        let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
@@ -192,7 +192,7 @@ impl BlockStore {
         self.inner.read().authority
     }
 
-    pub fn get_unknown_by_authority(&self, authority_index: AuthorityIndex) -> BTreeSet<BlockReference> {
+    pub fn get_unknown_by_authority(&self, authority_index: AuthorityIndex) -> HashSet<BlockReference> {
         self.inner.read().not_known_by_authority[authority_index as usize].clone()
     }
 
