@@ -223,6 +223,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             match message {
                 NetworkMessage::SubscribeOwnFrom(round) => {
                     if inner.block_store.byzantine_strategy.is_some() {
+                        let round = 0;
                         disseminator.disseminate_only_own_blocks(round).await;
                     } else {
                         //disseminator.disseminate_only_own_blocks(round).await;
