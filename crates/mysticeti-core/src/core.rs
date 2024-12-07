@@ -184,6 +184,8 @@ impl<H: BlockHandler> Core<H> {
         this
     }
 
+    pub fn get_signer(&self) -> &Signer { &self.signer}
+
     pub fn get_universal_committer(&self) -> UniversalCommitter {
         self.committer.clone()
     }

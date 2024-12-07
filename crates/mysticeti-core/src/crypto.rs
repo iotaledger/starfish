@@ -39,7 +39,7 @@ pub struct PublicKey(ed25519_consensus::VerificationKey);
 pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 
 // Box ensures value is not copied in memory when Signer itself is moved around for better security
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 
 #[cfg(not(test))]
@@ -85,14 +85,9 @@ impl MerkleRoot {
         computed_merkle_root == merkle_root.0
     }
 
-    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index_wr: Option<usize>) -> bool {
-        let leaf_index = leaf_index_wr.unwrap_or_else(|| {
-            encoded_statements
-                .iter()
-                .position(|e| e.is_some())
-                .unwrap_or(encoded_statements.len())
-        });
-        let shard = encoded_statements[leaf_index].clone().unwrap();
+    // The function assumes that encoded_statements[leaf_index] is Some. Otherwise panics
+    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index: usize) -> bool {
+        let shard = encoded_statements[leaf_index].clone().expect("It was checked that this entry is Some");
         let mut hasher = crypto::BlockHasher::default();
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();

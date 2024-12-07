@@ -301,26 +301,31 @@ impl StatementBlock {
     pub fn verify(&mut self, committee: &Committee, own_id: AuthorityIndex, peer_id: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
         let round = self.round();
         let committee_size = committee.len();
-        let information_size = committee.info_length();
+        let info_size = committee.info_length();
+        let parity_size = committee_size-info_size;
         let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
-
+        let number_info_somes = self.encoded_statements.iter().enumerate().filter(|(i,s)|*i< info_size && s.is_some()).count();
         match number_somes {
             0 => {},
             1 => {
-                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, Some(peer_id as usize)),
+                let position = self.encoded_statements.iter().position(|s|s.is_some()).expect("Should be one some");
+                if position != peer_id as usize {
+                    bail!("The peer delivers a wrong encoded chunk");
+                }
+                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, position),
                 "Merkle proof check failed");
                 }
-            x if x>=information_size => {
+            x if x>= info_size && number_info_somes== info_size => {
                 let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
-                encoder.reset(information_size, committee_size - information_size, shard_size).expect("encoder reset failed");
-                for shard_index in 0..information_size {
+                encoder.reset(info_size, parity_size, shard_size).expect("encoder reset failed");
+                for shard_index in 0..info_size {
                     let shard = self.encoded_statements()[shard_index].clone();
                     encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
                 }
                 let result = encoder.encode().expect("Encoding failed");
                 let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
-                for i in information_size..committee_size {
-                    self.encoded_statements[i] = recovery[i-information_size].clone();
+                for i in info_size..committee_size {
+                    self.encoded_statements[i] = recovery[i- info_size].clone();
                 }
                 let (computed_merkle_tree, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(self.encoded_statements(), own_id);
 
@@ -529,7 +534,7 @@ impl AuthoritySet {
     }
 
     pub fn present(&self) -> impl Iterator<Item = AuthorityIndex> + '_ {
-        (0..128).filter(|bit| (self.0 & 1 << bit) != 0)
+        (0..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
     }
 
     #[inline]
@@ -722,7 +727,7 @@ mod test {
     };
 
     use rand::{prelude::SliceRandom, Rng};
-
+    use crate::test_util::byzantine_committee_and_cores_epoch_duration;
     use super::*;
 
     pub struct Dag(HashMap<BlockReference, Data<StatementBlock>>);
@@ -875,5 +880,93 @@ mod test {
             a.insert(*x);
         }
         assert_eq!(present, a.present().collect::<Vec<_>>());
+    }
+
+    /// Function to generate a random Vec<BaseStatement> with only Share(Transaction)
+    pub fn generate_random_shares(count: usize) -> Vec<BaseStatement> {
+        let mut rng = rand::thread_rng();
+        let mut statements = Vec::new();
+
+        for _ in 0..count {
+            // Generate random Transaction
+            let transaction = Transaction {
+                data: (0..rng.gen_range(1..100)) // Random length of data
+                    .map(|_| rng.gen()) // Random bytes
+                    .collect(),
+            };
+
+            // Add Share variant to the list
+            statements.push(BaseStatement::Share(transaction));
+        }
+
+        statements
+    }
+    #[test]
+    fn create_block_and_verify() {
+        let committee_size = 4;
+        let number_byzantine = 0;
+        let byzantine_strategy = "honest".to_string();
+        let rounds_in_epoch = 100;
+        let (committee, mut cores, reporters) = byzantine_committee_and_cores_epoch_duration(
+            committee_size,
+            number_byzantine,
+            byzantine_strategy,
+            rounds_in_epoch,
+        );
+
+        let first_peer_index: AuthorityIndex = 1 as AuthorityIndex;
+        let second_peer_index: AuthorityIndex = 2 as AuthorityIndex;
+        let own_index: AuthorityIndex = 0 as AuthorityIndex;
+        let mut own_core = &mut cores[own_index as usize];
+        let clock_round = 1;
+        let mut genesis_blocks = Vec::new();
+        for i in 0..committee_size {
+            genesis_blocks.push(StatementBlock::new_genesis(i as AuthorityIndex));
+        }
+        let includes: Vec<BlockReference> = genesis_blocks.iter().map(|x| x.reference().clone()).collect();
+        let acknowledgement_statements = includes.clone();
+
+
+        let info_length = committee.info_length();
+        let parity_length = committee.len() - info_length;
+        let statements = generate_random_shares(5);
+        let mut encoded_statements = own_core.encode(statements, info_length, parity_length);
+
+
+        let mut full_block = StatementBlock::new_with_signer(
+            own_index,
+            clock_round,
+            includes.clone(),
+            acknowledgement_statements,
+            0,
+            false,
+            &own_core.get_signer(),
+            encoded_statements.clone(),
+        );
+        let mut encoder = ReedSolomonEncoder::new(2,
+                                                  4,
+                                                  64).unwrap();
+        // Before sending remove Somes from parity symbols
+        full_block.change_for_own_index(info_length);
+
+        // Assume the block is sent 0->1. Make verification by first peer
+        // The block is modified by encoding and including another Merkle proof
+        let result_full_block = full_block.verify(&committee, first_peer_index, own_index, &mut encoder);
+        assert!(result_full_block.is_ok());
+
+        let mut one_some_block = full_block.clone();
+        // Before sending between 1->2 leave one some
+        one_some_block.change_for_not_own_index(first_peer_index);
+
+        let result_one_some_block = one_some_block.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
+        assert!(result_one_some_block.is_ok());
+
+        // Now sending between 2->0
+        let mut none_block = one_some_block.clone();
+        // Before sending leave one some, but actually remove all of them
+        none_block.change_for_not_own_index(second_peer_index);
+
+        let result_all_none_block = none_block.verify(&committee, own_index, second_peer_index, &mut encoder);
+        assert!(result_all_none_block.is_ok());
     }
 }
