@@ -94,6 +94,40 @@ impl Linearizer {
                 to_commit.push(block);
             }
         }
+
+        // Filter the commitment and include only block from each slot (author, round)
+        let mut to_commit: Vec<_> = to_commit
+            .into_iter()
+            .map(|block| {
+                // Assuming block has `round`, `author`, and `digest` methods/properties
+                let round = block.round();
+                let author = block.author(); // Adjust if `author` is not clonable
+                let digest = block.digest(); // Adjust if `digest` is not clonable
+                (round, author, digest, block) // Store the original block as part of the tuple
+            })
+            .collect();
+
+        // Sort by (round, author, digest)
+        to_commit.sort_by(|a, b| {
+            a.0.cmp(&b.0) // Sort by round
+                .then(a.1.cmp(&b.1)) // Then by author
+                .then(a.2.cmp(&b.2)) // Finally by digest
+        });
+
+        // Select at most one block per (round, author)
+        let mut seen_round_author = HashSet::new();
+        let to_commit: Vec<_> = to_commit
+            .into_iter()
+            .filter_map(|(round, author, _, block)| {
+                // Keep only the first occurrence of each (round, author) pair
+                if seen_round_author.insert((round, author.clone())) {
+                    Some(block)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
