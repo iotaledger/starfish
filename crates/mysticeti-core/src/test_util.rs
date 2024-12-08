@@ -138,7 +138,7 @@ pub fn committee_and_cores_persisted_epoch_duration(
         .map(|authority| {
             let last_transaction = first_transaction_for_authority(authority);
             let (metrics, reporter) = Metrics::new(&Registry::new(), Some(&committee));
-            let block_handler = TestBlockHandler::new(
+            let (block_handler, _) = TestBlockHandler::new(
                 last_transaction,
                 committee.clone(),
                 authority,

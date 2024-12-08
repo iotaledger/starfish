@@ -94,6 +94,7 @@ impl TransactionGenerator {
                 }
             }
 
+            tracing::debug!("Generator send {} transactions", block.len());
             if !block.is_empty() && self.sender.send(block).await.is_err() {
                 return;
             }

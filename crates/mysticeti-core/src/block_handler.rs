@@ -11,7 +11,7 @@ use std::{
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-
+use tracing::debug;
 use crate::{
     block_store::BlockStore,
     committee::{Committee, ProcessedTransactionHandler, QuorumThreshold, TransactionAggregator},
@@ -26,10 +26,14 @@ use crate::{
         TransactionLocator,
     },
 };
+use crate::types::BaseStatement;
 
 pub trait BlockHandler: Send + Sync {
 
-
+    fn handle_blocks(
+        &mut self,
+        require_response: bool,
+    ) -> Vec<BaseStatement>;
     fn state(&self) -> Bytes;
 
     fn recover_state(&mut self, _state: &Bytes);
@@ -98,7 +102,9 @@ impl RealBlockHandler {
             return None;
         }
         let received = self.receiver.try_recv().ok()?;
-        self.pending_transactions += received.len();
+        let num_transactions = received.len();
+        self.pending_transactions += num_transactions;
+        tracing::debug!("Received {num_transactions} transactions from generator");
         Some(received)
     }
 }
@@ -112,11 +118,27 @@ impl BlockHandler for RealBlockHandler {
         self.transaction_votes.with_state(state);
     }
 
+
     fn cleanup(&self) {
         let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
         // todo - all of this should go away and we should measure tx latency differently
         let mut l = self.transaction_time.lock();
         l.retain(|_k, v| v.elapsed() < Duration::from_secs(10));
+    }
+
+    fn handle_blocks(
+        &mut self,
+        require_response: bool,
+    ) -> Vec<BaseStatement> {
+        let mut response = vec![];
+        if require_response {
+            while let Some(data) = self.receive_with_limit() {
+                for tx in data {
+                    response.push(BaseStatement::Share(tx));
+                }
+            }
+        }
+        response
     }
 }
 
@@ -124,10 +146,12 @@ impl BlockHandler for RealBlockHandler {
 #[allow(dead_code)]
 pub struct TestBlockHandler {
     last_transaction: u64,
+    pending_transactions: usize,
     transaction_votes: TransactionAggregator<QuorumThreshold>,
     pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
     committee: Arc<Committee>,
     authority: AuthorityIndex,
+    receiver: mpsc::Receiver<Vec<Transaction>>,
     metrics: Arc<Metrics>,
 }
 
@@ -137,15 +161,28 @@ impl TestBlockHandler {
         committee: Arc<Committee>,
         authority: AuthorityIndex,
         metrics: Arc<Metrics>,
-    ) -> Self {
-        Self {
+    ) -> (Self, mpsc::Sender<Vec<Transaction>>)  {
+        let (sender, receiver) = mpsc::channel(1024);
+        let this = Self {
             last_transaction,
             transaction_votes: Default::default(),
             transaction_time: Default::default(),
             committee,
             authority,
             metrics,
+            pending_transactions: 0,
+            receiver,
+        };
+        (this, sender)
+    }
+
+    fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
+        if self.pending_transactions >= SOFT_MAX_PROPOSED_PER_BLOCK {
+            return None;
         }
+        let received = self.receiver.try_recv().ok()?;
+        self.pending_transactions += received.len();
+        Some(received)
     }
 
     pub fn is_certified(&self, locator: &TransactionLocator) -> bool {
@@ -173,6 +210,22 @@ impl BlockHandler for TestBlockHandler {
             .expect("Failed to deserialize transaction aggregator state");
         self.transaction_votes.with_state(&transaction_votes);
         self.last_transaction = last_transaction;
+    }
+
+    fn handle_blocks(
+        &mut self,
+        require_response: bool,
+    ) -> Vec<BaseStatement> {
+        // todo - this is ugly, but right now we need a way to recover self.last_transaction
+        let mut response = vec![];
+        if require_response {
+            while let Some(data) = self.receive_with_limit() {
+                for tx in data {
+                    response.push(BaseStatement::Share(tx));
+                }
+            }
+        }
+        response
     }
 }
 

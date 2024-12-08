@@ -34,6 +34,7 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
+use crate::block_store::WAL_ENTRY_PAYLOAD;
 use crate::crypto::{BlockDigest, MerkleRoot};
 use crate::types::{Encoder, Decoder, Shard};
 
@@ -215,7 +216,26 @@ impl<H: BlockHandler> Core<H> {
                 .push((position, MetaStatement::Include(*processed.reference())));
             result.push(processed);
         }
+        self.run_block_handler();
         result
+    }
+
+    fn run_block_handler(&mut self) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::run_block_handler");
+        let statements = self
+            .block_handler
+            .handle_blocks(!self.epoch_changing());
+        let serialized_statements =
+            bincode::serialize(&statements).expect("Payload serialization failed");
+        let position = self
+            .wal_writer
+            .write(WAL_ENTRY_PAYLOAD, &serialized_statements)
+            .expect("Failed to write statements to wal");
+        self.pending
+            .push((position, MetaStatement::Payload(statements)));
     }
 
 
@@ -306,7 +326,7 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-
+        tracing::debug!("{:?}",self.pending);
         // Temporarily extract Includes, leaving Payloads untouched
         let mut include_positions: Vec<usize> = self
             .pending
@@ -344,7 +364,7 @@ impl<H: BlockHandler> Core<H> {
             }
         }
 
-
+        tracing::debug!("{:?}",self.pending);
         let first_include_index = self
             .pending
             .iter()
@@ -376,6 +396,7 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
         }
+        tracing::debug!("Include in block {} transactions", statements.len());
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
         let encoded_statements = self.encode(statements, info_length, parity_length);
