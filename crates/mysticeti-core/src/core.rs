@@ -227,7 +227,7 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("Core::run_block_handler");
         let statements = self
             .block_handler
-            .handle_blocks(true);
+            .handle_blocks(!self.epoch_changing());
         let serialized_statements =
             bincode::serialize(&statements).expect("Payload serialization failed");
         let position = self
@@ -325,8 +325,6 @@ impl<H: BlockHandler> Core<H> {
         if clock_round <= self.last_proposed() {
             return None;
         }
-
-        tracing::debug!("{:?}",self.pending);
         // Temporarily extract Includes, leaving Payloads untouched
         let mut include_positions: Vec<usize> = self
             .pending
@@ -363,8 +361,6 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
         }
-
-        tracing::debug!("{:?}",self.pending);
         let first_include_index = self
             .pending
             .iter()
@@ -396,7 +392,8 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
         }
-        tracing::debug!("Include in block {} transactions", statements.len());
+        let number_statements = statements.len();
+        tracing::debug!("Include in block {} transactions", number_statements);
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
         let encoded_statements = self.encode(statements, info_length, parity_length);
@@ -477,6 +474,7 @@ impl<H: BlockHandler> Core<H> {
             }
             self.threshold_clock
                 .add_block(*block.reference(), &self.committee);
+            self.block_handler.handle_proposal(number_statements);
             self.proposed_block_stats(&block);
             let next_entry = if let Some((pos, _)) = self.pending.get(0) {
                 *pos

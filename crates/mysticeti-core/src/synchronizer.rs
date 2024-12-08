@@ -21,6 +21,7 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::metrics::UtilizationTimerVecExt;
 
 // TODO: A central controller will eventually dynamically update these parameters.
 pub struct SynchronizerParameters {
@@ -170,6 +171,7 @@ where
             self.sender.clone(),
             self.inner.clone(),
             self.parameters.batch_size,
+            self.metrics.clone(),
         ));
         self.push_blocks = Some(handle);
     }
@@ -260,12 +262,14 @@ where
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         batch_size: usize,
+        metrics: Arc<Metrics>,
     ) -> Option<()> {
         let leader_timeout = Duration::from_millis(600);
         loop {
             let notified = inner.notify.notified();
             select! {
                 _sleep =  runtime::sleep(leader_timeout) => {
+                     let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
                     sending_batch_blocks_v2(
                 inner.clone(),
@@ -274,8 +278,10 @@ where
                 batch_size,
             )
             .await?;
+                    drop(timer);
                 }
                _created_block = notified => {
+                    let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after creating new block");
                     sending_batch_blocks_v2(
                 inner.clone(),
@@ -284,6 +290,7 @@ where
                 batch_size,
             )
             .await?;
+                    drop(timer);
                 }
             }
         }

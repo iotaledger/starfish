@@ -30,6 +30,7 @@ use crate::types::BaseStatement;
 
 pub trait BlockHandler: Send + Sync {
 
+    fn handle_proposal(&mut self, number_transactions: usize);
     fn handle_blocks(
         &mut self,
         require_response: bool,
@@ -69,6 +70,8 @@ pub struct RealBlockHandler {
 pub const SOFT_MAX_PROPOSED_PER_BLOCK: usize = 20 * 1000;
 
 impl RealBlockHandler {
+
+
     pub fn new(
         committee: Arc<Committee>,
         authority: AuthorityIndex,
@@ -112,6 +115,10 @@ impl RealBlockHandler {
 impl BlockHandler for RealBlockHandler {
     fn state(&self) -> Bytes {
         self.transaction_votes.state()
+    }
+
+    fn handle_proposal(&mut self, number_transactions: usize) {
+        self.pending_transactions -= number_transactions;
     }
 
     fn recover_state(&mut self, state: &Bytes) {
@@ -197,7 +204,9 @@ impl TestBlockHandler {
 impl BlockHandler for TestBlockHandler {
 
 
-
+    fn handle_proposal(&mut self, number_transactions: usize) {
+        self.pending_transactions -= number_transactions;
+    }
     fn state(&self) -> Bytes {
         let state = (&self.transaction_votes.state(), &self.last_transaction);
         let bytes =
