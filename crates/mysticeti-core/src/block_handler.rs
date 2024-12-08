@@ -283,7 +283,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<StatementBlock>>,
+        committed_leaders: Vec<Arc<StatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let committed = self
             .commit_interpreter

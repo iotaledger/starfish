@@ -3,6 +3,7 @@
 
 use std::{collections::HashSet, fmt};
 use std::collections::HashMap;
+use std::sync::Arc;
 use crate::{
     block_store::BlockStore,
     data::Data,
@@ -16,12 +17,12 @@ pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,
     /// All the committed blocks that are part of this sub-dag
-    pub blocks: Vec<Data<StatementBlock>>,
+    pub blocks: Vec<Arc<StatementBlock>>,
 }
 
 impl CommittedSubDag {
     /// Create new (empty) sub-dag.
-    pub fn new(anchor: BlockReference, blocks: Vec<Data<StatementBlock>>) -> Self {
+    pub fn new(anchor: BlockReference, blocks: Vec<Arc<StatementBlock>>) -> Self {
         Self { anchor, blocks }
     }
 
@@ -54,7 +55,7 @@ impl Linearizer {
     fn collect_committed_blocks_in_history(
         &mut self,
         block_store: &BlockStore,
-        leader_block: Data<StatementBlock>,
+        leader_block: Arc<StatementBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
@@ -134,7 +135,7 @@ impl Linearizer {
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<StatementBlock>>,
+        committed_leaders: Vec<Arc<StatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = vec![];
         for leader_block in committed_leaders {

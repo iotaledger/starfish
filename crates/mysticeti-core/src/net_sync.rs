@@ -232,7 +232,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Block(data_block) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-                    let mut block: StatementBlock = data_block.into();
+                    let mut block: StatementBlock = (*data_block).clone();
                     tracing::debug!("Received one block {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                         tracing::warn!(
@@ -261,7 +261,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                     let mut verified_data_blocks = Vec::new();
                     for data_block in required_blocks {
-                        let mut block: StatementBlock = data_block.into();
+                        let mut block: StatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                             tracing::warn!(

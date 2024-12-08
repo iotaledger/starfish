@@ -80,7 +80,7 @@ pub trait BlockWriter {
 #[derive(Clone)]
 enum IndexEntry {
     WalPosition(WalPosition),
-    Loaded(WalPosition, Data<StatementBlock>),
+    Loaded(WalPosition, Arc<StatementBlock>),
 }
 
 impl BlockStore {
@@ -112,7 +112,7 @@ impl BlockStore {
             }
             let block = match tag {
                 WAL_ENTRY_BLOCK => {
-                    let block = Data::<StatementBlock>::from_bytes(data)
+                    let block = Data::from_bytes(data)
                         .expect("Failed to deserialize data from wal");
                     builder.block(pos, &block);
                     block
@@ -209,7 +209,7 @@ impl BlockStore {
             .add_loaded(position, block, authority_index_start, authority_index_end);
     }
 
-    pub fn get_block(&self, reference: BlockReference) -> Option<Data<StatementBlock>> {
+    pub fn get_block(&self, reference: BlockReference) -> Option<Arc<StatementBlock>> {
         let entry = self.inner.read().get_block(reference);
         // todo - consider adding loaded entries back to cache
         entry.map(|pos| self.read_index(pos))
@@ -242,7 +242,7 @@ impl BlockStore {
             .update_known_by_authority(block_reference, authority);
     }
 
-    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<StatementBlock>> {
+    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Arc<StatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
         self.read_index_vec(entries)
     }
@@ -251,7 +251,7 @@ impl BlockStore {
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,
-    ) -> Vec<Data<StatementBlock>> {
+    ) -> Vec<Arc<StatementBlock>> {
         let entries = self
             .inner
             .read()
@@ -340,7 +340,7 @@ impl BlockStore {
         to_whom_authority_index: AuthorityIndex,
         from_excluded: RoundNumber,
         limit: usize,
-    ) -> Vec<Data<StatementBlock>> {
+    ) -> Vec<Arc<StatementBlock>> {
         let entries =
             self.inner
                 .read()
@@ -352,7 +352,7 @@ impl BlockStore {
         &self,
         to_whom_authority_index: AuthorityIndex,
         limit: usize,
-    ) -> Vec<Data<StatementBlock>> {
+    ) -> Vec<Arc<StatementBlock>> {
         let entries = self
             .inner
             .read()
@@ -362,13 +362,13 @@ impl BlockStore {
         let own_index = self.inner.read().authority;
         let info_length = self.inner.read().info_length;
         for data_block in data_blocks {
-            let mut block: StatementBlock = data_block.into();
+            let mut block: StatementBlock = (*data_block).clone();
             if block.author() == own_index {
                 block.change_for_own_index(info_length);
             } else {
                 block.change_for_not_own_index(own_index);
             }
-            let changed_data_block = Data::new(block);
+            let changed_data_block = Arc::new(block);
             changed_data_blocks.push(changed_data_block);
         }
         changed_data_blocks
@@ -380,7 +380,7 @@ impl BlockStore {
         from_excluded: RoundNumber,
         authority: AuthorityIndex,
         limit: usize,
-    ) -> Vec<Data<StatementBlock>> {
+    ) -> Vec<Arc<StatementBlock>> {
         let entries = self
             .inner
             .read()
@@ -396,7 +396,7 @@ impl BlockStore {
         self.inner.read().last_own_block()
     }
 
-    fn read_index(&self, entry: IndexEntry) -> Data<StatementBlock> {
+    fn read_index(&self, entry: IndexEntry) -> Arc<StatementBlock> {
         match entry {
             IndexEntry::WalPosition(position) => {
                 self.metrics.block_store_loaded_blocks.inc();
@@ -406,12 +406,14 @@ impl BlockStore {
                     .expect("Failed to read wal");
                 match tag {
                     WAL_ENTRY_BLOCK => {
-                        Data::from_bytes(data).expect("Failed to deserialize data from wal")
+
+                        StatementBlock::from_bytes(data).expect("Failed to deserialize data from wal")
+
                     }
                     WAL_ENTRY_OWN_BLOCK => {
                         OwnBlockData::from_bytes(data)
                             .expect("Failed to deserialized own block from wal")
-                            .1
+                            .1.borrow_arc_t()
                     }
                     _ => {
                         panic!("Trying to load index entry at position {position}, found tag {tag}")
@@ -422,7 +424,7 @@ impl BlockStore {
         }
     }
 
-    fn read_index_vec(&self, entries: Vec<IndexEntry>) -> Vec<Data<StatementBlock>> {
+    fn read_index_vec(&self, entries: Vec<IndexEntry>) -> Vec<Arc<StatementBlock>> {
         entries
             .into_iter()
             .map(|pos| self.read_index(pos))
@@ -432,8 +434,8 @@ impl BlockStore {
     /// Check whether `earlier_block` is an ancestor of `later_block`.
     pub fn linked(
         &self,
-        later_block: &Data<StatementBlock>,
-        earlier_block: &Data<StatementBlock>,
+        later_block: &Arc<StatementBlock>,
+        earlier_block: &Arc<StatementBlock>,
     ) -> bool {
         let mut parents = vec![later_block.clone()];
         for r in (earlier_block.round()..later_block.round()).rev() {
@@ -615,7 +617,7 @@ pub fn get_blocks_at_authority_round(
         let map = self.index.entry(block.round()).or_default();
         map.insert(
             (block.author(), block.digest()),
-            IndexEntry::Loaded(position, block),
+            IndexEntry::Loaded(position, block.borrow_arc_t()),
         );
     }
     // Update not known by authorities when the block gets recoverable after decoding
@@ -897,7 +899,7 @@ impl OwnBlockData {
         let next_entry = &bytes[..OWN_BLOCK_HEADER_SIZE];
         let next_entry: WalPosition = bincode::deserialize(next_entry)?;
         let block = bytes.slice(OWN_BLOCK_HEADER_SIZE..);
-        let block = Data::<StatementBlock>::from_bytes(block)?;
+        let block: Data<StatementBlock> = Data::from_bytes(block)?;
         let own_block_data = OwnBlockData {
             next_entry,
             block: block.clone(),

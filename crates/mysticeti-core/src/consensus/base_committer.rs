@@ -105,7 +105,7 @@ impl BaseCommitter {
     fn find_support(
         &self,
         (author, round): (AuthorityIndex, RoundNumber),
-        from: &Data<StatementBlock>,
+        from: &Arc<StatementBlock>,
     ) -> Option<BlockReference> {
         if from.round() < round {
             return None;
@@ -133,8 +133,8 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_vote(
         &self,
-        potential_vote: &Data<StatementBlock>,
-        leader_block: &Data<StatementBlock>,
+        potential_vote: &Arc<StatementBlock>,
+        leader_block: &Arc<StatementBlock>,
     ) -> bool {
         let (author, round) = leader_block.author_round();
         self.find_support((author, round), potential_vote) == Some(*leader_block.reference())
@@ -144,8 +144,8 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_certificate(
         &self,
-        potential_certificate: &Data<StatementBlock>,
-        leader_block: &Data<StatementBlock>,
+        potential_certificate: &Arc<StatementBlock>,
+        leader_block: &Arc<StatementBlock>,
     ) -> bool {
         let mut votes_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for reference in potential_certificate.includes() {
@@ -168,7 +168,7 @@ impl BaseCommitter {
     /// if it has a certified link to the anchor. Otherwise, we skip the target leader.
     fn decide_leader_from_anchor(
         &self,
-        anchor: &Data<StatementBlock>,
+        anchor: &Arc<StatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
     ) -> LeaderStatus {
@@ -261,7 +261,7 @@ impl BaseCommitter {
     fn enough_leader_support(
         &self,
         decision_round: RoundNumber,
-        leader_block: &Data<StatementBlock>,
+        leader_block: &Arc<StatementBlock>,
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 

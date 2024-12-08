@@ -42,9 +42,9 @@ impl BlockManager {
         &mut self,
         blocks: Vec<Data<StatementBlock>>,
         block_writer: &mut impl BlockWriter,
-    ) -> (Vec<(WalPosition, Data<StatementBlock>)>, HashSet<BlockReference>) {
+    ) -> (Vec<(WalPosition, Arc<StatementBlock>)>, HashSet<BlockReference>) {
         let mut blocks: VecDeque<Data<StatementBlock>> = blocks.into();
-        let mut newly_blocks_processed: Vec<(WalPosition, Data<StatementBlock>)> = vec![];
+        let mut newly_blocks_processed: Vec<(WalPosition, Arc<StatementBlock>)> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         while let Some(block) = blocks.pop_front() {
 
@@ -90,7 +90,7 @@ impl BlockManager {
 
                 // Block can be processed. So need to update indexes etc
                 let position = block_writer.insert_block(block.clone());
-                newly_blocks_processed.push((position, block.clone()));
+                newly_blocks_processed.push((position, block.borrow_arc_t()));
 
                 // Block can be added to the compact local DAG structure and update known/unknown blocks
                 block_writer.update_dag(block.reference().clone(), block.includes().clone());

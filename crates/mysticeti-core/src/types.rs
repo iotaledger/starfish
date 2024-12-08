@@ -24,11 +24,13 @@ use std::{
     ops::Range,
     time::Duration,
 };
-
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use digest::Digest;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
+use minibytes::Bytes;
 #[cfg(test)]
 pub use test::Dag;
 
@@ -39,6 +41,7 @@ use crate::{
     data::Data,
     threshold_clock::threshold_clock_valid_non_genesis,
 };
+use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Vote {
@@ -393,6 +396,13 @@ impl StatementBlock {
 
     pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
         self.merkle_proof = Some(merkle_proof);
+    }
+
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Arc<Self>> {
+        IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
+        IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
+        let t = bincode::deserialize(&bytes)?;
+        Ok(Arc::new(t))
     }
 }
 

@@ -34,7 +34,7 @@ pub trait CommitObserver: Send + Sync {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<StatementBlock>>,
+        committed_leaders: Vec<Arc<StatementBlock>>,
     ) -> Vec<CommittedSubDag>;
 
     fn aggregator_state(&self) -> Bytes;
@@ -86,10 +86,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self) -> bool {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Syncer::try_new_block");
         if self.force_new_block
             || self
             .core
@@ -104,6 +100,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         return false;
     }
     fn try_new_commit(&mut self) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Syncer::try_new_commit");
     // No need to commit after epoch is safe to close
         if self.core.epoch_closed() {
             return;

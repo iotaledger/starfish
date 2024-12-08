@@ -197,7 +197,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) -> Vec<Data<StatementBlock>> {
+    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>)  {
         let _timer = self
             .metrics
             .utilization_timer
@@ -217,7 +217,6 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         self.run_block_handler();
-        result
     }
 
     fn run_block_handler(&mut self) {
@@ -515,7 +514,7 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(&mut self) -> Vec<Data<StatementBlock>> {
+    pub fn try_commit(&mut self) -> Vec<Arc<StatementBlock>> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
