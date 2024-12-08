@@ -541,75 +541,67 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
     const MEAN_LATENCY_MIN: f64 = 75.0;
     const MEAN_LATENCY_MAX: f64 = 100.0;
 
-    // Quorum requirement (at least 2/3 + 1 of the rows with the quantile within range)
     let quorum_count = ((2.0 / 3.0) * n as f64).floor() + 1.0;
-
-    // Initialize the RNG
     let mut rng = StdRng::seed_from_u64(seed);
 
     loop {
-        // Placeholder for the table
         let mut table = vec![vec![0.0; n]; n];
-
-        // Generate latencies
         for i in 0..n {
             for j in i..n {
                 if i == j {
-                    table[i][j] = 0.0; // Latency to itself is 0
+                    table[i][j] = 0.0;
                 } else {
-                    // Use probabilities to simulate inter- and intra-region communication
                     let latency = if rng.gen_bool(0.7) {
-                        // Intra-region latency
                         rng.gen_range(INTRA_REGION_LATENCY_MIN..=INTRA_REGION_LATENCY_MAX)
                     } else {
-                        // Inter-region latency
                         rng.gen_range(INTER_REGION_LATENCY_MIN..=INTER_REGION_LATENCY_MAX)
                     } as f64;
 
-                    // Fill both [i][j] and [j][i] for symmetry
                     table[i][j] = latency;
                     table[j][i] = latency;
                 }
             }
         }
 
-        // Check how many rows have the 2/3 quantile within the latency range
         let num_rows_within_quantile_latency_range = table
             .iter()
             .filter(|row| {
-                // Clone the row and sort it to calculate the quantile
-                let mut sorted_row = (*row).clone(); // Clone the row to sort
-                sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap()); // Sort the cloned row
-
-                // Calculate the 2/3 quantile
-                let quantile_index = quorum_count as usize; // 2/3 quantile index
-                let quantile_value = sorted_row[quantile_index - 1]; // Get the value at 2/3 quantile index
-
+                let mut sorted_row = (*row).clone();
+                sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let quantile_index = quorum_count as usize;
+                let quantile_value = sorted_row[quantile_index - 1];
                 quantile_value >= QUANTILE_LATENCY_MIN && quantile_value <= QUANTILE_LATENCY_MAX
             })
             .count();
 
-        // Check how many rows have the 2/3 quantile within the latency range
         let num_rows_within_mean_latency_range = table
             .iter()
             .filter(|row| {
-                // Clone the row and sort it to calculate the quantile
-                let cur_row = (*row).clone(); // Clone the row to sort
+                let cur_row = (*row).clone();
                 let sum: f64 = cur_row.iter().sum();
                 let mean = sum / (cur_row.len() as f64 - 1.0);
                 mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
             })
             .count();
 
-        // Check if the number of rows with the quantile within the threshold meets the quorum requirement
+        // Triangle inequality check
+        let satisfies_triangle_inequality = (0..n).all(|i| {
+            (0..n).all(|j| {
+                (0..n).all(|k| {
+                    table[i][k] <= table[i][j] + table[j][k]
+                })
+            })
+        });
+
         if num_rows_within_quantile_latency_range as f64 >= quorum_count
             && num_rows_within_mean_latency_range as f64 >= quorum_count
+            && satisfies_triangle_inequality
         {
-            // If we have at least the quorum of rows with the quantile within the range, return the table
             return table;
         }
     }
 }
+
 
 fn generate_latency(mean: f64) -> Duration {
     let mut rng = rand::thread_rng();
