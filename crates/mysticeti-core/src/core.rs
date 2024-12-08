@@ -248,12 +248,13 @@ impl<H: BlockHandler> Core<H> {
         let data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
         self.encode_shards(data, info_length, parity_length)
     }
-    pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockDigest>) {
+    pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
         let total_length = info_length + parity_length;
 
-        for block_digest in new_blocks_to_reconstruct {
+        for block_reference in new_blocks_to_reconstruct {
+            let block_digest = block_reference.digest;
             let mut block = self.block_store.get_cached_block(block_digest);
             let position =  block.encoded_statements().iter().position(|x| x.is_some());
             let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
@@ -280,12 +281,16 @@ impl<H: BlockHandler> Core<H> {
             let recovered_statements = self.encode_shards(data, info_length, parity_length);
             let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority);
             if computed_merkle_root == block.merkle_root() {
+                tracing::debug!("Block {block_reference} is reconstructed");
                 block.add_encoded_statements(recovered_statements);
                 block.set_merkle_proof(computed_merkle_proof);
                 let block = Data::new(block);
                 (&mut self.wal_writer, &self.block_store).insert_block(block.clone());
                 self.block_store.update_data_availability_and_cached_blocks(&block);
-                //self.block_store.updated_unknown_by_others(block.reference().clone());
+                self.block_store.updated_unknown_by_others(block.reference().clone());
+            }
+            else {
+                tracing::debug!("Block {block_reference} is not correctly reconstructed");
             }
         }
     }

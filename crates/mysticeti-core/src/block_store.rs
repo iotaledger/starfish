@@ -760,7 +760,7 @@ pub fn get_blocks_at_authority_round(
             })
             .collect();
         let max_round_own_blocks = own_blocks.iter().map(|own_block|own_block.1).max();
-        let max_round_own_blocks = max_round_own_blocks.unwrap_or(0 as RoundNumber);
+        let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
         let new_limit = limit.saturating_sub(own_blocks.len());
         let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()

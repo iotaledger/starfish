@@ -42,12 +42,11 @@ impl BlockManager {
         &mut self,
         blocks: Vec<Data<StatementBlock>>,
         block_writer: &mut impl BlockWriter,
-    ) -> (Vec<(WalPosition, Data<StatementBlock>)>, HashSet<BlockDigest>) {
+    ) -> (Vec<(WalPosition, Data<StatementBlock>)>, HashSet<BlockReference>) {
         let mut blocks: VecDeque<Data<StatementBlock>> = blocks.into();
         let mut newly_blocks_processed: Vec<(WalPosition, Data<StatementBlock>)> = vec![];
-        let mut recoverable_blocks: HashSet<BlockDigest> = HashSet::new();
+        let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         while let Some(block) = blocks.pop_front() {
-            // Update the highest known round number.
 
             // check whether we have already processed this block and skip it if so.
             let block_reference = block.reference();
@@ -61,7 +60,7 @@ impl BlockManager {
                     self.block_store.update_with_new_shard(&block);
                      if self.block_store.is_sufficient_shards(&block) {
                          tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
-                         recoverable_blocks.insert(block.digest());
+                         recoverable_blocks.insert(block.reference().clone());
                      }
                 }
                 continue;
