@@ -227,7 +227,7 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("Core::run_block_handler");
         let statements = self
             .block_handler
-            .handle_blocks(!self.epoch_changing());
+            .handle_blocks(true);
         let serialized_statements =
             bincode::serialize(&statements).expect("Payload serialization failed");
         let position = self
