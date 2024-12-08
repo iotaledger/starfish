@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 use rand::{seq::SliceRandom, thread_rng};
+use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 
@@ -260,16 +261,31 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         batch_size: usize,
     ) -> Option<()> {
+        let leader_timeout = Duration::from_millis(600);
         loop {
             let notified = inner.notify.notified();
-            sending_batch_blocks_v2(
+            select! {
+                _sleep =  runtime::sleep(leader_timeout) => {
+                    tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
+                    sending_batch_blocks_v2(
                 inner.clone(),
                 to.clone(),
                 to_whom_authority_index,
                 batch_size,
             )
             .await?;
-            notified.await;
+                }
+               _created_block = notified => {
+                    tracing::debug!("Disseminate to {to_whom_authority_index} after creating new block");
+                    sending_batch_blocks_v2(
+                inner.clone(),
+                to.clone(),
+                to_whom_authority_index,
+                batch_size,
+            )
+            .await?;
+                }
+            }
         }
     }
 }
