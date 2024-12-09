@@ -60,7 +60,7 @@ impl Linearizer {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
         let mut buffer = vec![leader_block];
-        let mut new_acknowledgements = vec![];
+        let mut blocks_transaction_data_quorum = vec![];
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
@@ -70,7 +70,7 @@ impl Linearizer {
                 let s = self.votes.entry(*acknowledgement_statement).or_insert_with(StakeAggregator::new);
                 if !s.is_quorum(&self.committee) {
                     if s.add(who_votes, &self.committee) {
-                        new_acknowledgements.push(*acknowledgement_statement);
+                        blocks_transaction_data_quorum.push(*acknowledgement_statement);
                     }
                 }
             }
@@ -87,7 +87,7 @@ impl Linearizer {
             }
         }
         let mut to_commit = Vec::new();
-        for x in new_acknowledgements {
+        for x in blocks_transaction_data_quorum {
             if self.committed.insert(x) {
                 let block = block_store
                     .get_block(x)

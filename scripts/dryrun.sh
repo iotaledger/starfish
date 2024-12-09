@@ -3,7 +3,7 @@
 NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-5}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
-REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 
 
@@ -78,10 +78,10 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   LOG_FILE="validator_${i}.log.ansi"
   if [[ $i -eq 0 ]]; then
     echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET}..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
   else
     echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET}..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
   fi
 done
 

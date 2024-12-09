@@ -149,6 +149,8 @@ impl StatementBlock {
         ))
     }
 
+
+
     pub fn change_for_own_index(&mut self, info_length: usize) {
         for i in info_length..self.encoded_statements.len() {
             self.encoded_statements[i] = None;
