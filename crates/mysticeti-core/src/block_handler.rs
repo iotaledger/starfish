@@ -257,6 +257,23 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHan
             Default::default(),
         )
     }
+}
+
+
+
+impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
+    pub fn new_with_handler(
+        committee: Arc<Committee>,
+        metrics: Arc<Metrics>,
+        handler: H,
+    ) -> Self {
+        Self {
+            commit_interpreter: Linearizer::new((*committee).clone()),
+            transaction_votes: TransactionAggregator::with_handler(handler),
+            committed_leaders: vec![],
+            metrics,
+        }
+    }
 
     fn transaction_observer(&self, block: &Arc<StatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
@@ -301,36 +318,13 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHan
                 if let BaseStatement::Share(transaction) = statement {
                     let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                     let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
-                    let square_latency = latency.as_secs_f64().powf(2.0);
-                    self.metrics
-                        .latency_s
-                        .with_label_values(&["shared"])
-                        .observe(latency.as_secs_f64());
-                    self.metrics
-                        .latency_squared_s
-                        .with_label_values(&["shared"])
-                        .inc_by(square_latency);
+
+                    self.metrics.transaction_committed_latency.observe(latency);
                 }
             }
 
         }
     }
-}
-
-impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
-    pub fn new_with_handler(
-        committee: Arc<Committee>,
-        metrics: Arc<Metrics>,
-        handler: H,
-    ) -> Self {
-        Self {
-            commit_interpreter: Linearizer::new((*committee).clone()),
-            transaction_votes: TransactionAggregator::with_handler(handler),
-            committed_leaders: vec![],
-            metrics,
-        }
-    }
-
     pub fn committed_leaders(&self) -> &Vec<BlockReference> {
         &self.committed_leaders
     }
@@ -354,7 +348,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
-
+                self.transaction_observer(block);
             }
             // self.committed_dags.push(commit);
         }
