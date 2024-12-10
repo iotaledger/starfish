@@ -292,6 +292,17 @@ pub struct ClientParameters {
     pub initial_delay: Duration,
 }
 
+
+impl ClientParameters{
+    pub fn almost_default(load: usize) -> Self {
+        Self {
+            load,
+            transaction_size: client_defaults::default_transaction_size(),
+            initial_delay: client_defaults::default_initial_delay(),
+        }
+    }
+}
+
 mod client_defaults {
     use super::Duration;
 

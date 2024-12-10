@@ -100,7 +100,9 @@ impl Network {
                 addresses.len()
             );
         }
+        tracing::info!("Before latency table");
         let latency_table = generate_latency_table(addresses.len(), mimic_latency_seed);
+        tracing::info!("After latency table");
         if our_id == 0 {
             write_latency_delays(latency_table.clone()).unwrap();
         }
@@ -584,18 +586,10 @@ fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
             })
             .count();
 
-        // Triangle inequality check
-        let satisfies_triangle_inequality = (0..n).all(|i| {
-            (0..n).all(|j| {
-                (0..n).all(|k| {
-                    table[i][k] <= table[i][j] + table[j][k]
-                })
-            })
-        });
+
 
         if num_rows_within_quantile_latency_range as f64 >= quorum_count
             && num_rows_within_mean_latency_range as f64 >= quorum_count
-            && satisfies_triangle_inequality
         {
             return table;
         }

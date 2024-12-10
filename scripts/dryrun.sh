@@ -1,11 +1,13 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
+NUM_VALIDATORS=${NUM_VALIDATORS:-8} #With N physical cores, it is recommended to have less than N validators
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-5}
+DESIRED_TPS=${DESIRED_TPS:-200}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
-
+# Perform the division of DESIRED_TPS by NUM_VALIDATORS
+TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
 
 # Colors using tput
 RED=$(tput setaf 1)
@@ -72,16 +74,16 @@ fi
 
 # Start Validators
 tmux kill-server || true
-export RUST_LOG=warn,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG
+export RUST_LOG=warn,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
 for ((i=0; i<NUM_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
   if [[ $i -eq 0 ]]; then
-    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET}..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
+    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i > $LOG_FILE"
   else
-    echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET}..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
+    echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
   fi
 done
 

@@ -84,7 +84,6 @@ impl Validator {
             metrics.clone(),
             public_config.parameters.consensus_only,
         );
-
         TransactionGenerator::start(
             block_sender,
             authority,
@@ -95,11 +94,13 @@ impl Validator {
         let committed_transaction_log =
             TransactionLog::start(private_config.committed_transactions_log())
                 .expect("Failed to open committed transaction log for write");
+        tracing::info!("Transaction log");
         let commit_handler = TestCommitHandler::new_with_handler(
             committee.clone(),
             metrics.clone(),
             committed_transaction_log,
         );
+        tracing::info!("Commit handler");
         let core = Core::open(
             block_handler,
             authority,
@@ -111,6 +112,7 @@ impl Validator {
             wal_writer,
             CoreOptions::default(),
         );
+        tracing::info!("Core");
         let network = Network::load(
             &public_config,
             authority,
@@ -118,6 +120,7 @@ impl Validator {
             metrics.clone(),
         )
         .await;
+        tracing::info!("Network is created. Starting synchronizer");
         let network_synchronizer = NetworkSyncer::start(
             network,
             core,

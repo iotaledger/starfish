@@ -69,6 +69,9 @@ enum Operation {
         /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
+        /// The load for the node
+        #[clap(long, value_name = "INT", default_value_t = 10, global = true)]
+        load: usize,
         /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
@@ -115,9 +118,10 @@ async fn main() -> Result<()> {
         Operation::DryRun {
             authority,
             committee_size,
+            load,
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
-        } => dryrun(authority, committee_size, byzantine_strategy, mimic_latency).await?,
+        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency).await?,
     }
 
     Ok(())
@@ -236,6 +240,7 @@ async fn run(
 async fn dryrun(
     authority: AuthorityIndex,
     committee_size: usize,
+    load: usize,
     byzantine_strategy: String,
     mimic_latency: u64,
 ) -> Result<()> {
@@ -244,7 +249,7 @@ async fn dryrun(
     );
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
-    let client_parameters = ClientParameters::default();
+    let client_parameters = ClientParameters::almost_default(load);
     let node_parameters = NodeParameters::almost_default(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
