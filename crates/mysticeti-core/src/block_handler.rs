@@ -349,6 +349,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
                 if block.round() > 0 {
+                    // Going over transactions should be either handled only for own blocks
+                    // or delegated to multiple threads
                     //self.transaction_observer(block);
                 }
             }
