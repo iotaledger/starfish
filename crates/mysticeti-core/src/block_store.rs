@@ -25,6 +25,7 @@ use crate::{
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
+use crate::types::VerifiedStatementBlock;
 
 #[allow(unused)]
 #[derive(Clone, Debug)]
@@ -63,7 +64,7 @@ struct BlockStoreInner {
 }
 
 pub trait BlockWriter {
-    fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition;
+    fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition;
 
     fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
 
@@ -80,7 +81,7 @@ pub trait BlockWriter {
 #[derive(Clone)]
 enum IndexEntry {
     WalPosition(WalPosition),
-    Loaded(WalPosition, Arc<StatementBlock>),
+    Loaded(WalPosition, Arc<VerifiedStatementBlock>),
 }
 
 impl BlockStore {
@@ -198,7 +199,7 @@ impl BlockStore {
 
     pub fn insert_block(
         &self,
-        block: Data<StatementBlock>,
+        block: Data<VerifiedStatementBlock>,
         position: WalPosition,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
@@ -224,7 +225,7 @@ impl BlockStore {
         self.inner.write().updated_unknown_by_others(block_reference);
     }
 
-    pub fn update_data_availability_and_cached_blocks(&self, block: &StatementBlock) {
+    pub fn update_data_availability_and_cached_blocks(&self, block: &VerifiedStatementBlock) {
         self.inner.write().update_data_availability_and_cached_blocks(block);
     }
 
@@ -297,17 +298,17 @@ impl BlockStore {
         self.inner.read().shard_count(digest)
     }
 
-    pub fn get_new_shards_ids(&self, block: &StatementBlock) -> Vec<usize> {
+    pub fn get_new_shards_ids(&self, block: &VerifiedStatementBlock) -> Vec<usize> {
         self.inner.read().get_new_shards_ids(block)
     }
 
-    pub fn update_with_new_shard(&self, block: &StatementBlock) {
+    pub fn update_with_new_shard(&self, block: &VerifiedStatementBlock) {
         self.inner.write().update_with_new_shard(block);
     }
 
 
-    pub fn is_sufficient_shards(&self, block: &StatementBlock) -> bool {
-        self.inner.write().is_sufficient_shards(block)
+    pub fn is_sufficient_shards(&self, digest: BlockDigest) -> bool {
+        self.inner.write().is_sufficient_shards(digest)
     }
 
     pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {
@@ -470,7 +471,7 @@ impl BlockStoreInner {
         self.cached_blocks.get(&digest).map_or(0, |x| x.1)
     }
 
-    pub fn get_new_shards_ids(&self, block: &StatementBlock) -> Vec<usize> {
+    pub fn get_new_shards_ids(&self, block: &VerifiedStatementBlock) -> Vec<usize> {
         let block_digest = block.digest();
         if self.data_availability.contains(&block_digest) {
             return vec![];
@@ -500,7 +501,7 @@ impl BlockStoreInner {
         res
     }
 
-    pub fn update_with_new_shard(&mut self, block: &StatementBlock) {
+    pub fn update_with_new_shard(&mut self, block: &VerifiedStatementBlock) {
         if let Some(entry) = self.cached_blocks.get_mut(&block.digest()) {
             let (cached_block, count) = entry;
             for (index, encoded_shard) in block.encoded_statements().iter().enumerate() {
@@ -514,8 +515,8 @@ impl BlockStoreInner {
         }
     }
 
-    pub fn is_sufficient_shards(&mut self, block: &StatementBlock) -> bool{
-        let count_shards = self.shard_count(block.digest());
+    pub fn is_sufficient_shards(&mut self, digest: BlockDigest) -> bool{
+        let count_shards = self.shard_count(digest);
         if count_shards >= self.info_length {
             return true;
         }
@@ -603,7 +604,7 @@ pub fn get_blocks_at_authority_round(
     pub fn add_loaded(
         &mut self,
         position: WalPosition,
-        block: Data<StatementBlock>,
+        block: Data<VerifiedStatementBlock>,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
@@ -678,7 +679,7 @@ pub fn get_blocks_at_authority_round(
     }
 
 
-    pub fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+    pub fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
         let committee_size = block.encoded_statements().len();
         let count = block.encoded_statements().iter().filter(|x|x.is_some()).count();
         if count < committee_size {
@@ -853,7 +854,7 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
         self.1.update_data_availability_and_cached_blocks(block);
     }
 
-    fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
+    fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
         let pos = self
             .0
             .write(WAL_ENTRY_BLOCK, block.serialized_bytes())
@@ -888,18 +889,18 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
 #[derive(Clone)]
 pub struct OwnBlockData {
     pub next_entry: WalPosition,
-    pub block: Data<StatementBlock>,
+    pub block: Data<VerifiedStatementBlock>,
 }
 
 const OWN_BLOCK_HEADER_SIZE: usize = 8;
 
 impl OwnBlockData {
     // A bit of custom serialization to minimize data copy, relies on own_block_serialization_test
-    pub fn from_bytes(bytes: Bytes) -> bincode::Result<(OwnBlockData, Data<StatementBlock>)> {
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<(OwnBlockData, Data<VerifiedStatementBlock>)> {
         let next_entry = &bytes[..OWN_BLOCK_HEADER_SIZE];
         let next_entry: WalPosition = bincode::deserialize(next_entry)?;
         let block = bytes.slice(OWN_BLOCK_HEADER_SIZE..);
-        let block: Data<StatementBlock> = Data::from_bytes(block)?;
+        let block: Data<VerifiedStatementBlock> = Data::from_bytes(block)?;
         let own_block_data = OwnBlockData {
             next_entry,
             block: block.clone(),

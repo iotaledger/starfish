@@ -14,12 +14,13 @@ use crate::{
     wal::WalPosition,
 };
 use crate::crypto::BlockDigest;
+use crate::types::VerifiedStatementBlock;
 
 /// Block manager suspends incoming blocks until they are connected to the existing graph,
 /// returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
-    blocks_pending: HashMap<BlockReference, Data<StatementBlock>>,
+    blocks_pending: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
     /// Keeps all the blocks (`HashSet<BlockReference>`) waiting for `BlockReference` to be processed.
     block_references_waiting: HashMap<BlockReference, HashSet<BlockReference>>,
     /// Keeps all blocks that need to be synced in order to unblock the processing of other pending
@@ -40,11 +41,11 @@ impl BlockManager {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<StatementBlock>>,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
         block_writer: &mut impl BlockWriter,
-    ) -> (Vec<(WalPosition, Arc<StatementBlock>)>, HashSet<BlockReference>) {
-        let mut blocks: VecDeque<Data<StatementBlock>> = blocks.into();
-        let mut newly_blocks_processed: Vec<(WalPosition, Arc<StatementBlock>)> = vec![];
+    ) -> (Vec<(WalPosition, Arc<VerifiedStatementBlock>)>, HashSet<BlockReference>) {
+        let mut blocks: VecDeque<Data<VerifiedStatementBlock>> = blocks.into();
+        let mut newly_blocks_processed: Vec<(WalPosition, Arc<VerifiedStatementBlock>)> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         while let Some(block) = blocks.pop_front() {
 
@@ -58,7 +59,7 @@ impl BlockManager {
                 tracing::debug!("Positions {:?}, exists {:?}", position_indices, block_exists);
                 if position_indices.len() > 0 {
                     self.block_store.update_with_new_shard(&block);
-                     if self.block_store.is_sufficient_shards(&block) {
+                     if self.block_store.is_sufficient_shards(block.digest()) {
                          tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
                          recoverable_blocks.insert(block.reference().clone());
                      }

@@ -445,8 +445,6 @@ where
         if self.enable {
             return;
         }
-
-        let now = timestamp_utc();
         let mut to_request = vec![];
 
         let missing_blocks = self.inner.syncer.get_missing_blocks().await;

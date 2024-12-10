@@ -36,7 +36,7 @@ use crate::{
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
 use crate::crypto::{BlockDigest, MerkleRoot};
-use crate::types::{Encoder, Decoder, Shard};
+use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -197,7 +197,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>)  {
+    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>)  {
         let _timer = self
             .metrics
             .utilization_timer
@@ -303,10 +303,12 @@ impl<H: BlockHandler> Core<H> {
                 tracing::debug!("Block {block_reference} is reconstructed");
                 block.add_encoded_statements(recovered_statements);
                 block.set_merkle_proof(computed_merkle_proof);
-                let block = Data::new(block);
-                (&mut self.wal_writer, &self.block_store).insert_block(block.clone());
-                self.block_store.update_data_availability_and_cached_blocks(&block);
-                self.block_store.updated_unknown_by_others(block.reference().clone());
+                let verified_block = block.transform_to_verified(self.authority, &self.committee);
+                let verified_data_block = Data::new(verified_block);
+
+                (&mut self.wal_writer, &self.block_store).insert_block(verified_data_block.clone());
+                self.block_store.update_data_availability_and_cached_blocks(&verified_data_block);
+                self.block_store.updated_unknown_by_others(verified_data_block.reference().clone());
             }
             else {
                 tracing::debug!("Block {block_reference} is not correctly reconstructed");

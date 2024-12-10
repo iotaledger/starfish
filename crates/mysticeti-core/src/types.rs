@@ -86,6 +86,106 @@ impl Hash for BlockReference {
 
 #[derive(Clone, Serialize, Deserialize)]
 // Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+pub struct VerifiedStatementBlock {
+    reference: BlockReference,
+
+    //  A list of block references to other blocks that this block includes
+    //  Note that the order matters: if a reference to two blocks from the same round and same authority
+    //  are included, then the first reference is the one that this block conceptually votes for.
+    includes: Vec<BlockReference>,
+
+    // Transaction data acknowledgment
+    acknowledgement_statements: Vec<BlockReference>,
+
+    // Creation time of the block as reported by creator, currently not enforced
+    meta_creation_time_ns: TimestampNs,
+
+    epoch_marker: EpochStatus,
+
+    // Signature by the block author
+    signature: SignatureBytes,
+    // It could be either a vector of BaseStatement or None
+    statements: Option<Vec<BaseStatement>>,
+    // It could be one some or all nones
+    encoded_statements: Vec<Option<Shard>>,
+    // This is Some only when the above has one some
+    merkle_proof:  Option<Vec<u8>>,
+    // merkle root is computed for encoded_statements
+    merkle_root: MerkleRoot,
+
+}
+
+impl VerifiedStatementBlock {
+    pub fn merkle_root(&self) -> MerkleRoot {
+        self.merkle_root.clone()
+    }
+
+    pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
+        &self.acknowledgement_statements
+    }
+
+    pub fn reference(&self) -> &BlockReference {
+        &self.reference
+    }
+
+    pub fn includes(&self) -> &Vec<BlockReference> {
+        &self.includes
+    }
+
+
+
+    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
+        &self
+            .encoded_statements
+    }
+    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
+        self.encoded_statements[position] = Some(shard);
+    }
+
+    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
+        self.encoded_statements = encoded_statements;
+    }
+
+
+
+    pub fn author(&self) -> AuthorityIndex {
+        self.reference.authority
+    }
+
+    pub fn round(&self) -> RoundNumber {
+        self.reference.round
+    }
+
+    pub fn digest(&self) -> BlockDigest {
+        self.reference.digest
+    }
+
+    pub fn author_round(&self) -> (AuthorityIndex, RoundNumber) {
+        self.reference.author_round()
+    }
+
+    pub fn signature(&self) -> &SignatureBytes {
+        &self.signature
+    }
+
+    pub fn meta_creation_time_ns(&self) -> TimestampNs {
+        self.meta_creation_time_ns
+    }
+
+    pub fn epoch_changed(&self) -> EpochStatus {
+        self.epoch_marker
+    }
+
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Arc<Self>> {
+        IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
+        IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
+        let t = bincode::deserialize(&bytes)?;
+        Ok(Arc::new(t))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
 pub struct StatementBlock {
     reference: BlockReference,
 
@@ -301,6 +401,92 @@ impl StatementBlock {
         let secs = self.meta_creation_time_ns / NANOS_IN_SEC;
         let nanos = self.meta_creation_time_ns % NANOS_IN_SEC;
         Duration::new(secs as u64, nanos as u32)
+    }
+
+    pub fn transform_to_verified(self,  own_id: AuthorityIndex, committee: &Committee) -> VerifiedStatementBlock {
+        let info_length = committee.info_length();
+        let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
+        let number_info_somes = self.encoded_statements.iter().enumerate().filter(|(i,s)|*i< info_length && s.is_some()).count();
+        if number_info_somes == info_length {
+            let info_shards: Vec<Vec<u8>> = self.encoded_statements()
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| *i < info_length && s.is_some())
+                .map(|(_, s)| s.clone().unwrap()) // Safe to unwrap because we filtered for `is_some()`
+                .collect();
+            // Combine all the shards into a single Vec<u8> (assuming they are in order)
+            let mut reconstructed_data = Vec::new();
+            for shard in info_shards {
+                reconstructed_data.extend(shard);
+            }
+
+            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
+            if reconstructed_data.len() < 4 {
+                panic!("Reconstructed data is too short to contain a valid length");
+            }
+
+            let bytes_length = u32::from_le_bytes(
+                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
+            ) as usize;
+
+            // Ensure the data length matches the declared length
+            if reconstructed_data.len() < 4 + bytes_length {
+                panic!("Reconstructed data length does not match the declared bytes_length");
+            }
+
+            // Deserialize the rest of the data into `Vec<BaseStatement>`
+            let serialized_data_statements = &reconstructed_data[4..4 + bytes_length];
+            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_data_statements)
+                .expect("Deserialization of reconstructed data failed");
+
+            let mut encoded_statements = self.encoded_statements;
+            for (i, shard) in encoded_statements.iter_mut().enumerate() {
+                if i != own_id as usize {
+                    *shard = None;
+                }
+            }
+
+            VerifiedStatementBlock {
+                reference: self.reference,
+                includes: self.includes,
+                acknowledgement_statements: self.acknowledgement_statements,
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker,
+                signature: self.signature,
+                statements: Some(reconstructed_statements),
+                encoded_statements,
+                merkle_proof: self.merkle_proof,
+                merkle_root: self.merkle_root,
+            }
+        } else {
+            if number_somes == 1 {
+                VerifiedStatementBlock {
+                    reference: self.reference,
+                    includes: self.includes,
+                    acknowledgement_statements: self.acknowledgement_statements,
+                    meta_creation_time_ns: self.meta_creation_time_ns,
+                    epoch_marker: self.epoch_marker,
+                    signature: self.signature,
+                    statements: None,
+                    encoded_statements: self.encoded_statements,
+                    merkle_proof: self.merkle_proof,
+                    merkle_root: self.merkle_root,
+                }
+            } else {
+                VerifiedStatementBlock {
+                    reference: self.reference,
+                    includes: self.includes,
+                    acknowledgement_statements: self.acknowledgement_statements,
+                    meta_creation_time_ns: self.meta_creation_time_ns,
+                    epoch_marker: self.epoch_marker,
+                    signature: self.signature,
+                    statements: None,
+                    encoded_statements: vec![None; committee.len()],
+                    merkle_proof: None,
+                    merkle_root: self.merkle_root,
+                }
+            }
+        }
     }
 
     pub fn verify(&mut self, committee: &Committee, own_id: AuthorityIndex, peer_id: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {

@@ -15,6 +15,7 @@ use crate::{
     runtime::timestamp_utc,
     types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
 };
+use crate::types::VerifiedStatementBlock;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
@@ -62,7 +63,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
         let _timer = self
             .metrics
             .utilization_timer

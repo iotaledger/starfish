@@ -244,9 +244,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         // todo: Terminate connection upon receiving incorrect block.
                         break;
                     }
+                    let verified_block = block.transform_to_verified(own_id, &inner.committee);
 
                     drop(timer);
-                    let data_block = Data::new(block);
+                    let data_block = Data::new(verified_block);
                     inner.syncer.add_blocks(vec![data_block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
@@ -273,7 +274,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
-                        let data_block = Data::new(block);
+                        let verified_block = block.transform_to_verified(own_id, &inner.committee);
+                        let data_block = Data::new(verified_block);
                         verified_data_blocks.push(data_block);
                     }
                     drop(timer);

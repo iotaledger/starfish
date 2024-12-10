@@ -11,6 +11,7 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
 };
+use crate::types::VerifiedStatementBlock;
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     syncer: Mutex<Syncer<H, S, C>>,
@@ -29,7 +30,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.syncer.into_inner()
     }
 
-    pub async fn add_blocks(&self, blocks: Vec<Data<StatementBlock>>) {
+    pub async fn add_blocks(&self, blocks: Vec<Data<VerifiedStatementBlock>>) {
         self.syncer.lock().add_blocks(blocks);
     }
 
