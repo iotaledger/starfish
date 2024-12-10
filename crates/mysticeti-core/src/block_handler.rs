@@ -348,7 +348,9 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
-                self.transaction_observer(block);
+                if block.round() > 0 {
+                    //self.transaction_observer(block);
+                }
             }
             // self.committed_dags.push(commit);
         }
