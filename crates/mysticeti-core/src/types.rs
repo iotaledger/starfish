@@ -334,6 +334,8 @@ impl StatementBlock {
                 }
                 let (computed_merkle_tree, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(self.encoded_statements(), own_id);
 
+
+
                 ensure!(computed_merkle_tree== self.merkle_root, "Incorrect Merkle root");
 
                 self.merkle_proof = Some(merkle_proof_bytes);

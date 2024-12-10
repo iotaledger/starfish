@@ -25,32 +25,17 @@ use crate::metrics::UtilizationTimerVecExt;
 
 // TODO: A central controller will eventually dynamically update these parameters.
 pub struct SynchronizerParameters {
-    /// The maximum number of helpers (across all nodes).
-    pub absolute_maximum_helpers: usize,
-    /// The maximum number of helpers per authority.
-    pub maximum_helpers_per_authority: usize,
     /// The number of blocks to send in a single batch.
     pub batch_size: usize,
     /// The sampling precision with which to re-evaluate the sync strategy.
     pub sample_precision: Duration,
-    /// The grace period with which to eagerly sync missing blocks.
-    pub grace_period: Duration,
-    /// The interval at which to send stream blocks authored by other nodes.
-    pub stream_interval: Duration,
-    /// Threshold number of missing block from an authority to open a new stream.
-    pub new_stream_threshold: usize,
 }
 
 impl Default for SynchronizerParameters {
     fn default() -> Self {
         Self {
-            absolute_maximum_helpers: 10,
-            maximum_helpers_per_authority: 2,
-            batch_size: 30,
-            sample_precision: Duration::from_millis(500),
-            grace_period: Duration::from_millis(0),
-            stream_interval: Duration::from_secs(1),
-            new_stream_threshold: 10,
+            batch_size: 16,
+            sample_precision: Duration::from_millis(600),
         }
     }
 }
@@ -206,7 +191,7 @@ where
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        10 * batch_size,
+                        batch_size,
                     )
                     .await?;
                 }
@@ -217,7 +202,7 @@ where
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        10 * batch_size,
+                        batch_size,
                     )
                     .await?;
                 }
@@ -230,7 +215,7 @@ where
                             to.clone(),
                             to_whom_authority_index,
                             &mut round,
-                            10 * batch_size,
+                            batch_size,
                         )
                         .await?;
                     }
@@ -472,19 +457,14 @@ where
                 .set(missing.len() as i64);
 
             for reference in missing {
-                let time = self.missing.entry(reference).or_insert(now);
-                if now.checked_sub(*time).unwrap_or_default() >= self.parameters.grace_period {
-                    if authority >= to_request.len() {
-                        to_request.resize(authority + 1, vec![]);
-                    }
-                    to_request[authority].push(reference);
-                    self.missing.remove(&reference); // todo - ensure we receive the block
+                if authority >= to_request.len() {
+                    to_request.resize(authority + 1, vec![]);
                 }
+                to_request[authority].push(reference);
+                self.missing.remove(&reference); // todo - ensure we receive the block
+
             }
         }
-        self.missing.retain(|_, time| {
-            now.checked_sub(*time).unwrap_or_default() < self.parameters.grace_period
-        });
         // TODO: If we are missing many blocks from the same authority
         // (`missing.len() > self.parameters.new_stream_threshold`), it is likely that
         // we have a network partition. We should try to find an other peer from which
