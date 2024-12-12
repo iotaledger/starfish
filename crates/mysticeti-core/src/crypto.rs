@@ -18,7 +18,7 @@ use crate::{
 };
 use rs_merkle::{MerkleProof, MerkleTree};
 use rs_merkle::algorithms::Sha256;
-use crate::types::Shard;
+use crate::types::{Shard, VerifiedStatementBlock};
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
@@ -227,6 +227,22 @@ impl<T: AsBytes> CryptoHash for T {
 
 impl PublicKey {
     pub fn verify_block(&self, block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
+        let signature = Signature::from(block.signature().0);
+        let mut hasher = BlockHasher::default();
+        BlockDigest::digest_without_signature(
+            &mut hasher,
+            block.author(),
+            block.round(),
+            block.includes(),
+            block.acknowledgement_statements(),
+            block.meta_creation_time_ns(),
+            block.epoch_changed(),
+            block.merkle_root(),
+        );
+        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
+        self.0.verify(&signature, digest.as_ref())
+    }
+    pub fn verify_signature_block(&self, block: &VerifiedStatementBlock) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
         let mut hasher = BlockHasher::default();
         BlockDigest::digest_without_signature(

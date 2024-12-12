@@ -36,6 +36,7 @@ use crate::{
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
 use crate::crypto::{BlockDigest, MerkleRoot};
+use crate::encoder::ShardEncoder;
 use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
 
 pub struct Core<H: BlockHandler> {
@@ -239,34 +240,7 @@ impl<H: BlockHandler> Core<H> {
 
 
 
-    pub fn encode_shards(&mut self, mut data: Vec<Option<Shard>>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
-        let shard_bytes = data[0].as_ref().unwrap().len();
-        self.encoder.reset(info_length, parity_length, shard_bytes).expect("reset failed");
-        for shard in data.clone() {
-            self.encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
-        }
-        let result = self.encoder.encode().expect("Encoding failed");
-        let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
-        data.extend(recovery);
-        data
-    }
 
-    pub fn encode(&mut self, block: Vec<BaseStatement>, info_length: usize, parity_length: usize) -> Vec<Option<Shard>> {
-        let mut serialized = bincode::serialize(&block).expect("Serialization of statements before encoding failed");
-        let bytes_length = serialized.len();
-        let mut statements_with_len:Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
-        statements_with_len.append(&mut serialized);
-        let mut shard_bytes = (bytes_length + info_length - 1) / info_length;
-        //shard_bytes should be divisible by 64 in version 2.2.2
-        //it only needs to be even in a new version 3.0.1, but it requires a newer version of rust 1.80
-        if shard_bytes % 64 != 0 {
-            shard_bytes += 64 - shard_bytes % 64;
-        }
-        let length_with_padding = shard_bytes * info_length;
-        statements_with_len.resize(length_with_padding, 0);
-        let data : Vec<Option<Shard>> = statements_with_len.chunks(shard_bytes).map(|chunk| Some(chunk.to_vec())).collect();
-        self.encode_shards(data, info_length, parity_length)
-    }
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
@@ -297,14 +271,13 @@ impl<H: BlockHandler> Core<H> {
             }
             drop(result);
 
-            let recovered_statements = self.encode_shards(data, info_length, parity_length);
+            let recovered_statements = self.encoder.encode_shards(data, info_length, parity_length);
             let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority);
             if computed_merkle_root == block.merkle_root() {
                 tracing::debug!("Block {block_reference} is reconstructed");
                 block.add_encoded_statements(recovered_statements);
                 block.set_merkle_proof(computed_merkle_proof);
-                let verified_block = block.transform_to_verified(self.authority, &self.committee);
-                let verified_data_block = Data::new(verified_block);
+                let verified_data_block = Data::new(block);
 
                 (&mut self.wal_writer, &self.block_store).insert_block(verified_data_block.clone());
                 self.block_store.update_data_availability_and_cached_blocks(&verified_data_block);
@@ -317,7 +290,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
 
-    pub fn try_new_block(&mut self) -> Option<Data<StatementBlock>> {
+    pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
         let _timer = self
             .metrics
             .utilization_timer
@@ -397,7 +370,7 @@ impl<H: BlockHandler> Core<H> {
         tracing::debug!("Include in block {} transactions", number_statements);
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
-        let encoded_statements = self.encode(statements, info_length, parity_length);
+        let encoded_statements = self.encoder.encode_statements(statements.clone(), info_length, parity_length);
 
 
         for j in 0..self.last_own_block.len() {
@@ -435,7 +408,7 @@ impl<H: BlockHandler> Core<H> {
             // Todo change this once we track known transactions
             let acknowledgement_statements = includes.clone();
 
-            let new_block = StatementBlock::new_with_signer(
+            let new_verified_block = VerifiedStatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
                 includes.clone(),
@@ -443,9 +416,10 @@ impl<H: BlockHandler> Core<H> {
                 time_ns,
                 self.epoch_changing(),
                 &self.signer,
+                statements.clone(),
                 encoded_statements.clone(),
             );
-            blocks.push(new_block);
+            blocks.push(new_verified_block);
         }
 
         let mut return_blocks = vec![];
@@ -470,7 +444,7 @@ impl<H: BlockHandler> Core<H> {
                     "Created an oversized block (check all limits set properly: {} > {}): {:?}",
                     block.serialized_bytes().len(),
                     crate::wal::MAX_ENTRY_SIZE / 2,
-                    block.detailed()
+                    block,
                 );
             }
             self.threshold_clock
@@ -510,13 +484,13 @@ impl<H: BlockHandler> Core<H> {
             .expect("Failed to create wal syncer")
     }
 
-    fn proposed_block_stats(&self, block: &Data<StatementBlock>) {
+    fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(&mut self) -> Vec<Arc<StatementBlock>> {
+    pub fn try_commit(&mut self) -> Vec<Arc<VerifiedStatementBlock>> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
@@ -622,7 +596,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // This function is needed only for signalling that we created a new block
-    pub fn last_own_block(&self) -> &Data<StatementBlock> {
+    pub fn last_own_block(&self) -> &Data<VerifiedStatementBlock> {
         &self.last_own_block[0].block
     }
 

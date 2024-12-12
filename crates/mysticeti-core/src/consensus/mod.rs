@@ -7,6 +7,7 @@ use crate::{
     data::Data,
     types::{format_authority_round, AuthorityIndex, RoundNumber, StatementBlock},
 };
+use crate::types::VerifiedStatementBlock;
 
 pub mod base_committer;
 pub mod linearizer;
@@ -27,7 +28,7 @@ pub const MINIMUM_WAVE_LENGTH: RoundNumber = 3;
 /// advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    Commit(Arc<StatementBlock>),
+    Commit(Arc<VerifiedStatementBlock>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
 }
@@ -57,7 +58,7 @@ impl LeaderStatus {
         }
     }
 
-    pub fn into_decided_block(self) -> Option<Arc<StatementBlock>> {
+    pub fn into_decided_block(self) -> Option<Arc<VerifiedStatementBlock>> {
         match self {
             Self::Commit(block) => Some(block),
             Self::Skip(..) => None,

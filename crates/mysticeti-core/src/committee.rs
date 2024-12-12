@@ -25,6 +25,7 @@ use crate::{
         TransactionLocator, TransactionLocatorRange,
     },
 };
+use crate::types::VerifiedStatementBlock;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Committee {
@@ -113,18 +114,18 @@ impl Committee {
     pub fn genesis_blocks(
         &self,
         for_authority: AuthorityIndex,
-    ) -> (Data<StatementBlock>, Vec<Data<StatementBlock>>) {
+    ) -> (Data<VerifiedStatementBlock>, Vec<Data<VerifiedStatementBlock>>) {
         let other_blocks: Vec<_> = self
             .authorities()
             .filter_map(|a| {
                 if a == for_authority {
                     None
                 } else {
-                    Some(StatementBlock::new_genesis(a))
+                    Some(VerifiedStatementBlock::new_genesis(a))
                 }
             })
             .collect();
-        let own_genesis_block = StatementBlock::new_genesis(for_authority);
+        let own_genesis_block = VerifiedStatementBlock::new_genesis(for_authority);
         (own_genesis_block, other_blocks)
     }
 

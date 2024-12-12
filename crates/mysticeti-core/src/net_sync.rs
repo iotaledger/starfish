@@ -35,7 +35,7 @@ use crate::{
 };
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
-use crate::types::{StatementBlock};
+use crate::types::{StatementBlock, VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -232,7 +232,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Block(data_block) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-                    let mut block: StatementBlock = (*data_block).clone();
+                    let mut block = (*data_block).clone();
                     tracing::debug!("Received one block {} from {}", block, peer);
                     if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                         tracing::warn!(
@@ -244,10 +244,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         // todo: Terminate connection upon receiving incorrect block.
                         break;
                     }
-                    let verified_block = block.transform_to_verified(own_id, &inner.committee);
-
+                    let data_block = Data::new(block);
                     drop(timer);
-                    let data_block = Data::new(verified_block);
                     inner.syncer.add_blocks(vec![data_block]).await;
                 }
                 NetworkMessage::Batch(blocks) => {
@@ -261,8 +259,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                     let mut verified_data_blocks = Vec::new();
-                    for data_block in required_blocks {
-                        let mut block: StatementBlock = (*data_block).clone();
+                    for arc_block in required_blocks {
+                        let mut block: VerifiedStatementBlock = (*arc_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
                         if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
                             tracing::warn!(
@@ -274,8 +272,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
-                        let verified_block = block.transform_to_verified(own_id, &inner.committee);
-                        let data_block = Data::new(verified_block);
+                        let data_block = Data::new(block);
                         verified_data_blocks.push(data_block);
                     }
                     drop(timer);

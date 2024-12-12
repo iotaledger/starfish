@@ -27,7 +27,7 @@ use crate::{
     },
 };
 use crate::transactions_generator::TransactionGenerator;
-use crate::types::{BaseStatement, Shard};
+use crate::types::{BaseStatement, Shard, VerifiedStatementBlock};
 
 pub trait BlockHandler: Send + Sync {
 
@@ -336,7 +336,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Arc<StatementBlock>>,
+        committed_leaders: Vec<Arc<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let committed = self
             .commit_interpreter

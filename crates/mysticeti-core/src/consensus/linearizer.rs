@@ -10,6 +10,7 @@ use crate::{
     types::{BlockReference, StatementBlock},
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
+use crate::types::VerifiedStatementBlock;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -17,12 +18,12 @@ pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,
     /// All the committed blocks that are part of this sub-dag
-    pub blocks: Vec<Arc<StatementBlock>>,
+    pub blocks: Vec<Arc<VerifiedStatementBlock>>,
 }
 
 impl CommittedSubDag {
     /// Create new (empty) sub-dag.
-    pub fn new(anchor: BlockReference, blocks: Vec<Arc<StatementBlock>>) -> Self {
+    pub fn new(anchor: BlockReference, blocks: Vec<Arc<VerifiedStatementBlock>>) -> Self {
         Self { anchor, blocks }
     }
 
@@ -55,7 +56,7 @@ impl Linearizer {
     fn collect_committed_blocks_in_history(
         &mut self,
         block_store: &BlockStore,
-        leader_block: Arc<StatementBlock>,
+        leader_block: Arc<VerifiedStatementBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
@@ -135,7 +136,7 @@ impl Linearizer {
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Arc<StatementBlock>>,
+        committed_leaders: Vec<Arc<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = vec![];
         for leader_block in committed_leaders {

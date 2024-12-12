@@ -44,3 +44,4 @@ mod transactions_generator;
 pub mod types;
 pub mod validator;
 mod wal;
+mod encoder;

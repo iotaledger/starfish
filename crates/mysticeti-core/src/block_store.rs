@@ -49,7 +49,7 @@ struct BlockStoreInner {
     // Store the blocks for which we have transaction data
     data_availability: HashSet<BlockDigest>,
     // Store the blocks until the transaction data gets recoverable
-    cached_blocks: BTreeMap<BlockDigest, (StatementBlock, usize)>,
+    cached_blocks: BTreeMap<BlockDigest, (VerifiedStatementBlock, usize)>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
@@ -68,7 +68,7 @@ pub trait BlockWriter {
 
     fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
 
-    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock);
+    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock);
 
     fn insert_own_block(
         &mut self,
@@ -210,7 +210,7 @@ impl BlockStore {
             .add_loaded(position, block, authority_index_start, authority_index_end);
     }
 
-    pub fn get_block(&self, reference: BlockReference) -> Option<Arc<StatementBlock>> {
+    pub fn get_block(&self, reference: BlockReference) -> Option<Arc<VerifiedStatementBlock>> {
         let entry = self.inner.read().get_block(reference);
         // todo - consider adding loaded entries back to cache
         entry.map(|pos| self.read_index(pos))
@@ -243,7 +243,7 @@ impl BlockStore {
             .update_known_by_authority(block_reference, authority);
     }
 
-    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Arc<StatementBlock>> {
+    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Arc<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
         self.read_index_vec(entries)
     }
@@ -252,7 +252,7 @@ impl BlockStore {
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,
-    ) -> Vec<Arc<StatementBlock>> {
+    ) -> Vec<Arc<VerifiedStatementBlock>> {
         let entries = self
             .inner
             .read()
@@ -311,7 +311,7 @@ impl BlockStore {
         self.inner.write().is_sufficient_shards(digest)
     }
 
-    pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {
+    pub fn get_cached_block(&self, digest: BlockDigest) -> VerifiedStatementBlock {
         self.inner.read().get_cached_block(digest)
     }
     pub fn len_expensive(&self) -> usize {
@@ -341,7 +341,7 @@ impl BlockStore {
         to_whom_authority_index: AuthorityIndex,
         from_excluded: RoundNumber,
         limit: usize,
-    ) -> Vec<Arc<StatementBlock>> {
+    ) -> Vec<Arc<VerifiedStatementBlock>> {
         let entries =
             self.inner
                 .read()
@@ -353,7 +353,7 @@ impl BlockStore {
         &self,
         to_whom_authority_index: AuthorityIndex,
         limit: usize,
-    ) -> Vec<Arc<StatementBlock>> {
+    ) -> Vec<Arc<VerifiedStatementBlock>> {
         let entries = self
             .inner
             .read()
@@ -363,11 +363,11 @@ impl BlockStore {
         let own_index = self.inner.read().authority;
         let info_length = self.inner.read().info_length;
         for data_block in data_blocks {
-            let mut block: StatementBlock = (*data_block).clone();
+            let mut block: VerifiedStatementBlock = (*data_block).clone();
             if block.author() == own_index {
-                block.change_for_own_index(info_length);
+                block.change_for_own_index();
             } else {
-                block.change_for_not_own_index(own_index);
+                block.change_for_not_own_index();
             }
             let changed_data_block = Arc::new(block);
             changed_data_blocks.push(changed_data_block);
@@ -375,19 +375,6 @@ impl BlockStore {
         changed_data_blocks
     }
 
-
-    pub fn get_others_blocks(
-        &self,
-        from_excluded: RoundNumber,
-        authority: AuthorityIndex,
-        limit: usize,
-    ) -> Vec<Arc<StatementBlock>> {
-        let entries = self
-            .inner
-            .read()
-            .get_others_blocks(from_excluded, authority, limit);
-        self.read_index_vec(entries)
-    }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
         self.inner.read().last_seen_by_authority(authority)
@@ -397,7 +384,7 @@ impl BlockStore {
         self.inner.read().last_own_block()
     }
 
-    fn read_index(&self, entry: IndexEntry) -> Arc<StatementBlock> {
+    fn read_index(&self, entry: IndexEntry) -> Arc<VerifiedStatementBlock> {
         match entry {
             IndexEntry::WalPosition(position) => {
                 self.metrics.block_store_loaded_blocks.inc();
@@ -408,7 +395,7 @@ impl BlockStore {
                 match tag {
                     WAL_ENTRY_BLOCK => {
 
-                        StatementBlock::from_bytes(data).expect("Failed to deserialize data from wal")
+                        VerifiedStatementBlock::from_bytes(data).expect("Failed to deserialize data from wal")
 
                     }
                     WAL_ENTRY_OWN_BLOCK => {
@@ -425,7 +412,7 @@ impl BlockStore {
         }
     }
 
-    fn read_index_vec(&self, entries: Vec<IndexEntry>) -> Vec<Arc<StatementBlock>> {
+    fn read_index_vec(&self, entries: Vec<IndexEntry>) -> Vec<Arc<VerifiedStatementBlock>> {
         entries
             .into_iter()
             .map(|pos| self.read_index(pos))
@@ -435,8 +422,8 @@ impl BlockStore {
     /// Check whether `earlier_block` is an ancestor of `later_block`.
     pub fn linked(
         &self,
-        later_block: &Arc<StatementBlock>,
-        earlier_block: &Arc<StatementBlock>,
+        later_block: &Arc<VerifiedStatementBlock>,
+        earlier_block: &Arc<VerifiedStatementBlock>,
     ) -> bool {
         let mut parents = vec![later_block.clone()];
         for r in (earlier_block.round()..later_block.round()).rev() {
@@ -523,7 +510,7 @@ impl BlockStoreInner {
         return false
     }
 
-    pub fn get_cached_block(&self, digest: BlockDigest) -> StatementBlock {
+    pub fn get_cached_block(&self, digest: BlockDigest) -> VerifiedStatementBlock {
         self.cached_blocks.get(&digest).expect("Cached block missing").0.clone()
     }
 
@@ -682,13 +669,13 @@ pub fn get_blocks_at_authority_round(
     pub fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
         let committee_size = block.encoded_statements().len();
         let count = block.encoded_statements().iter().filter(|x|x.is_some()).count();
-        if count < committee_size {
+        if block.statements().is_some() {
+            self.data_availability.insert(block.digest());
+            self.cached_blocks.remove(&block.digest());
+        } else  {
             if !self.data_availability.contains(&block.digest()) {
                 self.cached_blocks.insert(block.digest(), (block.clone(), count));
             }
-        } else {
-            self.data_availability.insert(block.digest());
-            self.cached_blocks.remove(&block.digest());
         }
     }
 
@@ -784,30 +771,6 @@ pub fn get_blocks_at_authority_round(
 
     }
 
-    pub fn get_others_blocks(
-        &self,
-        from_excluded: RoundNumber,
-        authority: AuthorityIndex,
-        limit: usize,
-    ) -> Vec<IndexEntry> {
-        self.index
-            .range((from_excluded + 1)..)
-            .take(limit)
-            .flat_map(|(round, map)| {
-                map.keys()
-                    .filter(|(a, _)| *a == authority)
-                    .map(|(a, d)| BlockReference {
-                        authority: *a,
-                        round: *round,
-                        digest: *d,
-                    })
-            })
-            .map(|reference| {
-                self.get_block(reference)
-                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {reference}"))
-            })
-            .collect()
-    }
 
     fn add_own_index(
         &mut self,
@@ -850,7 +813,7 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
         self.1.update_dag(block_reference, parents);
     }
 
-    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
         self.1.update_data_availability_and_cached_blocks(block);
     }
 

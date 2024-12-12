@@ -29,6 +29,7 @@ use crate::{
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
 use crate::crypto::MerkleRoot;
+use crate::types::VerifiedStatementBlock;
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -513,7 +514,7 @@ impl BlockWriter for TestBlockWriter {
         (&mut self.wal_writer, &self.block_store).update_dag(block_reference, parents);
     }
 
-    fn update_data_availability_and_cached_blocks(&mut self, block: &StatementBlock) {
+    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
         (&mut self.wal_writer, &self.block_store).update_data_availability_and_cached_blocks(block);
     }
 

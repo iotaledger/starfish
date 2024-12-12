@@ -11,6 +11,7 @@ use crate::{
     data::Data,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
 };
+use crate::types::VerifiedStatementBlock;
 
 /// The consensus protocol operates in 'waves'. Each wave is composed of a leader round, at least one
 /// voting round, and one decision round.
@@ -105,7 +106,7 @@ impl BaseCommitter {
     fn find_support(
         &self,
         (author, round): (AuthorityIndex, RoundNumber),
-        from: &Arc<StatementBlock>,
+        from: &Arc<VerifiedStatementBlock>,
     ) -> Option<BlockReference> {
         if from.round() < round {
             return None;
@@ -133,8 +134,8 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_vote(
         &self,
-        potential_vote: &Arc<StatementBlock>,
-        leader_block: &Arc<StatementBlock>,
+        potential_vote: &Arc<VerifiedStatementBlock>,
+        leader_block: &Arc<VerifiedStatementBlock>,
     ) -> bool {
         let (author, round) = leader_block.author_round();
         self.find_support((author, round), potential_vote) == Some(*leader_block.reference())
@@ -144,8 +145,8 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_certificate(
         &self,
-        potential_certificate: &Arc<StatementBlock>,
-        leader_block: &Arc<StatementBlock>,
+        potential_certificate: &Arc<VerifiedStatementBlock>,
+        leader_block: &Arc<VerifiedStatementBlock>,
     ) -> bool {
         let mut votes_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for reference in potential_certificate.includes() {
@@ -168,7 +169,7 @@ impl BaseCommitter {
     /// if it has a certified link to the anchor. Otherwise, we skip the target leader.
     fn decide_leader_from_anchor(
         &self,
-        anchor: &Arc<StatementBlock>,
+        anchor: &Arc<VerifiedStatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
     ) -> LeaderStatus {
@@ -261,7 +262,7 @@ impl BaseCommitter {
     fn enough_leader_support(
         &self,
         decision_round: RoundNumber,
-        leader_block: &Arc<StatementBlock>,
+        leader_block: &Arc<VerifiedStatementBlock>,
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 
