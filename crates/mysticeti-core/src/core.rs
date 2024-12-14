@@ -456,8 +456,8 @@ impl<H: BlockHandler> Core<H> {
                 .metrics
                 .utilization_timer
                 .utilization_timer("Core::try_new_block::serialize block");
-            drop(timer_for_serialization);
             let block = Data::new(block);
+            drop(timer_for_serialization);
             if block.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
                 // Sanity check for now
                 panic!(
@@ -480,6 +480,10 @@ impl<H: BlockHandler> Core<H> {
                 next_entry,
                 block: block.clone(),
             });
+            let timer_for_disk = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::try_new_block::writing to disk");
             (&mut self.wal_writer, &self.block_store).insert_own_block(
                 &self.last_own_block.last().unwrap(),
                 authority_bounds[block_id] as AuthorityIndex,
@@ -489,6 +493,7 @@ impl<H: BlockHandler> Core<H> {
             if self.options.fsync {
                 self.wal_writer.sync().expect("Wal sync failed");
             }
+            drop(timer_for_disk);
 
             tracing::debug!("Created block {block:?} with refs {:?}", block.includes().len());
             return_blocks.push(block);
