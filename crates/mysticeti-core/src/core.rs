@@ -373,7 +373,14 @@ impl<H: BlockHandler> Core<H> {
         tracing::debug!("Include in block {} transactions", number_statements);
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
+
+
+        let timer_for_encoding = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::try_new_block::encoding");
         let encoded_statements = self.encoder.encode_statements(statements.clone(), info_length, parity_length);
+        drop(timer_for_encoding);
 
         let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round.saturating_sub(1));
 
@@ -412,7 +419,10 @@ impl<H: BlockHandler> Core<H> {
             // Todo change this once we track known transactions
 
             let acknowledgement_statements = acknowledgment_statements_retrieved.clone();
-
+            let timer_for_building_block = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::try_new_block::build block");
             let new_verified_block = VerifiedStatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
@@ -424,6 +434,7 @@ impl<H: BlockHandler> Core<H> {
                 statements.clone(),
                 encoded_statements.clone(),
             );
+            drop(timer_for_building_block);
             blocks.push(new_verified_block);
         }
 
@@ -441,7 +452,11 @@ impl<H: BlockHandler> Core<H> {
                 "Invalid block {}",
                 block.clone()
             );
-
+            let timer_for_serialization = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::try_new_block::serialize block");
+            drop(timer_for_serialization);
             let block = Data::new(block);
             if block.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
                 // Sanity check for now

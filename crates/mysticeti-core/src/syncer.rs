@@ -64,10 +64,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Syncer::add_blocks");
         self.core.add_blocks(blocks);
         self.try_new_block();
         self.try_new_commit();
