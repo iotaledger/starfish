@@ -375,6 +375,7 @@ impl<H: BlockHandler> Core<H> {
         let parity_length = self.committee.len() - info_length;
         let encoded_statements = self.encoder.encode_statements(statements.clone(), info_length, parity_length);
 
+        let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round.saturating_sub(1));
 
         for j in 0..self.last_own_block.len() {
             // Compress the references in the block
@@ -409,7 +410,8 @@ impl<H: BlockHandler> Core<H> {
             assert!(!includes.is_empty());
             let time_ns = timestamp_utc().as_nanos() + j as u128;
             // Todo change this once we track known transactions
-            let acknowledgement_statements = includes.clone();
+
+            let acknowledgement_statements = acknowledgment_statements_retrieved.clone();
 
             let new_verified_block = VerifiedStatementBlock::new_with_signer(
                 self.authority,

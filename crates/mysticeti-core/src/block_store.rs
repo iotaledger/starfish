@@ -232,6 +232,10 @@ impl BlockStore {
         self.inner.write().update_data_availability_and_cached_blocks(block);
     }
 
+    pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {
+        self.inner.write().get_pending_acknowledgment(round_number)
+    }
+
 
 
 
@@ -365,7 +369,6 @@ impl BlockStore {
         let data_blocks = self.read_index_vec(entries);
         let mut changed_data_blocks = Vec::new();
         let own_index = self.inner.read().authority;
-        let info_length = self.inner.read().info_length;
         for data_block in data_blocks {
             let mut block: VerifiedStatementBlock = (*data_block).clone();
             if block.author() == own_index {
@@ -519,12 +522,12 @@ impl BlockStoreInner {
 
 
 
-    pub fn is_sufficient_shards(&mut self, block_reference: &BlockReference) -> bool{
+    pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool{
         let count_shards = self.shard_count(block_reference);
         if count_shards >= self.info_length {
             return true;
         }
-        return false
+        false
     }
 
     pub fn get_cached_block(&self, block_reference: &BlockReference) -> VerifiedStatementBlock {
@@ -684,10 +687,13 @@ pub fn get_blocks_at_authority_round(
 
 
     pub fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
-        let committee_size = block.encoded_statements().len();
         let count = block.encoded_statements().iter().filter(|x|x.is_some()).count();
         if block.statements().is_some() {
-            self.data_availability.insert(block.reference().clone());
+            if !self.data_availability.contains(block.reference()) {
+                self.data_availability.insert(block.reference().clone());
+                self.pending_acknowledgment.push(block.reference().clone());
+            }
+
             self.cached_blocks.remove(&block.reference());
         } else  {
             if !self.data_availability.contains(&block.reference()) {
@@ -695,6 +701,22 @@ pub fn get_blocks_at_authority_round(
             }
         }
     }
+
+    pub fn get_pending_acknowledgment(&mut self, round_number: RoundNumber) -> Vec<BlockReference> {
+        // Partition the vector into two parts: one to keep, and one to return
+        let (to_return, to_keep): (Vec<_>, Vec<_>) = self
+            .pending_acknowledgment
+            .drain(..)
+            .partition(|x| x.round <= round_number);
+
+        // Replace the original vector with the elements to keep
+        self.pending_acknowledgment = to_keep;
+
+        // Return the filtered elements
+        to_return
+    }
+
+
 
     pub fn update_known_by_authority(
         &mut self,
