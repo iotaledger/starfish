@@ -67,7 +67,7 @@ impl BlockManager {
                         recoverable_blocks.remove(block.reference());
                     } else {
                         self.block_store.update_with_new_shard(&block);
-                        if self.block_store.is_sufficient_shards(block.digest()) {
+                        if self.block_store.is_sufficient_shards(block.reference()) {
                             tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
                             recoverable_blocks.insert(block.reference().clone());
                         }

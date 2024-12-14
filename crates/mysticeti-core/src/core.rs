@@ -238,7 +238,43 @@ impl<H: BlockHandler> Core<H> {
             .push((position, MetaStatement::Payload(statements)));
     }
 
+    fn sort_includes_in_pending(&mut self) {
+        // Temporarily extract Includes, leaving Payloads untouched
+        let mut include_positions: Vec<usize> = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, meta))| matches!(meta, MetaStatement::Include(_)))
+            .map(|(index, _)| index)
+            .collect();
+        // Sort the Include entries by round
+        include_positions.sort_by_key(|&index| {
+            if let MetaStatement::Include(block_ref) = &self.pending[index].1 {
+                block_ref.round()
+            } else {
+                unreachable!() // This should never happen
+            }
+        });
 
+        // Reorder the Include entries in place
+        for i in 0..include_positions.len() {
+            for j in (i + 1)..include_positions.len() {
+                let i_pos = include_positions[i];
+                let j_pos = include_positions[j];
+
+                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) = (
+                    &self.pending[i_pos].1,
+                    &self.pending[j_pos].1,
+                ) {
+                    if j_meta.round() < i_meta.round() {
+                        // Swap the positions and the entries directly
+                        self.pending.swap(i_pos, j_pos);
+                        include_positions.swap(i, j);
+                    }
+                }
+            }
+        }
+    }
 
 
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
@@ -247,8 +283,7 @@ impl<H: BlockHandler> Core<H> {
         let total_length = info_length + parity_length;
 
         for block_reference in new_blocks_to_reconstruct {
-            let block_digest = block_reference.digest;
-            let mut block = self.block_store.get_cached_block(block_digest);
+            let mut block = self.block_store.get_cached_block(&block_reference);
             let position =  block.encoded_statements().iter().position(|x| x.is_some());
             let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
             let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();
@@ -299,42 +334,10 @@ impl<H: BlockHandler> Core<H> {
         if clock_round <= self.last_proposed() {
             return None;
         }
-        // Temporarily extract Includes, leaving Payloads untouched
-        let mut include_positions: Vec<usize> = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, meta))| matches!(meta, MetaStatement::Include(_)))
-            .map(|(index, _)| index)
-            .collect();
-        let total_includes = include_positions.len();
-        // Sort the Include entries by round
-        include_positions.sort_by_key(|&index| {
-            if let MetaStatement::Include(block_ref) = &self.pending[index].1 {
-                block_ref.round()
-            } else {
-                unreachable!() // This should never happen
-            }
-        });
 
-        // Reorder the Include entries in place
-        for i in 0..include_positions.len() {
-            for j in (i + 1)..include_positions.len() {
-                let i_pos = include_positions[i];
-                let j_pos = include_positions[j];
+        // Sort includes in pending to include all blocks up to the given round
+        self.sort_includes_in_pending();
 
-                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) = (
-                    &self.pending[i_pos].1,
-                    &self.pending[j_pos].1,
-                ) {
-                    if j_meta.round() < i_meta.round() {
-                        // Swap the positions and the entries directly
-                        self.pending.swap(i_pos, j_pos);
-                        include_positions.swap(i, j);
-                    }
-                }
-            }
-        }
         let first_include_index = self
             .pending
             .iter()
@@ -470,7 +473,7 @@ impl<H: BlockHandler> Core<H> {
                 self.wal_writer.sync().expect("Wal sync failed");
             }
 
-            tracing::debug!("Created block {block:?} with refs {:?} and total include {:?}", block.includes().len(), total_includes);
+            tracing::debug!("Created block {block:?} with refs {:?}", block.includes().len());
             return_blocks.push(block);
             block_id += 1;
         }

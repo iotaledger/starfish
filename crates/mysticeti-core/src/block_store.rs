@@ -48,9 +48,11 @@ pub struct BlockStore {
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
-    data_availability: HashSet<BlockDigest>,
+    data_availability: HashSet<BlockReference>,
+    // Might need to store in sorted (by round) way
+    pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
-    cached_blocks: BTreeMap<BlockDigest, (VerifiedStatementBlock, usize)>,
+    cached_blocks: BTreeMap<BlockReference, (VerifiedStatementBlock, usize)>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
@@ -295,8 +297,8 @@ impl BlockStore {
         self.inner.read().block_exists(reference)
     }
 
-    pub fn shard_count(&self, digest: BlockDigest) -> usize {
-        self.inner.read().shard_count(digest)
+    pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
+        self.inner.read().shard_count(block_reference)
     }
 
     pub fn get_new_shards_ids(&self, block: &VerifiedStatementBlock) -> Vec<usize> {
@@ -309,12 +311,12 @@ impl BlockStore {
 
 
 
-    pub fn is_sufficient_shards(&self, digest: BlockDigest) -> bool {
-        self.inner.write().is_sufficient_shards(digest)
+    pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool {
+        self.inner.write().is_sufficient_shards(block_reference)
     }
 
-    pub fn get_cached_block(&self, digest: BlockDigest) -> VerifiedStatementBlock {
-        self.inner.read().get_cached_block(digest)
+    pub fn get_cached_block(&self, block_reference: &BlockReference) -> VerifiedStatementBlock {
+        self.inner.read().get_cached_block(block_reference)
     }
     pub fn len_expensive(&self) -> usize {
         let inner = self.inner.read();
@@ -453,20 +455,20 @@ impl BlockStoreInner {
         blocks.contains_key(&(reference.authority, reference.digest))
     }
 
-    pub fn shard_count(&self, digest: BlockDigest) -> usize {
-        if self.data_availability.contains(&digest) {
+    pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
+        if self.data_availability.contains(block_reference) {
             return self.committee_size;
         }
-        self.cached_blocks.get(&digest).map_or(0, |x| x.1)
+        self.cached_blocks.get(block_reference).map_or(0, |x| x.1)
     }
 
     pub fn get_new_shards_ids(&self, block: &VerifiedStatementBlock) -> Vec<usize> {
-        let block_digest = block.digest();
-        if self.data_availability.contains(&block_digest) {
+        let block_reference = block.reference();
+        if self.data_availability.contains(block_reference) {
             return vec![];
         }
         // If the block is not in the cache
-        if !self.cached_blocks.contains_key(&block_digest) && block.statements().is_none() {
+        if !self.cached_blocks.contains_key(block_reference) && block.statements().is_none() {
             // Collect indices of `Some` encoded statements
             return block
                 .encoded_statements()
@@ -487,7 +489,7 @@ impl BlockStoreInner {
         }
 
         // Get the cached block
-        let cached_block = &self.cached_blocks.get(&block_digest).expect("Cached block missing").0;
+        let cached_block = &self.cached_blocks.get(&block_reference).expect("Cached block missing").0;
         let cached_statements = cached_block.encoded_statements();
         let block_statements = block.encoded_statements();
 
@@ -502,7 +504,7 @@ impl BlockStoreInner {
     }
 
     pub fn update_with_new_shard(&mut self, block: &VerifiedStatementBlock) {
-        if let Some(entry) = self.cached_blocks.get_mut(&block.digest()) {
+        if let Some(entry) = self.cached_blocks.get_mut(block.reference()) {
             let (cached_block, count) = entry;
             for (index, encoded_shard) in block.encoded_statements().iter().enumerate() {
                 if let Some(encoded_shard) = encoded_shard {
@@ -517,16 +519,16 @@ impl BlockStoreInner {
 
 
 
-    pub fn is_sufficient_shards(&mut self, digest: BlockDigest) -> bool{
-        let count_shards = self.shard_count(digest);
+    pub fn is_sufficient_shards(&mut self, block_reference: &BlockReference) -> bool{
+        let count_shards = self.shard_count(block_reference);
         if count_shards >= self.info_length {
             return true;
         }
         return false
     }
 
-    pub fn get_cached_block(&self, digest: BlockDigest) -> VerifiedStatementBlock {
-        self.cached_blocks.get(&digest).expect("Cached block missing").0.clone()
+    pub fn get_cached_block(&self, block_reference: &BlockReference) -> VerifiedStatementBlock {
+        self.cached_blocks.get(&block_reference).expect("Cached block missing").0.clone()
     }
 
 pub fn get_blocks_at_authority_round(
@@ -685,11 +687,11 @@ pub fn get_blocks_at_authority_round(
         let committee_size = block.encoded_statements().len();
         let count = block.encoded_statements().iter().filter(|x|x.is_some()).count();
         if block.statements().is_some() {
-            self.data_availability.insert(block.digest());
-            self.cached_blocks.remove(&block.digest());
+            self.data_availability.insert(block.reference().clone());
+            self.cached_blocks.remove(&block.reference());
         } else  {
-            if !self.data_availability.contains(&block.digest()) {
-                self.cached_blocks.insert(block.digest(), (block.clone(), count));
+            if !self.data_availability.contains(&block.reference()) {
+                self.cached_blocks.insert(block.reference().clone(), (block.clone(), count));
             }
         }
     }
