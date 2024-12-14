@@ -41,6 +41,7 @@ pub struct Metrics {
     pub latency_squared_s: CounterVec,
     pub committed_leaders_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
+    pub sequenced_transactions_total: IntCounter,
     pub inter_block_latency_s: HistogramVec,
 
     pub block_store_unloaded_blocks: IntCounter,
@@ -238,6 +239,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            sequenced_transactions_total: register_int_counter_with_registry!(
+                "sequenced_transactions_total",
+                "Total number of sequenced transactions",
+                registry,
+            )
+                .unwrap(),
 
             block_store_loaded_blocks: register_int_counter_with_registry!(
                 "block_store_loaded_blocks",

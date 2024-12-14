@@ -284,6 +284,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
                     let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
                     self.metrics.transaction_committed_latency.observe(latency);
+                    self.metrics.sequenced_transactions_total.inc();
                 }
             }
         }
