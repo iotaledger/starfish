@@ -1177,7 +1177,7 @@ mod test {
     use crate::test_util::byzantine_committee_and_cores_epoch_duration;
     use super::*;
 
-    pub struct Dag(HashMap<BlockReference, Data<StatementBlock>>);
+    pub struct Dag(HashMap<BlockReference, Data<VerifiedStatementBlock>>);
 
     #[cfg(test)]
     impl Dag {
@@ -1194,7 +1194,7 @@ mod test {
             Self(blocks)
         }
 
-        pub fn draw_block(block: &str) -> StatementBlock {
+        pub fn draw_block(block: &str) -> VerifiedStatementBlock {
             let block = block.trim();
             assert!(block.ends_with(']'), "Invalid block definition: {}", block);
             let block = &block[..block.len() - 1];
@@ -1211,13 +1211,14 @@ mod test {
             };
             let acknowledgement_statements = includes
                 .clone();
-            StatementBlock {
+            VerifiedStatementBlock {
                 reference,
                 includes,
                 acknowledgement_statements,
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),
+                statements: None,
                 encoded_statements: vec![],
                 merkle_proof: None,
                 merkle_root: MerkleRoot::default(),
@@ -1239,7 +1240,7 @@ mod test {
         /// For each authority add a 0 round block if not present
         pub fn add_genesis_blocks(mut self) -> Self {
             for authority in self.authorities() {
-                let block = StatementBlock::new_genesis(authority);
+                let block = VerifiedStatementBlock::new_genesis(authority);
                 let entry = self.0.entry(*block.reference());
                 entry.or_insert_with(move || block);
             }
@@ -1275,7 +1276,7 @@ mod test {
     pub struct RandomDagIter<'a>(&'a Dag, std::vec::IntoIter<BlockReference>);
 
     impl<'a> Iterator for RandomDagIter<'a> {
-        type Item = &'a Data<StatementBlock>;
+        type Item = &'a Data<VerifiedStatementBlock>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let next = self.1.next()?;
@@ -1378,7 +1379,7 @@ mod test {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
         let statements = generate_random_shares(5);
-        let mut encoded_statements = own_core.encode(statements, info_length, parity_length);
+        let mut encoded_statements = own_core.encoder.encode_statements(statements, info_length, parity_length);
 
 
         let mut full_block = StatementBlock::new_with_signer(

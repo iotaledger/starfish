@@ -7,10 +7,7 @@ scrape_configs:
   - job_name: 'mysticeti-metrics'
     static_configs:
       - targets:
+          - 'host.docker.internal:1504'
+          - 'host.docker.internal:1505'
+          - 'host.docker.internal:1506'
           - 'host.docker.internal:1507'
-          - 'host.docker.internal:1508'
-          - 'host.docker.internal:1509'
-          - 'host.docker.internal:1510'
-          - 'host.docker.internal:1511'
-          - 'host.docker.internal:1512'
-          - 'host.docker.internal:1513'

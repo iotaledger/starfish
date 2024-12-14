@@ -43,6 +43,7 @@ pub struct BlockStore {
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
 
+
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
@@ -307,6 +308,7 @@ impl BlockStore {
     }
 
 
+
     pub fn is_sufficient_shards(&self, digest: BlockDigest) -> bool {
         self.inner.write().is_sufficient_shards(digest)
     }
@@ -464,7 +466,7 @@ impl BlockStoreInner {
             return vec![];
         }
         // If the block is not in the cache
-        if !self.cached_blocks.contains_key(&block_digest) {
+        if !self.cached_blocks.contains_key(&block_digest) && block.statements().is_none() {
             // Collect indices of `Some` encoded statements
             return block
                 .encoded_statements()
@@ -473,6 +475,17 @@ impl BlockStoreInner {
                 .filter_map(|(i, stmt)| if stmt.is_some() { Some(i) } else { None })
                 .collect();
         }
+        // If the block is not in the cache
+        if block.statements().is_some() {
+            // Collect indices of `Some` encoded statements
+            return block
+                .encoded_statements()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, stmt)|  { Some(i) })
+                .collect();
+        }
+
         // Get the cached block
         let cached_block = &self.cached_blocks.get(&block_digest).expect("Cached block missing").0;
         let cached_statements = cached_block.encoded_statements();
@@ -501,6 +514,8 @@ impl BlockStoreInner {
             }
         }
     }
+
+
 
     pub fn is_sufficient_shards(&mut self, digest: BlockDigest) -> bool{
         let count_shards = self.shard_count(digest);

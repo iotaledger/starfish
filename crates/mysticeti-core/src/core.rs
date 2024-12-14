@@ -60,7 +60,7 @@ pub struct Core<H: BlockHandler> {
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
     //coding_engine : reed_solomon_simd::engine::DefaultEngine,
-    encoder : Encoder,
+    pub(crate) encoder : Encoder,
     decoder: Decoder,
 }
 

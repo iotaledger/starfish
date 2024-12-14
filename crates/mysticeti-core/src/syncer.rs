@@ -173,7 +173,7 @@ mod tests {
 
     pub enum SyncerEvent {
         ForceNewBlock(RoundNumber),
-        DeliverBlock(Data<StatementBlock>),
+        DeliverBlock(Data<VerifiedStatementBlock>),
     }
 
     impl SimulatorState for Syncer<TestBlockHandler, bool, TestCommitHandler> {

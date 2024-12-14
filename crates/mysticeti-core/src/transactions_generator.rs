@@ -107,7 +107,7 @@ impl TransactionGenerator {
         }
     }
 
-    pub fn extract_timestamp(transaction: Transaction) -> Duration {
+    pub fn extract_timestamp(transaction: &Transaction) -> Duration {
         let bytes = transaction.as_bytes()[0..8]
             .try_into()
             .expect("Transactions should be at least 8 bytes");

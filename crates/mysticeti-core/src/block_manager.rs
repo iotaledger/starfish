@@ -58,11 +58,20 @@ impl BlockManager {
                 let position_indices =  self.block_store.get_new_shards_ids(&block);
                 tracing::debug!("Positions {:?}, exists {:?}", position_indices, block_exists);
                 if position_indices.len() > 0 {
-                    self.block_store.update_with_new_shard(&block);
-                     if self.block_store.is_sufficient_shards(block.digest()) {
-                         tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
-                         recoverable_blocks.insert(block.reference().clone());
-                     }
+                    if block.statements().is_some() {
+                        // Block can be processed. So need to update indexes etc
+                        let position = block_writer.insert_block(block.clone());
+                        newly_blocks_processed.push((position, block.borrow_arc_t()));
+                        self.block_store.update_data_availability_and_cached_blocks(&block);
+                        self.block_store.updated_unknown_by_others(block.reference().clone());
+                        recoverable_blocks.remove(block.reference());
+                    } else {
+                        self.block_store.update_with_new_shard(&block);
+                        if self.block_store.is_sufficient_shards(block.digest()) {
+                            tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
+                            recoverable_blocks.insert(block.reference().clone());
+                        }
+                    }
                 }
                 continue;
             }

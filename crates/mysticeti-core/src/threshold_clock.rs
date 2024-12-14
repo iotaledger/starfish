@@ -116,27 +116,27 @@ mod tests {
     #[test]
     fn test_threshold_clock_valid() {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[]"),
             &committee
         ));
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0, C0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0, C0, D0]"),
             &committee
         ));
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A2:[A1, B1, C0, D0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A2:[A1, B1, C1, D0]"),
             &committee
         ));

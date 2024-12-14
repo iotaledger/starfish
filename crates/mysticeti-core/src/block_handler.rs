@@ -275,46 +275,10 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         }
     }
 
-    fn transaction_observer(&self, block: &Arc<StatementBlock>) {
+    fn transaction_observer(&self, block: &Arc<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
-        let info_length = self.commit_interpreter.committee.info_length();
-        let number_info_somes = block.encoded_statements().iter().enumerate().filter(|(i,s)|*i< info_length && s.is_some()).count();
-        if number_info_somes < info_length {
-            tracing::debug!("Can't reconstruct transactions: {number_info_somes}  out of {info_length} are available for {:?}", block);
-        } else {
-            let info_shards: Vec<Vec<u8>> = block.encoded_statements()
-                .iter()
-                .enumerate()
-                .filter(|(i, s)| *i < info_length && s.is_some())
-                .map(|(_, s)| s.clone().unwrap()) // Safe to unwrap because we filtered for `is_some()`
-                .collect();
-            // Combine all the shards into a single Vec<u8> (assuming they are in order)
-            let mut reconstructed_data = Vec::new();
-            for shard in info_shards {
-                reconstructed_data.extend(shard);
-            }
-
-            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
-            if reconstructed_data.len() < 4 {
-                panic!("Reconstructed data is too short to contain a valid length");
-            }
-
-            let bytes_length = u32::from_le_bytes(
-                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
-            ) as usize;
-
-            // Ensure the data length matches the declared length
-            if reconstructed_data.len() < 4 + bytes_length {
-                panic!("Reconstructed data length does not match the declared bytes_length");
-            }
-
-            // Deserialize the rest of the data into `Vec<BaseStatement>`
-            let serialized_block = &reconstructed_data[4..4 + bytes_length];
-            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_block)
-                .expect("Deserialization of reconstructed data failed");
-            for statement in reconstructed_statements {
-                // Record end-to-end latency. The first 8 bytes of the transaction are the timestamp of the
-                // transaction submission.
+        if let Some(vec) = block.statements().as_ref() {
+            for statement in vec {
                 if let BaseStatement::Share(transaction) = statement {
                     let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                     let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
@@ -322,7 +286,6 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
                     self.metrics.transaction_committed_latency.observe(latency);
                 }
             }
-
         }
     }
     pub fn committed_leaders(&self) -> &Vec<BlockReference> {
@@ -349,9 +312,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
                 if block.round() > 0 {
-                    // Going over transactions should be either handled only for own blocks
-                    // or delegated to multiple threads
-                    //self.transaction_observer(block);
+                    // Block is supposed to have uncoded transactions
+                    self.transaction_observer(block);
                 }
             }
             // self.committed_dags.push(commit);

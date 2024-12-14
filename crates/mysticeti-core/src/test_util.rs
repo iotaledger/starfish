@@ -474,7 +474,7 @@ impl TestBlockWriter {
         dag
     }
 
-    pub fn add_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
+    pub fn add_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
         self.update_dag(block.reference().clone(), block.includes().clone());
         self.update_data_availability_and_cached_blocks(&block);
         let pos = self
@@ -490,7 +490,7 @@ impl TestBlockWriter {
         pos
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Data<StatementBlock>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
         for block in blocks {
             self.add_block(block);
         }
@@ -506,7 +506,7 @@ impl TestBlockWriter {
 }
 
 impl BlockWriter for TestBlockWriter {
-    fn insert_block(&mut self, block: Data<StatementBlock>) -> WalPosition {
+    fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
         (&mut self.wal_writer, &self.block_store).insert_block(block)
     }
 
@@ -553,7 +553,7 @@ pub fn build_dag(
         None => {
             let (references, genesis): (Vec<_>, Vec<_>) = committee
                 .authorities()
-                .map(|index| StatementBlock::new_genesis(index))
+                .map(|index| VerifiedStatementBlock::new_genesis(index))
                 .map(|block| (*block.reference(), block))
                 .unzip();
             block_writer.add_blocks(genesis);
@@ -567,7 +567,7 @@ pub fn build_dag(
             .authorities()
             .map(|authority| {
                 let acknowledgement_statements = includes.clone();
-                let block = Data::new(StatementBlock::new(
+                let block = Data::new(VerifiedStatementBlock::new(
                     authority,
                     round,
                     includes.clone(),
@@ -575,6 +575,7 @@ pub fn build_dag(
                     0,
                     false,
                     Default::default(),
+                    vec![],
                     vec![],
                     None,
                     MerkleRoot::default(),
@@ -599,7 +600,7 @@ pub fn build_dag_layer(
     for (authority, parents) in connections {
         let round = parents.first().unwrap().round + 1;
         let acknowledgement_statements = parents.clone();
-        let block = Data::new(StatementBlock::new(
+        let block = Data::new(VerifiedStatementBlock::new(
             authority,
             round,
             parents,
@@ -607,6 +608,7 @@ pub fn build_dag_layer(
             0,
             false,
             Default::default(),
+            vec![],
             vec![],
             None,
             MerkleRoot::default(),
