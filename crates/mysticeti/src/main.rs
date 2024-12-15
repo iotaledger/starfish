@@ -76,8 +76,8 @@ enum Operation {
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
         /// Seed for mimicing latency between nodes, 0 for zero latency
-        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
-        mimic_extra_latency: u64,
+        #[clap(long, global = true, default_value_t = false)]
+        mimic_extra_latency: bool,
     },
 }
 
@@ -242,7 +242,7 @@ async fn dryrun(
     committee_size: usize,
     load: usize,
     byzantine_strategy: String,
-    mimic_latency: u64,
+    mimic_latency: bool,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"

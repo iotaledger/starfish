@@ -50,8 +50,8 @@ pub struct NodeParameters {
     pub consensus_only: bool,
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
-    #[serde(default = "node_defaults::default_mimic_extra_latency_seed")]
-    pub mimic_extra_latency_seed: u64,
+    #[serde(default = "node_defaults::default_mimic_latency")]
+    pub mimic_latency: bool,
 }
 
 pub mod node_defaults {
@@ -63,9 +63,6 @@ pub mod node_defaults {
         std::time::Duration::from_millis(1000)
     }
 
-    pub fn default_mimic_extra_latency_seed() -> u64 {
-        0
-    }
 
     pub fn default_max_block_size() -> usize {
         4 * 1024 * 1024
@@ -94,6 +91,9 @@ pub mod node_defaults {
     pub fn default_enable_synchronizer() -> bool {
         false
     }
+    pub fn default_mimic_latency() -> bool {
+        true
+    }
 }
 
 impl Default for NodeParameters {
@@ -108,15 +108,14 @@ impl Default for NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
-            mimic_extra_latency_seed: node_defaults::default_mimic_extra_latency_seed(),
+            mimic_latency: node_defaults::default_mimic_latency(),
         }
     }
 }
 
 impl NodeParameters {
-    pub fn almost_default(seed: u64) -> Self {
+    pub fn almost_default(mimic_latency: bool) -> Self {
         Self {
-            mimic_extra_latency_seed: seed,
             wave_length: node_defaults::default_wave_length(),
             leader_timeout: node_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),
@@ -126,6 +125,7 @@ impl NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            mimic_latency,
         }
     }
 }

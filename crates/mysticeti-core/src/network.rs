@@ -34,6 +34,35 @@ use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
+
+// AWS regions and their names
+const REGIONS: [&str; 16] = [
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
+    "eu-west-2", "eu-central-1", "ap-northeast-1", "ap-northeast-2",
+    "ap-southeast-1", "ap-southeast-2", "ap-south-1",
+    "ca-central-1", "sa-east-1", "me-south-1", "af-south-1"
+];
+
+// Latency table as a constant
+const LATENCY_TABLE: [[u32; 16]; 16] = [
+    [0, 10, 80, 70, 80, 85, 90, 220, 215, 240, 260, 190, 20, 110, 140, 180],
+    [10, 0, 85, 75, 85, 90, 95, 225, 220, 245, 265, 195, 25, 115, 145, 185],
+    [80, 85, 0, 20, 140, 150, 150, 160, 155, 190, 210, 200, 90, 140, 190, 230],
+    [70, 75, 20, 0, 130, 140, 140, 150, 145, 180, 200, 190, 80, 130, 180, 220],
+    [80, 85, 140, 130, 0, 15, 20, 230, 225, 200, 220, 180, 85, 210, 150, 170],
+    [85, 90, 150, 140, 15, 0, 25, 235, 230, 205, 225, 185, 90, 215, 155, 175],
+    [90, 95, 150, 140, 20, 25, 0, 220, 215, 190, 210, 170, 95, 220, 140, 160],
+    [220, 225, 160, 150, 230, 235, 220, 0, 50, 70, 100, 150, 230, 320, 190, 230],
+    [215, 220, 155, 145, 225, 230, 215, 50, 0, 80, 110, 140, 225, 315, 180, 220],
+    [240, 245, 190, 180, 200, 205, 190, 70, 80, 0, 90, 120, 240, 340, 170, 210],
+    [260, 265, 210, 200, 220, 225, 210, 100, 110, 90, 0, 140, 260, 350, 190, 230],
+    [190, 195, 200, 190, 180, 185, 170, 150, 140, 120, 140, 0, 190, 310, 130, 150],
+    [20, 25, 90, 80, 85, 90, 95, 230, 225, 240, 260, 190, 0, 120, 150, 190],
+    [110, 115, 140, 130, 210, 215, 220, 320, 315, 340, 350, 310, 120, 0, 220, 260],
+    [140, 145, 190, 180, 150, 155, 140, 190, 180, 170, 190, 130, 150, 220, 0, 100],
+    [180, 185, 230, 220, 170, 175, 160, 230, 220, 210, 230, 150, 190, 260, 100, 0],
+];
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
     SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
@@ -72,13 +101,13 @@ impl Network {
     ) -> Self {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
-        let mimic_latency_seed = parameters.parameters.mimic_extra_latency_seed;
+        let mimic_latency = parameters.parameters.mimic_latency;
         Self::from_socket_addresses(
             &addresses,
             our_id as usize,
             local_addr,
             metrics,
-            mimic_latency_seed,
+            mimic_latency,
         )
         .await
     }
@@ -92,7 +121,7 @@ impl Network {
         our_id: usize,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
-        mimic_latency_seed: u64,
+        mimic_latency: bool,
     ) -> Self {
         if our_id >= addresses.len() {
             panic!(
@@ -101,7 +130,7 @@ impl Network {
             );
         }
         tracing::info!("Before latency table");
-        let latency_table = generate_latency_table(addresses.len(), mimic_latency_seed);
+        let latency_table = generate_latency_table(addresses.len(), mimic_latency);
         tracing::info!("After latency table");
         if our_id == 0 {
             write_latency_delays(latency_table.clone()).unwrap();
@@ -532,68 +561,26 @@ impl Worker {
 /// `seed` is a global seed used for deterministic generation.
 /// If `seed == 0`, the table is initialized with all zeros.
 /// expected mean latency for a quorum of nodes should be below within expected thresholds
-fn generate_latency_table(n: usize, seed: u64) -> Vec<Vec<f64>> {
-    // Hard-coded parameters
-    const INTRA_REGION_LATENCY_MIN: u64 = 1;
-    const INTRA_REGION_LATENCY_MAX: u64 = 100;
-    const INTER_REGION_LATENCY_MIN: u64 = 100;
-    const INTER_REGION_LATENCY_MAX: u64 = 200;
-    const QUANTILE_LATENCY_MIN: f64 = 75.0;
-    const QUANTILE_LATENCY_MAX: f64 = 100.0;
-    const MEAN_LATENCY_MIN: f64 = 75.0;
-    const MEAN_LATENCY_MAX: f64 = 100.0;
+fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
 
-    let quorum_count = ((2.0 / 3.0) * n as f64).floor() + 1.0;
-    let mut rng = StdRng::seed_from_u64(seed);
-
-    loop {
-        let mut table = vec![vec![0.0; n]; n];
+    let mut resulting_table = vec![vec![];n];
+    if !mimic_latency {
         for i in 0..n {
-            for j in i..n {
-                if i == j {
-                    table[i][j] = 0.0;
-                } else {
-                    let latency = if rng.gen_bool(0.7) {
-                        rng.gen_range(INTRA_REGION_LATENCY_MIN..=INTRA_REGION_LATENCY_MAX)
-                    } else {
-                        rng.gen_range(INTER_REGION_LATENCY_MIN..=INTER_REGION_LATENCY_MAX)
-                    } as f64;
-
-                    table[i][j] = latency;
-                    table[j][i] = latency;
-                }
+            for j in 0..n {
+                resulting_table[i].push(0.0)
             }
         }
-
-        let num_rows_within_quantile_latency_range = table
-            .iter()
-            .filter(|row| {
-                let mut sorted_row = (*row).clone();
-                sorted_row.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let quantile_index = quorum_count as usize;
-                let quantile_value = sorted_row[quantile_index - 1];
-                quantile_value >= QUANTILE_LATENCY_MIN && quantile_value <= QUANTILE_LATENCY_MAX
-            })
-            .count();
-
-        let num_rows_within_mean_latency_range = table
-            .iter()
-            .filter(|row| {
-                let cur_row = (*row).clone();
-                let sum: f64 = cur_row.iter().sum();
-                let mean = sum / (cur_row.len() as f64 - 1.0);
-                mean >= MEAN_LATENCY_MIN && mean <= MEAN_LATENCY_MAX
-            })
-            .count();
-
-
-
-        if num_rows_within_quantile_latency_range as f64 >= quorum_count
-            && num_rows_within_mean_latency_range as f64 >= quorum_count
-        {
-            return table;
+    } else {
+        let valid_sequence = [0, 5, 7, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+        for i in 0..n {
+            for j in 0..n {
+                let index_i = i % 16;
+                let index_j = j % 16;
+                resulting_table[i].push(LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0)
+            }
         }
     }
+    resulting_table
 }
 
 

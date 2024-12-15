@@ -118,8 +118,13 @@ pub struct VerifiedStatementBlock {
 }
 
 impl VerifiedStatementBlock {
-    pub(crate) fn change_for_not_own_index(&mut self) {
+    pub(crate) fn change_for_not_own_index(&mut self, own_index: AuthorityIndex) {
         self.statements = None;
+        for i in 0..self.encoded_statements().len() {
+            if i != own_index as usize {
+                self.encoded_statements[i] = None;
+            }
+        }
     }
 }
 

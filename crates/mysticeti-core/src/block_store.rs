@@ -69,10 +69,6 @@ struct BlockStoreInner {
 pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition;
 
-    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
-
-    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock);
-
     fn insert_own_block(
         &mut self,
         block: &OwnBlockData,
@@ -145,11 +141,7 @@ impl BlockStore {
             };
             // todo - we want to keep some last blocks in the cache
             block_count += 1;
-            inner.add_unloaded(block.reference(), pos, 0, committee.len() as AuthorityIndex);
-
-            // todo - we might need to sort all unprocessed blocks by rounds and run update with a loop
-            inner.update_dag(block.reference().clone(), block.includes().clone());
-            inner.update_data_availability_and_cached_blocks(&block);
+            inner.add_unloaded(&block, pos, 0, committee.len() as AuthorityIndex);
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
@@ -219,18 +211,11 @@ impl BlockStore {
         entry.map(|pos| self.read_index(pos))
     }
 
-    // this function should be called when we add a block to the local DAG for the first time
-    pub fn update_dag(&self, block_reference: BlockReference, parents: Vec<BlockReference>) {
-        self.inner.write().update_dag(block_reference, parents);
-    }
 
     pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
         self.inner.write().updated_unknown_by_others(block_reference);
     }
 
-    pub fn update_data_availability_and_cached_blocks(&self, block: &VerifiedStatementBlock) {
-        self.inner.write().update_data_availability_and_cached_blocks(block);
-    }
 
     pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {
         self.inner.write().get_pending_acknowledgment(round_number)
@@ -374,7 +359,7 @@ impl BlockStore {
             if block.author() == own_index {
                 block.change_for_own_index();
             } else {
-                block.change_for_not_own_index();
+                block.change_for_not_own_index(own_index);
             }
             let changed_data_block = Arc::new(block);
             changed_data_blocks.push(changed_data_block);
@@ -596,16 +581,19 @@ pub fn get_blocks_at_authority_round(
 
     pub fn add_unloaded(
         &mut self,
-        reference: &BlockReference,
+        block: &VerifiedStatementBlock,
         position: WalPosition,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
+        let reference = block.reference();
         self.highest_round = max(self.highest_round, reference.round());
         let map = self.index.entry(reference.round()).or_default();
         map.insert(reference.author_digest(), IndexEntry::WalPosition(position));
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
+        self.update_dag(block.reference().clone(), block.includes().clone());
+        self.update_data_availability_and_cached_blocks(&block);
     }
 
     pub fn add_loaded(
@@ -627,6 +615,8 @@ pub fn get_blocks_at_authority_round(
             (block.author(), block.digest()),
             IndexEntry::Loaded(position, block.borrow_arc_t()),
         );
+        self.update_dag(block.reference().clone(), block.includes().clone());
+        self.update_data_availability_and_cached_blocks(&block);
     }
     // Update not known by authorities when the block gets recoverable after decoding
     // This will send the block to others
@@ -647,8 +637,12 @@ pub fn get_blocks_at_authority_round(
         if block_reference.round == 0 {
             return;
         }
+        // don't update if it is already there
+        if self.dag.contains_key(&block_reference) {
+            return;
+        }
         // update information about block_reference
-        self.dag.insert(
+       self.dag.insert(
             block_reference,
             (
                 parents,
@@ -848,13 +842,6 @@ pub const WAL_ENTRY_STATE: Tag = 4;
 pub const WAL_ENTRY_COMMIT: Tag = 5;
 
 impl BlockWriter for (&mut WalWriter, &BlockStore) {
-    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
-        self.1.update_dag(block_reference, parents);
-    }
-
-    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
-        self.1.update_data_availability_and_cached_blocks(block);
-    }
 
     fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
         let pos = self
@@ -879,11 +866,6 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
             authority_index_start,
             authority_index_end,
         );
-        self.1.update_dag(
-            *data.block.reference(),
-            data.block.includes().clone(),
-        );
-        self.1.update_data_availability_and_cached_blocks(&data.block);
     }
 }
 

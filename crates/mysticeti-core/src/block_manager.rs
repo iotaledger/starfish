@@ -61,7 +61,6 @@ impl BlockManager {
                         // Block can be processed. So need to update indexes etc
                         let position = block_writer.insert_block(block.clone());
                         newly_blocks_processed.push((position, block.borrow_arc_t()));
-                        self.block_store.update_data_availability_and_cached_blocks(&block);
                         self.block_store.updated_unknown_by_others(block.reference().clone());
                         recoverable_blocks.remove(block.reference());
                     } else {
@@ -100,13 +99,6 @@ impl BlockManager {
                 // Block can be processed. So need to update indexes etc
                 let position = block_writer.insert_block(block.clone());
                 newly_blocks_processed.push((position, block.borrow_arc_t()));
-
-                // Block can be added to the compact local DAG structure and update known/unknown blocks
-                block_writer.update_dag(block.reference().clone(), block.includes().clone());
-
-                // Update data availability and cached blocks for this block for the first time
-                block_writer.update_data_availability_and_cached_blocks(&block);
-
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =
