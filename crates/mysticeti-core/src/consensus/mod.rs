@@ -4,8 +4,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 use crate::{
-    data::Data,
-    types::{format_authority_round, AuthorityIndex, RoundNumber, StatementBlock},
+    types::{format_authority_round, AuthorityIndex, RoundNumber},
 };
 use crate::types::VerifiedStatementBlock;
 

@@ -21,11 +21,11 @@ use crate::{
     data::Data,
     range_map::RangeMap,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, Stake, StatementBlock,
-        TransactionLocator, TransactionLocatorRange,
+        AuthorityIndex, AuthoritySet, BlockReference, Stake,
+        TransactionLocator, TransactionLocatorRange,VerifiedStatementBlock,
     },
 };
-use crate::types::VerifiedStatementBlock;
+
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Committee {

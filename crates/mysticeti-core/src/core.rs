@@ -59,7 +59,6 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    //coding_engine : reed_solomon_simd::engine::DefaultEngine,
     pub(crate) encoder : Encoder,
     decoder: Decoder,
 }

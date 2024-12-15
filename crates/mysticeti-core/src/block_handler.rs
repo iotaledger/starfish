@@ -11,23 +11,21 @@ use std::{
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tracing::debug;
 use crate::{
     block_store::BlockStore,
     committee::{Committee, ProcessedTransactionHandler, QuorumThreshold, TransactionAggregator},
     consensus::linearizer::{CommittedSubDag, Linearizer},
-    data::Data,
     log::TransactionLog,
     metrics::{Metrics, UtilizationTimerExt},
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
     types::{
-        AuthorityIndex, BlockReference, StatementBlock, Transaction,
+        AuthorityIndex, BlockReference, Transaction,
         TransactionLocator,
     },
 };
 use crate::transactions_generator::TransactionGenerator;
-use crate::types::{BaseStatement, Shard, VerifiedStatementBlock};
+use crate::types::{BaseStatement, VerifiedStatementBlock};
 
 pub trait BlockHandler: Send + Sync {
 

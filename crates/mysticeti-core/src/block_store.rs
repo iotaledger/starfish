@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{HashSet};
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
@@ -21,7 +21,7 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     state::{RecoveredState, RecoveredStateBuilder},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, StatementBlock,
+        AuthorityIndex, BlockDigest, BlockReference, RoundNumber,
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };

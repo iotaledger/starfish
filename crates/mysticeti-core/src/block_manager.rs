@@ -10,10 +10,9 @@ use crate::{
     block_store::{BlockStore, BlockWriter},
     committee::Committee,
     data::Data,
-    types::{BlockReference, StatementBlock},
+    types::{BlockReference},
     wal::WalPosition,
 };
-use crate::crypto::BlockDigest;
 use crate::types::VerifiedStatementBlock;
 
 /// Block manager suspends incoming blocks until they are connected to the existing graph,

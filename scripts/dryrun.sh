@@ -1,10 +1,10 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
+NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
 SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-5}
-DESIRED_TPS=${DESIRED_TPS:-200}
+DESIRED_TPS=${DESIRED_TPS:-2000}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
-REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)

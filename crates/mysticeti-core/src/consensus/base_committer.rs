@@ -8,8 +8,7 @@ use crate::{
     block_store::BlockStore,
     committee::{Committee, QuorumThreshold, StakeAggregator},
     consensus::MINIMUM_WAVE_LENGTH,
-    data::Data,
-    types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
 use crate::types::VerifiedStatementBlock;
 
