@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use crate::{
     block_store::BlockStore,
-    data::Data,
-    types::{BlockReference, StatementBlock},
+    types::{BlockReference},
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::types::VerifiedStatementBlock;

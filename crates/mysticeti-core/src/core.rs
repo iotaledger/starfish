@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashSet},
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
@@ -31,11 +31,11 @@ use crate::{
     runtime::timestamp_utc,
     state::RecoveredState,
     threshold_clock::ThresholdClockAggregator,
-    types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
-use crate::crypto::{BlockDigest, MerkleRoot};
+use crate::crypto::{MerkleRoot};
 use crate::encoder::ShardEncoder;
 use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
 

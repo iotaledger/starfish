@@ -1,15 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
 use minibytes::Bytes;
 
 use crate::{
     block_store::{BlockStore, CommitData, OwnBlockData},
     core::MetaStatement,
     data::Data,
-    types::{BlockReference, StatementBlock},
+    types::{BlockReference},
     wal::WalPosition,
 };
 use crate::types::VerifiedStatementBlock;

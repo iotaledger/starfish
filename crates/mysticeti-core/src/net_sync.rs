@@ -35,7 +35,7 @@ use crate::{
 };
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
-use crate::types::{StatementBlock, VerifiedStatementBlock};
+use crate::types::{VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;

@@ -25,11 +25,10 @@ use tokio::{
 
 use crate::{
     config::NodePublicConfig,
-    data::Data,
     metrics::{print_network_address_table, Metrics},
     runtime,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber},
 };
 use crate::types::VerifiedStatementBlock;
 

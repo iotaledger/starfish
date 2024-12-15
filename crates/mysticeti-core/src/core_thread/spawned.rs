@@ -10,7 +10,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {

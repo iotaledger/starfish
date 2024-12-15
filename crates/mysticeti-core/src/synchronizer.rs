@@ -17,7 +17,7 @@ use crate::{
     net_sync::{self, NetworkSyncerInner},
     network::NetworkMessage,
     runtime,
-    runtime::{sleep, timestamp_utc, Handle, JoinHandle},
+    runtime::{sleep, Handle, JoinHandle},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };

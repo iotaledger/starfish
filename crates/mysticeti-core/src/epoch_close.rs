@@ -8,9 +8,8 @@ use std::sync::{
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    data::Data,
     runtime::timestamp_utc,
-    types::{InternalEpochStatus, StatementBlock},
+    types::{InternalEpochStatus},
 };
 use crate::types::VerifiedStatementBlock;
 

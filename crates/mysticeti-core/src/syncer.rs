@@ -13,7 +13,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber},
 };
 use crate::types::VerifiedStatementBlock;
 
