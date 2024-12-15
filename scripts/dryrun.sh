@@ -1,8 +1,7 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
-SEED_FOR_EXTRA_LATENCY=${SEED_FOR_EXTRA_LATENCY:-5}
-DESIRED_TPS=${DESIRED_TPS:-2000}
+NUM_VALIDATORS=${NUM_VALIDATORS:-30} #With N physical cores, it is recommended to have less than N validators
+DESIRED_TPS=${DESIRED_TPS:-600}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
@@ -19,8 +18,6 @@ RESET=$(tput sgr0)
 
 # Output Validators
 echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-# Output Seed for latency
-echo -e "${GREEN}Seed for extra latency: ${YELLOW}$SEED_FOR_EXTRA_LATENCY${RESET}"
 # Output Byzantine strategy
 echo -e "${GREEN}Byzantine strategy: ${YELLOW}$BYZANTINE_STRATEGY${RESET}"
 
@@ -80,10 +77,10 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   LOG_FILE="validator_${i}.log.ansi"
   if [[ $i -eq 0 ]]; then
     echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --byzantine-strategy $BYZANTINE_STRATEGY --authority $i 2>&1 | tee $LOG_FILE"
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --byzantine-strategy $BYZANTINE_STRATEGY --authority $i 2>&1 | tee $LOG_FILE"
   else
     echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency $SEED_FOR_EXTRA_LATENCY --authority $i > $LOG_FILE"
+    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $i > $LOG_FILE"
   fi
 done
 

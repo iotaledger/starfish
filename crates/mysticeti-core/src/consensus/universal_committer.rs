@@ -11,6 +11,7 @@ use crate::{
 };
 use std::collections::HashSet;
 use std::{collections::VecDeque, sync::Arc};
+use crate::metrics::UtilizationTimerVecExt;
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
 /// It can be configured to use a combination of different commit strategies, including
@@ -48,13 +49,22 @@ impl UniversalCommitter {
                 );
 
                 // Try to directly decide the leader.
+                let timer_direct_decide = self
+                    .metrics
+                    .utilization_timer
+                    .utilization_timer("Committer::direct_decide");
                 let mut status = committer.try_direct_decide(leader, round);
                 if !self.committed.contains(&(leader, round)) {
                     self.update_metrics(&status, true);
                 }
+                drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
                 // If we can't directly decide the leader, try to indirectly decide it.
+                let timer_indirect_decide = self
+                    .metrics
+                    .utilization_timer
+                    .utilization_timer("Committer::indirect_decide");
                 if !status.is_decided() {
                     status = committer.try_indirect_decide(leader, round, leaders.iter());
                     if !self.committed.contains(&(leader, round)) {
@@ -62,6 +72,7 @@ impl UniversalCommitter {
                     }
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
+                drop(timer_indirect_decide);
 
                 if status.is_decided() {
                     self.committed.insert((leader, round));

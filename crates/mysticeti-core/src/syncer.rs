@@ -105,8 +105,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.core.epoch_closed() {
             return;
         };
-
+        let timer_core_commit = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::try_new_commit");
         let newly_committed = self.core.try_commit();
+        drop(timer_core_commit);
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {
             let committed_refs: Vec<_> = newly_committed
@@ -123,10 +127,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let committed_subdag = self
             .commit_observer
             .handle_commit(self.core.block_store(), newly_committed);
+
+
         self.core.handle_committed_subdag(
             committed_subdag,
             &self.commit_observer.aggregator_state(),
         );
+
 
     }
 
