@@ -287,6 +287,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
                     self.metrics.sequenced_transactions_total.inc();
                 }
             }
+        } else {
+            tracing::debug!("Transactions from block {:?} are committed, but not available", block);
         }
     }
     pub fn committed_leaders(&self) -> &Vec<BlockReference> {

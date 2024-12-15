@@ -22,8 +22,8 @@ use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings
 pub struct MysticetiNodeParameters(NodeParameters);
 
 impl MysticetiNodeParameters {
-    pub fn almost_default(seed: u64) -> MysticetiNodeParameters {
-        MysticetiNodeParameters(NodeParameters::almost_default(seed))
+    pub fn almost_default(mimic_latency: bool) -> MysticetiNodeParameters {
+        MysticetiNodeParameters(NodeParameters::almost_default(mimic_latency))
     }
 }
 

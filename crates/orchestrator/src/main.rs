@@ -239,29 +239,8 @@ async fn run<C: ServerProviderClient>(
                     NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
                 }
                 None => {
-                    if mimic_latency {
-                        let input = (
-                            committee,
-                            byzantine_nodes,
-                            byzantine_strategy.clone(),
-                            mimic_latency,
-                            loads.clone(),
-                            skip_testbed_update,
-                            skip_testbed_configuration,
-                        );
 
-                        // Create a hasher
-                        let mut hasher = DefaultHasher::new();
-
-                        // Hash the input tuple
-                        input.hash(&mut hasher);
-
-                        // Return the hashed value as a seed
-                        let latency_seed = hasher.finish();
-                        NodeParameters::almost_default(latency_seed)
-                    } else {
-                        NodeParameters::default()
-                    }
+                        NodeParameters::almost_default(mimic_latency)
                 }
             };
             let client_parameters = match &settings.client_parameters_path {
