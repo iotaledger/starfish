@@ -141,11 +141,7 @@ impl BlockStore {
             };
             // todo - we want to keep some last blocks in the cache
             block_count += 1;
-            inner.add_unloaded(block.reference(), pos, 0, committee.len() as AuthorityIndex);
-
-            // todo - we might need to sort all unprocessed blocks by rounds and run update with a loop
-            inner.update_dag(block.reference().clone(), block.includes().clone());
-            inner.update_data_availability_and_cached_blocks(&block);
+            inner.add_unloaded(&block, pos, 0, committee.len() as AuthorityIndex);
         }
         metrics.block_store_entries.inc_by(block_count);
         if let Some(replay_started) = replay_started {
@@ -363,7 +359,7 @@ impl BlockStore {
             if block.author() == own_index {
                 block.change_for_own_index();
             } else {
-                block.change_for_not_own_index();
+                block.change_for_not_own_index(own_index);
             }
             let changed_data_block = Arc::new(block);
             changed_data_blocks.push(changed_data_block);
@@ -585,16 +581,19 @@ pub fn get_blocks_at_authority_round(
 
     pub fn add_unloaded(
         &mut self,
-        reference: &BlockReference,
+        block: &VerifiedStatementBlock,
         position: WalPosition,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
+        let reference = block.reference();
         self.highest_round = max(self.highest_round, reference.round());
         let map = self.index.entry(reference.round()).or_default();
         map.insert(reference.author_digest(), IndexEntry::WalPosition(position));
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
+        self.update_dag(block.reference().clone(), block.includes().clone());
+        self.update_data_availability_and_cached_blocks(&block);
     }
 
     pub fn add_loaded(
