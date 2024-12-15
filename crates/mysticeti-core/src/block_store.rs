@@ -637,8 +637,12 @@ pub fn get_blocks_at_authority_round(
         if block_reference.round == 0 {
             return;
         }
+        // don't update if it is already there
+        if self.dag.contains_key(&block_reference) {
+            return;
+        }
         // update information about block_reference
-        self.dag.insert(
+       self.dag.insert(
             block_reference,
             (
                 parents,
