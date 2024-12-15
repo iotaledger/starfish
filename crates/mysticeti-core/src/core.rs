@@ -315,7 +315,6 @@ impl<H: BlockHandler> Core<H> {
                 let verified_data_block = Data::new(block);
 
                 (&mut self.wal_writer, &self.block_store).insert_block(verified_data_block.clone());
-                self.block_store.update_data_availability_and_cached_blocks(&verified_data_block);
                 self.block_store.updated_unknown_by_others(verified_data_block.reference().clone());
             }
             else {

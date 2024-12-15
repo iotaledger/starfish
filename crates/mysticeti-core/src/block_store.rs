@@ -69,10 +69,6 @@ struct BlockStoreInner {
 pub trait BlockWriter {
     fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition;
 
-    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>);
-
-    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock);
-
     fn insert_own_block(
         &mut self,
         block: &OwnBlockData,
@@ -219,18 +215,11 @@ impl BlockStore {
         entry.map(|pos| self.read_index(pos))
     }
 
-    // this function should be called when we add a block to the local DAG for the first time
-    pub fn update_dag(&self, block_reference: BlockReference, parents: Vec<BlockReference>) {
-        self.inner.write().update_dag(block_reference, parents);
-    }
 
     pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
         self.inner.write().updated_unknown_by_others(block_reference);
     }
 
-    pub fn update_data_availability_and_cached_blocks(&self, block: &VerifiedStatementBlock) {
-        self.inner.write().update_data_availability_and_cached_blocks(block);
-    }
 
     pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {
         self.inner.write().get_pending_acknowledgment(round_number)
@@ -627,6 +616,8 @@ pub fn get_blocks_at_authority_round(
             (block.author(), block.digest()),
             IndexEntry::Loaded(position, block.borrow_arc_t()),
         );
+        self.update_dag(block.reference().clone(), block.includes().clone());
+        self.update_data_availability_and_cached_blocks(&block);
     }
     // Update not known by authorities when the block gets recoverable after decoding
     // This will send the block to others
@@ -848,13 +839,6 @@ pub const WAL_ENTRY_STATE: Tag = 4;
 pub const WAL_ENTRY_COMMIT: Tag = 5;
 
 impl BlockWriter for (&mut WalWriter, &BlockStore) {
-    fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
-        self.1.update_dag(block_reference, parents);
-    }
-
-    fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
-        self.1.update_data_availability_and_cached_blocks(block);
-    }
 
     fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
         let pos = self
@@ -879,11 +863,6 @@ impl BlockWriter for (&mut WalWriter, &BlockStore) {
             authority_index_start,
             authority_index_end,
         );
-        self.1.update_dag(
-            *data.block.reference(),
-            data.block.includes().clone(),
-        );
-        self.1.update_data_availability_and_cached_blocks(&data.block);
     }
 }
 
