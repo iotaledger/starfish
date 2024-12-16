@@ -59,6 +59,7 @@ impl UniversalCommitter {
                     for reference in potential_voting_block.includes() {
                         if reference.round == round && reference.authority == leader {
                             voters_for_leaders.insert((reference.clone(), potential_voting_block.reference().clone()));
+                            break;
                         }
                     }
                 }
