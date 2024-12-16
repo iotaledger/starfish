@@ -1,8 +1,8 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
+NUM_VALIDATORS=${NUM_VALIDATORS:-15} #With N physical cores, it is recommended to have less than N validators
 DESIRED_TPS=${DESIRED_TPS:-10000}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocate} #possible "honest" | "delayed" | "equivocate" | "timeout"
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-delayed} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
@@ -47,6 +47,18 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
 done
 
 echo -e "${GREEN}Updated prometheus.yaml successfully!${RESET}"
+
+
+# Calculate port to look for committed leaders
+PORT=$((1500 + NUM_VALIDATORS + 2))
+
+# Define the file path
+FILE="monitoring/grafana/grafana-dashboard.json"
+
+# Replace the line in the file
+sed -i "s/1507/$PORT/" "$FILE"
+
+echo -e "${GREEN}Updated grafana-dashboard.json successfully!${RESET}"
 
 
 # Docker Compose Down
