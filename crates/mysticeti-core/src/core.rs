@@ -677,20 +677,4 @@ impl CoreOptions {
     }
 }
 
-#[cfg(test)]
-mod test {
 
-    use super::*;
-
-    fn push_all(
-        p: &mut Vec<Vec<Data<StatementBlock>>>,
-        except: AuthorityIndex,
-        block: &Data<StatementBlock>,
-    ) {
-        for (i, q) in p.iter_mut().enumerate() {
-            if i as AuthorityIndex != except {
-                q.push(block.clone());
-            }
-        }
-    }
-}

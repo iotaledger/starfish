@@ -1,7 +1,7 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-30} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-600}
+NUM_VALIDATORS=${NUM_VALIDATORS:-20} #With N physical cores, it is recommended to have less than N validators
+DESIRED_TPS=${DESIRED_TPS:-200}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 

@@ -417,16 +417,14 @@ impl BlockStore {
         later_block: &Arc<VerifiedStatementBlock>,
         earlier_block: &Arc<VerifiedStatementBlock>,
     ) -> bool {
-        let mut parents = vec![later_block.clone()];
+        let mut parents = HashSet::from([later_block.clone()]);
         for r in (earlier_block.round()..later_block.round()).rev() {
-            parents = self
-                .get_blocks_by_round(r)
-                .into_iter()
-                .filter(|block| {
-                    parents
-                        .iter()
-                        .any(|x| x.includes().contains(block.reference()))
-                })
+            // Collect parents from the current set of blocks.
+            parents = parents
+                .iter()
+                .flat_map(|block| block.includes()) // Get included blocks.
+                .map(|block_reference| self.get_block(*block_reference).expect("Block should be in Block Store"))
+                .filter(|included_block| included_block.round() >= earlier_block.round()) // Filter by round.
                 .collect();
         }
         parents.contains(earlier_block)
