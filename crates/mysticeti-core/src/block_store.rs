@@ -345,12 +345,14 @@ impl BlockStore {
     pub fn get_unknown_causal_history(
         &self,
         to_whom_authority_index: AuthorityIndex,
-        limit: usize,
+        batch_own_block_size: usize,
+        batch_other_block_size: usize,
     ) -> Vec<Arc<VerifiedStatementBlock>> {
         let entries = self
             .inner
             .read()
-            .get_unknown_causal_history(to_whom_authority_index, limit);
+            .get_unknown_causal_history(to_whom_authority_index, batch_own_block_size,batch_other_block_size
+        );
         let data_blocks = self.read_index_vec(entries);
         let mut changed_data_blocks = Vec::new();
         let own_index = self.inner.read().authority;
@@ -766,12 +768,13 @@ pub fn get_blocks_at_authority_round(
     pub fn get_unknown_causal_history(
         &self,
         to_whom: AuthorityIndex,
-        limit: usize,
+        batch_own_block_size: usize,
+        batch_other_block_size: usize,
     ) -> Vec<IndexEntry> {
         let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| block_reference.authority == self.authority)
-            .take(limit)
+            .take(batch_own_block_size)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
                     (index_entry, block_reference.round())
@@ -782,11 +785,10 @@ pub fn get_blocks_at_authority_round(
             .collect();
         let max_round_own_blocks = own_blocks.iter().map(|own_block|own_block.1).max();
         let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
-        let new_limit = limit.saturating_sub(own_blocks.len());
         let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| (block_reference.authority != self.authority) && (block_reference.round < max_round_own_blocks))
-            .take(new_limit)
+            .take(batch_other_block_size)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
                     (index_entry, block_reference.round())

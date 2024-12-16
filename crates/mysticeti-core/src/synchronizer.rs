@@ -24,9 +24,12 @@ use crate::{
 use crate::metrics::UtilizationTimerVecExt;
 
 // TODO: A central controller will eventually dynamically update these parameters.
+#[derive(Clone)]
 pub struct SynchronizerParameters {
-    /// The number of blocks to send in a single batch.
-    pub batch_size: usize,
+    /// The number of own blocks to send in a single batch.
+    pub batch_own_block_size: usize,
+    /// The number of other blocks to send in a single batch.
+    pub batch_other_block_size: usize,
     /// The sampling precision with which to re-evaluate the sync strategy.
     pub sample_precision: Duration,
 }
@@ -34,7 +37,8 @@ pub struct SynchronizerParameters {
 impl Default for SynchronizerParameters {
     fn default() -> Self {
         Self {
-            batch_size: 16,
+            batch_own_block_size: 8,
+            batch_other_block_size: 128,
             sample_precision: Duration::from_millis(600),
         }
     }
@@ -140,7 +144,7 @@ where
             self.sender.clone(),
             self.inner.clone(),
             round,
-            self.parameters.batch_size,
+            self.parameters.clone(),
         ));
         self.own_blocks = Some(handle);
     }
@@ -155,7 +159,7 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
-            self.parameters.batch_size,
+            self.parameters.clone(),
             self.metrics.clone(),
         ));
         self.push_blocks = Some(handle);
@@ -167,9 +171,13 @@ where
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
-        batch_size: usize,
+        synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
+        let mut batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
+        if byzantine_strategy.is_some() {
+            batch_own_block_size = 2 * inner.block_store.committee_size;
+        }
         let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner
             .block_store
@@ -186,23 +194,23 @@ where
                     if leaders_current_round.contains(&own_authority_index) {
                         let _sleep = runtime::sleep(leader_timeout).await;
                     }
-                    sending_batch_blocks_v1(
+                    sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_size,
+                        batch_own_block_size,
                     )
                     .await?;
                 }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::EquivocatingBlocks) => {
-                    sending_batch_blocks_v1(
+                    sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_size,
+                        batch_own_block_size,
                     )
                     .await?;
                 }
@@ -210,24 +218,24 @@ where
                 Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
-                        sending_batch_blocks_v1(
+                        sending_batch_own_blocks(
                             inner.clone(),
                             to.clone(),
                             to_whom_authority_index,
                             &mut round,
-                            batch_size,
+                            batch_own_block_size,
                         )
                         .await?;
                     }
                 }
                 // Send block to the authority whenever a new block is created
                 _ => {
-                    sending_batch_blocks_v1(
+                    sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_size,
+                        batch_own_block_size,
                     )
                         .await?;
 
@@ -246,21 +254,22 @@ where
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        batch_size: usize,
+        synchronizer_parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
         let leader_timeout = Duration::from_millis(600);
+
         loop {
             let notified = inner.notify.notified();
             select! {
                 _sleep =  runtime::sleep(leader_timeout) => {
                      let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
-                    sending_batch_blocks_v2(
+                    sending_batch_all_blocks(
                 inner.clone(),
                 to.clone(),
                 to_whom_authority_index,
-                batch_size,
+                synchronizer_parameters.clone(),
             )
             .await?;
                     drop(timer);
@@ -268,11 +277,11 @@ where
                _created_block = notified => {
                     let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after creating new block");
-                    sending_batch_blocks_v2(
+                    sending_batch_all_blocks(
                 inner.clone(),
                 to.clone(),
                 to_whom_authority_index,
-                batch_size,
+                synchronizer_parameters.clone(),
             )
             .await?;
                     drop(timer);
@@ -282,7 +291,7 @@ where
     }
 }
 
-async fn sending_batch_blocks_v1<H, C>(
+async fn sending_batch_own_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
@@ -309,21 +318,23 @@ where
     Some(())
 }
 
-async fn sending_batch_blocks_v2<H, C>(
+async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
-    batch_size: usize,
+    synchronizer_parameters: SynchronizerParameters,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
+    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
     let own_index = inner.block_store.get_own_authority_index();
     let blocks = inner
         .block_store
-        .get_unknown_causal_history(to_whom_authority_index, batch_size);
+        .get_unknown_causal_history(to_whom_authority_index, batch_own_block_size, batch_other_block_size);
     for block in &blocks {
         inner
             .block_store
