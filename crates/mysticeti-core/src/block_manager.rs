@@ -50,9 +50,11 @@ impl BlockManager {
 
             // check whether we have already processed this block and skip it if so.
             let block_reference = block.reference();
+            if self.blocks_pending.contains_key(block_reference) {
+                continue;
+            }
             let block_exists = self.block_store.block_exists(*block_reference);
             if block_exists
-                || self.blocks_pending.contains_key(block_reference)
             {
                 let position_indices =  self.block_store.get_new_shards_ids(&block);
                 tracing::debug!("Positions {:?}, exists {:?}", position_indices, block_exists);
