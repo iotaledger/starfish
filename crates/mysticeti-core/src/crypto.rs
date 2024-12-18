@@ -50,11 +50,11 @@ type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
 
 impl MerkleRoot {
-    pub fn new_from_encoded_statements(encoded_statements: &Vec<Option<Shard>>, authority_index: AuthorityIndex) -> (MerkleRoot, Vec<u8>) {
+    pub fn new_from_encoded_statements(encoded_statements: &Vec<Shard>, authority_index: usize) -> (MerkleRoot, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
             let mut hasher = crypto::BlockHasher::default();
-            shard.clone().unwrap().crypto_hash(&mut hasher);
+            shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
         }
@@ -63,17 +63,17 @@ impl MerkleRoot {
             .root()
             .ok_or("couldn't get the merkle root")
             .unwrap();
-        let indices_to_prove = vec![authority_index as usize];
+        let indices_to_prove = vec![authority_index];
         let merkle_proof = merkle_tree.proof(&indices_to_prove);
         let merkle_proof_bytes =merkle_proof.to_bytes();
         (MerkleRoot(merkle_root), merkle_proof_bytes)
     }
 
-    pub fn check_correctness_merkle_root(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot) -> bool {
+    pub fn check_correctness_merkle_root(encoded_statements: &Vec<Shard>, merkle_root: MerkleRoot) -> bool {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
             let mut hasher = crypto::BlockHasher::default();
-            shard.clone().unwrap().crypto_hash(&mut hasher);
+            shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
        }
@@ -86,8 +86,7 @@ impl MerkleRoot {
     }
 
     // The function assumes that encoded_statements[leaf_index] is Some. Otherwise panics
-    pub fn check_correctness_merkle_leaf(encoded_statements: &Vec<Option<Shard>>, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index: usize) -> bool {
-        let shard = encoded_statements[leaf_index].clone().expect("It was checked that this entry is Some");
+    pub fn check_correctness_merkle_leaf(shard: Shard, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index: usize) -> bool {
         let mut hasher = crypto::BlockHasher::default();
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();
@@ -226,23 +225,7 @@ impl<T: AsBytes> CryptoHash for T {
 }
 
 impl PublicKey {
-    pub fn verify_block(&self, block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
-        let signature = Signature::from(block.signature().0);
-        let mut hasher = BlockHasher::default();
-        BlockDigest::digest_without_signature(
-            &mut hasher,
-            block.author(),
-            block.round(),
-            block.includes(),
-            block.acknowledgement_statements(),
-            block.meta_creation_time_ns(),
-            block.epoch_changed(),
-            block.merkle_root(),
-        );
-        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
-        self.0.verify(&signature, digest.as_ref())
-    }
-    pub fn verify_signature_block(&self, block: &VerifiedStatementBlock) -> Result<(), ed25519_consensus::Error> {
+    pub fn verify_signature_in_block(&self, block: &VerifiedStatementBlock) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
         let mut hasher = BlockHasher::default();
         BlockDigest::digest_without_signature(

@@ -24,6 +24,7 @@ use crate::{
         TransactionLocator,
     },
 };
+use crate::data::Data;
 use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
 
@@ -273,7 +274,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         }
     }
 
-    fn transaction_observer(&self, block: &Arc<VerifiedStatementBlock>) {
+    fn transaction_observer(&self, block: &Data<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.statements().as_ref() {
             for statement in vec {
@@ -300,7 +301,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Arc<VerifiedStatementBlock>>,
+        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let committed = self
             .commit_interpreter

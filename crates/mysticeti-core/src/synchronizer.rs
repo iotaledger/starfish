@@ -114,11 +114,11 @@ where
     ) -> Option<()> {
         let mut missing = Vec::new();
         for reference in references {
-            let stored_block = self.inner.block_store.get_block(reference);
+            let stored_block = self.inner.block_store.get_storage_block(reference);
             let found = stored_block.is_some();
             match stored_block {
                 // TODO: Should we be able to send more than one block in a single network message?
-                Some(block) => self.sender.send(NetworkMessage::Block(block)).await.ok()?,
+                Some(block) => self.sender.send(NetworkMessage::Batch(vec![block])).await.ok()?,
                 None => missing.push(reference),
             }
             self.metrics
@@ -306,14 +306,14 @@ where
     let blocks =
         inner
             .block_store
-            .get_own_blocks(to_whom_authority_index, round.clone(), batch_size);
+            .get_own_transmission_blocks(to_whom_authority_index, round.clone(), batch_size);
     for block in blocks {
         inner
             .block_store
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
         *round = block.round();
         tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {block:?}");
-        to.send(NetworkMessage::Block(block)).await.ok()?;
+        to.send(NetworkMessage::Batch(vec![block])).await.ok()?;
     }
     Some(())
 }

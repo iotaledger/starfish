@@ -19,7 +19,7 @@ use crate::types::VerifiedStatementBlock;
 /// returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
-    blocks_pending: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
+    blocks_pending: HashMap<BlockReference, (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     /// Keeps all the blocks (`HashSet<BlockReference>`) waiting for `BlockReference` to be processed.
     block_references_waiting: HashMap<BlockReference, HashSet<BlockReference>>,
     /// Keeps all blocks that need to be synced in order to unblock the processing of other pending
@@ -40,36 +40,33 @@ impl BlockManager {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
+        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
         block_writer: &mut impl BlockWriter,
-    ) -> (Vec<(WalPosition, Arc<VerifiedStatementBlock>)>, HashSet<BlockReference>) {
-        let mut blocks: VecDeque<Data<VerifiedStatementBlock>> = blocks.into();
-        let mut newly_blocks_processed: Vec<(WalPosition, Arc<VerifiedStatementBlock>)> = vec![];
+    ) -> (Vec<(WalPosition, Data<VerifiedStatementBlock>)>, HashSet<BlockReference>) {
+        let mut blocks: VecDeque<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)> = blocks.into();
+        let mut newly_blocks_processed: Vec<(WalPosition, Data<VerifiedStatementBlock>)> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
-        while let Some(block) = blocks.pop_front() {
-
+        while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
-            let block_reference = block.reference();
+            let block_reference = storage_and_transmission_blocks.0.reference();
             if self.blocks_pending.contains_key(block_reference) {
                 continue;
             }
             let block_exists = self.block_store.block_exists(*block_reference);
             if block_exists
             {
-                let position_indices =  self.block_store.get_new_shards_ids(&block);
-                tracing::debug!("Positions {:?}, exists {:?}", position_indices, block_exists);
-                if position_indices.len() > 0 {
-                    if block.statements().is_some() {
+                let contains_new_shard_or_header =  self.block_store.contains_new_shard_or_header(&storage_and_transmission_blocks.0);
+                if contains_new_shard_or_header {
+                    if storage_and_transmission_blocks.0.statements().is_some() {
                         // Block can be processed. So need to update indexes etc
-                        let position = block_writer.insert_block(block.clone());
-                        newly_blocks_processed.push((position, block.borrow_arc_t()));
-                        self.block_store.updated_unknown_by_others(block.reference().clone());
-                        recoverable_blocks.remove(block.reference());
+                        let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
+                        newly_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
+                        self.block_store.updated_unknown_by_others(storage_and_transmission_blocks.0.reference().clone());
+                        recoverable_blocks.remove(storage_and_transmission_blocks.0.reference());
                     } else {
-                        self.block_store.update_with_new_shard(&block);
-                        if self.block_store.is_sufficient_shards(block.reference()) {
-                            tracing::debug!("Block to be recovered {:?}; Positions {:?}, exists {:?}", block, position_indices, block_exists);
-                            recoverable_blocks.insert(block.reference().clone());
+                        self.block_store.update_with_new_shard(&storage_and_transmission_blocks.0);
+                        if self.block_store.is_sufficient_shards(storage_and_transmission_blocks.0.reference()) {
+                            recoverable_blocks.insert(storage_and_transmission_blocks.0.reference().clone());
                         }
                     }
                 }
@@ -77,7 +74,7 @@ impl BlockManager {
             }
 
             let mut processed = true;
-            for included_reference in block.includes() {
+            for included_reference in storage_and_transmission_blocks.0.includes() {
                 // If we are missing a reference then we insert into pending and update the waiting index
                 if !self.block_store.block_exists(*included_reference) {
                     processed = false;
@@ -94,13 +91,13 @@ impl BlockManager {
             self.missing[block_reference.authority as usize].remove(block_reference);
 
             if !processed {
-                self.blocks_pending.insert(*block_reference, block);
+                self.blocks_pending.insert(*block_reference, storage_and_transmission_blocks);
             } else {
                 let block_reference = *block_reference;
 
                 // Block can be processed. So need to update indexes etc
-                let position = block_writer.insert_block(block.clone());
-                newly_blocks_processed.push((position, block.borrow_arc_t()));
+                let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
+                newly_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =
@@ -110,7 +107,7 @@ impl BlockManager {
                     for waiting_block_reference in waiting_references {
                         let block_pointer = self.blocks_pending.get(&waiting_block_reference).expect("Safe since we ensure the block waiting reference has a valid primary key.");
 
-                        if block_pointer
+                        if block_pointer.0
                             .includes()
                             .iter()
                             .all(|item_ref| !self.block_references_waiting.contains_key(item_ref))
@@ -152,7 +149,7 @@ mod tests {
             let mut bm = BlockManager::new(block_writer.block_store(), &dag.committee());
             let mut processed_blocks = HashSet::new();
             for block in iter {
-                let processed = bm.add_blocks(vec![block.clone()], &mut block_writer).0;
+                let processed = bm.add_blocks(vec![(block.clone(),block.clone())], &mut block_writer).0;
                 print!("Adding {:?}:", block.reference());
                 for (_, p) in processed {
                     print!("{:?},", p.reference());

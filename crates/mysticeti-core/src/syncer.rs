@@ -35,7 +35,7 @@ pub trait CommitObserver: Send + Sync {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Arc<VerifiedStatementBlock>>,
+        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag>;
 
     fn aggregator_state(&self) -> Bytes;
@@ -63,7 +63,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) {
         self.core.add_blocks(blocks);
         self.try_new_block();
         self.try_new_commit();
@@ -189,9 +189,11 @@ mod tests {
                         // eprintln!("[{:06} {}] Proposal timeout for {round}", scheduler.time_ms(), self.core.authority());
                     }
                 }
-                SyncerEvent::DeliverBlock(block) => {
+                SyncerEvent::DeliverBlock(data_storage_block) => {
                     // eprintln!("[{:06} {}] Deliver {block}", scheduler.time_ms(), self.core.authority());
-                    self.add_blocks(vec![block]);
+                    let transmission_block = data_storage_block.to_send(self.core.authority());
+                    let data_transmission_block = Data::new(transmission_block);
+                    self.add_blocks(vec![(data_storage_block,data_transmission_block)]);
                 }
             }
 

@@ -25,7 +25,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 }
 
 enum CoreThreadCommand {
-    AddBlocks(Vec<Data<VerifiedStatementBlock>>, oneshot::Sender<()>),
+    AddBlocks(Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
     /// Request missing blocks that need to be synched.
@@ -59,7 +59,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.join_handle.join().unwrap()
     }
 
-    pub async fn add_blocks(&self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
             .await;

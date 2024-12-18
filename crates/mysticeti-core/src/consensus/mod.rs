@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::{
     types::{format_authority_round, AuthorityIndex, RoundNumber},
 };
+use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 pub mod base_committer;
@@ -27,7 +28,7 @@ pub const MINIMUM_WAVE_LENGTH: RoundNumber = 3;
 /// advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    Commit(Arc<VerifiedStatementBlock>),
+    Commit(Data<VerifiedStatementBlock>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
 }
@@ -57,7 +58,7 @@ impl LeaderStatus {
         }
     }
 
-    pub fn into_decided_block(self) -> Option<Arc<VerifiedStatementBlock>> {
+    pub fn into_decided_block(self) -> Option<Data<VerifiedStatementBlock>> {
         match self {
             Self::Commit(block) => Some(block),
             Self::Skip(..) => None,

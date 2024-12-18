@@ -9,6 +9,7 @@ use crate::{
     types::{BlockReference},
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
+use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
@@ -17,12 +18,12 @@ pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,
     /// All the committed blocks that are part of this sub-dag
-    pub blocks: Vec<Arc<VerifiedStatementBlock>>,
+    pub blocks: Vec<Data<VerifiedStatementBlock>>,
 }
 
 impl CommittedSubDag {
     /// Create new (empty) sub-dag.
-    pub fn new(anchor: BlockReference, blocks: Vec<Arc<VerifiedStatementBlock>>) -> Self {
+    pub fn new(anchor: BlockReference, blocks: Vec<Data<VerifiedStatementBlock>>) -> Self {
         Self { anchor, blocks }
     }
 
@@ -55,7 +56,7 @@ impl Linearizer {
     fn collect_committed_blocks_in_history(
         &mut self,
         block_store: &BlockStore,
-        leader_block: Arc<VerifiedStatementBlock>,
+        leader_block: Data<VerifiedStatementBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
@@ -81,7 +82,7 @@ impl Linearizer {
                     continue;
                 }
                 let block = block_store
-                    .get_block(*reference)
+                    .get_storage_block(*reference)
                     .expect("We should have the whole sub-dag by now");
                 buffer.push(block);
             }
@@ -90,7 +91,7 @@ impl Linearizer {
         for x in blocks_transaction_data_quorum {
             if self.committed.insert(x) {
                 let block = block_store
-                    .get_block(x)
+                    .get_storage_block(x)
                     .expect("We should have the whole sub-dag by now");
                 to_commit.push(block);
             }
@@ -135,7 +136,7 @@ impl Linearizer {
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Arc<VerifiedStatementBlock>>,
+        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = vec![];
         for leader_block in committed_leaders {

@@ -10,6 +10,7 @@ use crate::{
     consensus::MINIMUM_WAVE_LENGTH,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 /// The consensus protocol operates in 'waves'. Each wave is composed of a leader round, at least one
@@ -105,7 +106,7 @@ impl BaseCommitter {
     fn find_support(
         &self,
         (author, round): (AuthorityIndex, RoundNumber),
-        from: &Arc<VerifiedStatementBlock>,
+        from: &Data<VerifiedStatementBlock>,
     ) -> Option<BlockReference> {
 
         if from.round() <= round {
@@ -121,7 +122,7 @@ impl BaseCommitter {
             }
             let include = self
                 .block_store
-                .get_block(*include)
+                .get_storage_block(*include)
                 .expect("We should have the whole sub-dag by now");
             if let Some(support) = self.find_support((author, round), &include) {
                 return Some(support);
@@ -134,8 +135,8 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_vote(
         &self,
-        potential_vote: &Arc<VerifiedStatementBlock>,
-        leader_block: &Arc<VerifiedStatementBlock>,
+        potential_vote: &Data<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedStatementBlock>,
     ) -> bool {
         let (author, round) = leader_block.author_round();
         self.find_support((author, round), potential_vote) == Some(*leader_block.reference())
@@ -145,15 +146,15 @@ impl BaseCommitter {
     /// the specified leader (`leader_block`).
     fn is_certificate(
         &self,
-        potential_certificate: &Arc<VerifiedStatementBlock>,
-        leader_block: &Arc<VerifiedStatementBlock>,
+        potential_certificate: &Data<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedStatementBlock>,
         voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let mut votes_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for reference in potential_certificate.includes() {
             let potential_vote = self
                 .block_store
-                .get_block(*reference)
+                .get_storage_block(*reference)
                 .expect("We should have the whole sub-dag by now");
 
             if voters_for_leaders.contains(&(leader_block.reference().clone(), potential_vote.reference().clone())) {
@@ -170,7 +171,7 @@ impl BaseCommitter {
     /// if it has a certified link to the anchor. Otherwise, we skip the target leader.
     fn decide_leader_from_anchor(
         &self,
-        anchor: &Arc<VerifiedStatementBlock>,
+        anchor: &Data<VerifiedStatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
         voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
@@ -261,7 +262,7 @@ impl BaseCommitter {
     fn enough_leader_support(
         &self,
         decision_round: RoundNumber,
-        leader_block: &Arc<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedStatementBlock>,
         voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);

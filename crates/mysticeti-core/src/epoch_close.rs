@@ -11,6 +11,7 @@ use crate::{
     runtime::timestamp_utc,
     types::{InternalEpochStatus},
 };
+use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 pub struct EpochManager {
@@ -35,7 +36,7 @@ impl EpochManager {
         }
     }
 
-    pub fn observe_committed_block(&mut self, block: &Arc<VerifiedStatementBlock>, committee: &Committee) {
+    pub fn observe_committed_block(&mut self, block: &Data<VerifiedStatementBlock>, committee: &Committee) {
         if block.epoch_changed() {
             let is_quorum = self.change_aggregator.add(block.author(), committee);
             if is_quorum && (self.epoch_status != InternalEpochStatus::SafeToClose) {

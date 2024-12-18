@@ -39,7 +39,6 @@ use crate::{
     committee::{Committee},
     crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
     data::Data,
-    threshold_clock::threshold_clock_valid_non_genesis,
 };
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 use crate::encoder::ShardEncoder;
@@ -108,7 +107,39 @@ pub struct VerifiedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be one some or all nones
+    // It could be a pair of encoded shard and position or none
+    encoded_shard: Option<(Shard, usize)>,
+    // This is Some only when the above has one some
+    merkle_proof:  Option<Vec<u8>>,
+    // merkle root is computed for encoded_statements
+    merkle_root: MerkleRoot,
+
+}
+
+
+#[derive(Clone, Serialize, Deserialize)]
+// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+pub struct CachedStatementBlock {
+    reference: BlockReference,
+
+    //  A list of block references to other blocks that this block includes
+    //  Note that the order matters: if a reference to two blocks from the same round and same authority
+    //  are included, then the first reference is the one that this block conceptually votes for.
+    includes: Vec<BlockReference>,
+
+    // Transaction data acknowledgment
+    acknowledgement_statements: Vec<BlockReference>,
+
+    // Creation time of the block as reported by creator, currently not enforced
+    meta_creation_time_ns: TimestampNs,
+
+    epoch_marker: EpochStatus,
+
+    // Signature by the block author
+    signature: SignatureBytes,
+    // It could be either a vector of BaseStatement or None
+    statements: Option<Vec<BaseStatement>>,
+    // It could be a pair of encoded shard and position or none
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
     merkle_proof:  Option<Vec<u8>>,
@@ -117,23 +148,47 @@ pub struct VerifiedStatementBlock {
 
 }
 
-impl VerifiedStatementBlock {
-    pub(crate) fn change_for_not_own_index(&mut self, own_index: AuthorityIndex) {
-        self.statements = None;
-        for i in 0..self.encoded_statements().len() {
-            if i != own_index as usize {
-                self.encoded_statements[i] = None;
-            }
+impl CachedStatementBlock {
+    pub(crate) fn to_verified_block(
+        &self,
+        encoded_shard: Option<(Shard,usize)>,
+        merkle_proof: Vec<u8>
+    ) -> VerifiedStatementBlock {
+        VerifiedStatementBlock {
+            reference: self.reference.clone(),
+            includes: self.includes.clone(),
+            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            meta_creation_time_ns: self.meta_creation_time_ns,
+            epoch_marker: self.epoch_marker.clone(),
+            signature: self.signature.clone(),
+            statements: self.statements.clone(),
+            encoded_shard, // Replace `0` with the actual position logic
+            merkle_proof: Some(merkle_proof),
+            merkle_root: self.merkle_root.clone(),
         }
     }
+
+
 }
 
-impl VerifiedStatementBlock {
-    pub(crate) fn change_for_own_index(&mut self) {
-       for i in 0..self.encoded_statements.len() {
-           self.encoded_statements[i] = None;
-       }
+impl CachedStatementBlock {
+    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
+        &self.encoded_statements
     }
+
+    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
+        self.encoded_statements[position] = Some(shard);
+    }
+
+    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
+        self.encoded_statements = encoded_statements;
+    }
+
+
+    pub fn merkle_root(&self) -> MerkleRoot {
+        self.merkle_root.clone()
+    }
+
 }
 
 impl VerifiedStatementBlock {
@@ -147,7 +202,7 @@ impl VerifiedStatementBlock {
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
         statements: Vec<BaseStatement>,
-        encoded_statements: Vec<Option<Shard>>,
+        encoded_shard: Option<(Shard,usize)>,
         merkle_proof: Option<Vec<u8>>,
         merkle_root: MerkleRoot,
     ) -> Self {
@@ -172,9 +227,83 @@ impl VerifiedStatementBlock {
             epoch_marker,
             signature,
             statements: Some(statements),
-            encoded_statements,
+            encoded_shard,
             merkle_proof,
             merkle_root,
+        }
+    }
+
+    pub fn to_cached_block(
+        &self,
+        committee_size: usize,
+    ) -> CachedStatementBlock {
+        let mut encoded_statements: Vec<Option<Shard>> = Vec::new();
+        for i in 0..committee_size {
+            if let Some((shard, position)) = self.encoded_shard.as_ref() {
+                if i == *position {
+                    let new_shard: Shard = shard.clone();
+                    encoded_statements.push(Some(new_shard));
+                }
+            }
+            encoded_statements.push(None);
+        }
+        CachedStatementBlock {
+            reference: self.reference.clone(),
+            includes: self.includes.clone(),
+            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            meta_creation_time_ns: self.meta_creation_time_ns,
+            epoch_marker: self.epoch_marker.clone(),
+            signature: self.signature.clone(),
+            statements: self.statements.clone(),
+            encoded_statements, // Replace `0` with the actual position logic
+            merkle_proof: self.merkle_proof.clone(),
+            merkle_root: self.merkle_root.clone(),
+        }
+    }
+
+    pub fn to_send(&self, own_id: AuthorityIndex) -> Self {
+        if own_id != self.reference.authority {
+            if let Some((_,position)) = self.encoded_shard().as_ref() {
+                if *position != own_id as usize{
+                    return Self {
+                        reference: self.reference.clone(),
+                        includes: self.includes.clone(),
+                        acknowledgement_statements: self.acknowledgement_statements.clone(),
+                        meta_creation_time_ns: self.meta_creation_time_ns,
+                        epoch_marker: self.epoch_marker.clone(),
+                        signature: self.signature.clone(),
+                        statements: None,
+                        encoded_shard: None,
+                        merkle_proof: None,
+                        merkle_root: self.merkle_root.clone(),
+                    }
+                }
+            }
+            Self {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: None,
+                encoded_shard: self.encoded_shard.clone(),
+                merkle_proof: self.merkle_proof.clone(),
+                merkle_root: self.merkle_root.clone(),
+            }
+        } else {
+            Self {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: self.statements.clone(),
+                encoded_shard: None,
+                merkle_proof: None,
+                merkle_root: self.merkle_root.clone(),
+            }
         }
     }
 
@@ -188,7 +317,7 @@ impl VerifiedStatementBlock {
             false,
             SignatureBytes::default(),
             vec![],
-            vec![],
+            None,
             None,
             MerkleRoot::default(),
         ))
@@ -212,21 +341,14 @@ impl VerifiedStatementBlock {
 
 
 
-    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
+    pub fn encoded_shard(&self) -> &Option<(Shard,usize)> {
         &self
-            .encoded_statements
+            .encoded_shard
     }
 
     pub fn statements(&self) -> &Option<Vec<BaseStatement>> {
         &self
             .statements
-    }
-    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
-        self.encoded_statements[position] = Some(shard);
-    }
-
-    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
-        self.encoded_statements = encoded_statements;
     }
 
 
@@ -266,11 +388,11 @@ impl VerifiedStatementBlock {
         self.epoch_marker
     }
 
-    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Arc<Self>> {
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Self> {
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
         let t = bincode::deserialize(&bytes)?;
-        Ok(Arc::new(t))
+        Ok(t)
     }
 
     pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
@@ -285,9 +407,9 @@ impl VerifiedStatementBlock {
         epoch_marker: EpochStatus,
         signer: &Signer,
         statements: Vec<BaseStatement>,
-        encoded_statements: Vec<Option<Shard>>,
+        encoded_statements: Vec<Shard>,
     ) -> Self {
-        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority);
+        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
         let signature = signer.sign_block(
             authority,
             round,
@@ -297,12 +419,7 @@ impl VerifiedStatementBlock {
             epoch_marker,
             merkle_root,
         );
-        let mut encoded_statements = encoded_statements;
-        for i in 0..encoded_statements.len() {
-            if i != authority as usize {
-                encoded_statements[i] = None;
-            }
-        }
+        let encoded_shard = Some((encoded_statements[authority as usize].clone(), authority as usize));
         Self::new(
             authority,
             round,
@@ -312,44 +429,34 @@ impl VerifiedStatementBlock {
             epoch_marker,
             signature,
             statements,
-            encoded_statements,
+            encoded_shard,
             Some(merkle_proof_bytes),
             merkle_root,
         )
     }
 
-    pub fn verify(&mut self, committee: &Committee, own_id: AuthorityIndex, peer_id: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
+    pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder) -> eyre::Result<()> {
         let round = self.round();
         let committee_size = committee.len();
         let info_length = committee.info_length();
         let parity_length = committee_size-info_length;
         if self.statements.is_some() {
             let computed_encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
-            let (computed_merkle_tree, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&computed_encoded_statements, own_id);
-            ensure!(computed_merkle_tree== self.merkle_root, "Incorrect Merkle root");
+            let (computed_merkle_tree_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&computed_encoded_statements, own_id);
+            ensure!(computed_merkle_tree_root== self.merkle_root, "Incorrect Merkle root");
             self.merkle_proof = Some(merkle_proof_bytes);
-            for i in 0..computed_encoded_statements.len() {
-                if i != own_id as usize {
-                    self.encoded_statements[i] = None;
-                } else {
-                    self.encoded_statements[i] = computed_encoded_statements[i].clone();
-                }
-            }
+            self.encoded_shard = Some((computed_encoded_statements[own_id as usize].clone(), own_id));
         } else {
-            let number_somes = self.encoded_statements.iter().filter(|s| s.is_some()).count();
-            match number_somes {
-                0 => {},
-                1 => {
-                    let position = self.encoded_statements.iter().position(|s| s.is_some()).expect("Should be one some");
-                    if position != peer_id as usize {
+            if self.encoded_shard.is_some() {
+                    let (encoded_shard, position) = self.encoded_shard.clone().expect("We expect an encoded shard");
+                    if position != peer_id {
                         bail!("The peer delivers a wrong encoded chunk");
                     }
-                    ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, position),
+                    if self.merkle_proof.is_none() {
+                        bail!("The peer didn't include the proof for the chunk");
+                    }
+                    ensure!(MerkleRoot::check_correctness_merkle_leaf(encoded_shard, self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, position),
                     "Merkle proof check failed");
-                }
-                _ => {
-                    bail!("Only three options are possible");
-                }
             }
         }
 
@@ -378,7 +485,7 @@ impl VerifiedStatementBlock {
         if round == GENESIS_ROUND {
             bail!("Genesis block should not go through verification");
         }
-        if let Err(e) = pub_key.verify_signature_block(self) {
+        if let Err(e) = pub_key.verify_signature_in_block(self) {
             bail!("Block signature verification has failed: {:?}", e);
         }
         for include in &self.includes {
@@ -453,368 +560,6 @@ impl Ord for BlockReference {
     }
 }
 
-impl StatementBlock {
-    pub fn new_genesis(authority: AuthorityIndex) -> Data<Self> {
-        Data::new(Self::new(
-            authority,
-            GENESIS_ROUND,
-            vec![],
-            vec![],
-            0,
-            false,
-            SignatureBytes::default(),
-            vec![None],
-            None,
-            MerkleRoot::default(),
-        ))
-    }
-
-
-
-    pub fn change_for_own_index(&mut self, info_length: usize) {
-        for i in info_length..self.encoded_statements.len() {
-            self.encoded_statements[i] = None;
-        }
-    }
-    pub fn change_for_not_own_index(&mut self, authority_index: AuthorityIndex) {
-        for i in 0..self.encoded_statements.len() {
-            if i as AuthorityIndex != authority_index {
-                self.encoded_statements[i] = None;
-            }
-        }
-    }
-
-    pub fn new_with_signer(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: Vec<BlockReference>,
-        acknowledgement_statements: Vec<BlockReference>,
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signer: &Signer,
-        encoded_statements: Vec<Option<Shard>>,
-    ) -> Self {
-        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority);
-        let signature = signer.sign_block(
-            authority,
-            round,
-            &includes,
-            &acknowledgement_statements,
-            meta_creation_time_ns,
-            epoch_marker,
-            merkle_root,
-        );
-        Self::new(
-            authority,
-            round,
-            includes,
-            acknowledgement_statements,
-            meta_creation_time_ns,
-            epoch_marker,
-            signature,
-            encoded_statements,
-            Some(merkle_proof_bytes),
-            merkle_root,
-        )
-    }
-
-    pub fn new(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: Vec<BlockReference>,
-        acknowledgement_statements: Vec<BlockReference>,
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signature: SignatureBytes,
-        encoded_statements: Vec<Option<Shard>>,
-        merkle_proof: Option<Vec<u8>>,
-        merkle_root: MerkleRoot,
-    ) -> Self {
-        Self {
-            reference: BlockReference {
-                authority,
-                round,
-                digest: BlockDigest::new_without_statements(
-                    authority,
-                    round,
-                    &includes,
-                    &acknowledgement_statements,
-                    meta_creation_time_ns,
-                    epoch_marker,
-                    &signature,
-                    merkle_root,
-                ),
-            },
-            includes,
-            acknowledgement_statements,
-            meta_creation_time_ns,
-            epoch_marker,
-            signature,
-            encoded_statements,
-            merkle_proof,
-            merkle_root,
-        }
-    }
-
-    pub fn merkle_root(&self) -> MerkleRoot {
-        self.merkle_root.clone()
-    }
-
-    pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
-        &self.acknowledgement_statements
-    }
-
-    pub fn reference(&self) -> &BlockReference {
-        &self.reference
-    }
-
-    pub fn includes(&self) -> &Vec<BlockReference> {
-        &self.includes
-    }
-
-
-
-    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
-        &self
-            .encoded_statements
-    }
-    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
-        self.encoded_statements[position] = Some(shard);
-    }
-
-    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
-       self.encoded_statements = encoded_statements;
-    }
-
-
-
-    pub fn author(&self) -> AuthorityIndex {
-        self.reference.authority
-    }
-
-    pub fn round(&self) -> RoundNumber {
-        self.reference.round
-    }
-
-    pub fn digest(&self) -> BlockDigest {
-        self.reference.digest
-    }
-
-    pub fn author_round(&self) -> (AuthorityIndex, RoundNumber) {
-        self.reference.author_round()
-    }
-
-    pub fn signature(&self) -> &SignatureBytes {
-        &self.signature
-    }
-
-    pub fn meta_creation_time_ns(&self) -> TimestampNs {
-        self.meta_creation_time_ns
-    }
-
-    pub fn epoch_changed(&self) -> EpochStatus {
-        self.epoch_marker
-    }
-
-    pub fn meta_creation_time(&self) -> Duration {
-        // Some context: https://github.com/rust-lang/rust/issues/51107
-        let secs = self.meta_creation_time_ns / NANOS_IN_SEC;
-        let nanos = self.meta_creation_time_ns % NANOS_IN_SEC;
-        Duration::new(secs as u64, nanos as u32)
-    }
-
-    pub fn transform_to_verified(self,  own_id: AuthorityIndex, committee: &Committee) -> VerifiedStatementBlock {
-        let info_length = committee.info_length();
-        let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
-        let number_info_somes = self.encoded_statements.iter().enumerate().filter(|(i,s)|*i< info_length && s.is_some()).count();
-        if number_info_somes == info_length {
-            let info_shards: Vec<Vec<u8>> = self.encoded_statements()
-                .iter()
-                .enumerate()
-                .filter(|(i, s)| *i < info_length && s.is_some())
-                .map(|(_, s)| s.clone().unwrap()) // Safe to unwrap because we filtered for `is_some()`
-                .collect();
-            // Combine all the shards into a single Vec<u8> (assuming they are in order)
-            let mut reconstructed_data = Vec::new();
-            for shard in info_shards {
-                reconstructed_data.extend(shard);
-            }
-
-            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
-            if reconstructed_data.len() < 4 {
-                panic!("Reconstructed data is too short to contain a valid length");
-            }
-
-            let bytes_length = u32::from_le_bytes(
-                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
-            ) as usize;
-
-            // Ensure the data length matches the declared length
-            if reconstructed_data.len() < 4 + bytes_length {
-                panic!("Reconstructed data length does not match the declared bytes_length");
-            }
-
-            // Deserialize the rest of the data into `Vec<BaseStatement>`
-            let serialized_data_statements = &reconstructed_data[4..4 + bytes_length];
-            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_data_statements)
-                .expect("Deserialization of reconstructed data failed");
-
-            let mut encoded_statements = self.encoded_statements;
-            for (i, shard) in encoded_statements.iter_mut().enumerate() {
-                if i != own_id as usize {
-                    *shard = None;
-                }
-            }
-
-            VerifiedStatementBlock {
-                reference: self.reference,
-                includes: self.includes,
-                acknowledgement_statements: self.acknowledgement_statements,
-                meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker,
-                signature: self.signature,
-                statements: Some(reconstructed_statements),
-                encoded_statements,
-                merkle_proof: self.merkle_proof,
-                merkle_root: self.merkle_root,
-            }
-        } else {
-            if number_somes == 1 {
-                VerifiedStatementBlock {
-                    reference: self.reference,
-                    includes: self.includes,
-                    acknowledgement_statements: self.acknowledgement_statements,
-                    meta_creation_time_ns: self.meta_creation_time_ns,
-                    epoch_marker: self.epoch_marker,
-                    signature: self.signature,
-                    statements: None,
-                    encoded_statements: self.encoded_statements,
-                    merkle_proof: self.merkle_proof,
-                    merkle_root: self.merkle_root,
-                }
-            } else {
-                VerifiedStatementBlock {
-                    reference: self.reference,
-                    includes: self.includes,
-                    acknowledgement_statements: self.acknowledgement_statements,
-                    meta_creation_time_ns: self.meta_creation_time_ns,
-                    epoch_marker: self.epoch_marker,
-                    signature: self.signature,
-                    statements: None,
-                    encoded_statements: vec![None; committee.len()],
-                    merkle_proof: None,
-                    merkle_root: self.merkle_root,
-                }
-            }
-        }
-    }
-
-    pub fn verify(&mut self, committee: &Committee, own_id: AuthorityIndex, peer_id: AuthorityIndex, encoder: &mut Encoder) -> eyre::Result<()> {
-        let round = self.round();
-        let committee_size = committee.len();
-        let info_size = committee.info_length();
-        let parity_size = committee_size-info_size;
-        let number_somes = self.encoded_statements.iter().filter(|s|s.is_some()).count();
-        let number_info_somes = self.encoded_statements.iter().enumerate().filter(|(i,s)|*i< info_size && s.is_some()).count();
-        match number_somes {
-            0 => {},
-            1 => {
-                let position = self.encoded_statements.iter().position(|s|s.is_some()).expect("Should be one some");
-                if position != peer_id as usize {
-                    bail!("The peer delivers a wrong encoded chunk");
-                }
-                ensure!(MerkleRoot::check_correctness_merkle_leaf(self.encoded_statements(), self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, position),
-                "Merkle proof check failed");
-                }
-            x if x>= info_size && number_info_somes== info_size => {
-                let shard_size= self.encoded_statements()[0].as_ref().unwrap().len();
-                encoder.reset(info_size, parity_size, shard_size).expect("encoder reset failed");
-                for shard_index in 0..info_size {
-                    let shard = self.encoded_statements()[shard_index].clone();
-                    encoder.add_original_shard(shard.unwrap()).expect("Adding shard failed");
-                }
-                let result = encoder.encode().expect("Encoding failed");
-                let recovery: Vec<Option<Shard>> = result.recovery_iter().map(|slice| Some(slice.to_vec())).collect();
-                for i in info_size..committee_size {
-                    self.encoded_statements[i] = recovery[i- info_size].clone();
-                }
-                let (computed_merkle_tree, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(self.encoded_statements(), own_id);
-
-
-
-                ensure!(computed_merkle_tree== self.merkle_root, "Incorrect Merkle root");
-
-                self.merkle_proof = Some(merkle_proof_bytes);
-            }
-            _ => {
-                bail!("Only three options are possible");
-            }
-        }
-
-        // TODO: check correctness of encoded data/ chunks and merkle_root
-
-        let digest = BlockDigest::new(
-            self.author(),
-            round,
-            &self.includes,
-            &self.acknowledgement_statements,
-            self.meta_creation_time_ns,
-            self.epoch_marker,
-            &self.signature,
-            self.merkle_root,
-        );
-        ensure!(
-            digest == self.digest(),
-            "Digest does not match, calculated {:?}, provided {:?}",
-            digest,
-            self.digest()
-        );
-        let pub_key = committee.get_public_key(self.author());
-        let Some(pub_key) = pub_key else {
-            bail!("Unknown block author {}", self.author())
-        };
-        if round == GENESIS_ROUND {
-            bail!("Genesis block should not go through verification");
-        }
-        if let Err(e) = pub_key.verify_block(self) {
-            bail!("Block signature verification has failed: {:?}", e);
-        }
-        for include in &self.includes {
-            // Also check duplicate includes?
-            ensure!(
-                committee.known_authority(include.authority),
-                "Include {:?} references unknown authority",
-                include
-            );
-            ensure!(
-                include.round < round,
-                "Include {:?} round is greater or equal to own round {}",
-                include,
-                round
-            );
-        }
-        ensure!(
-            threshold_clock_valid_non_genesis(self, committee),
-            "Threshold clock is not valid"
-        );
-        Ok(())
-    }
-
-    pub fn detailed(&self) -> Detailed {
-        Detailed(self)
-    }
-
-    pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
-        self.merkle_proof = Some(merkle_proof);
-    }
-
-    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Arc<Self>> {
-        IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
-        IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
-        let t = bincode::deserialize(&bytes)?;
-        Ok(Arc::new(t))
-    }
-}
 
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub struct TransactionLocator {
@@ -897,7 +642,7 @@ impl BlockReference {
     #[cfg(test)]
     pub fn new_test(authority: AuthorityIndex, round: RoundNumber) -> Self {
         if round == 0 {
-            StatementBlock::new_genesis(authority).reference
+            VerifiedStatementBlock::new_genesis(authority).reference
         } else {
             Self {
                 authority,
@@ -971,43 +716,15 @@ pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {
     format!("{}{}", format_authority_index(i), r)
 }
 
-impl fmt::Debug for StatementBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
+
 
 impl fmt::Debug for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self)
     }
 }
-pub struct Detailed<'a>(&'a StatementBlock);
 
-impl<'a> fmt::Debug for Detailed<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "StatementBlock {:?} {{", self.0.reference())?;
-        write!(
-            f,
-            "includes({})={:?},",
-            self.0.includes().len(),
-            self.0.includes()
-        )?;
 
-        writeln!(f, "}}")
-    }
-}
-
-impl fmt::Display for StatementBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:[", self.reference)?;
-        for include in self.includes() {
-            write!(f, "{},", include)?;
-        }
-        write!(f, "](")?;
-        write!(f, ")")
-    }
-}
 
 impl fmt::Display for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1224,7 +941,7 @@ mod test {
                 epoch_marker: false,
                 signature: Default::default(),
                 statements: None,
-                encoded_statements: vec![],
+                encoded_shard: None,
                 merkle_proof: None,
                 merkle_root: MerkleRoot::default(),
             }
@@ -1353,83 +1070,5 @@ mod test {
         }
 
         statements
-    }
-    #[test]
-    fn create_block_and_verify() {
-        let committee_size = 4;
-        let number_byzantine = 0;
-        let byzantine_strategy = "honest".to_string();
-        let rounds_in_epoch = 100;
-        let (committee, mut cores, reporters) = byzantine_committee_and_cores_epoch_duration(
-            committee_size,
-            number_byzantine,
-            byzantine_strategy,
-            rounds_in_epoch,
-        );
-
-        let first_peer_index: AuthorityIndex = 1 as AuthorityIndex;
-        let second_peer_index: AuthorityIndex = 2 as AuthorityIndex;
-        let third_peer_index: AuthorityIndex = 3 as AuthorityIndex;
-        let own_index: AuthorityIndex = 0 as AuthorityIndex;
-        let mut own_core = &mut cores[own_index as usize];
-        let clock_round = 1;
-        let mut genesis_blocks = Vec::new();
-        for i in 0..committee_size {
-            genesis_blocks.push(StatementBlock::new_genesis(i as AuthorityIndex));
-        }
-        let includes: Vec<BlockReference> = genesis_blocks.iter().map(|x| x.reference().clone()).collect();
-        let acknowledgement_statements = includes.clone();
-
-
-        let info_length = committee.info_length();
-        let parity_length = committee.len() - info_length;
-        let statements = generate_random_shares(5);
-        let mut encoded_statements = own_core.encoder.encode_statements(statements, info_length, parity_length);
-
-
-        let mut full_block = StatementBlock::new_with_signer(
-            own_index,
-            clock_round,
-            includes.clone(),
-            acknowledgement_statements,
-            0,
-            false,
-            &own_core.get_signer(),
-            encoded_statements.clone(),
-        );
-        let mut encoder = ReedSolomonEncoder::new(2,
-                                                  4,
-                                                  64).unwrap();
-        let mut original_full_block = full_block.clone();
-        // Before sending remove Somes from parity symbols
-        full_block.change_for_own_index(info_length);
-
-        // Assume the block is sent 0->1. Make verification by first peer
-        // The block is modified by encoding and including another Merkle proof
-        let result_full_block = full_block.verify(&committee, first_peer_index, own_index, &mut encoder);
-        assert!(result_full_block.is_ok());
-
-        let mut one_some_block_from_first = full_block.clone();
-        // Before sending between 1->2 leave one some
-        one_some_block_from_first.change_for_not_own_index(first_peer_index);
-
-        let result_one_some_block = one_some_block_from_first.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
-        assert!(result_one_some_block.is_ok());
-
-        let mut one_some_block_from_second = original_full_block.verify(&committee, second_peer_index, first_peer_index, &mut encoder);
-        // Before sending between 1->3 leave one some
-        original_full_block.change_for_not_own_index(second_peer_index);
-        let mut one_some_block_from_second = original_full_block;
-
-        let result_one_some_block = one_some_block_from_second.verify(&committee, third_peer_index, second_peer_index, &mut encoder);
-        assert!(result_one_some_block.is_ok());
-
-        // Now sending between 2->0
-        let mut none_block = one_some_block_from_first.clone();
-        // Before sending leave one some, but actually remove all of them
-        none_block.change_for_not_own_index(second_peer_index);
-
-        let result_all_none_block = none_block.verify(&committee, own_index, second_peer_index, &mut encoder);
-        assert!(result_all_none_block.is_ok());
     }
 }

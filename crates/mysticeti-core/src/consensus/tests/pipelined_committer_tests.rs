@@ -8,6 +8,7 @@ use crate::{
     test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
     types::{BlockReference, StatementBlock},
 };
+use crate::types::VerifiedStatementBlock;
 
 /// Commit one leader.
 #[test]
@@ -188,7 +189,7 @@ fn no_leader() {
 
     let genesis: Vec<_> = committee
         .authorities()
-        .map(|authority| *StatementBlock::new_genesis(authority).reference())
+        .map(|authority| *VerifiedStatementBlock::new_genesis(authority).reference())
         .collect();
     let connections = committee
         .authorities()

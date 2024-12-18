@@ -29,7 +29,7 @@ use crate::{
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
 use crate::crypto::MerkleRoot;
-use crate::types::VerifiedStatementBlock;
+use crate::types::{Shard, VerifiedStatementBlock};
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -474,13 +474,13 @@ impl TestBlockWriter {
         dag
     }
 
-    pub fn add_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
+    pub fn add_block(&mut self, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) -> WalPosition {
         let pos = self
             .wal_writer
-            .write(WAL_ENTRY_BLOCK, &bincode::serialize(&block).unwrap())
+            .write(WAL_ENTRY_BLOCK, storage_and_transmission_blocks.0.serialized_bytes())
             .unwrap();
         self.block_store.insert_block(
-            block,
+            storage_and_transmission_blocks,
             pos,
             0,
             self.block_store.committee_size as AuthorityIndex,
@@ -488,7 +488,7 @@ impl TestBlockWriter {
         pos
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) {
         for block in blocks {
             self.add_block(block);
         }
@@ -504,8 +504,8 @@ impl TestBlockWriter {
 }
 
 impl BlockWriter for TestBlockWriter {
-    fn insert_block(&mut self, block: Data<VerifiedStatementBlock>) -> WalPosition {
-        (&mut self.wal_writer, &self.block_store).insert_block(block)
+    fn insert_block(&mut self, blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)) -> WalPosition {
+        (&mut self.wal_writer, &self.block_store).insert_block(blocks)
     }
 
 
@@ -544,7 +544,7 @@ pub fn build_dag(
             let (references, genesis): (Vec<_>, Vec<_>) = committee
                 .authorities()
                 .map(|index| VerifiedStatementBlock::new_genesis(index))
-                .map(|block| (*block.reference(), block))
+                .map(|block| (*block.reference(), (block.clone(), block)))
                 .unzip();
             block_writer.add_blocks(genesis);
             references
@@ -557,7 +557,7 @@ pub fn build_dag(
             .authorities()
             .map(|authority| {
                 let acknowledgement_statements = includes.clone();
-                let block = Data::new(VerifiedStatementBlock::new(
+                let data_storage_block = Data::new(VerifiedStatementBlock::new(
                     authority,
                     round,
                     includes.clone(),
@@ -566,11 +566,13 @@ pub fn build_dag(
                     false,
                     Default::default(),
                     vec![],
-                    vec![],
+                    None,
                     None,
                     MerkleRoot::default(),
                 ));
-                (*block.reference(), block)
+                let transmission_block = data_storage_block.to_send(authority);
+                let data_transmission_block = Data::new(transmission_block);
+                (*data_storage_block.reference(), (data_storage_block, data_transmission_block))
             })
             .unzip();
         block_writer.add_blocks(blocks);
@@ -590,7 +592,7 @@ pub fn build_dag_layer(
     for (authority, parents) in connections {
         let round = parents.first().unwrap().round + 1;
         let acknowledgement_statements = parents.clone();
-        let block = Data::new(VerifiedStatementBlock::new(
+        let data_storage_block = Data::new(VerifiedStatementBlock::new(
             authority,
             round,
             parents,
@@ -599,13 +601,15 @@ pub fn build_dag_layer(
             false,
             Default::default(),
             vec![],
-            vec![],
+            None,
             None,
             MerkleRoot::default(),
         ));
 
-        references.push(*block.reference());
-        block_writer.add_block(block);
+        let transmission_block = data_storage_block.to_send(authority);
+        let data_transmission_block = Data::new(transmission_block);
+        references.push(*data_storage_block.reference());
+        block_writer.add_block((data_storage_block, data_transmission_block));
     }
     references
 }

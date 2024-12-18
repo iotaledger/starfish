@@ -230,31 +230,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         disseminator.disseminate_all_blocks_push().await;
                     }
                 }
-                NetworkMessage::Block(data_block) => {
-                    let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-                    let mut block = (*data_block).clone();
-                    tracing::debug!("Received one block {} from {}", block, peer);
-                    if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
-                        tracing::warn!(
-                            "Rejected incorrect block {} from {}: {:?}",
-                            block.reference(),
-                            peer,
-                            e
-                        );
-                        // todo: Terminate connection upon receiving incorrect block.
-                        break;
-                    }
-                    let data_block = Data::new(block);
-                    drop(timer);
-                    inner.syncer.add_blocks(vec![data_block]).await;
-                }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
                     let mut required_blocks = Vec::new();
                     for block in blocks {
 
-                        let new_shards_ids = inner.block_store.get_new_shards_ids(&block);
-                        if new_shards_ids.len() > 0 {
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                        if contains_new_shard_or_header {
                             required_blocks.push(block);
                         }
                     }
@@ -262,7 +244,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     for arc_block in required_blocks {
                         let mut block: VerifiedStatementBlock = (*arc_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
-                        if let Err(e) = block.verify(&inner.committee, own_id, peer_id, &mut encoder) {
+                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),
@@ -272,8 +254,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
-                        let data_block = Data::new(block);
-                        verified_data_blocks.push(data_block);
+                        let storage_block = block;
+                        let transmission_block = storage_block.to_send(own_id);
+                        let data_storage_block = Data::new(storage_block);
+                        let data_transmission_block = Data::new(transmission_block);
+                        verified_data_blocks.push((data_storage_block, data_transmission_block));
                     }
                     drop(timer);
                     tracing::debug!("To be processed after verification from {:?}, {} blocks {:?}", peer, verified_data_blocks.len(), verified_data_blocks);

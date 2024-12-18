@@ -115,13 +115,13 @@ impl<H: BlockHandler> Core<H> {
             for block in other_genesis_blocks {
                 let reference = *block.reference();
                 threshold_clock.add_block(reference, &committee);
-                let position = block_writer.insert_block(block);
+                let position = block_writer.insert_block((block.clone(), block));
                 pending.push((position, MetaStatement::Include(reference)));
             }
             threshold_clock.add_block(*own_genesis_block.reference(), &committee);
             let own_block_data = OwnBlockData {
                 next_entry: WalPosition::MAX,
-                block: own_genesis_block,
+                storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block),
             };
             block_writer.insert_own_block(&own_block_data, 0, committee.len() as AuthorityIndex);
             own_block_data
@@ -197,7 +197,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>)  {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>)  {
         let _timer = self
             .metrics
             .utilization_timer
@@ -297,24 +297,31 @@ impl<H: BlockHandler> Core<H> {
                     self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
                 }
             }
+
+            let mut data: Vec<Shard> = vec![vec![]; info_length];
+            for i in 0..info_length {
+                if block.encoded_statements()[i].is_some() {
+                    data[i] = block.encoded_statements()[i].clone().unwrap();
+                }
+            }
             let result = self.decoder.decode().expect("Decoding should be correct");
-            let mut data = block.encoded_statements()[..info_length].to_vec();
             let restored: HashMap<_, _> = result.restored_original_iter().collect();
             for el in restored {
-                data[el.0] = Some(Shard::from(el.1));
+                data[el.0] = Shard::from(el.1);
             }
             drop(result);
 
             let recovered_statements = self.encoder.encode_shards(data, info_length, parity_length);
-            let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority);
+            let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority as usize);
             if computed_merkle_root == block.merkle_root() {
                 tracing::debug!("Block {block_reference} is reconstructed");
-                block.add_encoded_statements(recovered_statements);
-                block.set_merkle_proof(computed_merkle_proof);
-                let verified_data_block = Data::new(block);
+                let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[self.authority as usize].clone(), self.authority as usize)), computed_merkle_proof);
+                let transmission_block = storage_block.to_send(self.authority);
+                let data_storage_block = Data::new(storage_block);
+                let data_transmission_block = Data::new(transmission_block);
 
-                (&mut self.wal_writer, &self.block_store).insert_block(verified_data_block.clone());
-                self.block_store.updated_unknown_by_others(verified_data_block.reference().clone());
+                (&mut self.wal_writer, &self.block_store).insert_block((data_storage_block,data_transmission_block));
+                self.block_store.updated_unknown_by_others(block_reference);
             }
             else {
                 tracing::debug!("Block {block_reference} is not correctly reconstructed");
@@ -386,17 +393,17 @@ impl<H: BlockHandler> Core<H> {
             // Compress the references in the block
             // Iterate through all the include statements in the block, and make a set of all the references in their includes.
             let mut references_in_block: HashSet<BlockReference> = HashSet::new();
-            references_in_block.extend(self.last_own_block[j].block.includes());
+            references_in_block.extend(self.last_own_block[j].storage_transmission_blocks.0.includes());
             for (_, statement) in &taken {
                 if let MetaStatement::Include(block_ref) = statement {
                     // for all the includes in the block, add the references in the block to the set
-                    if let Some(block) = self.block_store.get_block(*block_ref) {
+                    if let Some(block) = self.block_store.get_storage_block(*block_ref) {
                         references_in_block.extend(block.includes());
                     }
                 }
             }
             let mut includes = vec![];
-            includes.push(*self.last_own_block[j].block.reference());
+            includes.push(*self.last_own_block[j].storage_transmission_blocks.0.reference());
             for (_, statement) in taken.clone().into_iter() {
                 match statement {
                     MetaStatement::Include(include) => {
@@ -421,7 +428,7 @@ impl<H: BlockHandler> Core<H> {
                 .metrics
                 .utilization_timer
                 .utilization_timer("Core::try_new_block::build block");
-            let new_verified_block = VerifiedStatementBlock::new_with_signer(
+            let storage_block = VerifiedStatementBlock::new_with_signer(
                 self.authority,
                 clock_round,
                 includes.clone(),
@@ -432,8 +439,9 @@ impl<H: BlockHandler> Core<H> {
                 statements.clone(),
                 encoded_statements.clone(),
             );
+            let transmission_block = storage_block.to_send(self.authority);
             drop(timer_for_building_block);
-            blocks.push(new_verified_block);
+            blocks.push((storage_block,transmission_block));
         }
 
         let mut return_blocks = vec![];
@@ -445,30 +453,31 @@ impl<H: BlockHandler> Core<H> {
         let mut block_id = 0;
         for block in blocks {
             assert_eq!(
-                block.includes().get(0).unwrap().authority,
+                block.0.includes().get(0).unwrap().authority,
                 self.authority,
                 "Invalid block {}",
-                block.clone()
+                block.0.clone()
             );
             let timer_for_serialization = self
                 .metrics
                 .utilization_timer
                 .utilization_timer("Core::try_new_block::serialize block");
-            let block = Data::new(block);
+            // Todo: for own blocks no need to serialize twice
+            let storage_and_transmission_blocks = (Data::new(block.0), Data::new(block.1));
             drop(timer_for_serialization);
-            if block.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
+            if storage_and_transmission_blocks.0.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
                 // Sanity check for now
                 panic!(
                     "Created an oversized block (check all limits set properly: {} > {}): {:?}",
-                    block.serialized_bytes().len(),
+                    storage_and_transmission_blocks.0.serialized_bytes().len(),
                     crate::wal::MAX_ENTRY_SIZE / 2,
-                    block,
+                    storage_and_transmission_blocks,
                 );
             }
             self.threshold_clock
-                .add_block(*block.reference(), &self.committee);
+                .add_block(*storage_and_transmission_blocks.0.reference(), &self.committee);
             self.block_handler.handle_proposal(number_statements);
-            self.proposed_block_stats(&block);
+            self.proposed_block_stats(&storage_and_transmission_blocks.0);
             let next_entry = if let Some((pos, _)) = self.pending.get(0) {
                 *pos
             } else {
@@ -476,7 +485,7 @@ impl<H: BlockHandler> Core<H> {
             };
             self.last_own_block.push(OwnBlockData {
                 next_entry,
-                block: block.clone(),
+                storage_transmission_blocks: storage_and_transmission_blocks.clone(),
             });
             let timer_for_disk = self
                 .metrics
@@ -493,11 +502,11 @@ impl<H: BlockHandler> Core<H> {
             }
             drop(timer_for_disk);
 
-            tracing::debug!("Created block {block:?} with refs {:?}", block.includes().len());
-            return_blocks.push(block);
+            tracing::debug!("Created block {storage_and_transmission_blocks:?} with refs {:?}", storage_and_transmission_blocks.0.includes().len());
+            return_blocks.push(storage_and_transmission_blocks);
             block_id += 1;
         }
-        Some(return_blocks[0].clone())
+        Some(return_blocks[0].0.clone())
     }
 
 
@@ -513,7 +522,7 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(&mut self) -> Vec<Arc<VerifiedStatementBlock>> {
+    pub fn try_commit(&mut self) -> Vec<Data<VerifiedStatementBlock>> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
@@ -620,12 +629,12 @@ impl<H: BlockHandler> Core<H> {
 
     // This function is needed only for signalling that we created a new block
     pub fn last_own_block(&self) -> &Data<VerifiedStatementBlock> {
-        &self.last_own_block[0].block
+        &self.last_own_block[0].storage_transmission_blocks.0
     }
 
     // This function is needed only for retrieving the last round of a block we proposed
     pub fn last_proposed(&self) -> RoundNumber {
-        self.last_own_block[0].block.round()
+        self.last_own_block[0].storage_transmission_blocks.0.round()
     }
 
     pub fn authority(&self) -> AuthorityIndex {

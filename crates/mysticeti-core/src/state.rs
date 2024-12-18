@@ -18,7 +18,7 @@ pub struct RecoveredState {
     pub last_own_block: Option<OwnBlockData>,
     pub pending: Vec<(WalPosition, MetaStatement)>,
     pub state: Option<Bytes>,
-    pub unprocessed_blocks: Vec<Data<VerifiedStatementBlock>>,
+    pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
 
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: HashSet<BlockReference>,
@@ -30,7 +30,7 @@ pub struct RecoveredStateBuilder {
     pending: BTreeMap<WalPosition, RawMetaStatement>,
     last_own_block: Option<OwnBlockData>,
     state: Option<Bytes>,
-    unprocessed_blocks: Vec<Data<VerifiedStatementBlock>>,
+    unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>) >,
 
     last_committed_leader: Option<BlockReference>,
     committed_blocks: HashSet<BlockReference>,
@@ -42,10 +42,10 @@ impl RecoveredStateBuilder {
         Self::default()
     }
 
-    pub fn block(&mut self, pos: WalPosition, block: &Data<VerifiedStatementBlock>) {
+    pub fn block(&mut self, pos: WalPosition, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) {
         self.pending
-            .insert(pos, RawMetaStatement::Include(*block.reference()));
-        self.unprocessed_blocks.push(block.clone());
+            .insert(pos, RawMetaStatement::Include(*storage_and_transmission_blocks.0.reference()));
+        self.unprocessed_blocks.push(storage_and_transmission_blocks);
     }
 
     pub fn payload(&mut self, pos: WalPosition, payload: Bytes) {
@@ -55,7 +55,7 @@ impl RecoveredStateBuilder {
     pub fn own_block(&mut self, own_block_data: OwnBlockData) {
         // Edge case of WalPosition::MAX is automatically handled here, empty map is returned
         self.pending = self.pending.split_off(&own_block_data.next_entry);
-        self.unprocessed_blocks.push(own_block_data.block.clone());
+        self.unprocessed_blocks.push(own_block_data.storage_transmission_blocks.clone());
         self.last_own_block = Some(own_block_data);
     }
 
