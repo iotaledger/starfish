@@ -462,8 +462,8 @@ impl BlockStoreInner {
         if !self.cached_blocks.contains_key(block_reference) {
             return true;
         }
-
-        // Get the cached block
+        // the header is in the cached block in this place
+        // we need at least a shard to update
         if block.encoded_shard().is_none() {
             return false;
         }
@@ -472,7 +472,7 @@ impl BlockStoreInner {
         if cached_block.encoded_statements()[*shard_index].is_none() {
             return true;
         }
-        return false;
+        false
     }
 
     pub fn update_with_new_shard(&mut self, block: &VerifiedStatementBlock) {
