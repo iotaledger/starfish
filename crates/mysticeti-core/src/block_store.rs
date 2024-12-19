@@ -116,7 +116,7 @@ impl BlockStore {
                 WAL_ENTRY_BLOCK => {
                     let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(data)
                         .expect("Failed to deserialize data from wal");
-                    let transmission_block = data_storage_block.to_send(authority);
+                    let transmission_block = data_storage_block.from_storage_to_transmission(authority);
                     let data_transmission_block = Data::new(transmission_block);
                     let data_storage_transmission_blocks = (data_storage_block,data_transmission_block);
                     builder.block(pos, data_storage_transmission_blocks.clone());
@@ -385,7 +385,7 @@ impl BlockStore {
                     WAL_ENTRY_BLOCK => {
 
                         let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(data).expect("Failed to deserialize data from wal");
-                        let transmission_block = data_storage_block.to_send(own_id);
+                        let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
                         let data_transmission_block = Data::new(transmission_block);
                         (data_storage_block, data_transmission_block)
                     }
@@ -874,7 +874,7 @@ impl OwnBlockData {
         let block = bytes.slice(OWN_BLOCK_HEADER_SIZE..);
         let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(block)?;
         let own_id = data_storage_block.author();
-        let transmission_block = data_storage_block.to_send(own_id);
+        let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
         let data_transmission_block = Data::new(transmission_block);
         let own_block_data = OwnBlockData {
             next_entry,

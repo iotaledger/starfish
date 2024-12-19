@@ -316,7 +316,7 @@ impl<H: BlockHandler> Core<H> {
             if computed_merkle_root == block.merkle_root() {
                 tracing::debug!("Block {block_reference} is reconstructed");
                 let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[self.authority as usize].clone(), self.authority as usize)), computed_merkle_proof);
-                let transmission_block = storage_block.to_send(self.authority);
+                let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);
 
@@ -452,10 +452,10 @@ impl<H: BlockHandler> Core<H> {
         let mut block_id = 0;
         for block in blocks {
             assert_eq!(
-                block.0.includes().get(0).unwrap().authority,
+                block.includes().get(0).unwrap().authority,
                 self.authority,
                 "Invalid block {}",
-                block.0.clone()
+                block.reference()
             );
             let timer_for_serialization = self
                 .metrics

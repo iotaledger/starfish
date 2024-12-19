@@ -570,7 +570,7 @@ pub fn build_dag(
                     None,
                     MerkleRoot::default(),
                 ));
-                let transmission_block = data_storage_block.to_send(authority);
+                let transmission_block = data_storage_block.from_storage_to_transmission(authority);
                 let data_transmission_block = Data::new(transmission_block);
                 (*data_storage_block.reference(), (data_storage_block, data_transmission_block))
             })
@@ -606,7 +606,7 @@ pub fn build_dag_layer(
             MerkleRoot::default(),
         ));
 
-        let transmission_block = data_storage_block.to_send(authority);
+        let transmission_block = data_storage_block.from_storage_to_transmission(authority);
         let data_transmission_block = Data::new(transmission_block);
         references.push(*data_storage_block.reference());
         block_writer.add_block((data_storage_block, data_transmission_block));

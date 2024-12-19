@@ -191,7 +191,7 @@ mod tests {
                 }
                 SyncerEvent::DeliverBlock(data_storage_block) => {
                     // eprintln!("[{:06} {}] Deliver {block}", scheduler.time_ms(), self.core.authority());
-                    let transmission_block = data_storage_block.to_send(self.core.authority());
+                    let transmission_block = data_storage_block.from_storage_to_transmission(self.core.authority());
                     let data_transmission_block = Data::new(transmission_block);
                     self.add_blocks(vec![(data_storage_block,data_transmission_block)]);
                 }

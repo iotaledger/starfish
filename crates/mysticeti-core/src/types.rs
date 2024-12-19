@@ -261,7 +261,7 @@ impl VerifiedStatementBlock {
         }
     }
 
-    pub fn to_send(&self, own_id: AuthorityIndex) -> Self {
+    pub fn from_storage_to_transmission(&self, own_id: AuthorityIndex) -> Self {
         if own_id != self.reference.authority {
             if let Some((_,position)) = self.encoded_shard().as_ref() {
                 if *position != own_id as usize{

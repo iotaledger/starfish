@@ -232,18 +232,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-                    let mut required_blocks = Vec::new();
-                    for block in blocks {
-
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
-                        if contains_new_shard_or_header {
-                            required_blocks.push(block);
-                        }
-                    }
                     let mut verified_data_blocks = Vec::new();
-                    for arc_block in required_blocks {
-                        let mut block: VerifiedStatementBlock = (*arc_block).clone();
+                    for data_block in blocks {
+                        let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
                         if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
@@ -255,7 +251,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = storage_block.to_send(own_id);
+                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
                         let data_storage_block = Data::new(storage_block);
                         let data_transmission_block = Data::new(transmission_block);
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
