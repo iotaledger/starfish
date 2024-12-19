@@ -439,9 +439,8 @@ impl<H: BlockHandler> Core<H> {
                 statements.clone(),
                 encoded_statements.clone(),
             );
-            let transmission_block = storage_block.to_send(self.authority);
             drop(timer_for_building_block);
-            blocks.push((storage_block,transmission_block));
+            blocks.push(storage_block);
         }
 
         let mut return_blocks = vec![];
@@ -463,7 +462,8 @@ impl<H: BlockHandler> Core<H> {
                 .utilization_timer
                 .utilization_timer("Core::try_new_block::serialize block");
             // Todo: for own blocks no need to serialize twice
-            let storage_and_transmission_blocks = (Data::new(block.0), Data::new(block.1));
+            let data_block = Data::new(block);
+            let storage_and_transmission_blocks = (data_block.clone(), data_block);
             drop(timer_for_serialization);
             if storage_and_transmission_blocks.0.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
                 // Sanity check for now

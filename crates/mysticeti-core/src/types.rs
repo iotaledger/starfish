@@ -419,7 +419,7 @@ impl VerifiedStatementBlock {
             epoch_marker,
             merkle_root,
         );
-        let encoded_shard = Some((encoded_statements[authority as usize].clone(), authority as usize));
+        //let encoded_shard = Some((encoded_statements[authority as usize].clone(), authority as usize));
         Self::new(
             authority,
             round,
@@ -429,8 +429,8 @@ impl VerifiedStatementBlock {
             epoch_marker,
             signature,
             statements,
-            encoded_shard,
-            Some(merkle_proof_bytes),
+            None,
+            None,
             merkle_root,
         )
     }
