@@ -348,6 +348,35 @@ impl BlockStore {
         self.read_index_transmission_vec(entries)
     }
 
+    pub fn get_unknown_own_blocks(
+        &self,
+        to_whom_authority_index: AuthorityIndex,
+        batch_own_block_size: usize,
+    ) -> Vec<Data<VerifiedStatementBlock>> {
+        let entries = self
+            .inner
+            .read()
+            .get_unknown_own_blocks(to_whom_authority_index, batch_own_block_size,
+            );
+        let data_transmission_blocks = self.read_index_transmission_vec(entries);
+        data_transmission_blocks
+    }
+
+    pub fn get_unknown_other_blocks(
+        &self,
+        to_whom_authority_index: AuthorityIndex,
+        batch_other_block_size: usize,
+        max_round_own_blocks: Option<RoundNumber>,
+    ) -> Vec<Data<VerifiedStatementBlock>> {
+        let entries = self
+            .inner
+            .read()
+            .get_unknown_other_blocks(to_whom_authority_index, batch_other_block_size, max_round_own_blocks
+            );
+        let data_transmission_blocks = self.read_index_transmission_vec(entries);
+        data_transmission_blocks
+    }
+
     pub fn get_unknown_causal_history(
         &self,
         to_whom_authority_index: AuthorityIndex,
@@ -751,6 +780,52 @@ pub fn get_blocks_at_authority_round(
                 }
             })
             .collect()
+    }
+
+    pub fn get_unknown_own_blocks(
+        &self,
+        to_whom: AuthorityIndex,
+        batch_own_block_size: usize,
+    ) -> Vec<IndexEntry> {
+        let mut own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|block_reference| block_reference.authority == self.authority)
+            .take(batch_own_block_size)
+            .map(|block_reference| {
+                if let Some(index_entry) = self.get_block(*block_reference) {
+                    (index_entry, block_reference.round())
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }
+            })
+            .collect();
+
+        own_blocks.sort_by_key(|x| x.1 as u64);
+        own_blocks.iter().map(|x|x.0.clone()).collect()
+    }
+
+    pub fn get_unknown_other_blocks(
+        &self,
+        to_whom: AuthorityIndex,
+        batch_other_block_size: usize,
+        max_round: Option<RoundNumber>,
+    ) -> Vec<IndexEntry> {
+        let max_round_own_blocks = max_round.unwrap_or(RoundNumber::MAX);
+        let mut other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|block_reference| (block_reference.authority != self.authority) && (block_reference.round < max_round_own_blocks))
+            .take(batch_other_block_size)
+            .map(|block_reference| {
+                if let Some(index_entry) = self.get_block(*block_reference) {
+                    (index_entry, block_reference.round())
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }
+            })
+            .collect();
+        other_blocks.sort_by_key(|x| x.1 as u64);
+        other_blocks.iter().map(|x|x.0.clone()).collect()
+
     }
 
     pub fn get_unknown_causal_history(

@@ -232,8 +232,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
+
+                    let mut blocks_with_statements = Vec::new();
+                    let mut blocks_without_statements = Vec::new();
+                    for block in blocks {
+                        if block.statements().is_some() {
+                            blocks_with_statements.push(block);
+                        } else {
+                            blocks_without_statements.push(block);
+                        }
+                    }
+
+                    // First process blocks with statements
                     let mut verified_data_blocks = Vec::new();
-                    for data_block in blocks {
+                    for data_block in blocks_with_statements {
                         let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
@@ -260,11 +272,48 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let data_transmission_block = Data::new(transmission_block);
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
                     }
-                    drop(timer);
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+
+                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
+
+                    // Second process blocks without statements
+                    let mut verified_data_blocks = Vec::new();
+                    for data_block in blocks_without_statements {
+                        let mut block: VerifiedStatementBlock = (*data_block).clone();
+                        tracing::debug!("Received {} from {}", block, peer);
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
+                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
+                            tracing::warn!(
+                                "Rejected incorrect block {} from {}: {:?}",
+                                block.reference(),
+                                peer,
+                                e
+                            );
+                            // todo: Terminate connection upon receiving incorrect block.
+                            break;
+                        }
+                        let storage_block = block;
+                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
+                        let data_storage_block = Data::new(storage_block);
+                        let data_transmission_block = Data::new(transmission_block);
+                        verified_data_blocks.push((data_storage_block, data_transmission_block));
+                    }
+
+                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                    if !verified_data_blocks.is_empty() {
+                        inner.syncer.add_blocks(verified_data_blocks).await;
+                    }
+
+                    drop(timer);
                 }
 
                 NetworkMessage::RequestBlocks(references) => {
