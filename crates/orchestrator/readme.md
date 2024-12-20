@@ -70,7 +70,7 @@ In a network of 10 validators, each with a corresponding load generator, each lo
 
 To run with Byzantine validators:
 ```bash
-cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy [equivocate|delayed|timeout] 
+cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy [equivocate|delayed|timeout] 
 ```
 In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows one of the Byzantine strategies [equivocate|delayed|timeout]
 

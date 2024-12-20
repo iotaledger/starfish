@@ -214,7 +214,7 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
-            mimic_extra_latency: mimic_latency,
+            mimic_extra_latency,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -240,7 +240,7 @@ async fn run<C: ServerProviderClient>(
                 }
                 None => {
 
-                        NodeParameters::almost_default(mimic_latency)
+                        NodeParameters::almost_default(mimic_extra_latency)
                 }
             };
             let client_parameters = match &settings.client_parameters_path {
