@@ -214,7 +214,7 @@
           "includeNullMetadata": true,
           "legendFormat": "Block Commit p50",
           "range": true,
-          "refId": "G",
+          "refId": "A",
           "useBackend": false
         },
         {
@@ -230,7 +230,7 @@
           "includeNullMetadata": true,
           "legendFormat": "Transaction Commit p50",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "useBackend": false
         }
       ],
