@@ -1,16 +1,15 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-1000}
+DESIRED_TPS=${DESIRED_TPS:-100000}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
-REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
 
 # Colors using tput
-RED=$(tput setaf 1)git diff --numstat branch1 branch2
-
+RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)

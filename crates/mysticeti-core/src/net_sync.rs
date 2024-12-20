@@ -35,7 +35,7 @@ use crate::{
 };
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
-use crate::types::{VerifiedStatementBlock};
+use crate::types::{BlockReference, VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -233,6 +233,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
 
+
+
                     let mut blocks_with_statements = Vec::new();
                     let mut blocks_without_statements = Vec::new();
                     for block in blocks {
@@ -242,6 +244,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             blocks_without_statements.push(block);
                         }
                     }
+
+                    let (one_block_with_statements, block_reference_to_check) = if blocks_with_statements.len() == 1 {
+                        (true, Some(blocks_with_statements[0].reference().clone()))
+                    } else {
+                        (false, None)
+                    };
+
 
                     // First process blocks with statements
                     let mut verified_data_blocks = Vec::new();
@@ -313,19 +322,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
+                    if one_block_with_statements {
+                        if !inner.block_store.block_exists(block_reference_to_check.unwrap()) {
+                            Self::request_missing_blocks(block_reference_to_check.unwrap(), &connection.sender);
+                        }
+                    }
+
                     drop(timer);
                 }
 
-                NetworkMessage::RequestBlocks(references) => {
+                NetworkMessage::RequestBlocks(reference) => {
                     // When Byzantine don't send your blocks to others
                     if inner.block_store.byzantine_strategy.is_none() {
-                        if references.len() > MAXIMUM_BLOCK_REQUEST {
-                            // Terminate connection on receiving invalid message.
-                            break;
-                        }
                         let authority = connection.peer_id as AuthorityIndex;
                         if disseminator
-                            .send_blocks(authority, references)
+                            .send_blocks(authority, reference)
                             .await
                             .is_none()
                         {
@@ -343,6 +354,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         disseminator.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
         None
+    }
+
+    fn request_missing_blocks(
+        block_reference_to_check: BlockReference,
+        sender: &mpsc::Sender<NetworkMessage>,
+    ) {
+            if let Ok(permit) = sender.try_reserve() {
+                permit.send(NetworkMessage::RequestBlocks(block_reference_to_check));
+            }
     }
 
     async fn leader_timeout_task(

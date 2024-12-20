@@ -110,26 +110,26 @@ where
     pub async fn send_blocks(
         &mut self,
         peer: AuthorityIndex,
-        references: Vec<BlockReference>,
-    ) -> Option<()> {
-        let mut missing = Vec::new();
-        for reference in references {
-            let stored_block = self.inner.block_store.get_storage_block(reference);
-            let found = stored_block.is_some();
-            match stored_block {
-                // TODO: Should we be able to send more than one block in a single network message?
-                Some(block) => self.sender.send(NetworkMessage::Batch(vec![block])).await.ok()?,
-                None => missing.push(reference),
-            }
-            self.metrics
-                .block_sync_requests_received
-                .with_label_values(&[&peer.to_string(), &found.to_string()])
-                .inc();
+        block_reference: BlockReference,
+    )  -> Option<(())>{
+        let own_index = self.inner.block_store.get_own_authority_index();
+        let batch_own_block_size = self.parameters.batch_own_block_size;
+        let batch_other_block_size =  self.parameters.batch_other_block_size;
+        let blocks = self.inner
+            .block_store
+            .get_unknown_past_cone(peer, block_reference, batch_own_block_size, batch_other_block_size);
+        for block in &blocks {
+            self.inner
+                .block_store
+                .update_known_by_authority(block.reference().clone(), peer);
         }
-        self.sender
-            .send(NetworkMessage::BlockNotFound(missing))
-            .await
-            .ok()
+        tracing::debug!("Blocks to be sent from {own_index:?} to {peer:?} are {blocks:?}");
+        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        self.metrics
+            .block_sync_requests_received
+            .with_label_values(&[&peer.to_string(), &"Found".to_string()])
+            .inc();
+        Some(())
     }
 
     pub async fn disseminate_only_own_blocks(&mut self, round: RoundNumber) {
@@ -345,6 +345,37 @@ where
     Some(())
 }
 
+
+
+async fn sending_past_cone_block<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    synchronizer_parameters: SynchronizerParameters,
+    block_reference: BlockReference,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
+    let own_index = inner.block_store.get_own_authority_index();
+    let blocks = inner
+        .block_store
+        .get_unknown_past_cone(to_whom_authority_index, block_reference, batch_own_block_size, batch_other_block_size);
+    for block in &blocks {
+        inner
+            .block_store
+            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+    }
+    tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {blocks:?}");
+    to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+    Some(())
+}
+
+
 enum BlockFetcherMessage {
     RegisterAuthority(AuthorityIndex, mpsc::Sender<NetworkMessage>),
     RemoveAuthority(AuthorityIndex),
@@ -505,8 +536,8 @@ where
                     let Ok(permit) = sender.try_reserve() else {
                         continue;
                     };
-
-                    let message = NetworkMessage::RequestBlocks(chunks.to_vec());
+                    // Broken logic below
+                    let message = NetworkMessage::RequestBlocks(chunks.to_vec()[0]);
                     permit.send(message);
                     self.metrics
                         .block_sync_requests_sent

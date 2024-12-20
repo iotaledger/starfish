@@ -240,6 +240,9 @@ impl BlockStore {
             .update_known_by_authority(block_reference, authority);
     }
 
+
+
+
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
         self.read_index_storage_vec(entries)
@@ -392,6 +395,22 @@ impl BlockStore {
         data_transmission_blocks
     }
 
+
+    pub fn get_unknown_past_cone(
+        &self,
+        to_whom_authority_index: AuthorityIndex,
+        block_reference: BlockReference,
+        batch_own_block_size: usize,
+        batch_other_block_size: usize,
+    ) -> Vec<Data<VerifiedStatementBlock>> {
+        let entries = self
+            .inner
+            .read()
+            .get_unknown_past_cone(to_whom_authority_index, block_reference, batch_own_block_size,batch_other_block_size
+            );
+        let data_transmission_blocks = self.read_index_transmission_vec(entries);
+        data_transmission_blocks
+    }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
         self.inner.read().last_seen_by_authority(authority)
@@ -851,6 +870,46 @@ pub fn get_blocks_at_authority_round(
         let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
             .iter()
             .filter(|block_reference| (block_reference.authority != self.authority) && (block_reference.round < max_round_own_blocks))
+            .take(batch_other_block_size)
+            .map(|block_reference| {
+                if let Some(index_entry) = self.get_block(*block_reference) {
+                    (index_entry, block_reference.round())
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }
+            })
+            .collect();
+
+        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> = own_blocks.into_iter().chain(other_blocks).collect();
+        blocks_to_send.sort_by_key(|x| x.1 as u64);
+        blocks_to_send.iter().map(|x|x.0.clone()).collect()
+
+    }
+
+
+    pub fn get_unknown_past_cone(
+        &self,
+        to_whom: AuthorityIndex,
+        block_reference: BlockReference,
+        batch_own_block_size: usize,
+        batch_other_block_size: usize,
+    ) -> Vec<IndexEntry> {
+        let max_round = block_reference.round;
+        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|block_reference| block_reference.authority == self.authority && block_reference.round < max_round)
+            .take(batch_own_block_size)
+            .map(|block_reference| {
+                if let Some(index_entry) = self.get_block(*block_reference) {
+                    (index_entry, block_reference.round())
+                } else {
+                    panic!("Block index corrupted, not found: {block_reference}");
+                }
+            })
+            .collect();
+        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|block_reference| (block_reference.authority != self.authority) && (block_reference.round < max_round))
             .take(batch_other_block_size)
             .map(|block_reference| {
                 if let Some(index_entry) = self.get_block(*block_reference) {
