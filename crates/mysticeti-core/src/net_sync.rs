@@ -226,8 +226,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let round = 0;
                         disseminator.disseminate_only_own_blocks(round).await;
                     } else {
-                        //disseminator.disseminate_only_own_blocks(round).await;
-                        disseminator.disseminate_all_blocks_push().await;
+                        disseminator.disseminate_only_own_blocks(round).await;
+                        //disseminator.disseminate_all_blocks_push().await;
                     }
                 }
                 NetworkMessage::Batch(blocks) => {
