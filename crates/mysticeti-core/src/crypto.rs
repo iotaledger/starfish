@@ -43,17 +43,17 @@ pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 
 #[cfg(not(test))]
-type BlockHasher = blake2::Blake2b<digest::consts::U32>;
+pub type BlockHasher =  blake3::Hasher;
 
 #[cfg(test)]
-type BlockHasher = blake2::Blake2b<digest::consts::U32>;
+pub type BlockHasher = blake3::Hasher;
 
 
 impl MerkleRoot {
     pub fn new_from_encoded_statements(encoded_statements: &Vec<Shard>, authority_index: usize) -> (MerkleRoot, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
-            let mut hasher = crypto::BlockHasher::default();
+            let mut hasher = crypto::BlockHasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
@@ -72,7 +72,7 @@ impl MerkleRoot {
     pub fn check_correctness_merkle_root(encoded_statements: &Vec<Shard>, merkle_root: MerkleRoot) -> bool {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
-            let mut hasher = crypto::BlockHasher::default();
+            let mut hasher = crypto::BlockHasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
@@ -87,7 +87,7 @@ impl MerkleRoot {
 
     // The function assumes that encoded_statements[leaf_index] is Some. Otherwise panics
     pub fn check_correctness_merkle_leaf(shard: Shard, merkle_root: MerkleRoot, proof_bytes: Vec<u8>, tree_size: usize, leaf_index: usize) -> bool {
-        let mut hasher = crypto::BlockHasher::default();
+        let mut hasher = crypto::BlockHasher::new();
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();
         let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
@@ -111,7 +111,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         merkle_root: MerkleRoot,
     ) -> Self {
-        let mut hasher = BlockHasher::default();
+        let mut hasher = BlockHasher::new();
         Self::digest_without_signature(
             &mut hasher,
             authority,
@@ -122,7 +122,7 @@ impl BlockDigest {
             epoch_marker,
             merkle_root
         );
-        hasher.update(signature);
+        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
@@ -136,7 +136,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         merkle_root: MerkleRoot,
     ) -> Self {
-        let mut hasher = BlockHasher::default();
+        let mut hasher = BlockHasher::new();
         Self::digest_without_signature(
             &mut hasher,
             authority,
@@ -147,7 +147,7 @@ impl BlockDigest {
             epoch_marker,
             merkle_root,
         );
-        hasher.update(signature);
+        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
@@ -195,31 +195,31 @@ impl<const N: usize> AsBytes for [u8; N] {
 }
 
 pub trait CryptoHash {
-    fn crypto_hash(&self, state: &mut impl Digest);
+    fn crypto_hash(&self, state: &mut BlockHasher);
 }
 
 impl CryptoHash for u64 {
-    fn crypto_hash(&self, state: &mut impl Digest) {
-        state.update(self.to_be_bytes());
+    fn crypto_hash(&self, state: &mut BlockHasher) {
+        state.update(&self.to_be_bytes());
     }
 }
 
 
 
 /*impl CryptoHash for StatementDigest {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut BlockHasher) {
         state.update(self.as_ref());
     }
 }*/
 
 impl CryptoHash for u128 {
-    fn crypto_hash(&self, state: &mut impl Digest) {
-        state.update(self.to_be_bytes());
+    fn crypto_hash(&self, state: &mut BlockHasher) {
+        state.update(&self.to_be_bytes());
     }
 }
 
 impl<T: AsBytes> CryptoHash for T {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut BlockHasher) {
         state.update(self.as_bytes());
     }
 }
@@ -227,7 +227,7 @@ impl<T: AsBytes> CryptoHash for T {
 impl PublicKey {
     pub fn verify_signature_in_block(&self, block: &VerifiedStatementBlock) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
-        let mut hasher = BlockHasher::default();
+        let mut hasher = BlockHasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
             block.author(),
@@ -261,7 +261,7 @@ impl Signer {
         epoch_marker: EpochStatus,
         merkle_root: MerkleRoot,
     ) -> SignatureBytes {
-        let mut hasher = BlockHasher::default();
+        let mut hasher = BlockHasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
             authority,

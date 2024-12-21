@@ -36,6 +36,7 @@ tracing-core = "0.1.31"
 tracing-subscriber = "0.3.17"
 zeroize = "1.6.0"
 reed-solomon-simd = { version = "2.2.2" }
+blake3 = "1.5.5"
 
 
 [dev-dependencies]

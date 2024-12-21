@@ -35,11 +35,7 @@ use minibytes::Bytes;
 pub use test::Dag;
 
 use crate::crypto::{MerkleRoot};
-use crate::{
-    committee::{Committee},
-    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
-    data::Data,
-};
+use crate::{committee::{Committee}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data};
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 use crate::encoder::ShardEncoder;
 use crate::threshold_clock::threshold_clock_valid_verified_block;
@@ -786,7 +782,7 @@ impl fmt::Debug for BaseStatement {
 }
 
 impl CryptoHash for BlockReference {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.authority.crypto_hash(state);
         self.round.crypto_hash(state);
         self.digest.crypto_hash(state);
@@ -794,20 +790,20 @@ impl CryptoHash for BlockReference {
 }
 
 impl CryptoHash for TransactionLocator {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.block.crypto_hash(state);
         self.offset.crypto_hash(state);
     }
 }
 
 impl CryptoHash for Shard {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         state.update(self);
     }
 }
 
 impl CryptoHash for TransactionLocatorRange {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.block.crypto_hash(state);
         self.offset_start_inclusive.crypto_hash(state);
         self.offset_end_exclusive.crypto_hash(state);
@@ -815,7 +811,7 @@ impl CryptoHash for TransactionLocatorRange {
 }
 
 impl CryptoHash for EpochStatus {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         match self {
             false => [0].crypto_hash(state),
             true => [1].crypto_hash(state),
@@ -824,7 +820,7 @@ impl CryptoHash for EpochStatus {
 }
 
 impl CryptoHash for BaseStatement {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         match self {
             BaseStatement::Share(tx) => {
                 [0].crypto_hash(state);
