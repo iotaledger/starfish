@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
-
-use digest::Digest;
 use ed25519_consensus::Signature;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -12,7 +10,7 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BlockReference, EpochStatus, RoundNumber, StatementBlock,
+        AuthorityIndex, BlockReference, EpochStatus, RoundNumber,
         TimestampNs,
     },
 };

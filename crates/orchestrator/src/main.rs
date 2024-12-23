@@ -12,7 +12,6 @@ use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::SshConnectionManager;
-use std::hash::{Hasher};
 use std::path::PathBuf;
 use testbed::Testbed;
 

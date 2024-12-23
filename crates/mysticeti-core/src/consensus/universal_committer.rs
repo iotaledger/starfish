@@ -9,7 +9,7 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
 use std::{collections::VecDeque, sync::Arc};
 use crate::metrics::UtilizationTimerVecExt;
 

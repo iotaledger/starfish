@@ -24,9 +24,7 @@ use std::{
     ops::Range,
     time::Duration,
 };
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use digest::Digest;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
@@ -405,7 +403,7 @@ impl VerifiedStatementBlock {
         statements: Vec<BaseStatement>,
         encoded_statements: Vec<Shard>,
     ) -> Self {
-        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
+        let (merkle_root, _merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
         let signature = signer.sign_block(
             authority,
             round,
@@ -415,7 +413,8 @@ impl VerifiedStatementBlock {
             epoch_marker,
             merkle_root,
         );
-        //let encoded_shard = Some((encoded_statements[authority as usize].clone(), authority as usize));
+
+
         Self::new(
             authority,
             round,

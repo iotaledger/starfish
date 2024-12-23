@@ -111,7 +111,7 @@ where
         &mut self,
         peer: AuthorityIndex,
         block_reference: BlockReference,
-    )  -> Option<(())>{
+    )  -> Option<()>{
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size =  self.parameters.batch_other_block_size;
@@ -149,6 +149,7 @@ where
         self.own_blocks = Some(handle);
     }
 
+    #[allow(unused)]
     pub async fn disseminate_all_blocks_push(&mut self) {
         if let Some(existing) = self.push_blocks.take() {
             existing.abort();
@@ -168,16 +169,13 @@ where
     async fn stream_only_own_blocks(
         universal_committer: UniversalCommitter,
         to_whom_authority_index: AuthorityIndex,
-        to: mpsc::Sender<NetworkMessage>,
+        to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
-        let mut batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+        let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
-        if byzantine_strategy.is_some() {
-            batch_own_block_size = 2 * inner.block_store.committee_size;
-        }
         let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner
             .block_store
@@ -318,6 +316,8 @@ where
     Some(())
 }
 
+
+#[allow(unused)]
 async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
@@ -347,6 +347,7 @@ where
 
 
 
+#[allow(unused)]
 async fn sending_past_cone_block<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
@@ -483,6 +484,7 @@ where
     }
 
     /// A simple and naive strategy that requests missing blocks from random peers.
+    #[allow(unused)]
     async fn sync_strategy(&mut self) {
         if self.enable {
             return;

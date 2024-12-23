@@ -282,7 +282,7 @@ impl<H: BlockHandler> Core<H> {
         let total_length = info_length + parity_length;
 
         for block_reference in new_blocks_to_reconstruct {
-            let mut block = self.block_store.get_cached_block(&block_reference);
+            let block = self.block_store.get_cached_block(&block_reference);
             let position =  block.encoded_statements().iter().position(|x| x.is_some());
             let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
             let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();

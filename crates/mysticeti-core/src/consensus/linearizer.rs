@@ -3,7 +3,6 @@
 
 use std::{collections::HashSet, fmt};
 use std::collections::HashMap;
-use std::sync::Arc;
 use crate::{
     block_store::BlockStore,
     types::{BlockReference},

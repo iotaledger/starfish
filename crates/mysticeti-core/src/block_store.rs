@@ -471,7 +471,7 @@ impl BlockStore {
         earlier_block: &Data<VerifiedStatementBlock>,
     ) -> bool {
         let mut parents = HashSet::from([later_block.clone()]);
-        for r in (earlier_block.round()..later_block.round()).rev() {
+        for _round_number in (earlier_block.round()..later_block.round()).rev() {
             // Collect parents from the current set of blocks.
             parents = parents
                 .iter()
