@@ -39,6 +39,7 @@ pub fn committee(n: usize) -> Arc<Committee> {
     Committee::new_test(vec![1; n])
 }
 
+#[allow(unused)]
 pub fn mixed_committee_and_cores(
     n: usize,
     number_byzantine: usize,
@@ -56,6 +57,7 @@ pub fn mixed_committee_and_cores(
         &&NodePublicConfig::new_for_tests(n),
     )
 }
+#[allow(unused)]
 pub fn honest_committee_and_cores(
     n: usize,
 ) -> (
@@ -105,6 +107,7 @@ pub fn honest_committee_and_cores_epoch_duration(
     committee_and_cores_persisted_epoch_duration(n, 0, "honest".to_string(), None, &config)
 }
 
+#[allow(unused)]
 pub fn honest_committee_and_cores_persisted(
     n: usize,
     path: Option<&Path>,
@@ -348,6 +351,7 @@ pub async fn network_syncers_with_epoch_duration(
     network_syncers
 }
 
+#[allow(unused)]
 pub fn rng_at_seed(seed: u64) -> StdRng {
     let bytes = seed.to_le_bytes();
     let mut seed = [0u8; 32];
@@ -460,6 +464,7 @@ impl TestBlockWriter {
         }
     }
 
+    #[allow(unused)]
     pub fn get_dag(&self) -> Vec<(BlockReference, Vec<BlockReference>)> {
         let mut dag: Vec<(BlockReference, Vec<BlockReference>)> = self
             .block_store

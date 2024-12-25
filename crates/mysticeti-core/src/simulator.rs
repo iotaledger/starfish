@@ -57,6 +57,7 @@ where
         self.events.is_empty()
     }
 
+    #[allow(unused)]
     pub fn states(&self) -> &[S] {
         &self.states
     }
