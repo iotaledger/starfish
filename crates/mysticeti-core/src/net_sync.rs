@@ -11,7 +11,7 @@ use std::{
 };
 
 use futures::future::join_all;
-use reed_solomon_simd::ReedSolomonEncoder;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     select,
     sync::{mpsc, oneshot, Notify},
@@ -34,6 +34,7 @@ use crate::{
     wal::WalSyncer,
 };
 use crate::data::Data;
+use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::{BlockReference, VerifiedStatementBlock};
 
@@ -211,6 +212,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
                                                   64).unwrap();
+        let mut decoder = ReedSolomonDecoder::new(2,
+                                              4,
+                                              64).unwrap();
 
         let peer_id = connection.peer_id as AuthorityIndex;
         inner.syncer.authority_connection(peer_id, true).await;
@@ -232,9 +236,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-
-
-
                     let mut blocks_with_statements = Vec::new();
                     let mut blocks_without_statements = Vec::new();
                     for block in blocks {
@@ -305,6 +306,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             );
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
+                        }
+                        let (ready_to_reconstruct, cached_block) = inner.block_store.ready_to_reconstruct(&block);
+                        if ready_to_reconstruct {
+                            let mut cached_block = cached_block.expect("Should be Some");
+                            cached_block.copy_shard(&block);
+                            let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
+                            if reconstructed_block.is_some() {
+                                block = reconstructed_block.expect("Should be Some");
+                                tracing::debug!("Reconstruction fro block {:?} within connection task is successful", block);
+                            }
                         }
                         let storage_block = block;
                         let transmission_block = storage_block.from_storage_to_transmission(own_id);
