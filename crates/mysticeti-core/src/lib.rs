@@ -44,3 +44,4 @@ pub mod types;
 pub mod validator;
 mod wal;
 mod encoder;
+mod decoder;
