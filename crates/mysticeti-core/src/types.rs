@@ -178,6 +178,13 @@ impl CachedStatementBlock {
         self.encoded_statements = encoded_statements;
     }
 
+    pub fn copy_shard(& mut self, block: &VerifiedStatementBlock) {
+        if block.encoded_shard.is_some() {
+            let (shard, shard_index) = block.encoded_shard().as_ref().expect("It should be some because of the above check");
+            self.encoded_statements[*shard_index] = Some(shard.clone());
+        }
+    }
+
 
     pub fn merkle_root(&self) -> MerkleRoot {
         self.merkle_root.clone()
