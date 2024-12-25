@@ -246,8 +246,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
 
-                    let (one_block_with_statements, block_reference_to_check) = if blocks_with_statements.len() == 1 {
-                        (true, Some(blocks_with_statements[0].reference().clone()))
+                    let (only_blocks_with_statements, block_reference_to_check) = if blocks_without_statements.len() == 0 && blocks_with_statements.len() > 0  {
+                        let mut block_reference = blocks_with_statements[0].reference().clone();
+                        let mut max_round  = blocks_with_statements[0].round();
+                        for block in blocks_with_statements.iter() {
+                            if block.round() > max_round {
+                                block_reference = block.reference().clone();
+                                max_round = block.round();
+                            }
+                        }
+                        (true, Some(block_reference))
                     } else {
                         (false, None)
                     };
@@ -314,7 +322,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
                             if reconstructed_block.is_some() {
                                 block = reconstructed_block.expect("Should be Some");
-                                tracing::debug!("Reconstruction fro block {:?} within connection task is successful", block);
+                                tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
+                            } else {
+                                tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
                             }
                         }
                         let storage_block = block;
@@ -328,13 +338,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
                     }
 
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                    tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
-                    if one_block_with_statements {
+                    if only_blocks_with_statements {
                         if !inner.block_store.block_exists(block_reference_to_check.unwrap()) {
+                            tracing::debug!("Make request missing block {:?} from peer {:?}", block_reference_to_check.unwrap(), peer);
                             Self::request_missing_blocks(block_reference_to_check.unwrap(), &connection.sender);
                         }
                     }
@@ -346,13 +357,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     // When Byzantine don't send your blocks to others
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
-                        if disseminator
-                            .send_blocks(authority, reference)
-                            .await
-                            .is_none()
-                        {
-                            break;
-                        }
+                        disseminator.send_blocks(authority, reference).await;
                     }
                 }
                 NetworkMessage::BlockNotFound(_references) => {

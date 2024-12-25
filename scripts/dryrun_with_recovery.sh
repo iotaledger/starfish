@@ -17,8 +17,6 @@ RESET=$(tput sgr0)
 
 # Output Validators
 echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-# Output Byzantine strategy
-echo -e "${GREEN}Byzantine strategy: ${YELLOW}$BYZANTINE_STRATEGY${RESET}"
 
 # Cleanup
 echo -e "${CYAN}Cleaning up .ansi files and dryrun-validator directories...${RESET}"
@@ -82,7 +80,7 @@ fi
 
 # Start Validators
 tmux kill-server || true
-for ((i=0; i<NUM_VALIDATORS - 2; i++)); do
+for ((i=0; i<NUM_VALIDATORS - 1; i++)); do
   export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
@@ -95,20 +93,17 @@ echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}; 
 
 # Start and immediately kill the last-1 validator
 PRE_LAST_VALIDATOR=$((NUM_VALIDATORS - 2))
-export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
 SESSION_NAME="validator_$PRE_LAST_VALIDATOR"
-LOG_FILE="validator_${PRE_LAST_VALIDATOR}.log.ansi"
-echo -e "${GREEN}Starting honest validator ${YELLOW}$PRE_LAST_VALIDATOR${RESET} and killing it immediately..."
-tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $PRE_LAST_VALIDATOR 2>&1 | tee $LOG_FILE"
 sleep 60
+echo -e "{GREEN}Killing last validator..."
 tmux kill-session -t "$SESSION_NAME"
 
 # Start the last validator
 LAST_VALIDATOR=$((NUM_VALIDATORS - 1))
-SESSION_NAME="validator_LAST_VALIDATOR"
+SESSION_NAME="validator_$LAST_VALIDATOR"
 LOG_FILE="validator_${LAST_VALIDATOR}.log.ansi"
-echo -e "${GREEN}Starting final validator ${YELLOW}LAST_VALIDATOR${RESET}..."
-tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority LAST_VALIDATOR 2>&1 | tee $LOG_FILE"
+echo -e "${GREEN}Starting final validator ${YELLOW}$LAST_VALIDATOR${RESET}..."
+tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $LAST_VALIDATOR 2>&1 | tee $LOG_FILE"
 
 
 

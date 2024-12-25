@@ -60,7 +60,7 @@ impl CachedStatementBlockDecoder for Decoder {
         let recovered_statements = encoder.encode_shards(data, info_length, parity_length);
         let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, own_id as usize);
         if computed_merkle_root == block.merkle_root() {
-            let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[own_id as usize].clone(), own_id as usize)), computed_merkle_proof);
+            let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[own_id as usize].clone(), own_id as usize)), computed_merkle_proof, info_length);
             return Some(storage_block)
         }
         return None;
