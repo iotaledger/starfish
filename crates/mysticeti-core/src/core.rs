@@ -321,7 +321,7 @@ impl<H: BlockHandler> Core<H> {
             let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority as usize);
             if computed_merkle_root == block.merkle_root() {
                 tracing::debug!("Block {block_reference} is reconstructed");
-                let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[self.authority as usize].clone(), self.authority as usize)), computed_merkle_proof);
+                let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[self.authority as usize].clone(), self.authority as usize)), computed_merkle_proof, info_length);
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);

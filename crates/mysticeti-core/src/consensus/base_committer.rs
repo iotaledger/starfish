@@ -98,50 +98,6 @@ impl BaseCommitter {
         Some(self.committee.elect_leader(round + offset))
     }
 
-    /// Find which block is supported at (author, round) by the given block.
-    /// Blocks can indirectly reference multiple other blocks at (author, round), but only one block at
-    /// (author, round)  will be supported by the given block. If block A supports B at (author, round),
-    /// it is guaranteed that any processed block by the same author that directly or indirectly includes
-    /// A will also support B at (author, round).
-    fn find_support(
-        &self,
-        (author, round): (AuthorityIndex, RoundNumber),
-        from: &Data<VerifiedStatementBlock>,
-    ) -> Option<BlockReference> {
-
-        if from.round() <= round {
-            return None;
-        }
-        for include in from.includes() {
-            // Weak links may point to blocks with lower round numbers than strong links.
-            if include.round() < round {
-                continue;
-            }
-            if include.author_round() == (author, round) {
-                return Some(*include);
-            }
-            let include = self
-                .block_store
-                .get_storage_block(*include)
-                .expect("We should have the whole sub-dag by now");
-            if let Some(support) = self.find_support((author, round), &include) {
-                return Some(support);
-            }
-        }
-        None
-    }
-
-    /// Check whether the specified block (`potential_certificate`) is a vote for
-    /// the specified leader (`leader_block`).
-    fn is_vote(
-        &self,
-        potential_vote: &Data<VerifiedStatementBlock>,
-        leader_block: &Data<VerifiedStatementBlock>,
-    ) -> bool {
-        let (author, round) = leader_block.author_round();
-        self.find_support((author, round), potential_vote) == Some(*leader_block.reference())
-    }
-
     /// Check whether the specified block (`potential_certificate`) is a certificate for
     /// the specified leader (`leader_block`).
     fn is_certificate(

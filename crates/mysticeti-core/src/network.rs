@@ -34,7 +34,7 @@ use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
-
+#[allow(unused)]
 // AWS regions and their names
 const REGIONS: [&str; 16] = [
     "us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
@@ -567,7 +567,7 @@ fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![];n];
     if !mimic_latency {
         for i in 0..n {
-            for j in 0..n {
+            for _j in 0..n {
                 resulting_table[i].push(0.0)
             }
         }

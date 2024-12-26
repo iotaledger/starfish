@@ -316,6 +316,10 @@ impl BlockStore {
         self.inner.read().contains_new_shard_or_header(block)
     }
 
+    pub fn ready_to_reconstruct(&self, block: &VerifiedStatementBlock) -> (bool, Option<CachedStatementBlock>) {
+        self.inner.read().ready_to_reconstruct(block)
+    }
+
 
     pub fn update_with_new_shard(&self, block: &VerifiedStatementBlock) {
         self.inner.write().update_with_new_shard(block);
@@ -485,7 +489,7 @@ impl BlockStore {
         earlier_block: &Data<VerifiedStatementBlock>,
     ) -> bool {
         let mut parents = HashSet::from([later_block.clone()]);
-        for r in (earlier_block.round()..later_block.round()).rev() {
+        for _round_number in (earlier_block.round()..later_block.round()).rev() {
             // Collect parents from the current set of blocks.
             parents = parents
                 .iter()
@@ -547,6 +551,22 @@ impl BlockStoreInner {
             return true;
         }
         false
+    }
+
+    // Chech whether the block can be reconstructed with a new shard
+    pub fn ready_to_reconstruct(&self, block: &VerifiedStatementBlock) -> (bool, Option<CachedStatementBlock>) {
+        if block.encoded_shard().is_none() || !self.cached_blocks.contains_key(block.reference())  {
+            return (false, None);
+        }
+        let (_, shard_index) = block.encoded_shard().as_ref().expect("It should be some because of the above check");
+        let cached_block = &self.cached_blocks.get(block.reference()).expect("Cached block missing").0;
+        if cached_block.encoded_statements()[*shard_index].is_none() {
+            let shard_count = 1 + cached_block.encoded_statements().iter().filter(|s| s.is_some()).count();
+            if shard_count >= self.info_length {
+                return (true, Some(cached_block.clone()));
+            }
+        }
+        return (false, None);
     }
 
     pub fn update_with_new_shard(&mut self, block: &VerifiedStatementBlock) {

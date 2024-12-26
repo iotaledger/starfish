@@ -25,7 +25,6 @@ use std::{
     time::Duration,
 };
 use std::sync::atomic::Ordering;
-use digest::Digest;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
@@ -147,19 +146,66 @@ impl CachedStatementBlock {
     pub(crate) fn to_verified_block(
         &self,
         encoded_shard: Option<(Shard,usize)>,
-        merkle_proof: Vec<u8>
+        merkle_proof: Vec<u8>,
+        info_length: usize,
     ) -> VerifiedStatementBlock {
-        VerifiedStatementBlock {
-            reference: self.reference.clone(),
-            includes: self.includes.clone(),
-            acknowledgement_statements: self.acknowledgement_statements.clone(),
-            meta_creation_time_ns: self.meta_creation_time_ns,
-            epoch_marker: self.epoch_marker.clone(),
-            signature: self.signature.clone(),
-            statements: self.statements.clone(),
-            encoded_shard, // Replace `0` with the actual position logic
-            merkle_proof: Some(merkle_proof),
-            merkle_root: self.merkle_root.clone(),
+        if self.statements.is_some() {
+            VerifiedStatementBlock {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: self.statements.clone(),
+                encoded_shard, // Replace `0` with the actual position logic
+                merkle_proof: Some(merkle_proof),
+                merkle_root: self.merkle_root.clone(),
+            }
+        } else {
+            let info_shards: Vec<Vec<u8>> = self.encoded_statements()
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| *i < info_length && s.is_some())
+                .map(|(_, s)| s.clone().unwrap()) // Safe to unwrap because we filtered for `is_some()`
+                .collect();
+            // Combine all the shards into a single Vec<u8> (assuming they are in order)
+            let mut reconstructed_data = Vec::new();
+            for shard in info_shards {
+                reconstructed_data.extend(shard);
+            }
+
+            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
+            if reconstructed_data.len() < 4 {
+                panic!("Reconstructed data is too short to contain a valid length");
+            }
+
+            let bytes_length = u32::from_le_bytes(
+                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
+            ) as usize;
+
+            // Ensure the data length matches the declared length
+            if reconstructed_data.len() < 4 + bytes_length {
+                panic!("Reconstructed data length does not match the declared bytes_length");
+            }
+
+            // Deserialize the rest of the data into `Vec<BaseStatement>`
+            let serialized_block = &reconstructed_data[4..4 + bytes_length];
+            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_block)
+                .expect("Deserialization of reconstructed data failed");
+            VerifiedStatementBlock {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: Some(reconstructed_statements),
+                encoded_shard, // Replace `0` with the actual position logic
+                merkle_proof: Some(merkle_proof),
+                merkle_root: self.merkle_root.clone(),
+            }
+
         }
     }
 
@@ -177,6 +223,13 @@ impl CachedStatementBlock {
 
     pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
         self.encoded_statements = encoded_statements;
+    }
+
+    pub fn copy_shard(& mut self, block: &VerifiedStatementBlock) {
+        if block.encoded_shard.is_some() {
+            let (shard, shard_index) = block.encoded_shard().as_ref().expect("It should be some because of the above check");
+            self.encoded_statements[*shard_index] = Some(shard.clone());
+        }
     }
 
 
@@ -404,7 +457,7 @@ impl VerifiedStatementBlock {
         statements: Vec<BaseStatement>,
         encoded_statements: Vec<Shard>,
     ) -> Self {
-        let (merkle_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
+        let (merkle_root, _merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
         let signature = signer.sign_block(
             authority,
             round,
@@ -414,7 +467,8 @@ impl VerifiedStatementBlock {
             epoch_marker,
             merkle_root,
         );
-        //let encoded_shard = Some((encoded_statements[authority as usize].clone(), authority as usize));
+
+
         Self::new(
             authority,
             round,

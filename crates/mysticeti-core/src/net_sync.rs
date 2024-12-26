@@ -11,7 +11,7 @@ use std::{
 };
 
 use futures::future::join_all;
-use reed_solomon_simd::ReedSolomonEncoder;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     select,
     sync::{mpsc, oneshot, Notify},
@@ -34,6 +34,7 @@ use crate::{
     wal::WalSyncer,
 };
 use crate::data::Data;
+use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::synchronizer::DataRequestor;
 use crate::types::{BlockReference, VerifiedStatementBlock};
@@ -223,6 +224,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
                                                   64).unwrap();
+        let mut decoder = ReedSolomonDecoder::new(2,
+                                              4,
+                                              64).unwrap();
 
         let peer_id = connection.peer_id as AuthorityIndex;
         inner.syncer.authority_connection(peer_id, true).await;
@@ -244,9 +248,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::Batch(blocks) => {
                     let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
-
-
-
                     let mut blocks_with_statements = Vec::new();
                     let mut blocks_without_statements = Vec::new();
                     for block in blocks {
@@ -257,8 +258,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
 
-                    let (one_block_with_statements, block_reference_to_check) = if blocks_with_statements.len() == 1 {
-                        (true, Some(blocks_with_statements[0].reference().clone()))
+                    let (only_blocks_with_statements, block_reference_to_check) = if blocks_without_statements.len() == 0 && blocks_with_statements.len() > 0  {
+                        let mut block_reference = blocks_with_statements[0].reference().clone();
+                        let mut max_round  = blocks_with_statements[0].round();
+                        for block in blocks_with_statements.iter() {
+                            if block.round() > max_round {
+                                block_reference = block.reference().clone();
+                                max_round = block.round();
+                            }
+                        }
+                        (true, Some(block_reference))
                     } else {
                         (false, None)
                     };
@@ -318,6 +327,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
+                        let (ready_to_reconstruct, cached_block) = inner.block_store.ready_to_reconstruct(&block);
+                        if ready_to_reconstruct {
+                            let mut cached_block = cached_block.expect("Should be Some");
+                            cached_block.copy_shard(&block);
+                            let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
+                            if reconstructed_block.is_some() {
+                                block = reconstructed_block.expect("Should be Some");
+                                tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
+                            } else {
+                                tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
+                            }
+                        }
                         let storage_block = block;
                         let transmission_block = storage_block.from_storage_to_transmission(own_id);
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
@@ -329,13 +350,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
                     }
 
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                    tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
-                    if one_block_with_statements {
+                    if only_blocks_with_statements {
                         if !inner.block_store.block_exists(block_reference_to_check.unwrap()) {
+                            tracing::debug!("Make request missing block {:?} from peer {:?}", block_reference_to_check.unwrap(), peer);
                             Self::request_missing_blocks(block_reference_to_check.unwrap(), &connection.sender);
                         }
                     }
@@ -347,16 +369,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     // When Byzantine don't send your blocks to others
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
-                        if disseminator
-                            .push_block_history(authority, reference)
-                            .await
-                            .is_none()
-                        {
-                            break;
-                        }
+                        disseminator.push_block_history(authority, reference).await;
                     }
                 }
-
                 NetworkMessage::RequestData(block_references) => {
                     // When Byzantine don't send your blocks to others
                     if inner.block_store.byzantine_strategy.is_none() {
@@ -370,6 +385,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                 }
+
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
                 }
