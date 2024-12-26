@@ -24,6 +24,7 @@ use crate::{
         TransactionLocator,
     },
 };
+use crate::committee::StakeAggregator;
 use crate::data::Data;
 use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
@@ -243,6 +244,7 @@ pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committed_leaders: Vec<BlockReference>,
     metrics: Arc<Metrics>,
+    pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHandler<H> {
@@ -270,9 +272,12 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
             commit_interpreter: Linearizer::new((*committee).clone()),
             transaction_votes: TransactionAggregator::with_handler(handler),
             committed_leaders: vec![],
+            pending: vec![],
             metrics,
         }
     }
+
+
 
     fn transaction_observer(&self, block: &Data<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
@@ -298,6 +303,10 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObserver
     for TestCommitHandler<H>
 {
+
+    fn get_pending_blocks(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
+        self.pending.clone()
+    }
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
@@ -307,23 +316,45 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
             .commit_interpreter
             .handle_commit(block_store, committed_leaders);
         for commit in &committed {
-            self.committed_leaders.push(commit.anchor);
-            for block in &commit.blocks {
+            self.committed_leaders.push(commit.0.anchor);
+            for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
-                if block.round() > 0 {
-                    // Block is supposed to have uncoded transactions
-                    self.transaction_observer(block);
+            }
+        }
+        let committed: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> = self.pending.iter().chain(committed.into_iter()).collect();
+        let mut i = 0;
+        let mut resulted_committed = Vec::new();
+        for (i, commit) in committed.iter().enumerate() {
+            let mut check_availability = true;
+            for block in &commit.0.blocks {
+                if !block_store.is_data_available(block.reference()) {
+                    check_availability = false;
+                    break;
                 }
             }
+            if check_availability {
+                for block in &commit.0.blocks {
+                    let updated_block = block_store
+                        .get_storage_block(*block.reference())
+                        .expect("We should have the whole sub-dag by now");
+                    if block.round() > 0 {
+                        // Block is supposed to have uncoded transactions
+                        self.transaction_observer(updated_block);
+                    }
+                }
+            } else {
+               break;
+            }
+            // todo: need to change the committed subdag again, but it is ok for now as the storage
+            // is not used.
+            resulted_committed.push(commit.0.clone());
             // self.committed_dags.push(commit);
         }
-        self.metrics
-            .commit_handler_pending_certificates
-            .set(self.transaction_votes.len() as i64);
-        committed
+        self.pending = committed[i..].to_vec();
+        resulted_committed
     }
 
 

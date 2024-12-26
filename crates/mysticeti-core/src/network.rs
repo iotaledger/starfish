@@ -71,6 +71,8 @@ pub enum NetworkMessage {
     Batch(Vec<Data<VerifiedStatementBlock>>),
     /// Request a few specific block references (this is not indented for large requests).
     RequestBlocks(BlockReference),
+    /// Request a few specific block references (this is not indented for large requests).
+    RequestData(Vec<BlockReference>),
     /// Indicate that a requested block is not found.
     BlockNotFound(Vec<BlockReference>),
 }

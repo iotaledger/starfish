@@ -197,14 +197,19 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>)  {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> bool  {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
-        let (processed, new_blocks_to_reconstruct) = self
+        let (processed, new_blocks_to_reconstruct, updated_statements) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+        let success = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
+            true;
+        } else {
+            false;
+        };
         tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
         self.reconstruct_data_blocks(new_blocks_to_reconstruct);
 
@@ -217,6 +222,7 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         self.run_block_handler();
+        success
     }
 
     fn run_block_handler(&mut self) {

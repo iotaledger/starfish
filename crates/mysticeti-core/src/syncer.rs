@@ -15,6 +15,7 @@ use crate::{
     runtime::timestamp_utc,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::types::VerifiedStatementBlock;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -37,6 +38,8 @@ pub trait CommitObserver: Send + Sync {
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag>;
+
+    fn get_pending_blocks(&self) ->  Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>;
 
     fn aggregator_state(&self) -> Bytes;
 
@@ -64,9 +67,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) {
-        self.core.add_blocks(blocks);
-        self.try_new_block();
-        self.try_new_commit();
+        // todo: when block is updated we might return false here and it can make committing longer
+        if self.core.add_blocks(blocks) {
+            self.try_new_block();
+            self.try_new_commit();
+        }
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {

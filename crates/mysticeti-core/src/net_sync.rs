@@ -35,6 +35,7 @@ use crate::{
 };
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
+use crate::synchronizer::DataRequestor;
 use crate::types::{BlockReference, VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -208,6 +209,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             SynchronizerParameters::default(),
             metrics.clone(),
         );
+
+        let mut data_requestor = DataRequestor::new(
+            connection.peer_id as AuthorityIndex,
+            connection.sender.clone(),
+            inner.clone(),
+            SynchronizerParameters::default(),
+            metrics.clone(),
+        );
+
+        data_requestor.start().await;
+
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
                                                   64).unwrap();
@@ -336,7 +348,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
                         if disseminator
-                            .send_blocks(authority, reference)
+                            .push_block_history(authority, reference)
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                NetworkMessage::RequestData(block_references) => {
+                    // When Byzantine don't send your blocks to others
+                    if inner.block_store.byzantine_strategy.is_none() {
+                        let authority = connection.peer_id as AuthorityIndex;
+                        if disseminator
+                            .send_blocks(authority, block_references)
                             .await
                             .is_none()
                         {

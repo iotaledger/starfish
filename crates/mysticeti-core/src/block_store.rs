@@ -294,6 +294,10 @@ impl BlockStore {
         self.inner.read().block_exists(reference)
     }
 
+    pub fn is_data_available(&self, reference: &BlockReference) -> bool {
+        self.inner.read().is_data_available(reference)
+    }
+
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
         self.inner.read().shard_count(block_reference)
     }
@@ -492,6 +496,10 @@ impl BlockStoreInner {
             return false;
         };
         blocks.contains_key(&(reference.authority, reference.digest))
+    }
+
+    pub fn is_data_available(&self, reference: &BlockReference) -> bool {
+        self.data_availability.contains(reference)
     }
 
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {

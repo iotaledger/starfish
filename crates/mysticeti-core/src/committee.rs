@@ -219,7 +219,7 @@ impl CommitteeThreshold for ValidityThreshold {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StakeAggregator<TH> {
-    votes: AuthoritySet,
+    pub votes: AuthoritySet,
     stake: Stake,
     _phantom: PhantomData<TH>,
 }

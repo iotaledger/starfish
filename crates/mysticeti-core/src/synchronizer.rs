@@ -21,6 +21,8 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::committee::{QuorumThreshold, StakeAggregator};
+use crate::consensus::linearizer::CommittedSubDag;
 use crate::metrics::UtilizationTimerVecExt;
 
 // TODO: A central controller will eventually dynamically update these parameters.
@@ -62,6 +64,93 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     parameters: SynchronizerParameters,
     /// Metrics.
     metrics: Arc<Metrics>,
+}
+
+pub struct DataRequestor<H: BlockHandler, C: CommitObserver> {
+    to_whom_authority_index: AuthorityIndex,
+    /// The sender to the network.
+    sender: mpsc::Sender<NetworkMessage>,
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    /// The handle of the task disseminating our own blocks.
+    data_requestor: Option<JoinHandle<Option<()>>>,
+    parameters: SynchronizerParameters,
+    /// Metrics.
+    metrics: Arc<Metrics>,
+}
+
+impl<H, C> DataRequestor<H, C>
+where
+    H: BlockHandler + 'static,
+    C: CommitObserver + 'static,
+{
+    pub fn new(
+        to_whom_authority_index: AuthorityIndex,
+        sender: mpsc::Sender<NetworkMessage>,
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        parameters: SynchronizerParameters,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            to_whom_authority_index,
+            sender,
+            inner,
+            data_requestor: None,
+            parameters,
+            metrics,
+        }
+    }
+
+    pub async fn shutdown(mut self) {
+        let mut waiters = Vec::with_capacity(1);
+        if let Some(handle) = self.data_requestor.take() {
+            handle.abort();
+            waiters.push(handle);
+        }
+        join_all(waiters).await;
+    }
+
+    pub async fn start(mut self) {
+        if let Some(existing) = self.data_requestor.take() {
+            existing.abort();
+            existing.await.ok();
+        }
+        let handle = Handle::current().spawn(Self::request_missing_data_blocks(
+            self.to_whom_authority_index,
+            self.sender.clone(),
+            self.inner.clone(),
+            self.parameters.clone(),
+        ));
+        self.data_requestor = Some(handle);
+    }
+
+    async fn request_missing_data_blocks<H, C>(peer: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>, parameters: SynchronizerParameters) -> Option<()>
+    where
+        C: 'static + CommitObserver,
+        H: 'static + BlockHandler,
+    {
+        let own_id = inner.block_store.get_own_authority_index();
+        let leader_timeout = Duration::from_secs(1);
+        loop {
+            runtime::sleep(leader_timeout);
+            let committed_dags: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> = inner.syncer.get_pending_blocks().await;
+            let mut to_request = Vec::new();
+            for commit in &committed_dags {
+                for (i, block) in commit.0.blocks.iter().enumerate() {
+                    let mut aggregator = commit.1[i].clone();
+                    if aggregator.votes.insert(own_id) {
+                        if !aggregator.votes.insert(peer) {
+                            to_request.push(block.reference().clone());
+                        }
+                    }
+                }
+            }
+            if to_request.len() > 0 {
+                tracing::debug!("Data from blocks {to_request:?} is requested from {to_whom_authority_index:?}");
+                to.send(NetworkMessage::RequestData(to_request)).await.ok()?;
+            }
+
+        }
+    }
 }
 
 impl<H, C> BlockDisseminator<H, C>
@@ -107,7 +196,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn send_blocks(
+    pub async fn push_block_history(
         &mut self,
         peer: AuthorityIndex,
         block_reference: BlockReference,
@@ -124,6 +213,33 @@ where
                 .update_known_by_authority(block.reference().clone(), peer);
         }
         tracing::debug!("Blocks to be sent from {own_index:?} to {peer:?} are {blocks:?}");
+        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        self.metrics
+            .block_sync_requests_received
+            .with_label_values(&[&peer.to_string(), &"Found".to_string()])
+            .inc();
+        Some(())
+    }
+
+
+    pub async fn send_blocks(
+        &mut self,
+        peer: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    )  -> Option<(())>{
+        let own_index = self.inner.block_store.get_own_authority_index();
+        let batch_own_block_size = self.parameters.batch_own_block_size;
+        let batch_other_block_size =  self.parameters.batch_other_block_size;
+        let mut blocks = Vec::new();
+        for block_reference in block_references {
+            let block = self.inner
+                .block_store
+                .get_storage_block(block_reference);
+            if block.is_some() {
+                blocks.push(block.expect("Should be some"));
+            }
+        }
+        tracing::debug!("Requested blocks with missing data to be sent from {own_index:?} to {peer:?} are {blocks:?}");
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         self.metrics
             .block_sync_requests_received
