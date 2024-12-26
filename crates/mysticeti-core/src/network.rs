@@ -5,8 +5,7 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
-use rand::prelude::StdRng;
-use rand::{prelude::ThreadRng, Rng, SeedableRng};
+use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;

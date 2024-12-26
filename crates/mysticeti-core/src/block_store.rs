@@ -25,6 +25,7 @@ use crate::{
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
+use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 #[allow(unused)]
@@ -64,6 +65,7 @@ struct BlockStoreInner {
     not_known_by_authority: Vec<HashSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
 pub trait BlockWriter {
@@ -195,6 +197,14 @@ impl BlockStore {
 
     pub fn get_unknown_by_authority(&self, authority_index: AuthorityIndex) -> HashSet<BlockReference> {
         self.inner.read().not_known_by_authority[authority_index as usize].clone()
+    }
+
+    pub fn read_pending_unavailable(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
+        self.inner.read().read_pending_unavailable()
+    }
+
+    pub fn update_pending_unavailable(&self, pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>) {
+        self.inner.write().update_pending_unavailable(pending);
     }
 
     pub fn insert_block(
@@ -507,6 +517,14 @@ impl BlockStoreInner {
             return self.committee_size;
         }
         self.cached_blocks.get(block_reference).map_or(0, |x| x.1)
+    }
+
+    pub fn read_pending_unavailable(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
+        self.pending_not_available.clone()
+    }
+
+    pub fn update_pending_unavailable(&mut self, pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>) {
+        self.pending_not_available = pending;
     }
 
     pub fn contains_new_shard_or_header(&self, block: &VerifiedStatementBlock) -> bool {

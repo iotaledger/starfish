@@ -210,7 +210,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics.clone(),
         );
 
-        let mut data_requestor = DataRequestor::new(
+        let data_requestor = DataRequestor::new(
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),

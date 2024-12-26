@@ -15,7 +15,6 @@ use crate::{
     runtime::timestamp_utc,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::types::VerifiedStatementBlock;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -38,8 +37,6 @@ pub trait CommitObserver: Send + Sync {
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag>;
-
-    fn get_pending_blocks(&self) ->  Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>;
 
     fn aggregator_state(&self) -> Bytes;
 

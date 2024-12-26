@@ -118,21 +118,17 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
-            self.parameters.clone(),
         ));
         self.data_requestor = Some(handle);
     }
 
-    async fn request_missing_data_blocks<H, C>(peer: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>, parameters: SynchronizerParameters) -> Option<()>
-    where
-        C: 'static + CommitObserver,
-        H: 'static + BlockHandler,
+    async fn request_missing_data_blocks(peer: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()>
     {
         let own_id = inner.block_store.get_own_authority_index();
         let leader_timeout = Duration::from_secs(1);
         loop {
             runtime::sleep(leader_timeout);
-            let committed_dags: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> = inner.syncer.get_pending_blocks().await;
+            let committed_dags: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> = inner.block_store.read_pending_unavailable();
             let mut to_request = Vec::new();
             for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
@@ -145,10 +141,9 @@ where
                 }
             }
             if to_request.len() > 0 {
-                tracing::debug!("Data from blocks {to_request:?} is requested from {to_whom_authority_index:?}");
+                tracing::debug!("Data from blocks {to_request:?} is requested from {peer:?}");
                 to.send(NetworkMessage::RequestData(to_request)).await.ok()?;
             }
-
         }
     }
 }
@@ -200,7 +195,7 @@ where
         &mut self,
         peer: AuthorityIndex,
         block_reference: BlockReference,
-    )  -> Option<(())>{
+    )  -> Option<()>{
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size =  self.parameters.batch_other_block_size;
@@ -226,25 +221,38 @@ where
         &mut self,
         peer: AuthorityIndex,
         block_references: Vec<BlockReference>,
-    )  -> Option<(())>{
+    )  -> Option<()>{
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size =  self.parameters.batch_other_block_size;
         let mut blocks = Vec::new();
+        let mut own_block_counter = 0;
+        let mut other_block_counter = 0;
         for block_reference in block_references {
             let block = self.inner
                 .block_store
                 .get_storage_block(block_reference);
             if block.is_some() {
-                blocks.push(block.expect("Should be some"));
+                let block = block.expect("Should be some");
+                if block.author() == own_index {
+                    own_block_counter += 1;
+                } else {
+                    other_block_counter += 1;
+                }
+                if own_block_counter >= batch_own_block_size && other_block_counter >= batch_other_block_size {
+                    break;
+                }
+                if own_block_counter >= batch_own_block_size {
+                    continue;
+                }
+                if other_block_counter >= batch_other_block_size {
+                    continue;
+                }
+                blocks.push(block);
             }
         }
         tracing::debug!("Requested blocks with missing data to be sent from {own_index:?} to {peer:?} are {blocks:?}");
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
-        self.metrics
-            .block_sync_requests_received
-            .with_label_values(&[&peer.to_string(), &"Found".to_string()])
-            .inc();
         Some(())
     }
 

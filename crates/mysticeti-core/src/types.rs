@@ -24,7 +24,6 @@ use std::{
     ops::Range,
     time::Duration,
 };
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use digest::Digest;
 use eyre::{bail, ensure};

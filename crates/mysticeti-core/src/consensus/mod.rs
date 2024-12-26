@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
-use std::sync::Arc;
 use crate::{
     types::{format_authority_round, AuthorityIndex, RoundNumber},
 };

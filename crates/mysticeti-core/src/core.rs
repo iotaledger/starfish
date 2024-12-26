@@ -205,10 +205,10 @@ impl<H: BlockHandler> Core<H> {
         let (processed, new_blocks_to_reconstruct, updated_statements) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
-        let success = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
-            true;
+        let success: bool = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
+            true
         } else {
-            false;
+            false
         };
         tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
         self.reconstruct_data_blocks(new_blocks_to_reconstruct);
@@ -288,7 +288,7 @@ impl<H: BlockHandler> Core<H> {
         let total_length = info_length + parity_length;
 
         for block_reference in new_blocks_to_reconstruct {
-            let mut block = self.block_store.get_cached_block(&block_reference);
+            let block = self.block_store.get_cached_block(&block_reference);
             let position =  block.encoded_statements().iter().position(|x| x.is_some());
             let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
             let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();

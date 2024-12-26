@@ -12,7 +12,7 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BlockReference, EpochStatus, RoundNumber, StatementBlock,
+        AuthorityIndex, BlockReference, EpochStatus, RoundNumber,
         TimestampNs,
     },
 };
