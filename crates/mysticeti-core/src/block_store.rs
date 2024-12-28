@@ -536,6 +536,9 @@ impl BlockStoreInner {
         if self.data_availability.contains(block_reference) {
             return false;
         }
+        if block.statements().is_some() {
+            return true;
+        }
         // If the block is not in the cache
         if !self.cached_blocks.contains_key(block_reference) {
             return true;
