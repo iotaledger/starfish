@@ -23,31 +23,31 @@ impl CachedStatementBlockDecoder for Decoder {
         &mut self,
         committee: &Committee,
         encoder: &mut Encoder,
-        block: CachedStatementBlock,
+        cached_block: CachedStatementBlock,
         own_id: AuthorityIndex,
     ) -> Option<VerifiedStatementBlock> {
         let info_length = committee.info_length();
         let total_length = committee.len();
         let parity_length = total_length - info_length;
-        let position =  block.encoded_statements().iter().position(|x| x.is_some());
+        let position =  cached_block.encoded_statements().iter().position(|x| x.is_some());
         let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
-        let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();
+        let shard_size = cached_block.encoded_statements()[position].as_ref().unwrap().len();
         self.reset(info_length, parity_length, shard_size).expect("decoder reset failed");
         for i in 0..info_length {
-            if block.encoded_statements()[i].is_some() {
-                self.add_original_shard(i, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
+            if cached_block.encoded_statements()[i].is_some() {
+                self.add_original_shard(i, cached_block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
             }
         }
         for i in info_length..total_length {
-            if block.encoded_statements()[i].is_some() {
-                self.add_recovery_shard(i - info_length, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
+            if cached_block.encoded_statements()[i].is_some() {
+                self.add_recovery_shard(i - info_length, cached_block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
             }
         }
 
         let mut data: Vec<Shard> = vec![vec![]; info_length];
         for i in 0..info_length {
-            if block.encoded_statements()[i].is_some() {
-                data[i] = block.encoded_statements()[i].clone().unwrap();
+            if cached_block.encoded_statements()[i].is_some() {
+                data[i] = cached_block.encoded_statements()[i].clone().unwrap();
             }
         }
         let result = self.decode().expect("Decoding should be correct");
@@ -59,8 +59,15 @@ impl CachedStatementBlockDecoder for Decoder {
 
         let recovered_statements = encoder.encode_shards(data, info_length, parity_length);
         let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, own_id as usize);
-        if computed_merkle_root == block.merkle_root() {
-            let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[own_id as usize].clone(), own_id as usize)), computed_merkle_proof, info_length);
+
+        if computed_merkle_root == cached_block.merkle_root() {
+            let mut reconstructed_cached_block = cached_block;
+            for i in 0..total_length {
+                if reconstructed_cached_block.encoded_statements()[i].is_none() {
+                    reconstructed_cached_block.add_encoded_shard(i, recovered_statements[i].clone());
+                }
+            }
+            let storage_block: VerifiedStatementBlock = reconstructed_cached_block.to_verified_block(own_id as usize, computed_merkle_proof, info_length);
             return Some(storage_block)
         }
         return None;
