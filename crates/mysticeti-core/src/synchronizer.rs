@@ -135,11 +135,9 @@ where
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
                         let mut aggregator = commit.1[i].clone();
-                        tracing::debug!("Block {block:?} with aggregator: {:?} is missing", aggregator);
-                        if aggregator.votes.insert(own_id) && !inner.block_store.is_data_available(block.reference()) {
-                            if !aggregator.votes.insert(peer_id) {
-                                to_request.push(block.reference().clone());
-                            }
+                        if aggregator.votes.insert(own_id) && !aggregator.votes.insert(peer_id) && !inner.block_store.is_data_available(block.reference()) {
+                            tracing::debug!("Data in block {block:?} is missing");
+                            to_request.push(block.reference().clone());
                         }
                     }
                 }
@@ -147,12 +145,9 @@ where
             if to_request.len() > 0 {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
                 to.send(NetworkMessage::RequestData(to_request)).await.ok()?;
-            } else {
-                break;
             }
             let _sleep = sleep(leader_timeout).await;
         }
-        Some(())
     }
 }
 
