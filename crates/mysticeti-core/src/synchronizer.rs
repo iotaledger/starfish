@@ -16,7 +16,6 @@ use crate::{
     metrics::Metrics,
     net_sync::{self, NetworkSyncerInner},
     network::NetworkMessage,
-    runtime,
     runtime::{sleep, Handle, JoinHandle},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
@@ -201,7 +200,6 @@ where
 
     pub async fn push_block_history(
         &mut self,
-        peer: AuthorityIndex,
         block_reference: BlockReference,
     ) {
         if let Some(existing) = self.response_push_blocks.take() {
@@ -235,7 +233,7 @@ where
         for block_reference in block_references {
             let block = self.inner
                 .block_store
-                .get_storage_block(block_reference);
+                .get_transmission_block(block_reference);
             if block.is_some() {
                 let block = block.expect("Should be some");
                 if block.author() == own_index {
