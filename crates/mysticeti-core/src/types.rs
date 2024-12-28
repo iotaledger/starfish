@@ -589,7 +589,7 @@ pub struct StatementBlock {
 
 }
 
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
 pub struct AuthoritySet(u128); // todo - support more then 128 authorities
 
 pub type TimestampNs = u128;

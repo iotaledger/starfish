@@ -200,7 +200,7 @@ pub trait CommitteeThreshold: Clone {
     fn is_threshold(committee: &Committee, amount: Stake) -> bool;
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QuorumThreshold;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ValidityThreshold;
@@ -217,7 +217,7 @@ impl CommitteeThreshold for ValidityThreshold {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug,Clone)]
 pub struct StakeAggregator<TH> {
     pub votes: AuthoritySet,
     stake: Stake,

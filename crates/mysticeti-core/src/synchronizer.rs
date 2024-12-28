@@ -22,6 +22,7 @@ use crate::{
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
 use crate::metrics::UtilizationTimerVecExt;
+use crate::types::format_authority_index;
 
 // TODO: A central controller will eventually dynamically update these parameters.
 #[derive(Clone)]
@@ -122,29 +123,36 @@ where
         self.data_requestor = Some(handle);
     }
 
-    async fn request_missing_data_blocks(peer: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()>
+    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()>
     {
+        let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
         let leader_timeout = Duration::from_secs(1);
         loop {
-            sleep(leader_timeout);
             let committed_dags= inner.block_store.read_pending_unavailable();
             let mut to_request = Vec::new();
             for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
-                    let mut aggregator = commit.1[i].clone();
-                    if aggregator.votes.insert(own_id) {
-                        if !aggregator.votes.insert(peer) {
-                            to_request.push(block.reference().clone());
+                    if block.round() > 0 {
+                        let mut aggregator = commit.1[i].clone();
+                        tracing::debug!("Block {block:?} with aggregator: {:?} is missing", aggregator);
+                        if aggregator.votes.insert(own_id) && !inner.block_store.is_data_available(block.reference()) {
+                            if !aggregator.votes.insert(peer_id) {
+                                to_request.push(block.reference().clone());
+                            }
                         }
                     }
                 }
             }
             if to_request.len() > 0 {
-                tracing::debug!("Data from blocks {to_request:?} is requested from {peer:?}");
+                tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
                 to.send(NetworkMessage::RequestData(to_request)).await.ok()?;
+            } else {
+                break;
             }
+            let _sleep = sleep(leader_timeout).await;
         }
+        Some(())
     }
 }
 
@@ -219,9 +227,10 @@ where
 
     pub async fn send_blocks(
         &mut self,
-        peer: AuthorityIndex,
+        peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
-    )  -> Option<()>{
+    ) -> Option<()>{
+        let peer = format_authority_index(peer_id);
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size =  self.parameters.batch_other_block_size;
@@ -294,9 +303,10 @@ where
         block_reference: BlockReference,
         inner: Arc<NetworkSyncerInner<H, C>>,
         to: Sender<NetworkMessage>,
-        peer: AuthorityIndex,
+        peer_id: AuthorityIndex,
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()>{
+        let peer = format_authority_index(peer_id);
         let leader_timeout = Duration::from_millis(600);
         loop {
             let own_index = inner.block_store.get_own_authority_index();
@@ -304,19 +314,19 @@ where
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
             let blocks = inner
                 .block_store
-                .get_unknown_past_cone(peer, block_reference, batch_own_block_size, batch_other_block_size);
+                .get_unknown_past_cone(peer_id, block_reference, batch_own_block_size, batch_other_block_size);
             for block in &blocks {
                 inner
                     .block_store
-                    .update_known_by_authority(block.reference().clone(), peer);
+                    .update_known_by_authority(block.reference().clone(), peer_id);
             }
-            tracing::debug!("Blocks to be sent from {own_index:?} to {peer:?} are {blocks:?}");
+            tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
             if blocks.len() > 0 {
                 to.send(NetworkMessage::Batch(blocks)).await.ok()?;
             } else {
                 break;
             }
-            let _sleep = runtime::sleep(leader_timeout).await;
+            let _sleep = sleep(leader_timeout).await;
         }
         Some(())
     }
@@ -345,7 +355,7 @@ where
                 Some(ByzantineStrategy::TimeoutLeader) => {
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
-                        let _sleep = runtime::sleep(leader_timeout).await;
+                        let _sleep = sleep(leader_timeout).await;
                     }
                     sending_batch_own_blocks(
                         inner.clone(),
@@ -397,7 +407,7 @@ where
                     )
                         .await?;
                     select! {
-                         _sleep =  runtime::sleep(leader_timeout) =>  {}
+                         _sleep =  sleep(leader_timeout) =>  {}
                         _created_block = notified => {}
                     }
 
@@ -424,7 +434,7 @@ where
         loop {
             let notified = inner.notify.notified();
             select! {
-                _sleep =  runtime::sleep(leader_timeout) => {
+                _sleep =  sleep(leader_timeout) => {
                      let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
                     sending_batch_all_blocks(
@@ -464,6 +474,7 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
+    let peer = format_authority_index(to_whom_authority_index);
     let own_index = inner.block_store.get_own_authority_index();
     let blocks =
         inner
@@ -475,7 +486,7 @@ where
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
         *round = max(*round, block.round());
     }
-    tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {blocks:?}");
+    tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
@@ -494,6 +505,7 @@ where
 {
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let peer = format_authority_index(to_whom_authority_index);
     tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
     let own_index = inner.block_store.get_own_authority_index();
     let blocks = inner
@@ -504,7 +516,7 @@ where
             .block_store
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
     }
-    tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {blocks:?}");
+    tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
@@ -535,7 +547,7 @@ where
             .block_store
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
     }
-    tracing::debug!("Blocks to be sent from {own_index:?} to {to_whom_authority_index:?} are {blocks:?}");
+    tracing::debug!("Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}");
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
@@ -703,7 +715,7 @@ where
                         continue;
                     };
                     // Broken logic below
-                    let message = NetworkMessage::RequestBlocks(chunks.to_vec()[0]);
+                    let message = NetworkMessage::MissingHistory(chunks.to_vec()[0]);
                     permit.send(message);
                     self.metrics
                         .block_sync_requests_sent

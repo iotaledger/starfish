@@ -1,7 +1,7 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-10000}
+DESIRED_TPS=${DESIRED_TPS:-100000}
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
@@ -84,7 +84,7 @@ fi
 # Start Validators
 tmux kill-server || true
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
+  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
   if [[ $i -eq 0 ]]; then

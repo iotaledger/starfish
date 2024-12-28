@@ -315,19 +315,23 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
+                tracing::debug!("Latency of block {} is computed", block.reference());
             }
         }
-        let mut pending =block_store.read_pending_unavailable();
+        let mut pending = block_store.read_pending_unavailable();
         pending.append(&mut committed);
         let committed = pending;
-        let i = 0;
+        let mut slice_index = 0;
         let mut resulted_committed = Vec::new();
         for (i, commit) in committed.iter().enumerate() {
             let mut check_availability = true;
             for block in &commit.0.blocks {
-                if !block_store.is_data_available(block.reference()) {
-                    check_availability = false;
-                    break;
+                if block.round() > 0 {
+                    if !block_store.is_data_available(block.reference()) {
+                        tracing::debug!("Block {} is not available", block.reference());
+                        check_availability = false;
+                        break;
+                    }
                 }
             }
             if check_availability {
@@ -335,9 +339,11 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                     let updated_block = block_store
                         .get_storage_block(*block.reference())
                         .expect("We should have the whole sub-dag by now");
-                    if block.round() > 0 {
+                    if updated_block.round() > 0 {
                         // Block is supposed to have uncoded transactions
                         self.transaction_observer(updated_block);
+
+                        tracing::debug!("Latency of transactions from block {} is computed", block.reference());
                     }
                 }
             } else {
@@ -347,8 +353,9 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
             // is not used.
             resulted_committed.push(commit.0.clone());
             // self.committed_dags.push(commit);
+            slice_index += 1;
         }
-        block_store.update_pending_unavailable(committed[i..].to_vec());
+        block_store.update_pending_unavailable(committed[slice_index..].to_vec());
         resulted_committed
     }
 
