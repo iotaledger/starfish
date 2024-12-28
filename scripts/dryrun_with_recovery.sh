@@ -53,7 +53,7 @@ PORT=$((1500 + NUM_VALIDATORS + 2))
 FILE="monitoring/grafana/grafana-dashboard.json"
 
 # Replace the line in the file
-sed -i "s/\(host\.docker\.internal:\)[0-9]\{4\}/\1$PORT/" "$FILE"
+sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
 
 echo -e "${GREEN}Updated grafana-dashboard.json successfully!${RESET}"
 
