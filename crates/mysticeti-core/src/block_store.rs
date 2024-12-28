@@ -226,6 +226,12 @@ impl BlockStore {
         entry.map(|pos| self.read_index(pos).0)
     }
 
+    pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
+        let entry = self.inner.read().get_block(reference);
+        // todo - consider adding loaded entries back to cache
+        entry.map(|pos| self.read_index(pos).1)
+    }
+
 
     pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
         self.inner.write().updated_unknown_by_others(block_reference);
