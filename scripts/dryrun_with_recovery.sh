@@ -2,7 +2,7 @@
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-4} #With N physical cores, it is recommended to have less than N validators
 DESIRED_TPS=${DESIRED_TPS:-10000}
-REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
@@ -95,7 +95,7 @@ echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}; 
 PRE_LAST_VALIDATOR=$((NUM_VALIDATORS - 2))
 SESSION_NAME="validator_$PRE_LAST_VALIDATOR"
 sleep 60
-echo -e "{GREEN}Killing last validator..."
+echo -e "${GREEN}Killing last validator..."
 tmux kill-session -t "$SESSION_NAME"
 
 # Start the last validator

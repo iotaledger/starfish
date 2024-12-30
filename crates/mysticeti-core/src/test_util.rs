@@ -25,11 +25,11 @@ use crate::{
     net_sync::NetworkSyncer,
     network::Network,
     syncer::{Syncer, SyncerSignals},
-    types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
 use crate::crypto::MerkleRoot;
-use crate::types::{Shard, VerifiedStatementBlock};
+use crate::types::{VerifiedStatementBlock};
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0

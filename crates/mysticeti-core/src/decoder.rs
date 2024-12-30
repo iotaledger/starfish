@@ -63,6 +63,6 @@ impl CachedStatementBlockDecoder for Decoder {
             let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[own_id as usize].clone(), own_id as usize)), computed_merkle_proof, info_length);
             return Some(storage_block)
         }
-        return None;
+        None
     }
 }

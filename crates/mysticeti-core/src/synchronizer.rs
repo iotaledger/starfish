@@ -302,7 +302,6 @@ where
         let peer = format_authority_index(peer_id);
         let leader_timeout = Duration::from_millis(600);
         loop {
-            let own_index = inner.block_store.get_own_authority_index();
             let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
             let blocks = inner
@@ -468,7 +467,6 @@ where
     H: 'static + BlockHandler,
 {
     let peer = format_authority_index(to_whom_authority_index);
-    let own_index = inner.block_store.get_own_authority_index();
     let blocks =
         inner
             .block_store

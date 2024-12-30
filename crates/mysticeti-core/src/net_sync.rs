@@ -27,7 +27,7 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
-    runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle},
+    runtime::{timestamp_utc, Handle, JoinError, JoinHandle},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
@@ -369,8 +369,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::MissingHistory(reference) => {
                     tracing::debug!("Received request missing block {:?} from peer {:?}", reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
-                        let authority = connection.peer_id as AuthorityIndex;
-                        disseminator.push_block_history(authority, reference).await;
+                        disseminator.push_block_history(reference).await;
                     }
                 }
                 NetworkMessage::RequestData(block_references) => {

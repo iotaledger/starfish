@@ -945,7 +945,7 @@ mod test {
     };
 
     use rand::{prelude::SliceRandom, Rng};
-    use crate::test_util::byzantine_committee_and_cores_epoch_duration;
+    
     use super::*;
 
     pub struct Dag(HashMap<BlockReference, Data<VerifiedStatementBlock>>);

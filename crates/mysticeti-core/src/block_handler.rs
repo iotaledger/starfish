@@ -323,7 +323,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         let committed = pending;
         let mut slice_index = 0;
         let mut resulted_committed = Vec::new();
-        for (i, commit) in committed.iter().enumerate() {
+        for (_i, commit) in committed.iter().enumerate() {
             let mut check_availability = true;
             for block in &commit.0.blocks {
                 if block.round() > 0 {
