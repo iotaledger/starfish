@@ -36,6 +36,7 @@ use crate::{
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
 use crate::crypto::{MerkleRoot};
+use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
 use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
 
@@ -289,39 +290,10 @@ impl<H: BlockHandler> Core<H> {
 
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);
-            let position =  block.encoded_statements().iter().position(|x| x.is_some());
-            let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
-            let shard_size = block.encoded_statements()[position].as_ref().unwrap().len();
-            self.decoder.reset(info_length, parity_length, shard_size).expect("decoder reset failed");
-            for i in 0..info_length {
-                if block.encoded_statements()[i].is_some() {
-                    self.decoder.add_original_shard(i, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
-                }
-            }
-            for i in info_length..total_length {
-                if block.encoded_statements()[i].is_some() {
-                    self.decoder.add_recovery_shard(i - info_length, block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
-                }
-            }
-
-            let mut data: Vec<Shard> = vec![vec![]; info_length];
-            for i in 0..info_length {
-                if block.encoded_statements()[i].is_some() {
-                    data[i] = block.encoded_statements()[i].clone().unwrap();
-                }
-            }
-            let result = self.decoder.decode().expect("Decoding should be correct");
-            let restored: HashMap<_, _> = result.restored_original_iter().collect();
-            for el in restored {
-                data[el.0] = Shard::from(el.1);
-            }
-            drop(result);
-
-            let recovered_statements = self.encoder.encode_shards(data, info_length, parity_length);
-            let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, self.authority as usize);
-            if computed_merkle_root == block.merkle_root() {
-                tracing::debug!("Block {block_reference} is reconstructed");
-                let storage_block: VerifiedStatementBlock = block.to_verified_block(Some((recovered_statements[self.authority as usize].clone(), self.authority as usize)), computed_merkle_proof, info_length);
+            let storage_block = self.decoder.decode_shards(&self.committee, &mut self.encoder, block, self.authority);
+            if storage_block.is_some() {
+                tracing::debug!("Block {block_reference} is reconstructed in core thread");
+                let storage_block: VerifiedStatementBlock = storage_block.expect("Block is verified to be reconstructed");
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);

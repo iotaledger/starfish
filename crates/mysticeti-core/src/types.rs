@@ -145,10 +145,11 @@ pub struct CachedStatementBlock {
 impl CachedStatementBlock {
     pub(crate) fn to_verified_block(
         &self,
-        encoded_shard: Option<(Shard,usize)>,
+        own_id: usize,
         merkle_proof: Vec<u8>,
         info_length: usize,
     ) -> VerifiedStatementBlock {
+        let encoded_shard: Option<(Shard,usize)> = Some((self.encoded_statements[own_id].clone().expect("Should be shard"), own_id));
         if self.statements.is_some() {
             VerifiedStatementBlock {
                 reference: self.reference.clone(),
@@ -166,8 +167,8 @@ impl CachedStatementBlock {
             let info_shards: Vec<Vec<u8>> = self.encoded_statements()
                 .iter()
                 .enumerate()
-                .filter(|(i, s)| *i < info_length && s.is_some())
-                .map(|(_, s)| s.clone().unwrap()) // Safe to unwrap because we filtered for `is_some()`
+                .filter(|(i, s)| *i < info_length)
+                .map(|(_, s)| s.clone().expect("Should be Some for all info length")) // Safe to unwrap because we filtered for `is_some()`
                 .collect();
             // Combine all the shards into a single Vec<u8> (assuming they are in order)
             let mut reconstructed_data = Vec::new();
@@ -186,7 +187,10 @@ impl CachedStatementBlock {
 
             // Ensure the data length matches the declared length
             if reconstructed_data.len() < 4 + bytes_length {
-                panic!("Reconstructed data length does not match the declared bytes_length");
+
+                panic!("Reconstructed data length does not match the declared bytes_length; {} {}",reconstructed_data.len(), bytes_length);
+            } else {
+                tracing::debug!("Reconstructed data length {}, bytes_length {}", reconstructed_data.len(), bytes_length);
             }
 
             // Deserialize the rest of the data into `Vec<BaseStatement>`

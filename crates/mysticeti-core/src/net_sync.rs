@@ -27,7 +27,7 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
-    runtime::{timestamp_utc, Handle, JoinError, JoinHandle},
+    runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
