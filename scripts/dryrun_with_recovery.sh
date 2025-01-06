@@ -1,10 +1,10 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
+NUM_VALIDATORS=${NUM_VALIDATORS:-13} #With N physical cores, it is recommended to have less than N validators
 KILL_VALIDATORS=${KILL_VALIDATORS:-2} #Kill first validators after 1 minute
-BOOT_VALIDATORS=${BOOT_VALIDATORS:-1} #Boot last validators after 1 minute
+BOOT_VALIDATORS=${BOOT_VALIDATORS:-2} #Boot last validators after 1 minute
 DESIRED_TPS=${DESIRED_TPS:-100000}
-REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
@@ -55,7 +55,11 @@ PORT=$((1500 + NUM_VALIDATORS + KILL_VALIDATORS + 1))
 FILE="monitoring/grafana/grafana-dashboard.json"
 
 # Replace the line in the file
-sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+else
+    sed -i -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+fi
 
 echo -e "${GREEN}Updated grafana-dashboard.json successfully!${RESET}"
 
