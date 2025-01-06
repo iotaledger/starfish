@@ -318,6 +318,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }
         }
+        // Compute transaction end-to-end latency
+        // First read for which subdags there is not enough transaction data
         let mut pending = block_store.read_pending_unavailable();
         pending.append(&mut committed);
         let committed = pending;

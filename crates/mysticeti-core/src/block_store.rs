@@ -50,7 +50,7 @@ struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
     data_availability: HashSet<BlockReference>,
-    // Might need to store in sorted (by round) way
+    // Blocks for which has available transactions data and didn't yet ackowledged.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
     cached_blocks: BTreeMap<BlockReference, (CachedStatementBlock, usize)>,
@@ -62,9 +62,11 @@ struct BlockStoreInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
+    // for each authority, the set of unknown blocks
     not_known_by_authority: Vec<HashSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
