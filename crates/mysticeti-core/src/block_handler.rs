@@ -274,7 +274,9 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
         }
     }
 
-    fn transaction_observer(&self, block: &Data<VerifiedStatementBlock>) {
+
+
+    fn transaction_observer(&self, block: Data<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.statements().as_ref() {
             for statement in vec {
@@ -303,27 +305,60 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag> {
-        let committed = self
+        let mut committed = self
             .commit_interpreter
             .handle_commit(block_store, committed_leaders);
         for commit in &committed {
-            self.committed_leaders.push(commit.anchor);
-            for block in &commit.blocks {
+            self.committed_leaders.push(commit.0.anchor);
+            for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
                 let block_timestamp = runtime::timestamp_utc() - block_creation_time;
 
                 self.metrics.block_committed_latency.observe(block_timestamp);
+                tracing::debug!("Latency of block {} is computed", block.reference());
+            }
+        }
+        // Compute transaction end-to-end latency
+        // First read for which subdags there is not enough transaction data
+        let mut pending = block_store.read_pending_unavailable();
+        pending.append(&mut committed);
+        let committed = pending;
+        let mut slice_index = 0;
+        let mut resulted_committed = Vec::new();
+        for (_i, commit) in committed.iter().enumerate() {
+            let mut check_availability = true;
+            for block in &commit.0.blocks {
                 if block.round() > 0 {
-                    // Block is supposed to have uncoded transactions
-                    self.transaction_observer(block);
+                    if !block_store.is_data_available(block.reference()) {
+                        tracing::debug!("Block {} is not available", block.reference());
+                        check_availability = false;
+                        break;
+                    }
                 }
             }
+            if check_availability {
+                for block in &commit.0.blocks {
+                    let updated_block = block_store
+                        .get_storage_block(*block.reference())
+                        .expect("We should have the whole sub-dag by now");
+                    if updated_block.round() > 0 {
+                        // Block is supposed to have uncoded transactions
+                        self.transaction_observer(updated_block);
+
+                        tracing::debug!("Latency of transactions from block {} is computed", block.reference());
+                    }
+                }
+            } else {
+               break;
+            }
+            // todo: need to change the committed subdag again, but it is ok for now as the storage
+            // is not used.
+            resulted_committed.push(commit.0.clone());
             // self.committed_dags.push(commit);
+            slice_index += 1;
         }
-        self.metrics
-            .commit_handler_pending_certificates
-            .set(self.transaction_votes.len() as i64);
-        committed
+        block_store.update_pending_unavailable(committed[slice_index..].to_vec());
+        resulted_committed
     }
 
 

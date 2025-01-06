@@ -6,7 +6,7 @@ use crate::{
         universal_committer::UniversalCommitterBuilder, LeaderStatus, DEFAULT_WAVE_LENGTH,
     },
     test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
-    types::{BlockReference, StatementBlock},
+    types::{BlockReference},
 };
 use crate::types::VerifiedStatementBlock;
 

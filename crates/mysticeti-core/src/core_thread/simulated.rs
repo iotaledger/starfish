@@ -11,6 +11,8 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
 };
+use crate::committee::{QuorumThreshold, StakeAggregator};
+use crate::consensus::linearizer::CommittedSubDag;
 use crate::types::VerifiedStatementBlock;
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -50,6 +52,14 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
             .missing_blocks()
             .to_vec()
     }
+
+    pub async fn get_pending_blocks(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
+        self.syncer
+            .lock()
+            .commit_observer()
+            .get_pending_blocks()
+    }
+
 
     pub async fn authority_connection(&self, authority_index: AuthorityIndex, connected: bool) {
         let mut lock = self.syncer.lock();

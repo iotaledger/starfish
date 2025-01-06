@@ -25,6 +25,7 @@ use crate::{
     },
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
+use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 #[allow(unused)]
@@ -49,7 +50,7 @@ struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
     data_availability: HashSet<BlockReference>,
-    // Might need to store in sorted (by round) way
+    // Blocks for which has available transactions data and didn't yet ackowledged.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
     cached_blocks: BTreeMap<BlockReference, (CachedStatementBlock, usize)>,
@@ -61,9 +62,12 @@ struct BlockStoreInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
+    // for each authority, the set of unknown blocks
     not_known_by_authority: Vec<HashSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    // committed subdag which contains blocks with at least one unavailable transaction data
+    pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
 pub trait BlockWriter {
@@ -197,6 +201,14 @@ impl BlockStore {
         self.inner.read().not_known_by_authority[authority_index as usize].clone()
     }
 
+    pub fn read_pending_unavailable(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
+        self.inner.read().read_pending_unavailable()
+    }
+
+    pub fn update_pending_unavailable(&self, pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>) {
+        self.inner.write().update_pending_unavailable(pending);
+    }
+
     pub fn insert_block(
         &self,
         storage_and_transmission_blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>),
@@ -214,6 +226,12 @@ impl BlockStore {
         let entry = self.inner.read().get_block(reference);
         // todo - consider adding loaded entries back to cache
         entry.map(|pos| self.read_index(pos).0)
+    }
+
+    pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
+        let entry = self.inner.read().get_block(reference);
+        // todo - consider adding loaded entries back to cache
+        entry.map(|pos| self.read_index(pos).1)
     }
 
 
@@ -292,6 +310,10 @@ impl BlockStore {
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {
         self.inner.read().block_exists(reference)
+    }
+
+    pub fn is_data_available(&self, reference: &BlockReference) -> bool {
+        self.inner.read().is_data_available(reference)
     }
 
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
@@ -498,6 +520,10 @@ impl BlockStoreInner {
         blocks.contains_key(&(reference.authority, reference.digest))
     }
 
+    pub fn is_data_available(&self, reference: &BlockReference) -> bool {
+        self.data_availability.contains(reference)
+    }
+
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
         if self.data_availability.contains(block_reference) {
             return self.committee_size;
@@ -505,10 +531,21 @@ impl BlockStoreInner {
         self.cached_blocks.get(block_reference).map_or(0, |x| x.1)
     }
 
+    pub fn read_pending_unavailable(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
+        self.pending_not_available.clone()
+    }
+
+    pub fn update_pending_unavailable(&mut self, pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>) {
+        self.pending_not_available = pending;
+    }
+
     pub fn contains_new_shard_or_header(&self, block: &VerifiedStatementBlock) -> bool {
         let block_reference = block.reference();
         if self.data_availability.contains(block_reference) {
             return false;
+        }
+        if block.statements().is_some() {
+            return true;
         }
         // If the block is not in the cache
         if !self.cached_blocks.contains_key(block_reference) {

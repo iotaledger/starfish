@@ -36,6 +36,8 @@ use crate::{
 use crate::data::Data;
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
+use crate::runtime::sleep;
+use crate::synchronizer::DataRequestor;
 use crate::types::{BlockReference, VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -209,6 +211,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             SynchronizerParameters::default(),
             metrics.clone(),
         );
+
+        let data_requestor = DataRequestor::new(
+            connection.peer_id as AuthorityIndex,
+            connection.sender.clone(),
+            inner.clone(),
+            SynchronizerParameters::default(),
+            metrics.clone(),
+        );
+
+        data_requestor.start().await;
+
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
                                                   64).unwrap();
@@ -353,13 +366,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     drop(timer);
                 }
 
-                NetworkMessage::RequestBlocks(reference) => {
-                    // When Byzantine don't send your blocks to others
+                NetworkMessage::MissingHistory(reference) => {
+                    tracing::debug!("Received request missing block {:?} from peer {:?}", reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
-                        let authority = connection.peer_id as AuthorityIndex;
-                        disseminator.send_blocks(authority, reference).await;
+                        disseminator.push_block_history(reference).await;
                     }
                 }
+                NetworkMessage::RequestData(block_references) => {
+                    tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                    if inner.block_store.byzantine_strategy.is_none() {
+                        let authority = connection.peer_id as AuthorityIndex;
+                        if disseminator
+                            .send_blocks(authority, block_references)
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
+                    }
+                }
+
                 NetworkMessage::BlockNotFound(_references) => {
                     // TODO: leverage this signal to request blocks from other peers
                 }
@@ -377,7 +403,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         sender: &mpsc::Sender<NetworkMessage>,
     ) {
             if let Ok(permit) = sender.try_reserve() {
-                permit.send(NetworkMessage::RequestBlocks(block_reference_to_check));
+                permit.send(NetworkMessage::MissingHistory(block_reference_to_check));
             }
     }
 
@@ -406,7 +432,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 return None;
             }
             select! {
-                _sleep = runtime::sleep(leader_timeout) => {
+                _sleep = sleep(leader_timeout) => {
                     tracing::debug!("Timeout in round {round}");
                     // todo - more then one round timeout can happen, need to fix this
                     inner.syncer.force_new_block(round).await;
@@ -415,7 +441,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 _notified = notified => {
                     // restart loop
                 }
-                _epoch_shutdown = runtime::sleep(shutdown_duration) => {
+                _epoch_shutdown = sleep(shutdown_duration) => {
                     tracing::info!("Shutting down sync after epoch close");
                     epoch_close_signal.close();
                 }
@@ -430,7 +456,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let cleanup_interval = Duration::from_secs(10);
         loop {
             select! {
-                _sleep = runtime::sleep(cleanup_interval) => {
+                _sleep = sleep(cleanup_interval) => {
                     // Keep read lock for everything else
                     inner.syncer.cleanup().await;
                 }
@@ -534,7 +560,7 @@ impl AsyncWalSyncer {
     // Returns true to stop the task
     async fn wait_next(&mut self) -> bool {
         select! {
-            _wait = runtime::sleep(Duration::from_secs(1)) => {
+            _wait = sleep(Duration::from_secs(1)) => {
                 false
             }
             _signal = self.stop.send(()) => {
@@ -551,7 +577,7 @@ impl AsyncWalSyncer {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
+    use crate::runtime::sleep;
     use crate::test_util::{check_commits, network_syncers};
 
     #[tokio::test]
@@ -559,7 +585,7 @@ mod tests {
     async fn test_network_sync() {
         let network_syncers = network_syncers(4).await;
         println!("Started");
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        sleep(Duration::from_secs(3)).await;
         println!("Done");
         let mut syncers = vec![];
         for network_syncer in network_syncers {
@@ -595,6 +621,7 @@ mod sim_tests {
             rng_at_seed, simulated_network_syncers,
         },
     };
+    use crate::runtime::sleep;
 
     async fn wait_for_epoch_to_close(
         network_syncers: Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
@@ -606,9 +633,9 @@ mod sim_tests {
                     any_closed = true;
                 }
             }
-            runtime::sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(10)).await;
         }
-        runtime::sleep(config::node_defaults::default_shutdown_grace_period()).await;
+        sleep(config::node_defaults::default_shutdown_grace_period()).await;
         let mut syncers = vec![];
         for net_sync in network_syncers {
             let syncer = net_sync.shutdown().await;
@@ -679,7 +706,7 @@ mod sim_tests {
     async fn test_network_sync_sim_all_up_async() {
         let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(4);
         simulated_network.connect_all().await;
-        runtime::sleep(Duration::from_secs(20)).await;
+        sleep(Duration::from_secs(20)).await;
         let mut syncers = vec![];
         for network_syncer in network_syncers {
             let syncer = network_syncer.shutdown().await;
@@ -702,7 +729,7 @@ mod sim_tests {
         let (simulated_network, network_syncers, mut reporters) = simulated_network_syncers(4);
         simulated_network.connect_some(|a, _b| a != 0).await;
         println!("Started");
-        runtime::sleep(Duration::from_secs(40)).await;
+        sleep(Duration::from_secs(40)).await;
         println!("Done");
         let mut syncers = vec![];
         for network_syncer in network_syncers {
@@ -730,7 +757,7 @@ mod sim_tests {
             .await;
 
         println!("Started");
-        runtime::sleep(Duration::from_secs(40)).await;
+        sleep(Duration::from_secs(40)).await;
         println!("Done");
         let mut syncers = vec![];
         for network_syncer in network_syncers {

@@ -13,6 +13,7 @@ use crate::types::VerifiedStatementBlock;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
+#[derive(Clone)]
 pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,
@@ -129,6 +130,7 @@ impl Linearizer {
             })
             .collect();
 
+
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
@@ -136,7 +138,7 @@ impl Linearizer {
         &mut self,
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
-    ) -> Vec<CommittedSubDag> {
+    ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
@@ -144,8 +146,12 @@ impl Linearizer {
            //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
+            let acknowledgement_authorities: Vec<_> = sub_dag.blocks
+                .iter()
+                .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum").clone())
+                .collect();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);
-            committed.push(sub_dag);
+            committed.push((sub_dag, acknowledgement_authorities));
         }
         committed
     }
