@@ -143,7 +143,7 @@ where
             }
             if to_request.len() > 0 {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
-                to.send(NetworkMessage::RequestData(to_request)).await.ok()?;
+                to.send(NetworkMessage::RequestChunk(to_request)).await.ok()?;
             }
             let _sleep = sleep(leader_timeout).await;
         }

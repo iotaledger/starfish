@@ -9,6 +9,8 @@ pub struct Transaction {
 }
 
 pub type RoundNumber = u64;
+
+pub type ShardIndex = usize;
 pub type BlockDigest = crate::crypto::BlockDigest;
 pub type Stake = u64;
 pub type KeyPair = u64;
@@ -102,11 +104,11 @@ pub struct VerifiedStatementBlock {
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
     // It could be a pair of encoded shard and position or none
-    encoded_shard: Option<(Shard, usize)>,
+    encoded_shard: Option<(Shard, ShardIndex)>,
     // This is Some only when the above has one some
-    merkle_proof:  Option<Vec<u8>>,
+    merkle_proof_encoded_shard:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
-    merkle_root: MerkleRoot,
+    merkle_root_encoded_statements: MerkleRoot,
 
 }
 
@@ -136,9 +138,9 @@ pub struct CachedStatementBlock {
     // It could be a pair of encoded shard and position or none
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
-    merkle_proof:  Option<Vec<u8>>,
+    merkle_proof_encoded_shard:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
-    merkle_root: MerkleRoot,
+    merkle_root_encoded_statements: MerkleRoot,
 
 }
 
@@ -160,8 +162,8 @@ impl CachedStatementBlock {
                 signature: self.signature.clone(),
                 statements: self.statements.clone(),
                 encoded_shard, // Replace `0` with the actual position logic
-                merkle_proof: Some(merkle_proof),
-                merkle_root: self.merkle_root.clone(),
+                merkle_proof_encoded_shard: Some(merkle_proof),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
         } else {
             let info_shards: Vec<Vec<u8>> = self.encoded_statements()
@@ -206,8 +208,8 @@ impl CachedStatementBlock {
                 signature: self.signature.clone(),
                 statements: Some(reconstructed_statements),
                 encoded_shard, // Replace `0` with the actual position logic
-                merkle_proof: Some(merkle_proof),
-                merkle_root: self.merkle_root.clone(),
+                merkle_proof_encoded_shard: Some(merkle_proof),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
 
         }
@@ -238,7 +240,7 @@ impl CachedStatementBlock {
 
 
     pub fn merkle_root(&self) -> MerkleRoot {
-        self.merkle_root.clone()
+        self.merkle_root_encoded_statements.clone()
     }
 
 }
@@ -280,8 +282,8 @@ impl VerifiedStatementBlock {
             signature,
             statements: Some(statements),
             encoded_shard,
-            merkle_proof,
-            merkle_root,
+            merkle_proof_encoded_shard: merkle_proof,
+            merkle_root_encoded_statements: merkle_root,
         }
     }
 
@@ -308,8 +310,8 @@ impl VerifiedStatementBlock {
             signature: self.signature.clone(),
             statements: self.statements.clone(),
             encoded_statements, // Replace `0` with the actual position logic
-            merkle_proof: self.merkle_proof.clone(),
-            merkle_root: self.merkle_root.clone(),
+            merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
+            merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
         }
     }
 
@@ -326,8 +328,8 @@ impl VerifiedStatementBlock {
                         signature: self.signature.clone(),
                         statements: None,
                         encoded_shard: None,
-                        merkle_proof: None,
-                        merkle_root: self.merkle_root.clone(),
+                        merkle_proof_encoded_shard: None,
+                        merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
                     }
                 }
             }
@@ -340,8 +342,8 @@ impl VerifiedStatementBlock {
                 signature: self.signature.clone(),
                 statements: None,
                 encoded_shard: self.encoded_shard.clone(),
-                merkle_proof: self.merkle_proof.clone(),
-                merkle_root: self.merkle_root.clone(),
+                merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
         } else {
             Self {
@@ -353,8 +355,8 @@ impl VerifiedStatementBlock {
                 signature: self.signature.clone(),
                 statements: self.statements.clone(),
                 encoded_shard: None,
-                merkle_proof: None,
-                merkle_root: self.merkle_root.clone(),
+                merkle_proof_encoded_shard: None,
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
         }
     }
@@ -376,7 +378,7 @@ impl VerifiedStatementBlock {
     }
 
     pub fn merkle_root(&self) -> MerkleRoot {
-        self.merkle_root.clone()
+        self.merkle_root_encoded_statements.clone()
     }
 
     pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
@@ -448,7 +450,7 @@ impl VerifiedStatementBlock {
     }
 
     pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
-        self.merkle_proof = Some(merkle_proof);
+        self.merkle_proof_encoded_shard = Some(merkle_proof);
     }
     pub fn new_with_signer(
         authority: AuthorityIndex,
@@ -496,8 +498,8 @@ impl VerifiedStatementBlock {
         if self.statements.is_some() {
             let computed_encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
             let (computed_merkle_tree_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&computed_encoded_statements, own_id);
-            ensure!(computed_merkle_tree_root== self.merkle_root, "Incorrect Merkle root");
-            self.merkle_proof = Some(merkle_proof_bytes);
+            ensure!(computed_merkle_tree_root== self.merkle_root_encoded_statements, "Incorrect Merkle root");
+            self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
             self.encoded_shard = Some((computed_encoded_statements[own_id as usize].clone(), own_id));
         } else {
             if self.encoded_shard.is_some() {
@@ -505,10 +507,10 @@ impl VerifiedStatementBlock {
                     if position != peer_id {
                         bail!("The peer delivers a wrong encoded chunk");
                     }
-                    if self.merkle_proof.is_none() {
+                    if self.merkle_proof_encoded_shard.is_none() {
                         bail!("The peer didn't include the proof for the chunk");
                     }
-                    ensure!(MerkleRoot::check_correctness_merkle_leaf(encoded_shard, self.merkle_root, self.merkle_proof.as_ref().cloned().unwrap(), committee_size, position),
+                    ensure!(MerkleRoot::check_correctness_merkle_leaf(encoded_shard, self.merkle_root_encoded_statements, self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(), committee_size, position),
                     "Merkle proof check failed");
             }
         }
@@ -523,7 +525,7 @@ impl VerifiedStatementBlock {
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
-            self.merkle_root,
+            self.merkle_root_encoded_statements,
         );
         ensure!(
             digest == self.digest(),
@@ -995,8 +997,8 @@ mod test {
                 signature: Default::default(),
                 statements: None,
                 encoded_shard: None,
-                merkle_proof: None,
-                merkle_root: MerkleRoot::default(),
+                merkle_proof_encoded_shard: None,
+                merkle_root_encoded_statements: MerkleRoot::default(),
             }
         }
 

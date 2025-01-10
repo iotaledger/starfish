@@ -1,8 +1,10 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-13} #With N physical cores, it is recommended to have less than N validators
-KILL_VALIDATORS=${KILL_VALIDATORS:-2} #Kill first validators after 1 minute
-BOOT_VALIDATORS=${BOOT_VALIDATORS:-2} #Boot last validators after 1 minute
+NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
+KILL_VALIDATORS=${KILL_VALIDATORS:-2} #Kill first validators after CRASH_TIME
+BOOT_VALIDATORS=${BOOT_VALIDATORS:-1} #Boot last validators after CRASH_TIME
+TEST_TIME=${TEST_TIME:-600} #time to perform the whole dryrun test
+CRASH_TIME=${CRASH_TIME:-100} #time when crash first nodes and start the last one
 DESIRED_TPS=${DESIRED_TPS:-100000}
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
@@ -97,8 +99,8 @@ done
 SHORT_URL=$(curl -s "http://tinyurl.com/api-create.php?url=http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-30m&to=now&refresh=5s")
 echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}; user/password = admin"
 
-# Kill first validators after 1 minute
-sleep 60
+# Kill first validators and start the last one after timeout
+sleep "$CRASH_TIME"
 
 for ((i=0; i<KILL_VALIDATORS; i++)); do
    SESSION_NAME="validator_$i"
@@ -114,8 +116,8 @@ for ((i=NUM_VALIDATORS - BOOT_VALIDATORS; i<NUM_VALIDATORS; i++)); do
    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $i 2>&1 | tee $LOG_FILE"
 done
 
-# Wait for the validators to run (e.g., 600 seconds)
-sleep 600
+# Wait for the validators to run the whole dryrun
+sleep "$TEST_TIME"
 
 # Kill all tmux sessions
 echo -e "${RED}Killing all tmux sessions...${RESET}"

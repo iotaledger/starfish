@@ -366,13 +366,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     drop(timer);
                 }
 
-                NetworkMessage::MissingHistory(reference) => {
-                    tracing::debug!("Received request missing block {:?} from peer {:?}", reference, peer);
+                NetworkMessage::MissingHistory(block_reference) => {
+                    tracing::debug!("Received request missing block {:?} from peer {:?}", block_reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
-                        disseminator.push_block_history(reference).await;
+                        disseminator.push_block_history(block_reference).await;
                     }
                 }
-                NetworkMessage::RequestData(block_references) => {
+                NetworkMessage::RequestChunk(block_references) => {
                     tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;

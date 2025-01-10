@@ -71,7 +71,7 @@ pub enum NetworkMessage {
     /// Request a few specific block references (this is not indented for large requests).
     MissingHistory(BlockReference),
     /// Request a few specific block references (this is not indented for large requests).
-    RequestData(Vec<BlockReference>),
+    RequestChunk(Vec<BlockReference>),
     /// Indicate that a requested block is not found.
     BlockNotFound(Vec<BlockReference>),
 }
