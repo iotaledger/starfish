@@ -157,7 +157,7 @@ impl UniversalCommitterBuilder {
             metrics,
             wave_length: DEFAULT_WAVE_LENGTH,
             number_of_leaders: 1,
-            pipeline: false,
+            pipeline: true,
         }
     }
 

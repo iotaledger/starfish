@@ -42,12 +42,6 @@ pub struct NodeParameters {
     pub rounds_in_epoch: RoundNumber,
     #[serde(default = "node_defaults::default_shutdown_grace_period")]
     pub shutdown_grace_period: Duration,
-    #[serde(default = "node_defaults::default_number_of_leaders")]
-    pub number_of_leaders: usize,
-    #[serde(default = "node_defaults::default_enable_pipelining")]
-    pub enable_pipelining: bool,
-    #[serde(default = "node_defaults::default_consensus_only")]
-    pub consensus_only: bool,
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
     #[serde(default = "node_defaults::default_mimic_latency")]
@@ -60,10 +54,8 @@ pub mod node_defaults {
     }
 
     pub fn default_leader_timeout() -> std::time::Duration {
-        std::time::Duration::from_millis(1000)
+        std::time::Duration::from_millis(600)
     }
-
-
     pub fn default_max_block_size() -> usize {
         4 * 1024 * 1024
     }
@@ -74,18 +66,6 @@ pub mod node_defaults {
 
     pub fn default_shutdown_grace_period() -> std::time::Duration {
         std::time::Duration::from_secs(2)
-    }
-
-    pub fn default_number_of_leaders() -> usize {
-        1
-    }
-
-    pub fn default_enable_pipelining() -> bool {
-        true
-    }
-
-    pub fn default_consensus_only() -> bool {
-        true
     }
 
     pub fn default_enable_synchronizer() -> bool {
@@ -104,9 +84,6 @@ impl Default for NodeParameters {
             max_block_size: node_defaults::default_max_block_size(),
             rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
-            number_of_leaders: node_defaults::default_number_of_leaders(),
-            enable_pipelining: node_defaults::default_enable_pipelining(),
-            consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
             mimic_latency: node_defaults::default_mimic_latency(),
         }
@@ -121,9 +98,6 @@ impl NodeParameters {
             max_block_size: node_defaults::default_max_block_size(),
             rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
-            number_of_leaders: node_defaults::default_number_of_leaders(),
-            enable_pipelining: node_defaults::default_enable_pipelining(),
-            consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
             mimic_latency,
         }

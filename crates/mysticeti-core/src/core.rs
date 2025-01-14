@@ -137,17 +137,7 @@ impl<H: BlockHandler> Core<H> {
 
         let committer =
             UniversalCommitterBuilder::new(committee.clone(), block_store.clone(), metrics.clone())
-                .with_number_of_leaders(public_config.parameters.number_of_leaders)
-                .with_pipeline(public_config.parameters.enable_pipelining)
                 .build();
-        tracing::info!(
-            "Pipeline enabled: {}",
-            public_config.parameters.enable_pipelining
-        );
-        tracing::info!(
-            "Number of leaders: {}",
-            public_config.parameters.number_of_leaders
-        );
         let encoder = ReedSolomonEncoder::new(2,
                                               4,
                                               64).unwrap();

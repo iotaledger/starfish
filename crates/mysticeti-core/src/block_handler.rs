@@ -62,7 +62,6 @@ pub struct RealBlockHandler {
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Vec<Transaction>>,
     pending_transactions: usize,
-    consensus_only: bool,
 }
 
 /// The max number of transactions per block.
@@ -78,7 +77,6 @@ impl RealBlockHandler {
         certified_transactions_log_path: &Path,
         block_store: BlockStore,
         metrics: Arc<Metrics>,
-        consensus_only: bool,
     ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
         let transaction_log = TransactionLog::start(certified_transactions_log_path)
@@ -93,7 +91,6 @@ impl RealBlockHandler {
             metrics,
             receiver,
             pending_transactions: 0, // todo - need to initialize correctly when loaded from disk
-            consensus_only,
         };
         (this, sender)
     }
