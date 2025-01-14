@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    fs,
-    io,
+    fs, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
@@ -51,6 +50,8 @@ pub struct NodeParameters {
     pub consensus_only: bool,
     #[serde(default = "node_defaults::default_enable_synchronizer")]
     pub enable_synchronizer: bool,
+    #[serde(default = "node_defaults::default_mimic_latency")]
+    pub mimic_latency: bool,
 }
 
 pub mod node_defaults {
@@ -59,8 +60,9 @@ pub mod node_defaults {
     }
 
     pub fn default_leader_timeout() -> std::time::Duration {
-        std::time::Duration::from_secs(2)
+        std::time::Duration::from_millis(1000)
     }
+
 
     pub fn default_max_block_size() -> usize {
         4 * 1024 * 1024
@@ -75,7 +77,7 @@ pub mod node_defaults {
     }
 
     pub fn default_number_of_leaders() -> usize {
-        2
+        1
     }
 
     pub fn default_enable_pipelining() -> bool {
@@ -88,6 +90,9 @@ pub mod node_defaults {
 
     pub fn default_enable_synchronizer() -> bool {
         false
+    }
+    pub fn default_mimic_latency() -> bool {
+        true
     }
 }
 
@@ -103,6 +108,24 @@ impl Default for NodeParameters {
             enable_pipelining: node_defaults::default_enable_pipelining(),
             consensus_only: node_defaults::default_consensus_only(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            mimic_latency: node_defaults::default_mimic_latency(),
+        }
+    }
+}
+
+impl NodeParameters {
+    pub fn almost_default(mimic_latency: bool) -> Self {
+        Self {
+            wave_length: node_defaults::default_wave_length(),
+            leader_timeout: node_defaults::default_leader_timeout(),
+            max_block_size: node_defaults::default_max_block_size(),
+            rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
+            shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
+            number_of_leaders: node_defaults::default_number_of_leaders(),
+            enable_pipelining: node_defaults::default_enable_pipelining(),
+            consensus_only: node_defaults::default_consensus_only(),
+            enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            mimic_latency,
         }
     }
 }
@@ -269,6 +292,17 @@ pub struct ClientParameters {
     pub initial_delay: Duration,
 }
 
+
+impl ClientParameters{
+    pub fn almost_default(load: usize) -> Self {
+        Self {
+            load,
+            transaction_size: client_defaults::default_transaction_size(),
+            initial_delay: client_defaults::default_initial_delay(),
+        }
+    }
+}
+
 mod client_defaults {
     use super::Duration;
 
@@ -281,7 +315,7 @@ mod client_defaults {
     }
 
     pub fn default_initial_delay() -> Duration {
-        Duration::from_secs(30)
+        Duration::from_secs(10)
     }
 }
 

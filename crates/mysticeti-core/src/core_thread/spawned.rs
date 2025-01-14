@@ -10,7 +10,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -25,7 +25,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 }
 
 enum CoreThreadCommand {
-    AddBlocks(Vec<Data<StatementBlock>>, oneshot::Sender<()>),
+    AddBlocks(Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
     /// Request missing blocks that need to be synched.
@@ -59,7 +59,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.join_handle.join().unwrap()
     }
 
-    pub async fn add_blocks(&self, blocks: Vec<Data<StatementBlock>>) {
+    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
             .await;

@@ -325,7 +325,7 @@ impl NodeExporter {
         );
 
         [
-            "(sudo systemctl status node_exporter && exit 0)",
+            "(sudo systemctl is-active --quiet node_exporter || exit 0)",
             &format!("curl -LO {source}"),
             &format!(
                 "tar -xvf node_exporter-{}.linux-amd64.tar.gz",

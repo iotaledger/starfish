@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
-
 use crate::{
-    data::Data,
-    types::{format_authority_round, AuthorityIndex, RoundNumber, StatementBlock},
+    types::{format_authority_round, AuthorityIndex, RoundNumber},
 };
+use crate::data::Data;
+use crate::types::VerifiedStatementBlock;
 
 pub mod base_committer;
 pub mod linearizer;
@@ -27,7 +27,7 @@ pub const MINIMUM_WAVE_LENGTH: RoundNumber = 3;
 /// advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    Commit(Data<StatementBlock>),
+    Commit(Data<VerifiedStatementBlock>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
 }
@@ -57,7 +57,7 @@ impl LeaderStatus {
         }
     }
 
-    pub fn into_decided_block(self) -> Option<Data<StatementBlock>> {
+    pub fn into_decided_block(self) -> Option<Data<VerifiedStatementBlock>> {
         match self {
             Self::Commit(block) => Some(block),
             Self::Skip(..) => None,

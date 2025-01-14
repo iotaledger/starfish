@@ -68,6 +68,14 @@ cargo run --bin orchestrator -- benchmark --committee 10 --loads 200
 
 In a network of 10 validators, each with a corresponding load generator, each load generator submits a fixed load of 20 tx/s. Performance measurements are collected by regularly scraping the Prometheus metrics exposed by the load generators. The `orchestrator` binary provides additional commands to run a specific number of load generators on separate machines.
 
+To run with Byzantine validators:
+```bash
+cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy [equivocate|delayed|timeout] 
+```
+In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows one of the Byzantine strategies [equivocate|delayed|timeout]
+
+
+
 ## Step 5. Monitoring
 
 The orchestrator provides facilities to monitor metrics on clients and nodes. It deploys a [Prometheus](https://prometheus.io) instance and a [Grafana](https://grafana.com) instance on a dedicated remote machine. Grafana is then available on the address printed on stdout (e.g., `http://3.83.97.12:3000`) with the default username and password both set to `admin`. You can either create a [new dashboard](https://grafana.com/docs/grafana/latest/getting-started/build-first-dashboard/) or [import](https://grafana.com/docs/grafana/latest/dashboards/manage-dashboards/#import-a-dashboard) the example dashboard located in the `./assets` folder.

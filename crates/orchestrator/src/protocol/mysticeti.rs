@@ -21,6 +21,12 @@ use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings
 #[serde(transparent)]
 pub struct MysticetiNodeParameters(NodeParameters);
 
+impl MysticetiNodeParameters {
+    pub fn almost_default(mimic_latency: bool) -> MysticetiNodeParameters {
+        MysticetiNodeParameters(NodeParameters::almost_default(mimic_latency))
+    }
+}
+
 impl Deref for MysticetiNodeParameters {
     type Target = NodeParameters;
 
@@ -44,7 +50,7 @@ impl Display for MysticetiNodeParameters {
         if self.consensus_only {
             write!(f, "Consensus-only mode")
         } else {
-            write!(f, "FPC mode")
+            write!(f, "FPC mode (not supported)")
         }
     }
 }
@@ -139,7 +145,7 @@ impl ProtocolCommands for MysticetiProtocol {
     fn node_command<I>(
         &self,
         instances: I,
-        _parameters: &BenchmarkParameters,
+        parameters: &BenchmarkParameters,
     ) -> Vec<(Instance, String)>
     where
         I: IntoIterator<Item = Instance>,
@@ -155,9 +161,13 @@ impl ProtocolCommands for MysticetiProtocol {
                     .working_dir
                     .join(format!("private-config-{authority}.yaml"));
                 let client_parameters_path = self.working_dir.join("client-parameters.yaml");
+                let byzantine_nodes = parameters.byzantine_nodes;
+                let mut byzantine_strategy = "honest".to_string();
+                if i < byzantine_nodes {
+                    byzantine_strategy = parameters.byzantine_strategy.clone();
+                }
 
-                let run = [
-                    &format!("./{BINARY_PATH}/mysticeti"),
+                let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--committee-path {}", committee_path.display()),
@@ -169,6 +179,23 @@ impl ProtocolCommands for MysticetiProtocol {
                     ),
                 ]
                 .join(" ");
+
+                if byzantine_strategy != "honest" {
+                    run = [
+                        &format!("./{BINARY_PATH}/mysticeti"),
+                        "run",
+                        &format!("--authority {authority}"),
+                        &format!("--committee-path {}", committee_path.display()),
+                        &format!("--public-config-path {}", public_config_path.display()),
+                        &format!("--private-config-path {}", private_config_path.display()),
+                        &format!(
+                            "--client-parameters-path {}",
+                            client_parameters_path.display()
+                        ),
+                        &format!("--byzantine-strategy {}", byzantine_strategy),
+                    ]
+                    .join(" ");
+                }
 
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
                 (instance, command)

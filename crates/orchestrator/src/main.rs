@@ -3,8 +3,6 @@
 
 //! Orchestrator entry point.
 
-use std::path::PathBuf;
-
 use benchmark::BenchmarkParameters;
 use clap::Parser;
 use client::{aws::AwsClient, vultr::VultrClient, ServerProviderClient};
@@ -14,6 +12,7 @@ use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::SshConnectionManager;
+use std::path::PathBuf;
 use testbed::Testbed;
 
 mod benchmark;
@@ -70,6 +69,18 @@ pub enum Operation {
         /// The committee size to deploy.
         #[clap(long, value_name = "INT", default_value_t = 4, global = true)]
         committee: usize,
+
+        /// The number of byzantine nodes to deploy.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        byzantine_nodes: usize,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
+        byzantine_strategy: String,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, action, default_value_t = false, global = true)]
+        mimic_extra_latency: bool,
 
         /// The set of loads to submit to the system (tx/s). Each load triggers a separate
         /// benchmark run. Setting a load to zero will not deploy any benchmark clients
@@ -200,6 +211,9 @@ async fn run<C: ServerProviderClient>(
         // Run benchmarks.
         Operation::Benchmark {
             committee,
+            byzantine_nodes,
+            byzantine_strategy,
+            mimic_extra_latency,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -223,7 +237,10 @@ async fn run<C: ServerProviderClient>(
                 Some(path) => {
                     NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
                 }
-                None => NodeParameters::default(),
+                None => {
+
+                        NodeParameters::almost_default(mimic_extra_latency)
+                }
             };
             let client_parameters = match &settings.client_parameters_path {
                 Some(path) => {
@@ -238,6 +255,8 @@ async fn run<C: ServerProviderClient>(
                 client_parameters,
                 committee,
                 loads,
+                byzantine_nodes,
+                byzantine_strategy,
             );
 
             Orchestrator::new(

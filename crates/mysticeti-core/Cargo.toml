@@ -15,6 +15,7 @@ ed25519-consensus = "2.1.0"
 eyre = { workspace = true }
 futures = { workspace = true }
 gettid = "0.1.2"
+rs_merkle = "1.4.2"
 hex = "0.4.3"
 hyper = "0.14.26"
 libc = "0.2.146"
@@ -34,6 +35,9 @@ tracing = { workspace = true }
 tracing-core = "0.1.31"
 tracing-subscriber = "0.3.17"
 zeroize = "1.6.0"
+reed-solomon-simd = { version = "2.2.2" }
+blake3 = "1.5.5"
+
 
 [dev-dependencies]
 reqwest = { workspace = true }

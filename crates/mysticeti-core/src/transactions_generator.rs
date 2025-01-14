@@ -8,11 +8,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{ClientParameters, NodePublicConfig},
-    crypto::AsBytes,
     metrics::Metrics,
     runtime::{self, timestamp_utc},
     types::{AuthorityIndex, Transaction},
 };
+use crate::crypto::AsBytes;
 
 pub struct TransactionGenerator {
     sender: mpsc::Sender<Vec<Transaction>>,
@@ -95,6 +95,7 @@ impl TransactionGenerator {
                 }
             }
 
+            tracing::debug!("Generator send {} transactions", block.len());
             if !block.is_empty() && self.sender.send(block).await.is_err() {
                 return;
             }

@@ -21,23 +21,18 @@ use crate::{
     data::Data,
     range_map::RangeMap,
     types::{
-        AuthorityIndex,
-        AuthoritySet,
-        BaseStatement,
-        BlockReference,
-        Stake,
-        StatementBlock,
-        TransactionLocator,
-        TransactionLocatorRange,
-        Vote,
+        AuthorityIndex, AuthoritySet, BlockReference, Stake,
+        TransactionLocator, TransactionLocatorRange,VerifiedStatementBlock,
     },
 };
 
-#[derive(Serialize, Deserialize)]
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Committee {
     authorities: Vec<Authority>,
     validity_threshold: Stake, // The minimum stake required for validity
     quorum_threshold: Stake,   // The minimum stake required for quorum
+    info_length: usize, // info length used for encoding
 }
 
 impl Committee {
@@ -46,6 +41,10 @@ impl Committee {
     pub fn new_test(stake: Vec<Stake>) -> Arc<Self> {
         let authorities = stake.into_iter().map(Authority::test_from_stake).collect();
         Self::new(authorities)
+    }
+
+    pub fn info_length(&self) -> usize {
+        self.info_length
     }
 
     pub fn new(authorities: Vec<Authority>) -> Arc<Self> {
@@ -65,10 +64,21 @@ impl Committee {
         }
         let validity_threshold = total_stake / 3;
         let quorum_threshold = 2 * total_stake / 3;
+
+
+        let committee_size = authorities.len();
+        let f = (committee_size - 1) / 3;
+        let info_length = match committee_size % 3 {
+            0 => {f+3},
+            1 => {f+1},
+            _ => {f+2},
+        };
+
         Arc::new(Committee {
             authorities,
             validity_threshold,
             quorum_threshold,
+            info_length,
         })
     }
 
@@ -104,18 +114,18 @@ impl Committee {
     pub fn genesis_blocks(
         &self,
         for_authority: AuthorityIndex,
-    ) -> (Data<StatementBlock>, Vec<Data<StatementBlock>>) {
+    ) -> (Data<VerifiedStatementBlock>, Vec<Data<VerifiedStatementBlock>>) {
         let other_blocks: Vec<_> = self
             .authorities()
             .filter_map(|a| {
                 if a == for_authority {
                     None
                 } else {
-                    Some(StatementBlock::new_genesis(a))
+                    Some(VerifiedStatementBlock::new_genesis(a))
                 }
             })
             .collect();
-        let own_genesis_block = StatementBlock::new_genesis(for_authority);
+        let own_genesis_block = VerifiedStatementBlock::new_genesis(for_authority);
         (own_genesis_block, other_blocks)
     }
 
@@ -190,7 +200,7 @@ pub trait CommitteeThreshold: Clone {
     fn is_threshold(committee: &Committee, amount: Stake) -> bool;
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QuorumThreshold;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ValidityThreshold;
@@ -207,9 +217,9 @@ impl CommitteeThreshold for ValidityThreshold {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug,Clone)]
 pub struct StakeAggregator<TH> {
-    votes: AuthoritySet,
+    pub votes: AuthoritySet,
     stake: Stake,
     _phantom: PhantomData<TH>,
 }
@@ -271,6 +281,18 @@ impl<TH: CommitteeThreshold> StakeAggregator<TH> {
             self.stake += stake;
         }
         TH::is_threshold(committee, self.stake)
+    }
+
+    pub fn get_stake_above_quorum_threshold(&self, committee: &Committee) -> Stake {
+        self.stake.saturating_sub(committee.quorum_threshold)
+    }
+
+    pub fn is_quorum(&self, committee: &Committee) -> bool {
+        TH::is_threshold(committee, self.stake)
+    }
+
+    pub fn get_stake(&self) -> Stake {
+        self.stake
     }
 
     pub fn clear(&mut self) {
@@ -339,47 +361,6 @@ impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
         });
     }
 
-    fn vote(
-        &mut self,
-        locator_range: TransactionLocatorRange,
-        vote: AuthorityIndex,
-        committee: &Committee,
-        processed: &mut Vec<TransactionLocator>,
-    ) {
-        if let Some(range_map) = self.pending.get_mut(locator_range.block()) {
-            range_map.mutate_range(locator_range.range(), |range, aggregator_opt| {
-                match aggregator_opt {
-                    None => {
-                        for l in range {
-                            let k = TransactionLocator::new(*locator_range.block(), l);
-                            // todo - make unknown_transaction take TransactionLocatorRange instead
-                            self.handler.unknown_transaction(k, vote);
-                        }
-                    }
-                    Some(aggregator) => {
-                        if aggregator.add(vote, committee) {
-                            for l in range {
-                                let k = TransactionLocator::new(*locator_range.block(), l);
-                                // todo - make transaction_processed take TransactionLocatorRange instead
-                                self.handler.transaction_processed(k);
-                                processed.push(k);
-                            }
-                            *aggregator_opt = None;
-                        }
-                    }
-                }
-            });
-            if range_map.is_empty() {
-                self.pending.remove(locator_range.block());
-            }
-        } else {
-            for l in locator_range.locators() {
-                // todo - make unknown_transaction take TransactionLocatorRange instead
-                self.handler.unknown_transaction(l, vote);
-            }
-        }
-    }
-
     pub fn len(&self) -> usize {
         self.pending.len()
     }
@@ -403,38 +384,7 @@ pub enum TransactionVoteResult {
 impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
     TransactionAggregator<TH, H>
 {
-    pub fn process_block(
-        &mut self,
-        block: &Data<StatementBlock>,
-        mut response: Option<&mut Vec<BaseStatement>>,
-        committee: &Committee,
-    ) -> Vec<TransactionLocator> {
-        let mut processed = vec![];
-        for range in block.shared_ranges() {
-            self.register(range, block.author(), committee);
-            if let Some(ref mut response) = response {
-                response.push(BaseStatement::VoteRange(range));
-            }
-        }
-        for statement in block.statements() {
-            match statement {
-                BaseStatement::Share(_transaction) => {}
-                BaseStatement::Vote(locator, vote) => match vote {
-                    Vote::Accept => self.vote(
-                        TransactionLocatorRange::one(*locator),
-                        block.author(),
-                        committee,
-                        &mut processed,
-                    ),
-                    Vote::Reject(_) => unimplemented!(),
-                },
-                BaseStatement::VoteRange(range) => {
-                    self.vote(*range, block.author(), committee, &mut processed);
-                }
-            }
-        }
-        processed
-    }
+
 }
 
 impl<TH: CommitteeThreshold> Default for StakeAggregator<TH> {

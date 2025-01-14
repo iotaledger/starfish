@@ -12,8 +12,7 @@ use tokio::time::{self, Instant};
 use crate::{
     benchmark::BenchmarkParameters,
     client::Instance,
-    display,
-    ensure,
+    display, ensure,
     error::{TestbedError, TestbedResult},
     faults::CrashRecoverySchedule,
     logs::LogsAnalyzer,
@@ -223,10 +222,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // many ssh connections for too long.
         let commit = &self.settings.repository.commit;
         let command = [
-            &format!("git fetch origin {commit}"),
-            &format!("(git checkout -b {commit} || git checkout -f origin/{commit})"),
+            "git fetch origin",
+            &format!("git checkout -B {commit} origin/{commit}"),
             "source $HOME/.cargo/env",
-            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release",
+            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --workspace --exclude orchestrator",
         ]
         .join(" && ");
 
@@ -257,10 +256,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Select instances to configure.
         let (clients, nodes, _) = self.select_instances(parameters)?;
         for (i, node) in nodes.iter().enumerate() {
-            display::config(format!("  - node {i}"), &node.ssh_address());
+            display::config(format!("  - node {i}"), node.ssh_address());
         }
         for (i, client) in clients.iter().enumerate() {
-            display::config(format!("  - client {i}"), &client.ssh_address());
+            display::config(format!("  - client {i}"), client.ssh_address());
         }
 
         // Generate the genesis configuration file and the keystore allowing access to gas objects.

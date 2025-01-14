@@ -14,11 +14,9 @@ use std::{
 use minibytes::Bytes;
 use serde::{
     de::{DeserializeOwned, Error},
-    Deserialize,
-    Deserializer,
-    Serialize,
-    Serializer,
+    Deserialize, Deserializer, Serialize, Serializer,
 };
+use crate::types::StatementBlock;
 
 /// Data<T> carries both the value and it's serialized bytes.
 /// When Data is created, it's value is serialized into a cache variable.
@@ -32,7 +30,7 @@ use serde::{
 pub struct Data<T>(Arc<DataInner<T>>);
 
 struct DataInner<T> {
-    t: T,
+    t: Arc<T>,
     serialized: Bytes, // this is serialized as bincode regardless of underlining serialization
 }
 
@@ -45,7 +43,11 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
         let serialized: Bytes = serialized.into();
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(serialized.len(), Ordering::Relaxed);
-        Self(Arc::new(DataInner { t, serialized }))
+        Self(Arc::new(DataInner { t:Arc::new(t), serialized }))
+    }
+
+    pub fn borrow_arc_t(&self) -> Arc<T> {
+        self.0.t.clone() // Clones the Arc, not the data inside
     }
 
     // Important - use Data::from_bytes,
@@ -55,7 +57,7 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
         IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
         let t = bincode::deserialize(&bytes)?;
         let inner = DataInner {
-            t,
+            t: Arc::new(t),
             serialized: bytes,
         };
         Ok(Self(Arc::new(inner)))
@@ -63,6 +65,13 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
 
     pub fn serialized_bytes(&self) -> &Bytes {
         &self.0.serialized
+    }
+}
+
+impl Into<Arc<StatementBlock>> for Data<StatementBlock> {
+
+    fn into(self) -> Arc<StatementBlock> {
+        self.0.t.clone()
     }
 }
 
@@ -102,7 +111,7 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Data<T> {
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(serialized.len(), Ordering::Relaxed);
         let serialized = serialized.into();
-        Ok(Self(Arc::new(DataInner { t, serialized })))
+        Ok(Self(Arc::new(DataInner { t: Arc::new(t), serialized })))
     }
 }
 

@@ -1,45 +1,77 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-
 use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
 use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
+use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpListener,
-        TcpSocket,
-        TcpStream,
+        TcpListener, TcpSocket, TcpStream,
     },
     runtime::Handle,
-    select,
     sync::mpsc,
     time::Instant,
 };
 
 use crate::{
     config::NodePublicConfig,
-    data::Data,
     metrics::{print_network_address_table, Metrics},
     runtime,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, RoundNumber, StatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::data::Data;
+use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+
+#[allow(unused)]
+// AWS regions and their names
+const REGIONS: [&str; 16] = [
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
+    "eu-west-2", "eu-central-1", "ap-northeast-1", "ap-northeast-2",
+    "ap-southeast-1", "ap-southeast-2", "ap-south-1",
+    "ca-central-1", "sa-east-1", "me-south-1", "af-south-1"
+];
+
+// Latency table as a constant
+const LATENCY_TABLE: [[u32; 16]; 16] = [
+    [0, 10, 80, 70, 80, 85, 90, 220, 215, 240, 260, 190, 20, 110, 140, 180],
+    [10, 0, 85, 75, 85, 90, 95, 225, 220, 245, 265, 195, 25, 115, 145, 185],
+    [80, 85, 0, 20, 140, 150, 150, 160, 155, 190, 210, 200, 90, 140, 190, 230],
+    [70, 75, 20, 0, 130, 140, 140, 150, 145, 180, 200, 190, 80, 130, 180, 220],
+    [80, 85, 140, 130, 0, 15, 20, 230, 225, 200, 220, 180, 85, 210, 150, 170],
+    [85, 90, 150, 140, 15, 0, 25, 235, 230, 205, 225, 185, 90, 215, 155, 175],
+    [90, 95, 150, 140, 20, 25, 0, 220, 215, 190, 210, 170, 95, 220, 140, 160],
+    [220, 225, 160, 150, 230, 235, 220, 0, 50, 70, 100, 150, 230, 320, 190, 230],
+    [215, 220, 155, 145, 225, 230, 215, 50, 0, 80, 110, 140, 225, 315, 180, 220],
+    [240, 245, 190, 180, 200, 205, 190, 70, 80, 0, 90, 120, 240, 340, 170, 210],
+    [260, 265, 210, 200, 220, 225, 210, 100, 110, 90, 0, 140, 260, 350, 190, 230],
+    [190, 195, 200, 190, 180, 185, 170, 150, 140, 120, 140, 0, 190, 310, 130, 150],
+    [20, 25, 90, 80, 85, 90, 95, 230, 225, 240, 260, 190, 0, 120, 150, 190],
+    [110, 115, 140, 130, 210, 215, 220, 320, 315, 340, 350, 310, 120, 0, 220, 260],
+    [140, 145, 190, 180, 150, 155, 140, 190, 180, 170, 190, 130, 150, 220, 0, 100],
+    [180, 185, 230, 220, 170, 175, 160, 230, 220, 210, 230, 150, 190, 260, 100, 0],
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
     SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
-    Block(Data<StatementBlock>),
+    // A batch of blocks is sent
+    Batch(Vec<Data<VerifiedStatementBlock>>),
     /// Request a few specific block references (this is not indented for large requests).
-    RequestBlocks(Vec<BlockReference>),
+    MissingHistory(BlockReference),
+    /// Request a few specific block references (this is not indented for large requests).
+    RequestChunk(Vec<BlockReference>),
     /// Indicate that a requested block is not found.
     BlockNotFound(Vec<BlockReference>),
 }
@@ -70,7 +102,15 @@ impl Network {
     ) -> Self {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
-        Self::from_socket_addresses(&addresses, our_id as usize, local_addr, metrics).await
+        let mimic_latency = parameters.parameters.mimic_latency;
+        Self::from_socket_addresses(
+            &addresses,
+            our_id as usize,
+            local_addr,
+            metrics,
+            mimic_latency,
+        )
+        .await
     }
 
     pub fn connection_receiver(&mut self) -> &mut mpsc::Receiver<Connection> {
@@ -82,12 +122,19 @@ impl Network {
         our_id: usize,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
+        mimic_latency: bool,
     ) -> Self {
         if our_id >= addresses.len() {
             panic!(
                 "our_id {our_id} is larger then address length {}",
                 addresses.len()
             );
+        }
+        tracing::info!("Before latency table");
+        let latency_table = generate_latency_table(addresses.len(), mimic_latency);
+        tracing::info!("After latency table");
+        if our_id == 0 {
+            write_latency_delays(latency_table.clone()).unwrap();
         }
         let server = TcpListener::bind(local_addr)
             .await
@@ -113,7 +160,8 @@ impl Network {
                     connection_sender: connection_sender.clone(),
                     bind_addr: bind_addr(local_addr),
                     active_immediately: id < our_id,
-                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone()
+                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone(),
+                    connection_latency: latency_table[id][our_id],
                 }
                 .run(receiver),
             );
@@ -129,6 +177,26 @@ impl Network {
             connection_receiver,
         }
     }
+}
+
+fn write_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
+    // Open (or create) the file "latency_delays"
+    let mut file = File::create("latency_delays.log")?;
+
+    // Write the header (optional)
+    writeln!(file, "Latency Delays")?;
+
+    // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line in the file
+    for row in latency_delays {
+        let row_string: String = row
+            .iter()
+            .map(|x| x.to_string()) // Convert each f64 to a string
+            .collect::<Vec<String>>()
+            .join(", "); // Join them with a comma and space
+        writeln!(file, "{}", row_string)?; // Write the row to the file
+    }
+
+    Ok(())
 }
 
 struct Server {
@@ -182,6 +250,7 @@ struct Worker {
     bind_addr: SocketAddr,
     active_immediately: bool,
     latency_sender: HistogramSender<Duration>,
+    connection_latency: f64,
 }
 
 struct WorkerConnection {
@@ -194,7 +263,7 @@ struct WorkerConnection {
 impl Worker {
     const ACTIVE_HANDSHAKE: u64 = 0xFEFE0000;
     const PASSIVE_HANDSHAKE: u64 = 0x0000AEAE;
-    const MAX_SIZE: u32 = 16 * 1024 * 1024;
+    const MAX_SIZE: u32 = 64 * 1024 * 1024;
 
     async fn run(self, mut receiver: mpsc::UnboundedReceiver<TcpStream>) -> Option<()> {
         let initial_delay = if self.active_immediately {
@@ -251,7 +320,7 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection).await
+        Self::handle_stream(stream, connection, self.connection_latency).await
     }
 
     async fn handle_passive_stream(&self, mut stream: TcpStream) -> io::Result<()> {
@@ -266,10 +335,14 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection).await
+        Self::handle_stream(stream, connection, self.connection_latency).await
     }
 
-    async fn handle_stream(stream: TcpStream, connection: WorkerConnection) -> io::Result<()> {
+    async fn handle_stream(
+        stream: TcpStream,
+        connection: WorkerConnection,
+        connection_latency: f64,
+    ) -> io::Result<()> {
         let WorkerConnection {
             sender,
             receiver,
@@ -279,8 +352,14 @@ impl Worker {
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
         let (pong_sender, pong_receiver) = mpsc::channel(16);
-        let write_fut =
-            Self::handle_write_stream(writer, receiver, pong_receiver, latency_sender).boxed();
+        let write_fut = Self::handle_write_stream(
+            writer,
+            receiver,
+            pong_receiver,
+            latency_sender,
+            connection_latency,
+        )
+        .boxed();
         let read_fut = Self::handle_read_stream(reader, sender, pong_sender).boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
@@ -288,78 +367,132 @@ impl Worker {
     }
 
     async fn handle_write_stream(
-        mut writer: OwnedWriteHalf,
+        writer: OwnedWriteHalf,
         mut receiver: mpsc::Receiver<NetworkMessage>,
         mut pong_receiver: mpsc::Receiver<i64>,
         latency_sender: HistogramSender<Duration>,
+        connection_latency: f64,
     ) -> io::Result<()> {
+        // Use Arc and Mutex to share the writer safely across multiple tasks
+        let writer = Arc::new(Mutex::new(writer));
         let start = Instant::now();
-        let mut ping_deadline = start + PING_INTERVAL;
-        loop {
-            select! {
-                _deadline = tokio::time::sleep_until(ping_deadline) => {
-                    ping_deadline += PING_INTERVAL;
-                    let ping_time = start.elapsed().as_micros() as i64;
-                    // because we wait for PING_INTERVAL the interval it can't be 0
-                    assert!(ping_time > 0);
-                    let ping = encode_ping(ping_time);
-                    writer.write_all(&ping).await?;
-                }
-                received = pong_receiver.recv() => {
-                    // We have an embedded ping-pong protocol for measuring RTT:
-                    //
-                    // Every PING_INTERVAL node emits a "ping", positive number encoding some local time
-                    // On receiving positive ping, node replies with "pong" which is negative number (e.g. "ping".neg())
-                    // On receiving negative number we can calculate RTT(by negating it again and getting original ping time)
-                    // todo - we trust remote peer here, might want to enforce ping (not critical for safety though)
 
-                    let Some(ping) = received else {return Ok(())}; // todo - pass signal? (pong_sender closed)
-                    if ping == 0 {
-                        tracing::warn!("Invalid ping: {ping}");
-                        return Ok(());
-                    }
-                    if ping > 0 {
-                        match ping.checked_neg() {
-                            Some(pong) => {
-                                let pong = encode_ping(pong);
-                                writer.write_all(&pong).await?;
-                            },
-                            None => {
-                                tracing::warn!("Invalid ping: {ping}");
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        match ping.checked_neg().and_then(|n|u64::try_from(n).ok()) {
-                            Some(our_ping) => {
-                                let time = start.elapsed().as_micros() as u64;
-                                match time.checked_sub(our_ping) {
-                                    Some(delay) => {
-                                        latency_sender.observe(Duration::from_micros(delay));
-                                    },
-                                    None => {
-                                        tracing::warn!("Invalid ping: {ping}, greater then current time {time}");
-                                        return Ok(());
-                                    }
-                                }
+        // Spawn the first task for handling pings
+        let writer_clone = Arc::clone(&writer);
+        let ping_task = tokio::spawn(async move {
+            let mut ping_deadline = start + PING_INTERVAL;
+            loop {
+                tokio::time::sleep_until(ping_deadline).await;
+                ping_deadline += PING_INTERVAL;
 
-                            },
-                            None => {
-                                tracing::warn!("Invalid pong: {ping}");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                received = receiver.recv() => {
-                    // todo - pass signal to break main loop
-                    let Some(message) = received else {return Ok(())};
-                    let serialized = bincode::serialize(&message).expect("Serialization should not fail");
-                    writer.write_u32(serialized.len() as u32).await?;
-                    writer.write_all(&serialized).await?;
+                let ping_time = start.elapsed().as_micros() as i64;
+                assert!(ping_time > 0); // interval can't be 0
+
+                let ping = encode_ping(ping_time);
+                let latency = generate_latency(connection_latency);
+                tokio::time::sleep(latency).await;
+
+                if let Err(e) = writer_clone.lock().await.write_all(&ping).await {
+                    tracing::error!("Failed to write ping: {e}");
+                    break;
                 }
             }
-        }
+        });
+
+        // Spawn the second task for handling pong responses
+        let writer_clone = Arc::clone(&writer);
+        let pong_task = tokio::spawn(async move {
+            while let Some(ping) = pong_receiver.recv().await {
+                if ping == 0 {
+                    tracing::warn!("Invalid ping: {ping}");
+                    break;
+                }
+                if ping > 0 {
+                    match ping.checked_neg() {
+                        Some(pong) => {
+                            let pong = encode_ping(pong);
+                            let latency = generate_latency(connection_latency);
+                            tokio::time::sleep(latency).await;
+
+                            if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
+                                tracing::error!("Failed to write pong: {e}");
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Invalid ping: {ping}");
+                            break;
+                        }
+                    }
+                } else {
+                    match ping.checked_neg().and_then(|n| u64::try_from(n).ok()) {
+                        Some(our_ping) => {
+                            let time = start.elapsed().as_micros() as u64;
+                            if let Some(delay) = time.checked_sub(our_ping) {
+                                latency_sender.observe(Duration::from_micros(delay));
+                            } else {
+                                tracing::warn!("Invalid ping: {ping}, greater than current time");
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Invalid pong: {ping}");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Spawn the third task for handling message sending
+        let message_task = tokio::spawn(async move {
+            let mut inner_task_handles = Vec::new();
+
+            while let Some(message) = receiver.recv().await {
+                let writer = writer.clone();
+                let latency = generate_latency(connection_latency);
+
+                // Spawn an inner task and collect its handle
+                let handle = tokio::spawn(async move {
+                    let serialized = match bincode::serialize(&message) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::error!("Serialization failed: {e}");
+                            return;
+                        }
+                    };
+
+                    tokio::time::sleep(latency).await;
+
+                    if let Err(e) = async {
+                        let mut writer_guard = writer.lock().await;
+                        // Write the length
+                        writer_guard.write_u32(serialized.len() as u32).await?;
+                        // Write the serialized data
+                        writer_guard.write_all(&serialized).await
+                    }.await {
+                        tracing::error!("Failed to write message: {e}");
+                    }
+
+
+
+                });
+
+                inner_task_handles.push(handle);
+            }
+
+            // Await all inner tasks
+            for handle in inner_task_handles {
+                if let Err(e) = handle.await {
+                    tracing::error!("An inner task failed: {e:?}");
+                }
+            }
+        });
+
+        // Wait for all tasks to complete
+        let _ = tokio::try_join!(ping_task, pong_task, message_task);
+
+        Ok(())
     }
 
     async fn handle_read_stream(
@@ -424,6 +557,51 @@ impl Worker {
     }
 }
 
+/// Generates a latency table for a geodistributed network.
+/// `n` is the number of nodes.
+/// `seed` is a global seed used for deterministic generation.
+/// If `seed == 0`, the table is initialized with all zeros.
+/// expected mean latency for a quorum of nodes should be below within expected thresholds
+fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
+
+    let mut resulting_table = vec![vec![];n];
+    if !mimic_latency {
+        for i in 0..n {
+            for _j in 0..n {
+                resulting_table[i].push(0.0)
+            }
+        }
+    } else {
+        let valid_sequence = [0, 5, 7, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+        for i in 0..n {
+            for j in 0..n {
+                let index_i = i % 16;
+                let index_j = j % 16;
+                resulting_table[i].push(LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0)
+            }
+        }
+    }
+    resulting_table
+}
+
+
+fn generate_latency(mean: f64) -> Duration {
+    let mut rng = rand::thread_rng();
+
+    // Define a constant deviation percentage (e.g., ±3% of the mean)
+    let deviation_percentage = 0.03; // 3%
+
+    // Calculate the deviation based on the mean
+    let deviation = mean * deviation_percentage;
+
+    // Generate latency by adding the random deviation to the mean
+    let latency = mean + rng.gen_range(-deviation..=deviation);
+
+    tracing::info!("Generated latency {latency}");
+    // Return the latency as a Duration (in milliseconds)
+    Duration::from_millis(latency as u64)
+}
+
 fn sample_delay(range: Range<Duration>) -> Duration {
     ThreadRng::default().gen_range(range)
 }
@@ -449,7 +627,6 @@ mod test {
 
     use crate::{committee::Committee, metrics::Metrics, test_util::networks_and_addresses};
 
-    #[ignore]
     #[tokio::test]
     async fn network_connect_test() {
         let committee = Committee::new_test(vec![1, 1, 1]);

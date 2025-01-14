@@ -9,10 +9,16 @@ pub struct Transaction {
 }
 
 pub type RoundNumber = u64;
+
+pub type ShardIndex = usize;
 pub type BlockDigest = crate::crypto::BlockDigest;
 pub type Stake = u64;
 pub type KeyPair = u64;
 pub type PublicKey = crate::crypto::PublicKey;
+pub type Shard = Vec<u8>;
+pub type Encoder = ReedSolomonEncoder;
+pub type Decoder = ReedSolomonDecoder;
+
 
 use std::{
     fmt,
@@ -20,19 +26,19 @@ use std::{
     ops::Range,
     time::Duration,
 };
-
-use digest::Digest;
+use std::sync::atomic::Ordering;
 use eyre::{bail, ensure};
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
+use minibytes::Bytes;
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::{
-    committee::{Committee, VoteRangeBuilder},
-    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
-    data::Data,
-    threshold_clock::threshold_clock_valid_non_genesis,
-};
+use crate::crypto::{MerkleRoot};
+use crate::{committee::{Committee}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data};
+use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
+use crate::encoder::ShardEncoder;
+use crate::threshold_clock::threshold_clock_valid_verified_block;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Vote {
@@ -77,7 +83,7 @@ impl Hash for BlockReference {
 
 #[derive(Clone, Serialize, Deserialize)]
 // Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
-pub struct StatementBlock {
+pub struct VerifiedStatementBlock {
     reference: BlockReference,
 
     //  A list of block references to other blocks that this block includes
@@ -85,8 +91,8 @@ pub struct StatementBlock {
     //  are included, then the first reference is the one that this block conceptually votes for.
     includes: Vec<BlockReference>,
 
-    // A list of base statements in order.
-    statements: Vec<BaseStatement>,
+    // Transaction data acknowledgment
+    acknowledgement_statements: Vec<BlockReference>,
 
     // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
@@ -95,29 +101,266 @@ pub struct StatementBlock {
 
     // Signature by the block author
     signature: SignatureBytes,
+    // It could be either a vector of BaseStatement or None
+    statements: Option<Vec<BaseStatement>>,
+    // It could be a pair of encoded shard and position or none
+    encoded_shard: Option<(Shard, ShardIndex)>,
+    // This is Some only when the above has one some
+    merkle_proof_encoded_shard:  Option<Vec<u8>>,
+    // merkle root is computed for encoded_statements
+    merkle_root_encoded_statements: MerkleRoot,
+
 }
 
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
-pub struct AuthoritySet(u128); // todo - support more then 128 authorities
 
-pub type TimestampNs = u128;
-const NANOS_IN_SEC: u128 = Duration::from_secs(1).as_nanos();
+#[derive(Clone, Serialize, Deserialize)]
+// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+pub struct CachedStatementBlock {
+    reference: BlockReference,
 
-const GENESIS_ROUND: RoundNumber = 0;
+    //  A list of block references to other blocks that this block includes
+    //  Note that the order matters: if a reference to two blocks from the same round and same authority
+    //  are included, then the first reference is the one that this block conceptually votes for.
+    includes: Vec<BlockReference>,
 
-impl PartialOrd for BlockReference {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+    // Transaction data acknowledgment
+    acknowledgement_statements: Vec<BlockReference>,
+
+    // Creation time of the block as reported by creator, currently not enforced
+    meta_creation_time_ns: TimestampNs,
+
+    epoch_marker: EpochStatus,
+
+    // Signature by the block author
+    signature: SignatureBytes,
+    // It could be either a vector of BaseStatement or None
+    statements: Option<Vec<BaseStatement>>,
+    // It could be a pair of encoded shard and position or none
+    encoded_statements: Vec<Option<Shard>>,
+    // This is Some only when the above has one some
+    merkle_proof_encoded_shard:  Option<Vec<u8>>,
+    // merkle root is computed for encoded_statements
+    merkle_root_encoded_statements: MerkleRoot,
+
+}
+
+impl CachedStatementBlock {
+    pub(crate) fn to_verified_block(
+        &self,
+        own_id: usize,
+        merkle_proof: Vec<u8>,
+        info_length: usize,
+    ) -> VerifiedStatementBlock {
+        let encoded_shard: Option<(Shard,usize)> = Some((self.encoded_statements[own_id].clone().expect("Should be shard"), own_id));
+        if self.statements.is_some() {
+            VerifiedStatementBlock {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: self.statements.clone(),
+                encoded_shard, // Replace `0` with the actual position logic
+                merkle_proof_encoded_shard: Some(merkle_proof),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+            }
+        } else {
+            let info_shards: Vec<Vec<u8>> = self.encoded_statements()
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| *i < info_length)
+                .map(|(_, s)| s.clone().expect("Should be Some for all info length")) // Safe to unwrap because we filtered for `is_some()`
+                .collect();
+            // Combine all the shards into a single Vec<u8> (assuming they are in order)
+            let mut reconstructed_data = Vec::new();
+            for shard in info_shards {
+                reconstructed_data.extend(shard);
+            }
+
+            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
+            if reconstructed_data.len() < 4 {
+                panic!("Reconstructed data is too short to contain a valid length");
+            }
+
+            let bytes_length = u32::from_le_bytes(
+                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
+            ) as usize;
+
+            // Ensure the data length matches the declared length
+            if reconstructed_data.len() < 4 + bytes_length {
+
+                panic!("Reconstructed data length does not match the declared bytes_length; {} {}",reconstructed_data.len(), bytes_length);
+            } else {
+                tracing::debug!("Reconstructed data length {}, bytes_length {}", reconstructed_data.len(), bytes_length);
+            }
+
+            // Deserialize the rest of the data into `Vec<BaseStatement>`
+            let serialized_block = &reconstructed_data[4..4 + bytes_length];
+            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_block)
+                .expect("Deserialization of reconstructed data failed");
+            VerifiedStatementBlock {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: Some(reconstructed_statements),
+                encoded_shard, // Replace `0` with the actual position logic
+                merkle_proof_encoded_shard: Some(merkle_proof),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+            }
+
+        }
     }
+
+
 }
 
-impl Ord for BlockReference {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, self.digest))
+impl CachedStatementBlock {
+    pub fn encoded_statements(&self) -> &Vec<Option<Shard>> {
+        &self.encoded_statements
     }
+
+    pub fn add_encoded_shard(&mut self, position: usize, shard: Shard) {
+        self.encoded_statements[position] = Some(shard);
+    }
+
+    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
+        self.encoded_statements = encoded_statements;
+    }
+
+    pub fn copy_shard(& mut self, block: &VerifiedStatementBlock) {
+        if block.encoded_shard.is_some() {
+            let (shard, shard_index) = block.encoded_shard().as_ref().expect("It should be some because of the above check");
+            self.encoded_statements[*shard_index] = Some(shard.clone());
+        }
+    }
+
+
+    pub fn merkle_root(&self) -> MerkleRoot {
+        self.merkle_root_encoded_statements.clone()
+    }
+
 }
 
-impl StatementBlock {
+impl VerifiedStatementBlock {
+
+    pub fn new(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: Vec<BlockReference>,
+        acknowledgement_statements: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+        signature: SignatureBytes,
+        statements: Vec<BaseStatement>,
+        encoded_shard: Option<(Shard,usize)>,
+        merkle_proof: Option<Vec<u8>>,
+        merkle_root: MerkleRoot,
+    ) -> Self {
+        Self {
+            reference: BlockReference {
+                authority,
+                round,
+                digest: BlockDigest::new_without_statements(
+                    authority,
+                    round,
+                    &includes,
+                    &acknowledgement_statements,
+                    meta_creation_time_ns,
+                    epoch_marker,
+                    &signature,
+                    merkle_root,
+                ),
+            },
+            includes,
+            acknowledgement_statements,
+            meta_creation_time_ns,
+            epoch_marker,
+            signature,
+            statements: Some(statements),
+            encoded_shard,
+            merkle_proof_encoded_shard: merkle_proof,
+            merkle_root_encoded_statements: merkle_root,
+        }
+    }
+
+    pub fn to_cached_block(
+        &self,
+        committee_size: usize,
+    ) -> CachedStatementBlock {
+        let mut encoded_statements: Vec<Option<Shard>> = Vec::new();
+        for i in 0..committee_size {
+            if let Some((shard, position)) = self.encoded_shard.as_ref() {
+                if i == *position {
+                    let new_shard: Shard = shard.clone();
+                    encoded_statements.push(Some(new_shard));
+                }
+            }
+            encoded_statements.push(None);
+        }
+        CachedStatementBlock {
+            reference: self.reference.clone(),
+            includes: self.includes.clone(),
+            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            meta_creation_time_ns: self.meta_creation_time_ns,
+            epoch_marker: self.epoch_marker.clone(),
+            signature: self.signature.clone(),
+            statements: self.statements.clone(),
+            encoded_statements, // Replace `0` with the actual position logic
+            merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
+            merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+        }
+    }
+
+    pub fn from_storage_to_transmission(&self, own_id: AuthorityIndex) -> Self {
+        if own_id != self.reference.authority {
+            if let Some((_,position)) = self.encoded_shard().as_ref() {
+                if *position != own_id as usize{
+                    return Self {
+                        reference: self.reference.clone(),
+                        includes: self.includes.clone(),
+                        acknowledgement_statements: self.acknowledgement_statements.clone(),
+                        meta_creation_time_ns: self.meta_creation_time_ns,
+                        epoch_marker: self.epoch_marker.clone(),
+                        signature: self.signature.clone(),
+                        statements: None,
+                        encoded_shard: None,
+                        merkle_proof_encoded_shard: None,
+                        merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                    }
+                }
+            }
+            Self {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: None,
+                encoded_shard: self.encoded_shard.clone(),
+                merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+            }
+        } else {
+            Self {
+                reference: self.reference.clone(),
+                includes: self.includes.clone(),
+                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                epoch_marker: self.epoch_marker.clone(),
+                signature: self.signature.clone(),
+                statements: self.statements.clone(),
+                encoded_shard: None,
+                merkle_proof_encoded_shard: None,
+                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+            }
+        }
+    }
+
     pub fn new_genesis(authority: AuthorityIndex) -> Data<Self> {
         Data::new(Self::new(
             authority,
@@ -127,66 +370,19 @@ impl StatementBlock {
             0,
             false,
             SignatureBytes::default(),
+            vec![],
+            None,
+            None,
+            MerkleRoot::default(),
         ))
     }
 
-    pub fn new_with_signer(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: Vec<BlockReference>,
-        statements: Vec<BaseStatement>,
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signer: &Signer,
-    ) -> Self {
-        let signature = signer.sign_block(
-            authority,
-            round,
-            &includes,
-            &statements,
-            meta_creation_time_ns,
-            epoch_marker,
-        );
-        Self::new(
-            authority,
-            round,
-            includes,
-            statements,
-            meta_creation_time_ns,
-            epoch_marker,
-            signature,
-        )
+    pub fn merkle_root(&self) -> MerkleRoot {
+        self.merkle_root_encoded_statements.clone()
     }
 
-    pub fn new(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        includes: Vec<BlockReference>,
-        statements: Vec<BaseStatement>,
-        meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
-        signature: SignatureBytes,
-    ) -> Self {
-        Self {
-            reference: BlockReference {
-                authority,
-                round,
-                digest: BlockDigest::new(
-                    authority,
-                    round,
-                    &includes,
-                    &statements,
-                    meta_creation_time_ns,
-                    epoch_marker,
-                    &signature,
-                ),
-            },
-            includes,
-            statements,
-            meta_creation_time_ns,
-            epoch_marker,
-            signature,
-        }
+    pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
+        &self.acknowledgement_statements
     }
 
     pub fn reference(&self) -> &BlockReference {
@@ -197,44 +393,19 @@ impl StatementBlock {
         &self.includes
     }
 
-    pub fn statements(&self) -> &Vec<BaseStatement> {
-        &self.statements
+
+
+    pub fn encoded_shard(&self) -> &Option<(Shard,usize)> {
+        &self
+            .encoded_shard
     }
 
-    // Todo - we should change the block so that it has all shared transactions in one vec
-    // This way this function will always return single TransactionLocatorRange instead of a vec
-    pub fn shared_ranges(&self) -> Vec<TransactionLocatorRange> {
-        let mut ranges = Vec::new();
-        let mut vote_range_builder = VoteRangeBuilder::default();
-        for (offset, statement) in self.statements.iter().enumerate() {
-            if let BaseStatement::Share(_) = statement {
-                if let Some(range) = vote_range_builder.add(offset as u64) {
-                    let range = TransactionLocatorRange::new(self.reference, range);
-                    ranges.push(range);
-                }
-            }
-        }
-        if let Some(range) = vote_range_builder.finish() {
-            let range = TransactionLocatorRange::new(self.reference, range);
-            ranges.push(range);
-        }
-        ranges
+    pub fn statements(&self) -> &Option<Vec<BaseStatement>> {
+        &self
+            .statements
     }
 
-    pub fn shared_transactions(&self) -> impl Iterator<Item = (TransactionLocator, &Transaction)> {
-        let reference = *self.reference();
-        self.statements
-            .iter()
-            .enumerate()
-            .filter_map(move |(pos, statement)| {
-                if let BaseStatement::Share(tx) = statement {
-                    let locator = TransactionLocator::new(reference, pos as u64);
-                    Some((locator, tx))
-                } else {
-                    None
-                }
-            })
-    }
+
 
     pub fn author(&self) -> AuthorityIndex {
         self.reference.authority
@@ -260,10 +431,6 @@ impl StatementBlock {
         self.meta_creation_time_ns
     }
 
-    pub fn epoch_changed(&self) -> EpochStatus {
-        self.epoch_marker
-    }
-
     pub fn meta_creation_time(&self) -> Duration {
         // Some context: https://github.com/rust-lang/rust/issues/51107
         let secs = self.meta_creation_time_ns / NANOS_IN_SEC;
@@ -271,16 +438,94 @@ impl StatementBlock {
         Duration::new(secs as u64, nanos as u32)
     }
 
-    pub fn verify(&self, committee: &Committee) -> eyre::Result<()> {
+    pub fn epoch_changed(&self) -> EpochStatus {
+        self.epoch_marker
+    }
+
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Self> {
+        IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
+        IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
+        let t = bincode::deserialize(&bytes)?;
+        Ok(t)
+    }
+
+    pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
+        self.merkle_proof_encoded_shard = Some(merkle_proof);
+    }
+    pub fn new_with_signer(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        includes: Vec<BlockReference>,
+        acknowledgement_statements: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        epoch_marker: EpochStatus,
+        signer: &Signer,
+        statements: Vec<BaseStatement>,
+        encoded_statements: Vec<Shard>,
+    ) -> Self {
+        let (merkle_root, _merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
+        let signature = signer.sign_block(
+            authority,
+            round,
+            &includes,
+            &acknowledgement_statements,
+            meta_creation_time_ns,
+            epoch_marker,
+            merkle_root,
+        );
+
+
+        Self::new(
+            authority,
+            round,
+            includes,
+            acknowledgement_statements,
+            meta_creation_time_ns,
+            epoch_marker,
+            signature,
+            statements,
+            None,
+            None,
+            merkle_root,
+        )
+    }
+
+    pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder) -> eyre::Result<()> {
         let round = self.round();
+        let committee_size = committee.len();
+        let info_length = committee.info_length();
+        let parity_length = committee_size-info_length;
+        if self.statements.is_some() {
+            let computed_encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
+            let (computed_merkle_tree_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&computed_encoded_statements, own_id);
+            ensure!(computed_merkle_tree_root== self.merkle_root_encoded_statements, "Incorrect Merkle root");
+            self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
+            self.encoded_shard = Some((computed_encoded_statements[own_id as usize].clone(), own_id));
+        } else {
+            if self.encoded_shard.is_some() {
+                    let (encoded_shard, position) = self.encoded_shard.clone().expect("We expect an encoded shard");
+                    if position != peer_id {
+                        bail!("The peer delivers a wrong encoded chunk");
+                    }
+                    if self.merkle_proof_encoded_shard.is_none() {
+                        bail!("The peer didn't include the proof for the chunk");
+                    }
+                    ensure!(MerkleRoot::check_correctness_merkle_leaf(encoded_shard, self.merkle_root_encoded_statements, self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(), committee_size, position),
+                    "Merkle proof check failed");
+            }
+        }
+
+        // TODO: check correctness of encoded data/ chunks and merkle_root
+
         let digest = BlockDigest::new(
             self.author(),
             round,
             &self.includes,
-            &self.statements,
+            &self.acknowledgement_statements,
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
+            self.merkle_root_encoded_statements,
         );
         ensure!(
             digest == self.digest(),
@@ -295,7 +540,7 @@ impl StatementBlock {
         if round == GENESIS_ROUND {
             bail!("Genesis block should not go through verification");
         }
-        if let Err(e) = pub_key.verify_block(self) {
+        if let Err(e) = pub_key.verify_signature_in_block(self) {
             bail!("Block signature verification has failed: {:?}", e);
         }
         for include in &self.includes {
@@ -312,25 +557,64 @@ impl StatementBlock {
                 round
             );
         }
-        for statement in &self.statements {
-            // Also check duplicate statements?
-            match statement {
-                BaseStatement::Share(_) => {}
-                BaseStatement::Vote(_, _) => {}
-                BaseStatement::VoteRange(range) => range.verify()?,
-            }
-        }
         ensure!(
-            threshold_clock_valid_non_genesis(self, committee),
+            threshold_clock_valid_verified_block(self, committee),
             "Threshold clock is not valid"
         );
         Ok(())
     }
 
-    pub fn detailed(&self) -> Detailed {
-        Detailed(self)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+pub struct StatementBlock {
+    reference: BlockReference,
+
+    //  A list of block references to other blocks that this block includes
+    //  Note that the order matters: if a reference to two blocks from the same round and same authority
+    //  are included, then the first reference is the one that this block conceptually votes for.
+    includes: Vec<BlockReference>,
+
+    // Transaction data acknowledgment
+    acknowledgement_statements: Vec<BlockReference>,
+
+        // Creation time of the block as reported by creator, currently not enforced
+    meta_creation_time_ns: TimestampNs,
+
+    epoch_marker: EpochStatus,
+
+    // Signature by the block author
+    signature: SignatureBytes,
+    // It could be either vector of Nones, vector of Somes or a vector with one Some
+    encoded_statements: Vec<Option<Shard>>,
+    // This is Some only when the above is a vector with 1 Some and all other Nones
+    merkle_proof:  Option<Vec<u8>>,
+    // merkle root is computed for encoded_statements
+    merkle_root: MerkleRoot,
+
+}
+
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
+pub struct AuthoritySet(u128); // todo - support more then 128 authorities
+
+pub type TimestampNs = u128;
+const NANOS_IN_SEC: u128 = Duration::from_secs(1).as_nanos();
+
+const GENESIS_ROUND: RoundNumber = 0;
+
+impl PartialOrd for BlockReference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
+
+impl Ord for BlockReference {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, self.digest))
+    }
+}
+
 
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub struct TransactionLocator {
@@ -360,13 +644,6 @@ impl TransactionLocator {
 }
 
 impl TransactionLocatorRange {
-    pub(crate) fn new(block: BlockReference, range: Range<u64>) -> Self {
-        Self {
-            block,
-            offset_start_inclusive: range.start,
-            offset_end_exclusive: range.end,
-        }
-    }
 
     pub fn one(locator: TransactionLocator) -> Self {
         Self {
@@ -420,7 +697,7 @@ impl BlockReference {
     #[cfg(test)]
     pub fn new_test(authority: AuthorityIndex, round: RoundNumber) -> Self {
         if round == 0 {
-            StatementBlock::new_genesis(authority).reference
+            VerifiedStatementBlock::new_genesis(authority).reference
         } else {
             Self {
                 authority,
@@ -454,9 +731,10 @@ impl fmt::Display for BlockReference {
         if self.authority < 26 {
             write!(
                 f,
-                "{}{}",
+                "{}{}{}",
                 format_authority_index(self.authority),
-                self.round
+                self.round,
+                self.digest
             )
         } else {
             write!(f, "[{:02}]{}", self.authority, self.round)
@@ -476,7 +754,7 @@ impl AuthoritySet {
     }
 
     pub fn present(&self) -> impl Iterator<Item = AuthorityIndex> + '_ {
-        (0..128).filter(|bit| (self.0 & 1 << bit) != 0)
+        (0..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
     }
 
     #[inline]
@@ -493,43 +771,23 @@ pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {
     format!("{}{}", format_authority_index(i), r)
 }
 
-impl fmt::Debug for StatementBlock {
+
+
+impl fmt::Debug for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self)
     }
 }
 
-pub struct Detailed<'a>(&'a StatementBlock);
 
-impl<'a> fmt::Debug for Detailed<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "StatementBlock {:?} {{", self.0.reference())?;
-        write!(
-            f,
-            "includes({})={:?},",
-            self.0.includes().len(),
-            self.0.includes()
-        )?;
-        write!(
-            f,
-            "statements({})={:?}",
-            self.0.statements.len(),
-            self.0.statements()
-        )?;
-        writeln!(f, "}}")
-    }
-}
 
-impl fmt::Display for StatementBlock {
+impl fmt::Display for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:[", self.reference)?;
         for include in self.includes() {
             write!(f, "{},", include)?;
         }
         write!(f, "](")?;
-        for statement in self.statements() {
-            write!(f, "{},", statement)?;
-        }
         write!(f, ")")
     }
 }
@@ -552,13 +810,29 @@ impl PartialEq for StatementBlock {
     }
 }
 
+impl PartialEq for VerifiedStatementBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference == other.reference
+    }
+}
+
 impl Eq for StatementBlock {}
+
+impl Eq for VerifiedStatementBlock {}
 
 impl std::hash::Hash for StatementBlock {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.reference.hash(state);
     }
 }
+
+
+impl std::hash::Hash for VerifiedStatementBlock {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.reference.hash(state);
+    }
+}
+
 
 impl fmt::Debug for BaseStatement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -567,7 +841,7 @@ impl fmt::Debug for BaseStatement {
 }
 
 impl CryptoHash for BlockReference {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.authority.crypto_hash(state);
         self.round.crypto_hash(state);
         self.digest.crypto_hash(state);
@@ -575,14 +849,20 @@ impl CryptoHash for BlockReference {
 }
 
 impl CryptoHash for TransactionLocator {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.block.crypto_hash(state);
         self.offset.crypto_hash(state);
     }
 }
 
+impl CryptoHash for Shard {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+        state.update(self);
+    }
+}
+
 impl CryptoHash for TransactionLocatorRange {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         self.block.crypto_hash(state);
         self.offset_start_inclusive.crypto_hash(state);
         self.offset_end_exclusive.crypto_hash(state);
@@ -590,10 +870,38 @@ impl CryptoHash for TransactionLocatorRange {
 }
 
 impl CryptoHash for EpochStatus {
-    fn crypto_hash(&self, state: &mut impl Digest) {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         match self {
             false => [0].crypto_hash(state),
             true => [1].crypto_hash(state),
+        }
+    }
+}
+
+impl CryptoHash for BaseStatement {
+    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+        match self {
+            BaseStatement::Share(tx) => {
+                [0].crypto_hash(state);
+                tx.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Accept) => {
+                [1].crypto_hash(state);
+                id.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Reject(None)) => {
+                [2].crypto_hash(state);
+                id.crypto_hash(state);
+            }
+            BaseStatement::Vote(id, Vote::Reject(Some(other))) => {
+                [3].crypto_hash(state);
+                id.crypto_hash(state);
+                other.crypto_hash(state);
+            }
+            BaseStatement::VoteRange(range) => {
+                [4].crypto_hash(state);
+                range.crypto_hash(state);
+            }
         }
     }
 }
@@ -643,10 +951,10 @@ mod test {
     };
 
     use rand::{prelude::SliceRandom, Rng};
-
+    
     use super::*;
 
-    pub struct Dag(HashMap<BlockReference, Data<StatementBlock>>);
+    pub struct Dag(HashMap<BlockReference, Data<VerifiedStatementBlock>>);
 
     #[cfg(test)]
     impl Dag {
@@ -663,7 +971,7 @@ mod test {
             Self(blocks)
         }
 
-        pub fn draw_block(block: &str) -> StatementBlock {
+        pub fn draw_block(block: &str) -> VerifiedStatementBlock {
             let block = block.trim();
             assert!(block.ends_with(']'), "Invalid block definition: {}", block);
             let block = &block[..block.len() - 1];
@@ -678,13 +986,19 @@ mod test {
                 let includes = includes.split(',');
                 includes.map(Self::parse_name).collect()
             };
-            StatementBlock {
+            let acknowledgement_statements = includes
+                .clone();
+            VerifiedStatementBlock {
                 reference,
                 includes,
-                statements: vec![],
+                acknowledgement_statements,
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),
+                statements: None,
+                encoded_shard: None,
+                merkle_proof_encoded_shard: None,
+                merkle_root_encoded_statements: MerkleRoot::default(),
             }
         }
 
@@ -703,7 +1017,7 @@ mod test {
         /// For each authority add a 0 round block if not present
         pub fn add_genesis_blocks(mut self) -> Self {
             for authority in self.authorities() {
-                let block = StatementBlock::new_genesis(authority);
+                let block = VerifiedStatementBlock::new_genesis(authority);
                 let entry = self.0.entry(*block.reference());
                 entry.or_insert_with(move || block);
             }
@@ -739,7 +1053,7 @@ mod test {
     pub struct RandomDagIter<'a>(&'a Dag, std::vec::IntoIter<BlockReference>);
 
     impl<'a> Iterator for RandomDagIter<'a> {
-        type Item = &'a Data<StatementBlock>;
+        type Item = &'a Data<VerifiedStatementBlock>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let next = self.1.next()?;
@@ -791,5 +1105,25 @@ mod test {
             a.insert(*x);
         }
         assert_eq!(present, a.present().collect::<Vec<_>>());
+    }
+
+    /// Function to generate a random Vec<BaseStatement> with only Share(Transaction)
+    pub fn generate_random_shares(count: usize) -> Vec<BaseStatement> {
+        let mut rng = rand::thread_rng();
+        let mut statements = Vec::new();
+
+        for _ in 0..count {
+            // Generate random Transaction
+            let transaction = Transaction {
+                data: (0..rng.gen_range(1..100)) // Random length of data
+                    .map(|_| rng.gen()) // Random bytes
+                    .collect(),
+            };
+
+            // Add Share variant to the list
+            statements.push(BaseStatement::Share(transaction));
+        }
+
+        statements
     }
 }

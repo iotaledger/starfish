@@ -5,13 +5,12 @@ use std::cmp::Ordering;
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    types::{BlockReference, RoundNumber, StatementBlock},
+    types::{BlockReference, RoundNumber},
 };
+use crate::types::VerifiedStatementBlock;
 
-// A block is threshold clock valid if:
-// - all included blocks have a round number lower than the block round number.
-// - the set of authorities with blocks included has a quorum in the current committee.
-pub fn threshold_clock_valid_non_genesis(block: &StatementBlock, committee: &Committee) -> bool {
+
+pub fn threshold_clock_valid_verified_block(block: &VerifiedStatementBlock, committee: &Committee) -> bool {
     // get a committee from the creator of the block
     let round_number = block.reference().round;
     assert!(round_number > 0);
@@ -51,7 +50,7 @@ impl ThresholdClockAggregator {
 
     pub fn add_block(&mut self, block: BlockReference, committee: &Committee) {
         match block.round.cmp(&self.round) {
-            // Blocks with round less then what we currently build are irrelevant here
+            // Blocks with round less than what we currently build are irrelevant here
             Ordering::Less => {}
             // If we processed block for round r, we also have stored 2f+1 blocks from r-1
             Ordering::Greater => {
@@ -90,27 +89,27 @@ mod tests {
     #[test]
     fn test_threshold_clock_valid() {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[]"),
             &committee
         ));
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0, C0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A1:[A0, B0, C0, D0]"),
             &committee
         ));
-        assert!(!threshold_clock_valid_non_genesis(
+        assert!(!threshold_clock_valid_verified_block(
             &Dag::draw_block("A2:[A1, B1, C0, D0]"),
             &committee
         ));
-        assert!(threshold_clock_valid_non_genesis(
+        assert!(threshold_clock_valid_verified_block(
             &Dag::draw_block("A2:[A1, B1, C1, D0]"),
             &committee
         ));

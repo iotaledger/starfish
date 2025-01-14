@@ -1,8 +1,11 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
+KILL_VALIDATORS=${KILL_VALIDATORS:-2} #Kill first validators after CRASH_TIME
+BOOT_VALIDATORS=${BOOT_VALIDATORS:-1} #Boot last validators after CRASH_TIME
+TEST_TIME=${TEST_TIME:-600} #time to perform the whole dryrun test
+CRASH_TIME=${CRASH_TIME:-100} #time when crash first nodes and start the last one
 DESIRED_TPS=${DESIRED_TPS:-100000}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
@@ -18,8 +21,6 @@ RESET=$(tput sgr0)
 
 # Output Validators
 echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-# Output Byzantine strategy
-echo -e "${GREEN}Byzantine strategy: ${YELLOW}$BYZANTINE_STRATEGY${RESET}"
 
 # Cleanup
 echo -e "${CYAN}Cleaning up .ansi files and dryrun-validator directories...${RESET}"
@@ -50,13 +51,17 @@ echo -e "${GREEN}Updated prometheus.yaml successfully!${RESET}"
 
 
 # Calculate port to look for committed leaders
-PORT=$((1500 + NUM_VALIDATORS + 2))
+PORT=$((1500 + NUM_VALIDATORS + KILL_VALIDATORS + 1))
 
 # Define the file path
 FILE="monitoring/grafana/grafana-dashboard.json"
 
 # Replace the line in the file
-sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+else
+    sed -i -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+fi
 
 echo -e "${GREEN}Updated grafana-dashboard.json successfully!${RESET}"
 
@@ -83,24 +88,36 @@ fi
 
 # Start Validators
 tmux kill-server || true
-for ((i=0; i<NUM_VALIDATORS; i++)); do
-  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
+for ((i=0; i<NUM_VALIDATORS - BOOT_VALIDATORS; i++)); do
+  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::types=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::block_handler=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
-  if [[ $i -eq 0 ]]; then
-    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --byzantine-strategy $BYZANTINE_STRATEGY --authority $i 2>&1 | tee $LOG_FILE"
-  else
-    echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-    tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $i 2>&1 | tee $LOG_FILE"
-  fi
+  echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
+  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $i 2>&1 | tee $LOG_FILE"
 done
 
 SHORT_URL=$(curl -s "http://tinyurl.com/api-create.php?url=http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-30m&to=now&refresh=5s")
 echo -e "${CYAN}Grafana monitoring is available at: ${GREEN}$SHORT_URL${RESET}; user/password = admin"
 
-# Wait for the validators to run (e.g., 600 seconds)
-sleep 600
+# Kill first validators and start the last one after timeout
+sleep "$CRASH_TIME"
+
+for ((i=0; i<KILL_VALIDATORS; i++)); do
+   SESSION_NAME="validator_$i"
+   echo -e "${RED}Killing first validator ${YELLOW}$i${RESET}..."
+   tmux kill-session -t "$SESSION_NAME"
+done
+
+# Start last validators
+for ((i=NUM_VALIDATORS - BOOT_VALIDATORS; i<NUM_VALIDATORS; i++)); do
+   SESSION_NAME="validator_$i"
+   echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
+   LOG_FILE="validator_${i}.log.ansi"
+   tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --authority $i 2>&1 | tee $LOG_FILE"
+done
+
+# Wait for the validators to run the whole dryrun
+sleep "$TEST_TIME"
 
 # Kill all tmux sessions
 echo -e "${RED}Killing all tmux sessions...${RESET}"

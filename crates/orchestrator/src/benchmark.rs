@@ -24,17 +24,23 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub nodes: usize,
     /// The total load (tx/s) to submit to the system.
     pub load: usize,
+    /// number Byzantine nodes
+    pub byzantine_nodes: usize,
+    /// Byzantine strategy
+    pub byzantine_strategy: String,
 }
 
 impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}-{:?}-{:?}-{}-{}",
+            "{:?}-{:?}-{:?}-{}-{}-{}-{}",
             self.node_parameters,
             self.client_parameters,
             self.settings.faults,
             self.nodes,
+            self.byzantine_nodes,
+            self.byzantine_strategy,
             self.load
         )
     }
@@ -44,8 +50,12 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} nodes ({}) - {} tx/s",
-            self.nodes, self.settings.faults, self.load
+            "{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s",
+            self.nodes,
+            self.byzantine_nodes,
+            self.byzantine_strategy,
+            self.settings.faults,
+            self.load
         )
     }
 }
@@ -58,6 +68,8 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         client_parameters: C,
         nodes: usize,
         loads: Vec<usize>,
+        byzantine_nodes: usize,
+        byzantine_strategy: String,
     ) -> Vec<Self> {
         loads
             .into_iter()
@@ -67,6 +79,8 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 client_parameters: client_parameters.clone(),
                 nodes,
                 load,
+                byzantine_nodes,
+                byzantine_strategy: byzantine_strategy.clone(),
             })
             .collect()
     }
@@ -78,6 +92,8 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             node_parameters: N::default(),
             client_parameters: C::default(),
             nodes: 4,
+            byzantine_nodes: 0,
+            byzantine_strategy: "honest".to_string(),
             load: 500,
         }
     }

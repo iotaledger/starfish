@@ -12,7 +12,6 @@ mod core_thread;
 mod crypto;
 mod data;
 mod epoch_close;
-mod finalization_interpreter;
 #[cfg(test)]
 #[cfg(feature = "simulator")]
 mod future_simulator;
@@ -44,3 +43,5 @@ mod transactions_generator;
 pub mod types;
 pub mod validator;
 mod wal;
+mod encoder;
+mod decoder;

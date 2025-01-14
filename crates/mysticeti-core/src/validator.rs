@@ -38,6 +38,7 @@ impl Validator {
         public_config: NodePublicConfig,
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
+        byzantine_strategy: String,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -71,6 +72,7 @@ impl Validator {
             &wal_writer,
             metrics.clone(),
             &committee,
+            byzantine_strategy,
         );
 
         // Boot the validator node.
@@ -82,7 +84,6 @@ impl Validator {
             metrics.clone(),
             public_config.parameters.consensus_only,
         );
-
         TransactionGenerator::start(
             block_sender,
             authority,
@@ -93,12 +94,13 @@ impl Validator {
         let committed_transaction_log =
             TransactionLog::start(private_config.committed_transactions_log())
                 .expect("Failed to open committed transaction log for write");
+        tracing::info!("Transaction log");
         let commit_handler = TestCommitHandler::new_with_handler(
             committee.clone(),
-            block_handler.transaction_time.clone(),
             metrics.clone(),
             committed_transaction_log,
         );
+        tracing::info!("Commit handler");
         let core = Core::open(
             block_handler,
             authority,
@@ -110,6 +112,7 @@ impl Validator {
             wal_writer,
             CoreOptions::default(),
         );
+        tracing::info!("Core");
         let network = Network::load(
             &public_config,
             authority,
@@ -117,6 +120,7 @@ impl Validator {
             metrics.clone(),
         )
         .await;
+        tracing::info!("Network is created. Starting synchronizer");
         let network_synchronizer = NetworkSyncer::start(
             network,
             core,
@@ -213,6 +217,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();
@@ -258,6 +263,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();
@@ -286,6 +292,7 @@ mod smoke_tests {
             public_config.clone(),
             private_config,
             client_parameters,
+            "honest".to_string(),
         )
         .await
         .unwrap();
@@ -331,6 +338,7 @@ mod smoke_tests {
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
+                "honest".to_string(),
             )
             .await
             .unwrap();
