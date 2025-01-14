@@ -3,7 +3,7 @@
 
 use crate::{
     consensus::{
-        universal_committer::UniversalCommitterBuilder, LeaderStatus, DEFAULT_WAVE_LENGTH,
+        universal_committer::UniversalCommitterBuilder, LeaderStatus, WAVE_LENGTH,
     },
     test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
     types::BlockReference,
@@ -14,7 +14,7 @@ use crate::{
 #[tracing_test::traced_test]
 fn direct_commit() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     for number_of_leaders in 1..committee.len() {
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, 5);
@@ -51,7 +51,7 @@ fn direct_commit() {
 #[tracing_test::traced_test]
 fn idempotence() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     for number_of_leaders in 1..committee.len() {
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, 5);
@@ -83,7 +83,7 @@ fn idempotence() {
 #[tracing_test::traced_test]
 fn multiple_direct_commit() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut last_committed = BlockReference::new_test(0, 0);
@@ -126,7 +126,7 @@ fn multiple_direct_commit() {
 #[tracing_test::traced_test]
 fn direct_commit_partial_round() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let first_leader_round = wave_length;
@@ -166,11 +166,11 @@ fn direct_commit_partial_round() {
 #[tracing_test::traced_test]
 fn direct_commit_late_call() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let n = 10;
-    let enough_blocks = wave_length * (n + 1) - 1;
+    let enough_blocks = n + 2;
     let mut block_writer = TestBlockWriter::new(&committee);
     build_dag(&committee, &mut block_writer, None, enough_blocks);
 
@@ -189,7 +189,7 @@ fn direct_commit_late_call() {
 
     assert_eq!(sequence.len(), number_of_leaders * n as usize);
     for (i, leaders) in sequence.chunks(number_of_leaders).enumerate() {
-        let leader_round = (i as u64 + 1) * wave_length;
+        let leader_round = (i + 1) as u64;
         for (j, leader) in leaders.iter().enumerate() {
             if let LeaderStatus::Commit(block) = leader {
                 let leader_offset = j as u64;
@@ -207,7 +207,7 @@ fn direct_commit_late_call() {
 #[tracing_test::traced_test]
 fn no_genesis_commit() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let first_commit_round = 2 * wave_length - 1;
@@ -236,7 +236,7 @@ fn no_genesis_commit() {
 #[tracing_test::traced_test]
 fn no_leader() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);
@@ -304,7 +304,7 @@ fn no_leader() {
 #[tracing_test::traced_test]
 fn direct_skip() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);
@@ -369,7 +369,7 @@ fn direct_skip() {
 #[tracing_test::traced_test]
 fn indirect_commit() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);
@@ -468,7 +468,7 @@ fn indirect_commit() {
 #[tracing_test::traced_test]
 fn indirect_skip() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);
@@ -591,7 +591,7 @@ fn indirect_skip() {
 #[tracing_test::traced_test]
 fn undecided() {
     let committee = committee(4);
-    let wave_length = DEFAULT_WAVE_LENGTH;
+    let wave_length = WAVE_LENGTH;
     let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);

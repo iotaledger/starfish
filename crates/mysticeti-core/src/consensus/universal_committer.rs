@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{base_committer::BaseCommitter, LeaderStatus, DEFAULT_WAVE_LENGTH};
+use super::{base_committer::BaseCommitter, LeaderStatus, WAVE_LENGTH};
 use crate::{
     block_store::BlockStore,
     committee::Committee,
@@ -155,7 +155,7 @@ impl UniversalCommitterBuilder {
             committee,
             block_store,
             metrics,
-            wave_length: DEFAULT_WAVE_LENGTH,
+            wave_length: WAVE_LENGTH,
             number_of_leaders: 1,
             pipeline: true,
         }

@@ -3,11 +3,10 @@
 
 use std::{fmt::Display, sync::Arc};
 use std::collections::HashSet;
-use super::{LeaderStatus, DEFAULT_WAVE_LENGTH};
+use super::{LeaderStatus, WAVE_LENGTH};
 use crate::{
     block_store::BlockStore,
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    consensus::MINIMUM_WAVE_LENGTH,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
 use crate::data::Data;
@@ -32,7 +31,7 @@ pub struct BaseCommitterOptions {
 impl Default for BaseCommitterOptions {
     fn default() -> Self {
         Self {
-            wave_length: DEFAULT_WAVE_LENGTH,
+            wave_length: WAVE_LENGTH,
             leader_offset: 0,
             round_offset: 0,
         }
@@ -62,7 +61,7 @@ impl BaseCommitter {
     }
 
     pub fn with_options(mut self, options: BaseCommitterOptions) -> Self {
-        assert!(options.wave_length >= MINIMUM_WAVE_LENGTH);
+        assert!(options.wave_length >= WAVE_LENGTH);
         self.options = options;
         self
     }
