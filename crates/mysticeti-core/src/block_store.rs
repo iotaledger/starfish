@@ -163,9 +163,9 @@ impl BlockStore {
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
             "delayed" => Some(ByzantineStrategy::TimeoutLeader),
+            "withholding" => Some(ByzantineStrategy::LeaderWithholding),
             "equivocating" => Some(ByzantineStrategy::Equivocating),
             "skipping-equivocating" => Some(ByzantineStrategy::SkippingEquivocating),
-            "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
             "fork-bomb" => Some(ByzantineStrategy::ForkBomb),
             "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocationForkBomb),
             _ => None, // Default to honest behavior

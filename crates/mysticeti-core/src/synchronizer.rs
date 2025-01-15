@@ -360,6 +360,30 @@ where
 
                     notified.await;
                 }
+                // Send your leader block to first 50% subset of validators
+                Some(ByzantineStrategy::LeaderWithholding) => {
+                    let leaders_current_round = universal_committer.get_leaders(current_round);
+                    if leaders_current_round.contains(&own_authority_index) {
+                        // Retrieve the authorities from the committee
+                        let committee = inner.committee.clone();
+                        let authorities: Vec<AuthorityIndex> = committee.authorities().collect();
+                        let total_authorities = authorities.len();
+                        let subset_size = (total_authorities as f64 * 0.5).ceil() as usize; // First 50%
+
+                        // Check if the `to_whom_authority_index` is in the first 50% of authorities
+                        if authorities.iter().take(subset_size).any(|&a| a == to_whom_authority_index) {
+                            // Send blocks only if `to_whom_authority_index` is in the first 50%
+                            sending_batch_own_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_own_block_size,
+                            )
+                                .await?;
+                        }
+                    }
+                }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::Equivocating) => {
                     sending_batch_own_blocks(

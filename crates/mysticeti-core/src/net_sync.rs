@@ -54,7 +54,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub syncer: CoreThreadDispatcher<H, Arc<Notify>, C>,
     pub block_store: BlockStore,
     pub notify: Arc<Notify>,
-    committee: Arc<Committee>,
+    pub committee: Arc<Committee>,
     stop: mpsc::Sender<()>,
     epoch_close_signal: mpsc::Sender<()>,
     pub epoch_closing_time: Arc<AtomicU64>,
