@@ -16,7 +16,7 @@ use crate::{
     block_manager::BlockManager,
     block_store::{
         BlockStore, BlockWriter, CommitData, OwnBlockData, WAL_ENTRY_COMMIT,
-        WAL_ENTRY_STATE,
+        WAL_ENTRY_STATE, ByzantineStrategy,
     },
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
@@ -325,9 +325,39 @@ impl<H: BlockHandler> Core<H> {
         mem::swap(&mut taken, &mut self.pending);
 
         let mut blocks = vec![];
-        if self.block_store.byzantine_strategy.is_some() && self.last_own_block.len() < self.committee.len() {
-            for _j in self.last_own_block.len()..self.committee.len() {
-                self.last_own_block.push(self.last_own_block[0].clone());
+        //if self.block_store.byzantine_strategy.is_some() && self.last_own_block.len() < self.committee.len() {
+        //    for _j in self.last_own_block.len()..self.committee.len() {
+        //        self.last_own_block.push(self.last_own_block[0].clone());
+        //    }
+       // }
+        if let Some(ref strategy) = self.block_store.byzantine_strategy {
+            match strategy {
+                // Strategy 1: Equivocating
+                ByzantineStrategy::Equivocating => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        // Clone the first block to create N-1 equivocated blocks
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                // Strategy 2: Skipping Equivocating
+                ByzantineStrategy::SkippingEquivocating => {
+                    for _ in self.last_own_block.len()..(self.last_own_block.len() + 2) {
+                        // Create two equivocated blocks
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                // Strategy 4: Equivocation Fork Bomb // TO BE DONE
+                ByzantineStrategy::EquivocationForkBomb => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        // Clone the first block for each validator, creating a unique block per validator
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                // Default case: No Equivocation of blocks
+                _ => {}
             }
         }
         let mut statements =  Vec::new();
