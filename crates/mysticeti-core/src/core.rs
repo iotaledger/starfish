@@ -340,9 +340,9 @@ impl<H: BlockHandler> Core<H> {
                     }
                 }
 
-                // Strategy 2: Skipping Equivocating
+                // Strategy 2: Skipping Equivocating crates two equivocating blocks
                 ByzantineStrategy::SkippingEquivocating => {
-                    for _ in self.last_own_block.len()..(self.last_own_block.len() + 2) {
+                    for _ in self.last_own_block.len()..2 {
                         // Create two equivocated blocks
                         self.last_own_block.push(self.last_own_block[0].clone());
                     }
