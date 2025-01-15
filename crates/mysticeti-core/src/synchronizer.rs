@@ -361,7 +361,7 @@ where
                     notified.await;
                 }
                 // Send an equivocating block to the authority whenever it is created
-                Some(ByzantineStrategy::EquivocatingBlocks) => {
+                Some(ByzantineStrategy::Equivocating) => {
                     sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
@@ -374,7 +374,7 @@ where
                     notified.await;
                 }
                 // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
-                Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
+                Some(ByzantineStrategy::EquivocationForkBomb) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
                         sending_batch_own_blocks(
