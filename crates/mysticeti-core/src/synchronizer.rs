@@ -4,7 +4,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use std::cmp::max;
 use futures::future::join_all;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
+use rand::prelude::StdRng;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -331,6 +332,7 @@ where
         mut round: RoundNumber,
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
+        let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
         let own_authority_index = inner.block_store.get_own_authority_index();
@@ -365,13 +367,17 @@ where
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
                         // Decide probabilistically whether to send blocks to the current authority
-                        let send = {
-                            use rand::Rng;
-                            let mut rng = rand::thread_rng();
-                            rng.gen_bool(0.5) // 50% chance
-                        };
-
-                        if send {
+                        let send: bool = rng.gen_bool(0.99);
+                        if !send {
+                            fake_sending_batch_own_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_own_block_size,
+                            )
+                                .await?;
+                        } else {
                             // Send blocks to the authority
                             sending_batch_own_blocks(
                                 inner.clone(),
@@ -439,6 +445,10 @@ where
         }
     }
 
+
+
+
+
     async fn disseminate_own_blocks_and_encoded_past_blocks(
         to_whom_authority_index: AuthorityIndex,
         to: mpsc::Sender<NetworkMessage>,
@@ -480,6 +490,32 @@ where
     }
 }
 
+
+async fn fake_sending_batch_own_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    round: &mut RoundNumber,
+    batch_size: usize,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let peer = format_authority_index(to_whom_authority_index);
+    let blocks =
+        inner
+            .block_store
+            .get_own_transmission_blocks(to_whom_authority_index, round.clone(), batch_size);
+    for block in blocks.iter() {
+        inner
+            .block_store
+            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+        *round = max(*round, block.round());
+    }
+    tracing::debug!("Blocks {blocks:?} are dropped to {peer}");
+    Some(())
+}
 async fn sending_batch_own_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
