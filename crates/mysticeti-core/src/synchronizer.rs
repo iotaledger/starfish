@@ -334,6 +334,7 @@ where
     ) -> Option<()> {
         let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+        let batch_byzantine_own_block_size = 50 * batch_own_block_size;
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
         let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner
@@ -356,7 +357,7 @@ where
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_own_block_size,
+                        batch_byzantine_own_block_size,
                     )
                     .await?;
 
@@ -367,29 +368,19 @@ where
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
                         // Decide probabilistically whether to send blocks to the current authority
-                        let send: bool = rng.gen_bool(0.99);
-                        if !send {
-                            fake_sending_batch_own_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                &mut round,
-                                batch_own_block_size,
-                            )
-                                .await?;
-                        } else {
+                        let send: bool = rng.gen_bool(0.1);
+                        if send {
                             // Send blocks to the authority
                             sending_batch_own_blocks(
                                 inner.clone(),
                                 to.clone(),
                                 to_whom_authority_index,
                                 &mut round,
-                                batch_own_block_size,
+                                batch_byzantine_own_block_size,
                             ).await?;
-
-                            notified.await;
                         }
                     }
+                    notified.await;
                 }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::Equivocating) => {
@@ -398,7 +389,7 @@ where
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_own_block_size,
+                        batch_byzantine_own_block_size,
                     )
                     .await?;
 
@@ -413,7 +404,7 @@ where
                             to.clone(),
                             to_whom_authority_index,
                             &mut round,
-                            batch_own_block_size,
+                            batch_byzantine_own_block_size,
                         )
                         .await?;
                     }
