@@ -31,9 +31,11 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
-    TimeoutLeader,
-    EquivocatingBlocks,
-    DelayedEquivocatingBlocks,
+    Equivocating,                  // Equivocation attack: N-1 equivocations per round
+    SkippingEquivocating,          // Skipping rule equivocation: 2 equivocations split across validators
+    LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
+    ForkBomb,                      // Fork bomb: withhold a chain of blocks and release it all at once
+    EquivocationForkBomb,          // Equivocation fork bomb: send different chains to each validator
 }
 #[derive(Clone)]
 pub struct BlockStore {
@@ -159,10 +161,12 @@ impl BlockStore {
             tracing::info!("Wal is empty, will start from genesis");
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
-            "equivocate" => Some(ByzantineStrategy::EquivocatingBlocks),
-            "delayed" => Some(ByzantineStrategy::DelayedEquivocatingBlocks),
-            "timeout" => Some(ByzantineStrategy::TimeoutLeader),
-            _ => None, // honest by default
+            "equivocating" => Some(ByzantineStrategy::Equivocating),
+            "skipping-equivocating" => Some(ByzantineStrategy::SkippingEquivocating),
+            "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
+            "fork-bomb" => Some(ByzantineStrategy::ForkBomb),
+            "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocationForkBomb),
+            _ => None, // Default to honest behavior
         };
         let this = Self {
             block_wal_reader,
