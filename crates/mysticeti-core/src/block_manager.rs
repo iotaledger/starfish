@@ -45,7 +45,7 @@ impl BlockManager {
     ) -> (Vec<(WalPosition, Data<VerifiedStatementBlock>)>, HashSet<BlockReference>, bool) {
         let mut updated_statements = false;
         let mut blocks: VecDeque<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)> = blocks.into();
-        let mut newly_blocks_processed: Vec<(WalPosition, Data<VerifiedStatementBlock>)> = vec![];
+        let mut newly_storage_blocks_processed: Vec<(WalPosition, Data<VerifiedStatementBlock>)> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
@@ -61,7 +61,7 @@ impl BlockManager {
                     if storage_and_transmission_blocks.0.statements().is_some() {
                         // Block can be processed. So need to update indexes etc
                         let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
-                        newly_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
+                        newly_storage_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
                         updated_statements = true;
                         self.block_store.updated_unknown_by_others(storage_and_transmission_blocks.0.reference().clone());
                         recoverable_blocks.remove(storage_and_transmission_blocks.0.reference());
@@ -99,7 +99,7 @@ impl BlockManager {
 
                 // Block can be processed. So need to update indexes etc
                 let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
-                newly_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
+                newly_storage_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =
@@ -124,7 +124,7 @@ impl BlockManager {
             }
         }
 
-        (newly_blocks_processed, recoverable_blocks, updated_statements)
+        (newly_storage_blocks_processed, recoverable_blocks, updated_statements)
     }
 
     pub fn missing_blocks(&self) -> &[HashSet<BlockReference>] {

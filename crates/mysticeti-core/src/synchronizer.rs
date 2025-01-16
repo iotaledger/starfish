@@ -148,7 +148,7 @@ where
             }
             if to_request.len() > 0 {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
-                to.send(NetworkMessage::RequestChunk(to_request)).await.ok()?;
+                to.send(NetworkMessage::MissingTxDataRequest(to_request)).await.ok()?;
             }
             let _sleep = sleep(leader_timeout).await;
         }
@@ -711,7 +711,7 @@ where
                         continue;
                     };
                     // Broken logic below
-                    let message = NetworkMessage::MissingHistory(chunks.to_vec()[0]);
+                    let message = NetworkMessage::MissingHistoryRequest(chunks.to_vec()[0]);
                     permit.send(message);
                     self.metrics
                         .block_sync_requests_sent

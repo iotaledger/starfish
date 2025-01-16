@@ -199,7 +199,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
         connection
             .sender
-            .send(NetworkMessage::SubscribeOwnFrom(last_seen))
+            .send(NetworkMessage::SubscribeBroadcastRequest(last_seen))
             .await
             .ok()?;
 
@@ -238,7 +238,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         tracing::debug!("Connection from {} to {} is established", own_id, peer_id);
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
-                NetworkMessage::SubscribeOwnFrom(round) => {
+                NetworkMessage::SubscribeBroadcastRequest(round) => {
                     if inner.block_store.byzantine_strategy.is_some() {
                         let round = 0;
                         disseminator.disseminate_only_own_blocks(round).await;
@@ -258,21 +258,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             blocks_without_statements.push(block);
                         }
                     }
-
-                    let (only_blocks_with_statements, block_reference_to_check) = if blocks_without_statements.len() == 0 && blocks_with_statements.len() > 0  {
-                        let mut block_reference = blocks_with_statements[0].reference().clone();
-                        let mut max_round  = blocks_with_statements[0].round();
-                        for block in blocks_with_statements.iter() {
-                            if block.round() > max_round {
-                                block_reference = block.reference().clone();
-                                max_round = block.round();
-                            }
-                        }
-                        (true, Some(block_reference))
-                    } else {
-                        (false, None)
-                    };
-
 
                     // First process blocks with statements
                     let mut verified_data_blocks = Vec::new();
@@ -305,8 +290,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
 
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                    let mut max_round_pending_block_reference: Option<BlockReference> = None;
                     if !verified_data_blocks.is_empty() {
-                        inner.syncer.add_blocks(verified_data_blocks).await;
+                        let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
+                        for block_reference in pending_block_references {
+                            if max_round_pending_block_reference.is_none() {
+                                max_round_pending_block_reference = Some(block_reference);
+                            } else {
+                                if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                                    max_round_pending_block_reference = Some(block_reference);
+                                }
+                            }
+                        }
                     }
 
                     // Second process blocks without statements
@@ -356,23 +351,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
-                    if only_blocks_with_statements {
-                        if !inner.block_store.block_exists(block_reference_to_check.unwrap()) {
-                            tracing::debug!("Make request missing block {:?} from peer {:?}", block_reference_to_check.unwrap(), peer);
-                            Self::request_missing_blocks(block_reference_to_check.unwrap(), &connection.sender);
-                        }
+                    if max_round_pending_block_reference.is_some() {
+                            tracing::debug!("Make request missing block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                            Self::request_missing_blocks(max_round_pending_block_reference.unwrap(), &connection.sender);
                     }
 
                     drop(timer);
                 }
 
-                NetworkMessage::MissingHistory(block_reference) => {
-                    tracing::debug!("Received request missing block {:?} from peer {:?}", block_reference, peer);
+                NetworkMessage::MissingHistoryRequest(block_reference) => {
+                    tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         disseminator.push_block_history(block_reference).await;
                     }
                 }
-                NetworkMessage::RequestChunk(block_references) => {
+                NetworkMessage::MissingTxDataRequest(block_references) => {
                     tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
@@ -404,7 +397,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         sender: &mpsc::Sender<NetworkMessage>,
     ) {
             if let Ok(permit) = sender.try_reserve() {
-                permit.send(NetworkMessage::MissingHistory(block_reference_to_check));
+                permit.send(NetworkMessage::MissingHistoryRequest(block_reference_to_check));
             }
     }
 

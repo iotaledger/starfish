@@ -185,15 +185,39 @@ impl<H: BlockHandler> Core<H> {
         self
     }
 
-    // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> bool  {
+    // This function attempts to add blocks to the local DAG (and in addition update with shards)
+    // It return true if any update was made successfully
+    // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
+    // For such blocks we need to send a missing history request
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>)  {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
+        let block_references_with_statements: Vec<_> = blocks
+            .iter()
+            .filter(|(b,_)|b.statements().is_some())
+            .map(|(b,_)| b.reference().clone())
+            .collect();
+        let block_manager_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("BlockManager::add_blocks");
         let (processed, new_blocks_to_reconstruct, updated_statements) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+        drop(block_manager_timer);
+        let processed_references: Vec<_> = processed
+            .iter()
+            .filter(|(_,b)|b.statements().is_some())
+            .map(|(_,b)| b.reference().clone())
+            .collect();
+        let not_processed_blocks: Vec<_> = block_references_with_statements
+            .iter()
+            .filter(|block_reference| !processed_references.contains(block_reference))
+            .map(|block_reference| block_reference.clone())
+            .collect();
+
         let success: bool = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
             true
         } else {
@@ -211,7 +235,7 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         self.run_block_handler();
-        success
+        (success, not_processed_blocks)
     }
 
     fn run_block_handler(&mut self) {

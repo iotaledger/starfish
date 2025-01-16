@@ -65,13 +65,13 @@ const LATENCY_TABLE: [[u32; 16]; 16] = [
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
-    SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
+    SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     // A batch of blocks is sent
     Batch(Vec<Data<VerifiedStatementBlock>>),
     /// Request a few specific block references (this is not indented for large requests).
-    MissingHistory(BlockReference),
+    MissingHistoryRequest(BlockReference),
     /// Request a few specific block references (this is not indented for large requests).
-    RequestChunk(Vec<BlockReference>),
+    MissingTxDataRequest(Vec<BlockReference>),
     /// Indicate that a requested block is not found.
     BlockNotFound(Vec<BlockReference>),
 }

@@ -32,8 +32,8 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.syncer.into_inner()
     }
 
-    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) {
-        self.syncer.lock().add_blocks(blocks);
+    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> Vec<BlockReference> {
+        self.syncer.lock().add_blocks(blocks)
     }
 
     pub async fn force_new_block(&self, round: RoundNumber) {
