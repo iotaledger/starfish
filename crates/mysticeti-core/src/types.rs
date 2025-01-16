@@ -169,7 +169,7 @@ impl CachedStatementBlock {
             let info_shards: Vec<Vec<u8>> = self.encoded_statements()
                 .iter()
                 .enumerate()
-                .filter(|(i, s)| *i < info_length)
+                .filter(|(i, _s)| *i < info_length)
                 .map(|(_, s)| s.clone().expect("Should be Some for all info length")) // Safe to unwrap because we filtered for `is_some()`
                 .collect();
             // Combine all the shards into a single Vec<u8> (assuming they are in order)

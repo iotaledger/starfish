@@ -27,7 +27,7 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
-    runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle},
+    runtime::{timestamp_utc, Handle, JoinError, JoinHandle},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
@@ -212,7 +212,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics.clone(),
         );
 
-        let data_requestor = DataRequestor::new(
+        let mut data_requestor = DataRequestor::new(
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),
@@ -394,6 +394,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
         inner.syncer.authority_connection(peer_id, false).await;
         disseminator.shutdown().await;
+        data_requestor.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
         None
     }

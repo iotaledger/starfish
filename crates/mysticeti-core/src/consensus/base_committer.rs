@@ -20,9 +20,6 @@ type WaveNumber = u64;
 pub struct BaseCommitterOptions {
     /// The length of a wave (minimum 3)
     pub wave_length: u64,
-    /// The offset used in the leader-election protocol. THis is used by the multi-committer to ensure
-    /// that each [`BaseCommitter`] instance elects a different leader.
-    pub leader_offset: u64,
     /// The offset of the first wave. This is used by the pipelined committer to ensure that each
     /// [`BaseCommitter`] instances operates on a different view of the dag.
     pub round_offset: u64,
@@ -32,7 +29,6 @@ impl Default for BaseCommitterOptions {
     fn default() -> Self {
         Self {
             wave_length: WAVE_LENGTH,
-            leader_offset: 0,
             round_offset: 0,
         }
     }
@@ -92,9 +88,7 @@ impl BaseCommitter {
         if self.leader_round(wave) != round {
             return None;
         }
-
-        let offset = self.options.leader_offset as RoundNumber;
-        Some(self.committee.elect_leader(round + offset))
+        Some(self.committee.elect_leader(round))
     }
 
     /// Check whether the specified block (`potential_certificate`) is a certificate for
@@ -318,8 +312,8 @@ impl Display for BaseCommitter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Committer-L{}-R{}",
-            self.options.leader_offset, self.options.round_offset
+            "Committer-Round-Offset{}",
+            self.options.round_offset
         )
     }
 }

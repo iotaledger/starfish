@@ -6,7 +6,6 @@ use std::{
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
-use std::collections::HashMap;
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;
@@ -35,10 +34,9 @@ use crate::{
     wal::{WalPosition, WalSyncer, WalWriter},
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
-use crate::crypto::{MerkleRoot};
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
-use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
+use crate::types::{Encoder, Decoder, VerifiedStatementBlock};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -276,7 +274,6 @@ impl<H: BlockHandler> Core<H> {
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
-        let total_length = info_length + parity_length;
 
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);

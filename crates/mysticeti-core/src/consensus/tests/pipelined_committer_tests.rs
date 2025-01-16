@@ -25,8 +25,6 @@ fn direct_commit() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -56,8 +54,6 @@ fn idempotence() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     // Commit one block.
@@ -90,8 +86,6 @@ fn multiple_direct_commit() {
             block_writer.into_block_store(),
             test_metrics(),
         )
-        .with_wave_length(wave_length)
-        .with_pipeline(true)
         .build();
 
         let sequence = committer.try_commit(last_committed);
@@ -127,8 +121,6 @@ fn direct_commit_late_call() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -163,8 +155,6 @@ fn no_genesis_commit() {
             block_writer.into_block_store(),
             test_metrics(),
         )
-        .with_wave_length(wave_length)
-        .with_pipeline(true)
         .build();
 
         let last_committed = BlockReference::new_test(0, 0);
@@ -211,8 +201,6 @@ fn no_leader() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -262,8 +250,6 @@ fn direct_skip() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -361,8 +347,6 @@ fn indirect_commit() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -437,8 +421,6 @@ fn indirect_skip() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -522,8 +504,6 @@ fn undecided() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_pipeline(true)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);

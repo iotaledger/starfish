@@ -109,7 +109,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn start(mut self) {
+    pub async fn start(&mut self) {
         if let Some(existing) = self.data_requestor.take() {
             existing.abort();
             existing.await.ok();
@@ -118,19 +118,21 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
+            self.parameters.clone(),
         ));
         self.data_requestor = Some(handle);
     }
 
-    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()>
+    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>, parameters: SynchronizerParameters) -> Option<()>
     {
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
         let leader_timeout = Duration::from_secs(1);
+        let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
             let committed_dags= inner.block_store.read_pending_unavailable();
             let mut to_request = Vec::new();
-            for commit in &committed_dags {
+            'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
                         let mut aggregator = commit.1[i].clone();
@@ -139,6 +141,9 @@ where
                             to_request.push(block.reference().clone());
                         }
                     }
+                }
+                if to_request.len() >= upper_limit_request_size {
+                    break 'commit_loop;
                 }
             }
             if to_request.len() > 0 {

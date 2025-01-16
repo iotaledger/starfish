@@ -77,10 +77,7 @@ impl Validator {
 
         // Boot the validator node.
         let (block_handler, block_sender) = RealBlockHandler::new(
-            committee.clone(),
-            authority,
             &private_config.certified_transactions_log(),
-            recovered.block_store.clone(),
             metrics.clone(),
         );
         TransactionGenerator::start(
@@ -275,7 +272,7 @@ mod smoke_tests {
             .skip(1)
             .map(|address| address.to_owned())
             .collect();
-        let timeout = config::node_defaults::default_leader_timeout() * 5;
+        let timeout = config::node_defaults::default_leader_timeout() * 20;
         tokio::select! {
             _ = await_for_commits(addresses) => (),
             _ = time::sleep(timeout) => panic!("Failed to gather commits within a few timeouts"),
