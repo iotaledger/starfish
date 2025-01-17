@@ -441,6 +441,8 @@ impl Worker {
                         }
                     }
                 }
+                // Yield to ensure responsiveness
+                tokio::task::yield_now().await;
             }
         });
 
