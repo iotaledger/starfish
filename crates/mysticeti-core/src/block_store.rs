@@ -31,13 +31,12 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
-    TimeoutLeader,               // Timeout Attack: delay sending leader blocks for a fixed timeout duration.
-    Equivocating,                // Equivocation Attack: create and send N-1 equivocations per round.
-    SkippingEquivocating,        // Skipping Equivocation: create and send 2 equivocations split across validators.
-    LeaderWithholding,           // Leader Withholding: send leader blocks to a random subset of validators after a delay;
-    // do not send own blocks if not the leader.
-    ForkBomb,                    // Fork Bomb: withhold a chain of blocks and release them all at once.
-    EquivocationForkBomb,        // Equivocation Fork Bomb: send different chains to each validator.
+    TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
+    Equivocating,                  // Equivocation attack: N-1 equivocations per round
+    EquivocatingTwoChains,          // Skipping rule equivocation: 2 equivocations split across validators
+    LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
+    ChainBomb,                       // Fork bomb: withhold a chain of blocks and release it all at once
+    EquivocatingChainBomb,          // Equivocation fork bomb: send different chains to each validator
 }
 #[derive(Clone)]
 pub struct BlockStore {
@@ -163,12 +162,12 @@ impl BlockStore {
             tracing::info!("Wal is empty, will start from genesis");
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
-            "delaying" => Some(ByzantineStrategy::TimeoutLeader),
-            "withhold" => Some(ByzantineStrategy::LeaderWithholding),
-            "equivocation" => Some(ByzantineStrategy::Equivocating),
-            "skipping-equivocation" => Some(ByzantineStrategy::SkippingEquivocating),
-            "fork-bomb" => Some(ByzantineStrategy::ForkBomb),
-            "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocationForkBomb),
+            "delayed" => Some(ByzantineStrategy::TimeoutLeader),
+            "withholding" => Some(ByzantineStrategy::LeaderWithholding),
+            "equivocating" => Some(ByzantineStrategy::Equivocating),
+            "skipping-equivocating" => Some(ByzantineStrategy::EquivocatingTwoChains),
+            "fork-bomb" => Some(ByzantineStrategy::ChainBomb),
+            "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocatingChainBomb),
             _ => None, // Default to honest behavior
         };
         let this = Self {

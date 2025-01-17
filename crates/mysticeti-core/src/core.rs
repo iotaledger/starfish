@@ -332,7 +332,7 @@ impl<H: BlockHandler> Core<H> {
        // }
         if let Some(ref strategy) = self.block_store.byzantine_strategy {
             match strategy {
-                // Strategy : Equivocating
+                //  Equivocating crates equivocating blocks
                 ByzantineStrategy::Equivocating => {
                     for _ in self.last_own_block.len()..self.committee.len() {
                         // Clone the first block to create N-1 equivocated blocks
@@ -340,16 +340,17 @@ impl<H: BlockHandler> Core<H> {
                     }
                 }
 
-                // Strategy : Skipping Equivocating crates two equivocating blocks
-                ByzantineStrategy::SkippingEquivocating => {
+                //  Skipping Equivocating crates two equivocating blocks
+                ByzantineStrategy::EquivocatingTwoChains => {
                     for _ in self.last_own_block.len()..2 {
                         // Create two equivocated blocks
                         self.last_own_block.push(self.last_own_block[0].clone());
                     }
                 }
 
-                // Strategy : Equivocation Fork Bomb
-                ByzantineStrategy::EquivocationForkBomb => {
+                // Strategy 4: Equivocation Chain Bomb creates chains of own blocks that are
+                // released to respected validators
+                ByzantineStrategy::EquivocatingChainBomb => {
                     for _ in self.last_own_block.len()..self.committee.len() {
                         // Clone the first block for each validator, creating a unique block per validator
                         self.last_own_block.push(self.last_own_block[0].clone());
@@ -443,17 +444,8 @@ impl<H: BlockHandler> Core<H> {
 
         let mut return_blocks = vec![];
         let mut authority_bounds = vec![0];
-        match self.block_store.byzantine_strategy {
-            // Skipping Equivocating: Divide the authorities into two groups
-            Some(ByzantineStrategy::SkippingEquivocating) => {
-                authority_bounds.push((self.committee.len() as f64 / 2.0).ceil() as usize);
-            }
-            // Default behavior: Distribute blocks evenly across all authorities
-            _ => {
-                for i in 1..=blocks.len() {
-                    authority_bounds.push(i * self.committee.len() / blocks.len());
-                }
-            }
+        for i in 1..=blocks.len() {
+            authority_bounds.push(i * self.committee.len() / blocks.len());
         }
         self.last_own_block = vec![];
         let mut block_id = 0;

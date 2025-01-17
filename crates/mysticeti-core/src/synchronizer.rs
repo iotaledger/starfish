@@ -387,7 +387,7 @@ where
                     notified.await;
                 }
                 // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
-                Some(ByzantineStrategy::ForkBomb) => {
+                Some(ByzantineStrategy::ChainBomb) => {
                     let k = 10; // Define K, the interval at which to send blocks (e.g., every 10th round)
                     // Check if this round is a multiple of K
                     if current_round % k == 0 {
@@ -407,7 +407,7 @@ where
                 }
                 // Create two equivocating blocks and, send the first one to the first 50% and the
                 // second to the other 50% of the validators
-                Some(ByzantineStrategy::SkippingEquivocating) => {
+                Some(ByzantineStrategy::EquivocatingTwoChains) => {
                     sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
@@ -433,7 +433,7 @@ where
                     notified.await;
                 }
                 // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
-                Some(ByzantineStrategy::EquivocationForkBomb) => {
+                Some(ByzantineStrategy::EquivocatingChainBomb) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
                         sending_batch_own_blocks(
