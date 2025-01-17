@@ -303,7 +303,7 @@ impl<H: BlockHandler> Core<H> {
             let block = self.block_store.get_cached_block(&block_reference);
             let storage_block = self.decoder.decode_shards(&self.committee, &mut self.encoder, block, self.authority);
             if storage_block.is_some() {
-                tracing::debug!("Block {block_reference} is reconstructed in core thread");
+                tracing::debug!("Reconstruction of block {:?} within core thread task is successful", block_reference);
                 let storage_block: VerifiedStatementBlock = storage_block.expect("Block is verified to be reconstructed");
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);

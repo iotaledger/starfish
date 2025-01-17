@@ -24,3 +24,5 @@ cobertura.xml
 .idea
 dryrun-validator-*/
 *.log.ansi
+/crates/mysticeti-core/latency_delays.log
+/latency_delays.log
