@@ -163,10 +163,10 @@ impl BlockStore {
             tracing::info!("Wal is empty, will start from genesis");
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
-            "delayed" => Some(ByzantineStrategy::TimeoutLeader),
-            "withholding" => Some(ByzantineStrategy::LeaderWithholding),
-            "equivocating" => Some(ByzantineStrategy::Equivocating),
-            "skipping-equivocating" => Some(ByzantineStrategy::SkippingEquivocating),
+            "delaying" => Some(ByzantineStrategy::TimeoutLeader),
+            "withhold" => Some(ByzantineStrategy::LeaderWithholding),
+            "equivocation" => Some(ByzantineStrategy::Equivocating),
+            "skipping-equivocation" => Some(ByzantineStrategy::SkippingEquivocating),
             "fork-bomb" => Some(ByzantineStrategy::ForkBomb),
             "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocationForkBomb),
             _ => None, // Default to honest behavior

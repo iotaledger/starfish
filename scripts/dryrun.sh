@@ -2,7 +2,7 @@
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
 DESIRED_TPS=${DESIRED_TPS:-10000}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-fork-bomb} #possible "honest" | "delayed" | "withholding"| "equivocate" | "timeout" |fork-bomb|
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-skipping-equivocation} #possible values "honest" | "delaying" | "withhold"| "equivocation" | "timeout" |"fork-bomb"| "equivocation-fork-bomb" | "skipping-equivocation"
 REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS

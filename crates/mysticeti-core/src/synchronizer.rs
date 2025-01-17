@@ -405,8 +405,8 @@ where
                     }
                     notified.await;
                 }
-                // Send one of two equivocating blocks to the authority whenever it is created
-                // TO DO
+                // Create two equivocating blocks and, send the first one to the first 50% and the
+                // second to the other 50% of the validators
                 Some(ByzantineStrategy::SkippingEquivocating) => {
                     sending_batch_own_blocks(
                         inner.clone(),
