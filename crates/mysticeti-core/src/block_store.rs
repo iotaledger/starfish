@@ -32,11 +32,11 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
     TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
-    Equivocating,                  // Equivocation attack: N-1 equivocations per round
+    EquivocatingChains,                  // Equivocation attack: N-1 equivocations per round
     EquivocatingTwoChains,          // Skipping rule equivocation: 2 equivocations split across validators
     LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
     ChainBomb,                       // Fork bomb: withhold a chain of blocks and release it all at once
-    EquivocatingChainBomb,          // Equivocation fork bomb: send different chains to each validator
+    EquivocatingChainsBomb,          // Equivocation fork bomb: send different chains to each validator
 }
 #[derive(Clone)]
 pub struct BlockStore {
@@ -164,10 +164,10 @@ impl BlockStore {
         let byzantine_strategy = match byzantine_strategy.as_str() {
             "delayed" => Some(ByzantineStrategy::TimeoutLeader),
             "withholding" => Some(ByzantineStrategy::LeaderWithholding),
-            "equivocating" => Some(ByzantineStrategy::Equivocating),
+            "equivocating" => Some(ByzantineStrategy::EquivocatingChains),
             "skipping-equivocating" => Some(ByzantineStrategy::EquivocatingTwoChains),
             "fork-bomb" => Some(ByzantineStrategy::ChainBomb),
-            "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocatingChainBomb),
+            "equivocation-fork-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
             _ => None, // Default to honest behavior
         };
         let this = Self {
