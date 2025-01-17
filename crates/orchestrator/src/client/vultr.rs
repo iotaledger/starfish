@@ -51,6 +51,7 @@ impl From<VultrInstance> for Instance {
             id: instance.id,
             region: instance.region,
             main_ip: instance.main_ip,
+            private_ip: instance.main_ip,
             tags: instance.tags,
             specs: instance.plan,
             status: instance.power_status.as_str().into(),
