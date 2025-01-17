@@ -343,6 +343,7 @@ where
             .unwrap_or_default()
             .round();
         let leader_timeout = Duration::from_secs(1);
+        let withholding_timeout = Duration::from_millis(500);
         loop {
             let notified = inner.notify.notified();
             match byzantine_strategy {
@@ -363,12 +364,15 @@ where
 
                     notified.await;
                 }
-                // Send your leader block to first 50% subset of validators
+                // Send your leader block (together with all previous non-leader blocks)  to first 50% subset of validators
+                // Do not send own blocks if your not leader.
                 Some(ByzantineStrategy::LeaderWithholding) => {
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
+                        // Sleep a bit to delay the broadcasting of the leader block
+                        let _sleep = sleep(withholding_timeout).await;
                         // Decide probabilistically whether to send blocks to the current authority
-                        let send: bool = rng.gen_bool(0.1);
+                        let send: bool = rng.gen_bool(0.5);
                         if send {
                             // Send blocks to the authority
                             sending_batch_own_blocks(
