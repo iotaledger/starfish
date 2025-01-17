@@ -386,6 +386,39 @@ where
                     }
                     notified.await;
                 }
+                // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
+                Some(ByzantineStrategy::ForkBomb) => {
+                    let k = 10; // Define K, the interval at which to send blocks (e.g., every 10th round)
+                    // Check if this round is a multiple of K
+                    if current_round % k == 0 {
+                        let leaders_next_round = universal_committer.get_leaders(current_round + 1);
+                        // Only send blocks if the next leader is the intended recipient
+                        if leaders_next_round.contains(&to_whom_authority_index) {
+                            sending_batch_own_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_byzantine_own_block_size,
+                            ).await?;
+                        }
+                    }
+                    notified.await;
+                }
+                // Send one of two equivocating blocks to the authority whenever it is created
+                // TO DO
+                Some(ByzantineStrategy::SkippingEquivocating) => {
+                    sending_batch_own_blocks(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        &mut round,
+                        batch_byzantine_own_block_size,
+                    )
+                        .await?;
+
+                    notified.await;
+                }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::Equivocating) => {
                     sending_batch_own_blocks(

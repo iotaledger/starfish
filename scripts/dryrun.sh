@@ -1,9 +1,9 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-1000}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-withholding} #possible "honest" | "delayed" | "withholding" | "equivocate" | "timeout" | "skipping-equivocating" | "fork-bomb" | "equivocation-fork-bomb"
-REMOVE_VOLUMES=1 #remove Grafana and Prometheus data volumes "0" | "1"
+DESIRED_TPS=${DESIRED_TPS:-10000}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-fork-bomb} #possible "honest" | "delayed" | "withholding"| "equivocate" | "timeout" |fork-bomb|
+REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
