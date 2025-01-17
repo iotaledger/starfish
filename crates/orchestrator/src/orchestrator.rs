@@ -229,6 +229,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         ]
         .join(" && ");
 
+        display::action(format!("update command: {command}"));
+
         let active = self.instances.iter().filter(|x| x.is_active()).cloned();
 
         let id = "update";
@@ -267,7 +269,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .protocol_commands
             .genesis_command(nodes.iter(), parameters)
             .await;
-
+        display::action(format!("Genesis command: {command}"));
         let id = "configure";
         let repo_name = self.settings.repository_name();
         let context = CommandContext::new()
@@ -346,15 +348,25 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .run_background("node".into())
             .with_log_file("~/node.log".into())
             .with_execute_from_path(repo.into());
+
+        display::action("\nExecuting commands");
+
         self.ssh_manager
             .execute_per_instance(targets, context)
             .await?;
+
+        display::action("\nPreparing metrics commands");
 
         // Wait until all nodes are reachable.
         let commands = self
             .protocol_commands
             .nodes_metrics_command(instances.clone(), parameters);
+
+        display::action("\nExecuting metrics commands");
+
         self.ssh_manager.wait_for_success(commands).await;
+
+        display::action("\nMetrics commands successful");
 
         Ok(())
     }
@@ -365,6 +377,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Select the instances to run.
         let (_, nodes, _) = self.select_instances(parameters)?;
+
+        display::action("\nInstances selected");
 
         // Boot one node per instance.
         self.boot_nodes(nodes, parameters).await?;

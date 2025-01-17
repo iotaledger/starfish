@@ -99,6 +99,12 @@ pub enum Operation {
         /// useful when debugging in some specific scenarios.
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
+
+        /// Flag indicating whether nodes should advertise their internal or public IP address for inter-node communication.
+        /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
+        /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
+        #[clap(long, action, default_value_t = false, global = true)]
+        use_internal_ip_addresses: bool
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -214,6 +220,7 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             mimic_extra_latency,
+            use_internal_ip_addresses,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -254,6 +261,7 @@ async fn run<C: ServerProviderClient>(
                 node_parameters,
                 client_parameters,
                 committee,
+                use_internal_ip_addresses,
                 loads,
                 byzantine_nodes,
                 byzantine_strategy,

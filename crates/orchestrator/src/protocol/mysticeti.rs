@@ -15,7 +15,7 @@ use mysticeti_core::{
 use serde::{Deserialize, Serialize};
 
 use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
-use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
+use crate::{benchmark::BenchmarkParameters, client::Instance, display, settings::Settings};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
@@ -37,7 +37,7 @@ impl Deref for MysticetiNodeParameters {
 
 impl Debug for MysticetiNodeParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-       write!(f, "c")
+        write!(f, "c")
     }
 }
 
@@ -93,7 +93,13 @@ impl ProtocolCommands for MysticetiProtocol {
         I: Iterator<Item = &'a Instance>,
     {
         let ips = instances
-            .map(|x| x.main_ip.to_string())
+            .map(|x| {
+                match parameters.use_internal_ip_address {
+                    true => x.private_ip,
+                    false => x.main_ip,
+                }
+                .to_string()
+            })
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -159,7 +165,8 @@ impl ProtocolCommands for MysticetiProtocol {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
 
-                let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
+                let mut run = [
+                    &format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--committee-path {}", committee_path.display()),
@@ -190,6 +197,9 @@ impl ProtocolCommands for MysticetiProtocol {
                 }
 
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
+
+                display::action(format!("\n Command ({authority}): {command}"));
+
                 (instance, command)
             })
             .collect()
@@ -225,7 +235,15 @@ impl ProtocolMetrics for MysticetiProtocol {
     {
         let (ips, instances): (_, Vec<_>) = instances
             .into_iter()
-            .map(|x| (IpAddr::V4(x.main_ip), x))
+            .map(|x| {
+                (
+                    match parameters.use_internal_ip_address {
+                        true => IpAddr::V4(x.private_ip),
+                        false => IpAddr::V4(x.main_ip),
+                    },
+                    x,
+                )
+            })
             .unzip();
 
         let node_parameters = Some(parameters.node_parameters.deref().clone());

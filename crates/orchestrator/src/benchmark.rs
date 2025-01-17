@@ -24,6 +24,10 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub nodes: usize,
     /// The total load (tx/s) to submit to the system.
     pub load: usize,
+    /// Flag indicating whether nodes should advertise their internal or public IP address for inter-node communication.
+    /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
+    /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
+    pub use_internal_ip_address: bool,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
     /// Byzantine strategy
@@ -34,14 +38,15 @@ impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}-{:?}-{:?}-{}-{}-{}-{}",
+            "{:?}-{:?}-{:?}-{}-{}-{}-{}-{}",
             self.node_parameters,
             self.client_parameters,
             self.settings.faults,
             self.nodes,
             self.byzantine_nodes,
             self.byzantine_strategy,
-            self.load
+            self.load,
+            self.use_internal_ip_address
         )
     }
 }
@@ -50,12 +55,13 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s",
+            "{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {})",
             self.nodes,
             self.byzantine_nodes,
             self.byzantine_strategy,
             self.settings.faults,
-            self.load
+            self.load,
+            self.use_internal_ip_address
         )
     }
 }
@@ -67,6 +73,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         node_parameters: N,
         client_parameters: C,
         nodes: usize,
+        use_internal_ip_address: bool,
         loads: Vec<usize>,
         byzantine_nodes: usize,
         byzantine_strategy: String,
@@ -77,6 +84,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 settings: settings.clone(),
                 node_parameters: node_parameters.clone(),
                 client_parameters: client_parameters.clone(),
+                use_internal_ip_address,
                 nodes,
                 load,
                 byzantine_nodes,
@@ -91,6 +99,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             settings: Settings::new_for_test(),
             node_parameters: N::default(),
             client_parameters: C::default(),
+            use_internal_ip_address: false,
             nodes: 4,
             byzantine_nodes: 0,
             byzantine_strategy: "honest".to_string(),
