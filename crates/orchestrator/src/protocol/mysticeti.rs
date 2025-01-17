@@ -15,7 +15,7 @@ use mysticeti_core::{
 use serde::{Deserialize, Serialize};
 
 use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
-use crate::{benchmark::BenchmarkParameters, client::Instance, display, settings::Settings};
+use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
@@ -37,7 +37,7 @@ impl Deref for MysticetiNodeParameters {
 
 impl Debug for MysticetiNodeParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "c")
+       write!(f, "c")
     }
 }
 
@@ -165,8 +165,7 @@ impl ProtocolCommands for MysticetiProtocol {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
 
-                let mut run = [
-                    &format!("./{BINARY_PATH}/mysticeti"),
+                let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--committee-path {}", committee_path.display()),
@@ -197,9 +196,6 @@ impl ProtocolCommands for MysticetiProtocol {
                 }
 
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
-
-                display::action(format!("\n Command ({authority}): {command}"));
-
                 (instance, command)
             })
             .collect()

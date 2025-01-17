@@ -9,7 +9,7 @@ use std::{
 use eyre::Context;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{benchmark::BenchmarkParameters, client::Instance, display};
+use crate::{benchmark::BenchmarkParameters, client::Instance};
 
 pub mod mysticeti;
 
@@ -112,11 +112,7 @@ pub trait ProtocolMetrics {
     {
         self.nodes_metrics_path(instances, parameters)
             .into_iter()
-            .map(|(instance, path)| (instance, {
-                display::action(format!("\ncurl {path}"));
-
-                format!("curl {path}")
-            }))
+            .map(|(instance, path)| (instance, format!("curl {path}")))
             .collect()
     }
 
