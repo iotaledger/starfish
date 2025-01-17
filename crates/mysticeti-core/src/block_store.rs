@@ -31,12 +31,13 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
-    TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
-    Equivocating,                  // Equivocation attack: N-1 equivocations per round
-    SkippingEquivocating,          // Skipping rule equivocation: 2 equivocations split across validators
-    LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
-    ForkBomb,                       // Fork bomb: withhold a chain of blocks and release it all at once
-    EquivocationForkBomb,          // Equivocation fork bomb: send different chains to each validator
+    TimeoutLeader,               // Timeout Attack: delay sending leader blocks for a fixed timeout duration.
+    Equivocating,                // Equivocation Attack: create and send N-1 equivocations per round.
+    SkippingEquivocating,        // Skipping Equivocation: create and send 2 equivocations split across validators.
+    LeaderWithholding,           // Leader Withholding: send leader blocks to a random subset of validators after a delay;
+    // do not send own blocks if not the leader.
+    ForkBomb,                    // Fork Bomb: withhold a chain of blocks and release them all at once.
+    EquivocationForkBomb,        // Equivocation Fork Bomb: send different chains to each validator.
 }
 #[derive(Clone)]
 pub struct BlockStore {
