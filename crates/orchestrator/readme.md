@@ -74,6 +74,12 @@ cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extr
 ```
 In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows one of the Byzantine strategies [equivocate|delayed|timeout]
 
+In case of running in a single AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between nodes. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command, for example:
+
+```bash
+cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy equivocate --use-internal-ip-addresses 
+
+```
 
 
 ## Step 5. Monitoring
