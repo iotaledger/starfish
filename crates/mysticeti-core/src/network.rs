@@ -68,12 +68,12 @@ pub enum NetworkMessage {
     SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     // A batch of blocks is sent
     Batch(Vec<Data<VerifiedStatementBlock>>),
-    /// Request a few specific block references (this is not indented for large requests).
+    /// Request a potentially missing history of a given block (only shards are sent)
     MissingHistoryRequest(BlockReference),
-    /// Request a few specific block references (this is not indented for large requests).
+    /// Request specific block (blocks with full data are sent)
+    MissingBlocksRequest(Vec<BlockReference>),
+    /// Request a tx data for a few specific block references (only shards are sent).
     MissingTxDataRequest(Vec<BlockReference>),
-    /// Indicate that a requested block is not found.
-    BlockNotFound(Vec<BlockReference>),
 }
 
 pub struct Network {

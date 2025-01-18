@@ -203,7 +203,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn push_block_history(
+    pub async fn push_block_history_with_shards(
         &mut self,
         block_reference: BlockReference,
     ) {
@@ -223,7 +223,7 @@ where
     }
 
 
-    pub async fn send_blocks(
+    pub async fn send_transmission_blocks(
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
@@ -258,12 +258,40 @@ where
                 blocks.push(block);
             }
         }
-        tracing::debug!("Requested blocks with missing data to be sent from {own_index:?} to {peer:?} are {blocks:?}");
+        tracing::debug!("Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}");
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         Some(())
     }
 
-    pub async fn disseminate_only_own_blocks(&mut self, round: RoundNumber) {
+    pub async fn send_storage_blocks(
+        &mut self,
+        peer_id: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    ) -> Option<()>{
+        let peer = format_authority_index(peer_id);
+        let own_index = self.inner.block_store.get_own_authority_index();
+        let batch_block_size = self.parameters.batch_own_block_size;
+        let mut blocks = Vec::new();
+        let mut block_counter = 0;
+        for block_reference in block_references {
+            let block = self.inner
+                .block_store
+                .get_storage_block(block_reference);
+            if block.is_some() {
+                let block = block.expect("Should be some");
+                block_counter += 1;
+                if block_counter >= batch_block_size{
+                    break;
+                }
+                blocks.push(block);
+            }
+        }
+        tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
+        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        Some(())
+    }
+
+    pub async fn disseminate_own_blocks(&mut self, round: RoundNumber) {
         if let Some(existing) = self.own_blocks.take() {
             existing.abort();
             existing.await.ok();

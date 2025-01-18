@@ -241,9 +241,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::SubscribeBroadcastRequest(round) => {
                     if inner.block_store.byzantine_strategy.is_some() {
                         let round = 0;
-                        disseminator.disseminate_only_own_blocks(round).await;
+                        disseminator.disseminate_own_blocks(round).await;
                     } else {
-                        disseminator.disseminate_only_own_blocks(round).await;
+                        disseminator.disseminate_own_blocks(round).await;
                         //disseminator.disseminate_all_blocks_push().await;
                     }
                 }
@@ -352,7 +352,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
 
                     if max_round_pending_block_reference.is_some() {
-                            tracing::debug!("Make request missing block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                            tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
                             Self::request_missing_blocks(max_round_pending_block_reference.unwrap(), &connection.sender);
                     }
 
@@ -362,15 +362,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::MissingHistoryRequest(block_reference) => {
                     tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
-                        disseminator.push_block_history(block_reference).await;
+                        disseminator.push_block_history_with_shards(block_reference).await;
                     }
                 }
-                NetworkMessage::MissingTxDataRequest(block_references) => {
+                NetworkMessage::MissingBlocksRequest(block_references) => {
                     tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
                         if disseminator
-                            .send_blocks(authority, block_references)
+                            .send_storage_blocks(authority, block_references)
                             .await
                             .is_none()
                         {
@@ -378,9 +378,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                 }
-
-                NetworkMessage::BlockNotFound(_references) => {
-                    // TODO: leverage this signal to request blocks from other peers
+                NetworkMessage::MissingTxDataRequest(block_references) => {
+                    tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                    if inner.block_store.byzantine_strategy.is_none() {
+                        let authority = connection.peer_id as AuthorityIndex;
+                        if disseminator
+                            .send_transmission_blocks(authority, block_references)
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         }
