@@ -274,9 +274,6 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
-        let info_length = self.committee.info_length();
-        let parity_length = self.committee.len() - info_length;
-        let total_length = info_length + parity_length;
 
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);

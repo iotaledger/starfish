@@ -50,14 +50,14 @@ impl BlockManager {
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
             let block_reference = storage_and_transmission_blocks.0.reference();
-            if self.blocks_pending.contains_key(block_reference) {
-                continue;
-            }
+
             let block_exists = self.block_store.block_exists(*block_reference);
             if block_exists
             {
+                tracing::debug!("Block exists: {:?}", block_reference);
                 let contains_new_shard_or_header =  self.block_store.contains_new_shard_or_header(&storage_and_transmission_blocks.0);
                 if contains_new_shard_or_header {
+                    tracing::debug!("Block contains new shard: {:?}", block_reference);
                     if storage_and_transmission_blocks.0.statements().is_some() {
                         // Block can be processed. So need to update indexes etc
                         let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
@@ -69,11 +69,17 @@ impl BlockManager {
                         self.block_store.update_with_new_shard(&storage_and_transmission_blocks.0);
                         if self.block_store.is_sufficient_shards(storage_and_transmission_blocks.0.reference()) {
                             recoverable_blocks.insert(storage_and_transmission_blocks.0.reference().clone());
+                            tracing::debug!("Block {:?} to reconstruct in core thread", block_reference);
                         }
                     }
                 }
                 continue;
             }
+
+            if self.blocks_pending.contains_key(block_reference) {
+                continue;
+            }
+
 
             let mut processed = true;
             for included_reference in storage_and_transmission_blocks.0.includes() {

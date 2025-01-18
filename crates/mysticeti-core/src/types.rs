@@ -161,7 +161,7 @@ impl CachedStatementBlock {
                 epoch_marker: self.epoch_marker.clone(),
                 signature: self.signature.clone(),
                 statements: self.statements.clone(),
-                encoded_shard, // Replace `0` with the actual position logic
+                encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
                 merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
@@ -207,7 +207,7 @@ impl CachedStatementBlock {
                 epoch_marker: self.epoch_marker.clone(),
                 signature: self.signature.clone(),
                 statements: Some(reconstructed_statements),
-                encoded_shard, // Replace `0` with the actual position logic
+                encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
                 merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
             }
@@ -788,6 +788,16 @@ impl fmt::Display for VerifiedStatementBlock {
             write!(f, "{},", include)?;
         }
         write!(f, "](")?;
+        if self.statements.is_some() {
+            write!(f, "ledger")?;
+        } else {
+            if self.encoded_shard.is_some() {
+                write!(f, "shard")?;
+            } else {
+                write!(f, "header")?;
+            }
+
+        }
         write!(f, ")")
     }
 }
