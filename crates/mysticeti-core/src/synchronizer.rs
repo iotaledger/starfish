@@ -263,7 +263,7 @@ where
         Some(())
     }
 
-    pub async fn send_storage_blocks(
+    pub async fn send_parents_storage_blocks(
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
@@ -279,11 +279,21 @@ where
                 .get_storage_block(block_reference);
             if block.is_some() {
                 let block = block.expect("Should be some");
-                block_counter += 1;
-                if block_counter >= batch_block_size{
-                    break;
+                for parent_reference in block.includes() {
+                    let parent = self.inner
+                        .block_store
+                        .get_storage_block(parent_reference.clone());
+                    if parent.is_some() {
+                        block_counter += 1;
+                        if block_counter >= batch_block_size{
+                            break;
+                        }
+                        blocks.push(parent.expect("Should be some"));
+                    }
                 }
-                blocks.push(block);
+            }
+            if block_counter >= batch_block_size{
+                break;
             }
         }
         tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");

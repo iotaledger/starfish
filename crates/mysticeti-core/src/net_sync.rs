@@ -194,6 +194,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
+
+        let starfish_flag = true;
+
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -290,16 +293,27 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
 
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
-                    let mut max_round_pending_block_reference: Option<BlockReference> = None;
                     if !verified_data_blocks.is_empty() {
                         let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        for block_reference in pending_block_references {
-                            if max_round_pending_block_reference.is_none() {
-                                max_round_pending_block_reference = Some(block_reference);
-                            } else {
-                                if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
-                                    max_round_pending_block_reference = Some(block_reference);
+                        if starfish_flag {
+                            let mut max_round_pending_block_reference = None;
+                            for block_reference in pending_block_references {
+                                if max_round_pending_block_reference.is_none() {
+                                    max_round_pending_block_reference = Some(block_reference.clone());
+                                } else {
+                                    if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                                        max_round_pending_block_reference = Some(block_reference.clone());
+                                    }
                                 }
+                            }
+                            if max_round_pending_block_reference.is_some() {
+                                tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                                Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
+                            }
+                        } else {
+                            if !pending_block_references.is_empty() {
+                                tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", pending_block_references, peer);
+                                Self::request_parents_blocks(pending_block_references, &connection.sender);
                             }
                         }
                     }
@@ -351,11 +365,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
-                    if max_round_pending_block_reference.is_some() {
-                            tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
-                            Self::request_missing_blocks(max_round_pending_block_reference.unwrap(), &connection.sender);
-                    }
-
                     drop(timer);
                 }
 
@@ -370,7 +379,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
                         if disseminator
-                            .send_storage_blocks(authority, block_references)
+                            .send_parents_storage_blocks(authority, block_references)
                             .await
                             .is_none()
                         {
@@ -401,13 +410,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         None
     }
 
-    fn request_missing_blocks(
-        block_reference_to_check: BlockReference,
+    fn request_missing_history_block(
+        block: BlockReference,
         sender: &mpsc::Sender<NetworkMessage>,
     ) {
             if let Ok(permit) = sender.try_reserve() {
-                permit.send(NetworkMessage::MissingHistoryRequest(block_reference_to_check));
+                permit.send(NetworkMessage::MissingHistoryRequest(block));
             }
+    }
+
+    fn request_parents_blocks(
+        blocks: Vec<BlockReference>,
+        sender: &mpsc::Sender<NetworkMessage>,
+    ) {
+        if let Ok(permit) = sender.try_reserve() {
+            permit.send(NetworkMessage::MissingBlocksRequest(blocks));
+        }
     }
 
     async fn leader_timeout_task(
