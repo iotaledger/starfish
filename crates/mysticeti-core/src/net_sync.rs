@@ -195,7 +195,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
     ) -> Option<()> {
 
-        let starfish_flag = true;
+        let starfish = inner.block_store.starfish;
 
         let last_seen = inner
             .block_store
@@ -295,7 +295,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        if starfish_flag {
+                        if starfish {
                             let mut max_round_pending_block_reference = None;
                             for block_reference in pending_block_references {
                                 if max_round_pending_block_reference.is_none() {

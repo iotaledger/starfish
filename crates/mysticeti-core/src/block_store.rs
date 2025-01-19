@@ -40,6 +40,7 @@ pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
     block_wal_reader: Arc<WalReader>,
     metrics: Arc<Metrics>,
+    pub(crate) starfish: bool,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
@@ -97,6 +98,7 @@ impl BlockStore {
         metrics: Arc<Metrics>,
         committee: &Committee,
         byzantine_strategy: String,
+        starfish: bool,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
@@ -169,6 +171,7 @@ impl BlockStore {
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
+            starfish,
             committee_size: committee.len(),
         };
         builder.build(this)
