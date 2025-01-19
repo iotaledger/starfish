@@ -77,6 +77,8 @@ pub enum BaseStatement {
 
 impl Hash for BlockReference {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.authority.hash(state);
+        self.round.hash(state);
         state.write(&self.digest.as_ref()[..8]);
     }
 }
@@ -611,7 +613,7 @@ impl PartialOrd for BlockReference {
 
 impl Ord for BlockReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, self.digest))
+        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, other.digest))
     }
 }
 
