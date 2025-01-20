@@ -33,6 +33,7 @@ use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
 
 #[allow(unused)]
 // AWS regions and their names
@@ -263,7 +264,7 @@ struct WorkerConnection {
 impl Worker {
     const ACTIVE_HANDSHAKE: u64 = 0xFEFE0000;
     const PASSIVE_HANDSHAKE: u64 = 0x0000AEAE;
-    const MAX_SIZE: u32 = 64 * 1024 * 1024;
+    const MAX_BUFFER_SIZE: u32 = MAX_BUFFER_SIZE;
 
     async fn run(self, mut receiver: mpsc::UnboundedReceiver<TcpStream>) -> Option<()> {
         let initial_delay = if self.active_immediately {
@@ -504,11 +505,11 @@ impl Worker {
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
-        // Note that Box::new([0u8; Self::MAX_SIZE as usize]); does not work with large MAX_SIZE
-        let mut buf = vec![0u8; Self::MAX_SIZE as usize].into_boxed_slice();
+        // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]); does not work with large MAX_BUFFER_SIZE
+        let mut buf = vec![0u8; Self::MAX_BUFFER_SIZE as usize].into_boxed_slice();
         loop {
             let size = stream.read_u32().await?;
-            if size > Self::MAX_SIZE {
+            if size > Self::MAX_BUFFER_SIZE {
                 tracing::warn!("Invalid size: {size}");
                 return Ok(());
             }

@@ -61,7 +61,7 @@ enum Operation {
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
         /// Which Byzantine Strategy to deploy
-        #[clap(long, global = true, default_value_t = true)]
+        #[clap(long, global = true, default_value_t = false)]
         starfish: bool,
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
@@ -82,7 +82,7 @@ enum Operation {
         #[clap(long, global = true, default_value_t = false)]
         mimic_extra_latency: bool,
         /// Which Byzantine Strategy to deploy
-        #[clap(long, global = true, default_value_t = true)]
+        #[clap(long, global = true, default_value_t = false)]
         starfish: bool,
     },
 }

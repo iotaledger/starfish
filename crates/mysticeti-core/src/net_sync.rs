@@ -282,7 +282,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let transmission_block = if starfish {
+                            storage_block.from_storage_to_transmission(own_id)
+                        } else {
+                            storage_block.clone()
+                        };
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;
@@ -350,7 +354,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                         let storage_block = block;
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let transmission_block = if starfish {
+                            storage_block.from_storage_to_transmission(own_id)
+                        } else {
+                            storage_block.clone()
+                        };
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;

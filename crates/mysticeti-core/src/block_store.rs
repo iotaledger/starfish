@@ -51,7 +51,7 @@ struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
     data_availability: HashSet<BlockReference>,
-    // Blocks for which has available transactions data and didn't yet ackowledged.
+    // Blocks for which has available transactions data and didn't yet acknowledge.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
     cached_blocks: BTreeMap<BlockReference, (CachedStatementBlock, usize)>,
@@ -166,6 +166,11 @@ impl BlockStore {
             "timeout" => Some(ByzantineStrategy::TimeoutLeader),
             _ => None, // honest by default
         };
+        if starfish {
+            tracing::info!("Starting Starfish protocol");
+        } else {
+            tracing::info!("Starting Mysticeti protocol");
+        }
         let this = Self {
             block_wal_reader,
             byzantine_strategy,

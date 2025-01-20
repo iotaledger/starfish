@@ -65,6 +65,8 @@ impl Linearizer {
         assert!(self.committed.insert(leader_block_ref));
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
+            let s = self.votes.entry(x.reference().clone()).or_insert_with(StakeAggregator::new);
+            s.add(leader_block_ref.authority, &self.committee);
             for reference in x.includes() {
                 // The block manager may have cleaned up blocks passed the latest committed rounds.
                 let block = block_store
@@ -180,10 +182,11 @@ impl Linearizer {
            //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
-            let acknowledgement_authorities: Vec<_> = sub_dag.blocks
-                .iter()
-                .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum").clone())
-                .collect();
+            let acknowledgement_authorities: Vec<_> =
+                    sub_dag.blocks
+                        .iter()
+                        .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum in starfish").clone())
+                        .collect();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);
             committed.push((sub_dag, acknowledgement_authorities));
         }
