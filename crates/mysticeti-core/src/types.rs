@@ -77,6 +77,8 @@ pub enum BaseStatement {
 
 impl Hash for BlockReference {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.authority.hash(state);
+        self.round.hash(state);
         state.write(&self.digest.as_ref()[..8]);
     }
 }
@@ -169,7 +171,7 @@ impl CachedStatementBlock {
             let info_shards: Vec<Vec<u8>> = self.encoded_statements()
                 .iter()
                 .enumerate()
-                .filter(|(i, s)| *i < info_length)
+                .filter(|(i, _s)| *i < info_length)
                 .map(|(_, s)| s.clone().expect("Should be Some for all info length")) // Safe to unwrap because we filtered for `is_some()`
                 .collect();
             // Combine all the shards into a single Vec<u8> (assuming they are in order)
@@ -611,7 +613,7 @@ impl PartialOrd for BlockReference {
 
 impl Ord for BlockReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, self.digest))
+        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, other.digest))
     }
 }
 

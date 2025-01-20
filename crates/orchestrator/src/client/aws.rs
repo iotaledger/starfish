@@ -108,6 +108,11 @@ impl AwsClient {
                 .unwrap_or("0.0.0.0") // Stopped instances do not have an ip address.
                 .parse()
                 .expect("AWS instance should have a valid ip"),
+            private_ip: aws_instance
+                .private_ip_address()
+                .unwrap_or("0.0.0.0") // Stopped instances do not have an ip address.
+                .parse()
+                .expect("AWS instance should have a valid ip"),
             tags: vec![self.settings.testbed_id.clone()],
             specs: format!(
                 "{:?}",
@@ -306,7 +311,7 @@ impl ServerProviderClient for AwsClient {
     where
         S: Into<String> + Serialize + Send,
     {
-        let random_delay_secs = rand::thread_rng().gen_range(0..=60);
+        let random_delay_secs = rand::thread_rng().gen_range(0..=200);
         println!("Sleeping for {} seconds...", random_delay_secs);
 
         // Sleep for the random delay

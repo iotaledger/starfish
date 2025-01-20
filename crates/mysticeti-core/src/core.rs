@@ -6,7 +6,6 @@ use std::{
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
-use std::collections::HashMap;
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;
@@ -35,10 +34,9 @@ use crate::{
     wal::{WalPosition, WalSyncer, WalWriter},
 };
 use crate::block_store::WAL_ENTRY_PAYLOAD;
-use crate::crypto::{MerkleRoot};
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
-use crate::types::{Encoder, Decoder, Shard, VerifiedStatementBlock};
+use crate::types::{Encoder, Decoder, VerifiedStatementBlock};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -187,15 +185,39 @@ impl<H: BlockHandler> Core<H> {
         self
     }
 
-    // Note that generally when you update this function you also want to change genesis initialization above
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> bool  {
+    // This function attempts to add blocks to the local DAG (and in addition update with shards)
+    // It return true if any update was made successfully
+    // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
+    // For such blocks we need to send a missing history request
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>)  {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
+        let block_references_with_statements: Vec<_> = blocks
+            .iter()
+            .filter(|(b,_)|b.statements().is_some())
+            .map(|(b,_)| b.reference().clone())
+            .collect();
+        let block_manager_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("BlockManager::add_blocks");
         let (processed, new_blocks_to_reconstruct, updated_statements) = self
             .block_manager
             .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+        drop(block_manager_timer);
+        let processed_references: Vec<_> = processed
+            .iter()
+            .filter(|(_,b)|b.statements().is_some())
+            .map(|(_,b)| b.reference().clone())
+            .collect();
+        let not_processed_blocks: Vec<_> = block_references_with_statements
+            .iter()
+            .filter(|block_reference| !processed_references.contains(block_reference))
+            .map(|block_reference| block_reference.clone())
+            .collect();
+
         let success: bool = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
             true
         } else {
@@ -213,7 +235,7 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         self.run_block_handler();
-        success
+        (success, not_processed_blocks)
     }
 
     fn run_block_handler(&mut self) {
@@ -274,12 +296,11 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
-
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);
             let storage_block = self.decoder.decode_shards(&self.committee, &mut self.encoder, block, self.authority);
             if storage_block.is_some() {
-                tracing::debug!("Block {block_reference} is reconstructed in core thread");
+                tracing::debug!("Reconstruction of block {:?} within core thread task is successful", block_reference);
                 let storage_block: VerifiedStatementBlock = storage_block.expect("Block is verified to be reconstructed");
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
@@ -322,11 +343,7 @@ impl<H: BlockHandler> Core<H> {
         mem::swap(&mut taken, &mut self.pending);
 
         let mut blocks = vec![];
-        //if self.block_store.byzantine_strategy.is_some() && self.last_own_block.len() < self.committee.len() {
-        //    for _j in self.last_own_block.len()..self.committee.len() {
-        //        self.last_own_block.push(self.last_own_block[0].clone());
-        //    }
-       // }
+   
         if let Some(ref strategy) = self.block_store.byzantine_strategy {
             match strategy {
                 //  Equivocating crates equivocating chains of blocks

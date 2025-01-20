@@ -60,6 +60,9 @@ enum Operation {
         /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
+        /// Which Byzantine Strategy to deploy
+        #[clap(long, global = true, default_value_t = false)]
+        starfish: bool,
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
@@ -78,6 +81,9 @@ enum Operation {
         /// Seed for mimicing latency between nodes, 0 for zero latency
         #[clap(long, global = true, default_value_t = false)]
         mimic_extra_latency: bool,
+        /// Which Byzantine Strategy to deploy
+        #[clap(long, global = true, default_value_t = false)]
+        starfish: bool,
     },
 }
 
@@ -104,6 +110,7 @@ async fn main() -> Result<()> {
             private_config_path,
             client_parameters_path,
             byzantine_strategy,
+            starfish,
         } => {
             run(
                 authority,
@@ -112,6 +119,7 @@ async fn main() -> Result<()> {
                 private_config_path,
                 client_parameters_path,
                 byzantine_strategy,
+                starfish
             )
             .await?
         }
@@ -121,7 +129,8 @@ async fn main() -> Result<()> {
             load,
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
-        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency).await?,
+            starfish,
+        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency, starfish).await?,
     }
 
     Ok(())
@@ -191,6 +200,7 @@ async fn run(
     private_config_path: String,
     client_parameters_path: String,
     byzantine_strategy: String,
+    starfish: bool,
 ) -> Result<()> {
     tracing::info!("Starting validator {authority}");
 
@@ -230,6 +240,7 @@ async fn run(
         private_config,
         client_parameters,
         byzantine_strategy,
+        starfish,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;
@@ -243,6 +254,7 @@ async fn dryrun(
     load: usize,
     byzantine_strategy: String,
     mimic_latency: bool,
+    starfish: bool,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
@@ -284,6 +296,7 @@ async fn dryrun(
         private_config,
         client_parameters,
         byzantine_strategy,
+        starfish,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;

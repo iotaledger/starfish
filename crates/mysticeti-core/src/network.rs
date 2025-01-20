@@ -33,6 +33,7 @@ use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
 
 #[allow(unused)]
 // AWS regions and their names
@@ -65,15 +66,15 @@ const LATENCY_TABLE: [[u32; 16]; 16] = [
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
-    SubscribeOwnFrom(RoundNumber), // subscribe from round number excluding
+    SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     // A batch of blocks is sent
     Batch(Vec<Data<VerifiedStatementBlock>>),
-    /// Request a few specific block references (this is not indented for large requests).
-    MissingHistory(BlockReference),
-    /// Request a few specific block references (this is not indented for large requests).
-    RequestChunk(Vec<BlockReference>),
-    /// Indicate that a requested block is not found.
-    BlockNotFound(Vec<BlockReference>),
+    /// Request a potentially missing history of a given block (only shards are sent)
+    MissingHistoryRequest(BlockReference),
+    /// Request specific block (blocks with full data are sent)
+    MissingBlocksRequest(Vec<BlockReference>),
+    /// Request a tx data for a few specific block references (only shards are sent).
+    MissingTxDataRequest(Vec<BlockReference>),
 }
 
 pub struct Network {
@@ -263,7 +264,7 @@ struct WorkerConnection {
 impl Worker {
     const ACTIVE_HANDSHAKE: u64 = 0xFEFE0000;
     const PASSIVE_HANDSHAKE: u64 = 0x0000AEAE;
-    const MAX_SIZE: u32 = 64 * 1024 * 1024;
+    const MAX_BUFFER_SIZE: u32 = MAX_BUFFER_SIZE;
 
     async fn run(self, mut receiver: mpsc::UnboundedReceiver<TcpStream>) -> Option<()> {
         let initial_delay = if self.active_immediately {
@@ -441,6 +442,8 @@ impl Worker {
                         }
                     }
                 }
+                // Yield to ensure responsiveness
+                tokio::task::yield_now().await;
             }
         });
 
@@ -502,11 +505,11 @@ impl Worker {
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
-        // Note that Box::new([0u8; Self::MAX_SIZE as usize]); does not work with large MAX_SIZE
-        let mut buf = vec![0u8; Self::MAX_SIZE as usize].into_boxed_slice();
+        // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]); does not work with large MAX_BUFFER_SIZE
+        let mut buf = vec![0u8; Self::MAX_BUFFER_SIZE as usize].into_boxed_slice();
         loop {
             let size = stream.read_u32().await?;
-            if size > Self::MAX_SIZE {
+            if size > Self::MAX_BUFFER_SIZE {
                 tracing::warn!("Invalid size: {size}");
                 return Ok(());
             }

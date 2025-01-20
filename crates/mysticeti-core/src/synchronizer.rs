@@ -110,7 +110,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn start(mut self) {
+    pub async fn start(&mut self) {
         if let Some(existing) = self.data_requestor.take() {
             existing.abort();
             existing.await.ok();
@@ -119,19 +119,21 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
+            self.parameters.clone(),
         ));
         self.data_requestor = Some(handle);
     }
 
-    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()>
+    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>, parameters: SynchronizerParameters) -> Option<()>
     {
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
         let leader_timeout = Duration::from_secs(1);
+        let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
             let committed_dags= inner.block_store.read_pending_unavailable();
             let mut to_request = Vec::new();
-            for commit in &committed_dags {
+            'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
                         let mut aggregator = commit.1[i].clone();
@@ -141,10 +143,13 @@ where
                         }
                     }
                 }
+                if to_request.len() >= upper_limit_request_size {
+                    break 'commit_loop;
+                }
             }
             if to_request.len() > 0 {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
-                to.send(NetworkMessage::RequestChunk(to_request)).await.ok()?;
+                to.send(NetworkMessage::MissingTxDataRequest(to_request)).await.ok()?;
             }
             let _sleep = sleep(leader_timeout).await;
         }
@@ -199,7 +204,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn push_block_history(
+    pub async fn push_block_history_with_shards(
         &mut self,
         block_reference: BlockReference,
     ) {
@@ -219,7 +224,7 @@ where
     }
 
 
-    pub async fn send_blocks(
+    pub async fn send_transmission_blocks(
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
@@ -254,12 +259,50 @@ where
                 blocks.push(block);
             }
         }
-        tracing::debug!("Requested blocks with missing data to be sent from {own_index:?} to {peer:?} are {blocks:?}");
+        tracing::debug!("Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}");
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         Some(())
     }
 
-    pub async fn disseminate_only_own_blocks(&mut self, round: RoundNumber) {
+    pub async fn send_parents_storage_blocks(
+        &mut self,
+        peer_id: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    ) -> Option<()>{
+        let peer = format_authority_index(peer_id);
+        let own_index = self.inner.block_store.get_own_authority_index();
+        let batch_block_size = self.parameters.batch_own_block_size;
+        let mut blocks = Vec::new();
+        let mut block_counter = 0;
+        for block_reference in block_references {
+            let block = self.inner
+                .block_store
+                .get_storage_block(block_reference);
+            if block.is_some() {
+                let block = block.expect("Should be some");
+                for parent_reference in block.includes() {
+                    let parent = self.inner
+                        .block_store
+                        .get_storage_block(parent_reference.clone());
+                    if parent.is_some() {
+                        block_counter += 1;
+                        if block_counter >= batch_block_size{
+                            break;
+                        }
+                        blocks.push(parent.expect("Should be some"));
+                    }
+                }
+            }
+            if block_counter >= batch_block_size{
+                break;
+            }
+        }
+        tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
+        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        Some(())
+    }
+
+    pub async fn disseminate_own_blocks(&mut self, round: RoundNumber) {
         if let Some(existing) = self.own_blocks.take() {
             existing.abort();
             existing.await.ok();
@@ -797,7 +840,7 @@ where
                         continue;
                     };
                     // Broken logic below
-                    let message = NetworkMessage::MissingHistory(chunks.to_vec()[0]);
+                    let message = NetworkMessage::MissingHistoryRequest(chunks.to_vec()[0]);
                     permit.send(message);
                     self.metrics
                         .block_sync_requests_sent

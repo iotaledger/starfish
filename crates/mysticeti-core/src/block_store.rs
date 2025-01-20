@@ -43,6 +43,7 @@ pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
     block_wal_reader: Arc<WalReader>,
     metrics: Arc<Metrics>,
+    pub(crate) starfish: bool,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
@@ -53,7 +54,7 @@ struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
     data_availability: HashSet<BlockReference>,
-    // Blocks for which has available transactions data and didn't yet ackowledged.
+    // Blocks for which has available transactions data and didn't yet acknowledge.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
     cached_blocks: HashMap<BlockReference, (CachedStatementBlock, usize)>,
@@ -100,6 +101,7 @@ impl BlockStore {
         metrics: Arc<Metrics>,
         committee: &Committee,
         byzantine_strategy: String,
+        starfish: bool,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
@@ -170,11 +172,17 @@ impl BlockStore {
             "equivocating-chains-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
             _ => None, // Default to honest behavior
         };
+        if starfish {
+            tracing::info!("Starting Starfish protocol");
+        } else {
+            tracing::info!("Starting Mysticeti protocol");
+        }
         let this = Self {
             block_wal_reader,
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
+            starfish,
             committee_size: committee.len(),
         };
         builder.build(this)

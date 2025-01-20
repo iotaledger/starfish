@@ -9,7 +9,7 @@ use crate::{
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
+use crate::types::{StatementBlock, VerifiedStatementBlock};
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -51,9 +51,40 @@ impl Linearizer {
             committee,
         }
     }
+    /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
+    /// have already been committed (within previous sub-dags).
+    fn collect_subdag_mysticeti(
+        &mut self,
+        block_store: &BlockStore,
+        leader_block: Data<VerifiedStatementBlock>
+    ) -> CommittedSubDag {
+        let mut to_commit = Vec::new();
+
+        let leader_block_ref = *leader_block.reference();
+        let mut buffer = vec![leader_block];
+        assert!(self.committed.insert(leader_block_ref));
+        while let Some(x) = buffer.pop() {
+            to_commit.push(x.clone());
+            let s = self.votes.entry(x.reference().clone()).or_insert_with(StakeAggregator::new);
+            s.add(leader_block_ref.authority, &self.committee);
+            for reference in x.includes() {
+                // The block manager may have cleaned up blocks passed the latest committed rounds.
+                let block = block_store
+                    .get_storage_block(*reference)
+                    .expect("We should have the whole sub-dag by now");
+
+                // Skip the block if we already committed it (either as part of this sub-dag or
+                // a previous one).
+                if self.committed.insert(*reference) {
+                    buffer.push(block);
+                }
+            }
+        }
+        CommittedSubDag::new(leader_block_ref, to_commit)
+    }
     // Collect all blocks in the history of committed leader that have a quorum of blocks
     // acknowledging them.
-    fn collect_committed_blocks_in_history(
+    fn collect_subdag_starfish(
         &mut self,
         block_store: &BlockStore,
         leader_block: Data<VerifiedStatementBlock>,
@@ -139,17 +170,23 @@ impl Linearizer {
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
+        let starfish = block_store.starfish;
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-           let mut sub_dag = self.collect_committed_blocks_in_history(block_store, leader_block);
+           let mut sub_dag = if starfish {
+               self.collect_subdag_starfish(block_store, leader_block)
+           } else {
+               self.collect_subdag_mysticeti(block_store, leader_block)
+           };
            //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
-            let acknowledgement_authorities: Vec<_> = sub_dag.blocks
-                .iter()
-                .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum").clone())
-                .collect();
+            let acknowledgement_authorities: Vec<_> =
+                    sub_dag.blocks
+                        .iter()
+                        .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum in starfish").clone())
+                        .collect();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);
             committed.push((sub_dag, acknowledgement_authorities));
         }

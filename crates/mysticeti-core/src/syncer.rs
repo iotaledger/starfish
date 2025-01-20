@@ -63,12 +63,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) -> Vec<BlockReference> {
         // todo: when block is updated we might return false here and it can make committing longer
-        if self.core.add_blocks(blocks) {
+        let (success, pending_blocks_with_statements) = self.core.add_blocks(blocks);
+        if success {
             self.try_new_block();
             self.try_new_commit();
         }
+        pending_blocks_with_statements
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {

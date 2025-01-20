@@ -56,9 +56,6 @@ const fn assert_constants() {
 pub struct RealBlockHandler {
     transaction_votes: TransactionAggregator<QuorumThreshold, TransactionLog>,
     pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
-    committee: Arc<Committee>,
-    authority: AuthorityIndex,
-    block_store: BlockStore,
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Vec<Transaction>>,
     pending_transactions: usize,
@@ -72,10 +69,7 @@ impl RealBlockHandler {
 
 
     pub fn new(
-        committee: Arc<Committee>,
-        authority: AuthorityIndex,
         certified_transactions_log_path: &Path,
-        block_store: BlockStore,
         metrics: Arc<Metrics>,
     ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
@@ -85,9 +79,6 @@ impl RealBlockHandler {
         let this = Self {
             transaction_votes: TransactionAggregator::with_handler(transaction_log),
             transaction_time: Default::default(),
-            committee,
-            authority,
-            block_store,
             metrics,
             receiver,
             pending_transactions: 0, // todo - need to initialize correctly when loaded from disk

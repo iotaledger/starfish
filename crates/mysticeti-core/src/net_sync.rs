@@ -27,7 +27,7 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
-    runtime::{self, timestamp_utc, Handle, JoinError, JoinHandle},
+    runtime::{timestamp_utc, Handle, JoinError, JoinHandle},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
@@ -194,12 +194,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
+
+        let starfish = inner.block_store.starfish;
+
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
         connection
             .sender
-            .send(NetworkMessage::SubscribeOwnFrom(last_seen))
+            .send(NetworkMessage::SubscribeBroadcastRequest(last_seen))
             .await
             .ok()?;
 
@@ -212,7 +215,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics.clone(),
         );
 
-        let data_requestor = DataRequestor::new(
+        let mut data_requestor = DataRequestor::new(
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),
@@ -238,12 +241,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         tracing::debug!("Connection from {} to {} is established", own_id, peer_id);
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
-                NetworkMessage::SubscribeOwnFrom(round) => {
+                NetworkMessage::SubscribeBroadcastRequest(round) => {
                     if inner.block_store.byzantine_strategy.is_some() {
                         let round = 0;
-                        disseminator.disseminate_only_own_blocks(round).await;
+                        disseminator.disseminate_own_blocks(round).await;
                     } else {
-                        disseminator.disseminate_only_own_blocks(round).await;
+                        disseminator.disseminate_own_blocks(round).await;
                         //disseminator.disseminate_all_blocks_push().await;
                     }
                 }
@@ -258,21 +261,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             blocks_without_statements.push(block);
                         }
                     }
-
-                    let (only_blocks_with_statements, block_reference_to_check) = if blocks_without_statements.len() == 0 && blocks_with_statements.len() > 0  {
-                        let mut block_reference = blocks_with_statements[0].reference().clone();
-                        let mut max_round  = blocks_with_statements[0].round();
-                        for block in blocks_with_statements.iter() {
-                            if block.round() > max_round {
-                                block_reference = block.reference().clone();
-                                max_round = block.round();
-                            }
-                        }
-                        (true, Some(block_reference))
-                    } else {
-                        (false, None)
-                    };
-
 
                     // First process blocks with statements
                     let mut verified_data_blocks = Vec::new();
@@ -294,7 +282,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let transmission_block = if starfish {
+                            storage_block.from_storage_to_transmission(own_id)
+                        } else {
+                            storage_block.clone()
+                        };
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;
@@ -306,7 +298,28 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
-                        inner.syncer.add_blocks(verified_data_blocks).await;
+                        let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
+                        if starfish {
+                            let mut max_round_pending_block_reference = None;
+                            for block_reference in pending_block_references {
+                                if max_round_pending_block_reference.is_none() {
+                                    max_round_pending_block_reference = Some(block_reference.clone());
+                                } else {
+                                    if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                                        max_round_pending_block_reference = Some(block_reference.clone());
+                                    }
+                                }
+                            }
+                            if max_round_pending_block_reference.is_some() {
+                                tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                                Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
+                            }
+                        } else {
+                            if !pending_block_references.is_empty() {
+                                tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", pending_block_references, peer);
+                                Self::request_parents_blocks(pending_block_references, &connection.sender);
+                            }
+                        }
                     }
 
                     // Second process blocks without statements
@@ -341,7 +354,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                         let storage_block = block;
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        let transmission_block = if starfish {
+                            storage_block.from_storage_to_transmission(own_id)
+                        } else {
+                            storage_block.clone()
+                        };
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;
@@ -356,28 +373,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         inner.syncer.add_blocks(verified_data_blocks).await;
                     }
 
-                    if only_blocks_with_statements {
-                        if !inner.block_store.block_exists(block_reference_to_check.unwrap()) {
-                            tracing::debug!("Make request missing block {:?} from peer {:?}", block_reference_to_check.unwrap(), peer);
-                            Self::request_missing_blocks(block_reference_to_check.unwrap(), &connection.sender);
-                        }
-                    }
-
                     drop(timer);
                 }
 
-                NetworkMessage::MissingHistory(block_reference) => {
-                    tracing::debug!("Received request missing block {:?} from peer {:?}", block_reference, peer);
+                NetworkMessage::MissingHistoryRequest(block_reference) => {
+                    tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
-                        disseminator.push_block_history(block_reference).await;
+                        disseminator.push_block_history_with_shards(block_reference).await;
                     }
                 }
-                NetworkMessage::RequestChunk(block_references) => {
+                NetworkMessage::MissingBlocksRequest(block_references) => {
                     tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
                         if disseminator
-                            .send_blocks(authority, block_references)
+                            .send_parents_storage_blocks(authority, block_references)
                             .await
                             .is_none()
                         {
@@ -385,26 +395,45 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                 }
-
-                NetworkMessage::BlockNotFound(_references) => {
-                    // TODO: leverage this signal to request blocks from other peers
+                NetworkMessage::MissingTxDataRequest(block_references) => {
+                    tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                    if inner.block_store.byzantine_strategy.is_none() {
+                        let authority = connection.peer_id as AuthorityIndex;
+                        if disseminator
+                            .send_transmission_blocks(authority, block_references)
+                            .await
+                            .is_none()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         }
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
         inner.syncer.authority_connection(peer_id, false).await;
         disseminator.shutdown().await;
+        data_requestor.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
         None
     }
 
-    fn request_missing_blocks(
-        block_reference_to_check: BlockReference,
+    fn request_missing_history_block(
+        block: BlockReference,
         sender: &mpsc::Sender<NetworkMessage>,
     ) {
             if let Ok(permit) = sender.try_reserve() {
-                permit.send(NetworkMessage::MissingHistory(block_reference_to_check));
+                permit.send(NetworkMessage::MissingHistoryRequest(block));
             }
+    }
+
+    fn request_parents_blocks(
+        blocks: Vec<BlockReference>,
+        sender: &mpsc::Sender<NetworkMessage>,
+    ) {
+        if let Ok(permit) = sender.try_reserve() {
+            permit.send(NetworkMessage::MissingBlocksRequest(blocks));
+        }
     }
 
     async fn leader_timeout_task(

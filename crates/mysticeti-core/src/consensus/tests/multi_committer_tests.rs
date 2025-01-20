@@ -15,34 +15,29 @@ use crate::{
 fn direct_commit() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    for number_of_leaders in 1..committee.len() {
-        let mut block_writer = TestBlockWriter::new(&committee);
-        build_dag(&committee, &mut block_writer, None, 5);
+    let number_of_leaders = 1;
+    let mut block_writer = TestBlockWriter::new(&committee);
+    build_dag(&committee, &mut block_writer, None, 2*wave_length-1);
 
-        let mut committer = UniversalCommitterBuilder::new(
-            committee.clone(),
-            block_writer.into_block_store(),
-            test_metrics(),
-        )
-        .with_wave_length(wave_length)
-        .with_number_of_leaders(number_of_leaders)
+    let mut committer = UniversalCommitterBuilder::new(
+        committee.clone(),
+        block_writer.into_block_store(),
+        test_metrics(),
+    )
         .build();
 
-        let last_committed = BlockReference::new_test(0, 0);
-        let sequence = committer.try_commit(last_committed);
-        tracing::info!("Commit sequence: {sequence:?}");
+    let last_committed = BlockReference::new_test(0, 0);
+    let sequence = committer.try_commit(last_committed);
+    tracing::info!("Commit sequence: {sequence:?}");
 
-        assert_eq!(sequence.len(), number_of_leaders);
-        for (i, leader) in sequence.iter().enumerate() {
-            if let LeaderStatus::Commit(block) = leader {
-                let leader_round = wave_length;
-                let leader_offset = i as u64;
-                let expected = committee.elect_leader(leader_round + leader_offset);
-                assert_eq!(block.author(), expected);
-            } else {
-                panic!("Expected a committed leader")
-            };
-        }
+    assert_eq!(sequence.len(), wave_length as usize);
+    for (i, leader) in sequence.iter().enumerate() {
+        if let LeaderStatus::Commit(block) = leader {
+            let expected = committee.elect_leader(i as u64 +1);
+            assert_eq!(block.author(), expected);
+        } else {
+            panic!("Expected a committed leader")
+        };
     }
 }
 
@@ -52,7 +47,7 @@ fn direct_commit() {
 fn idempotence() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    for number_of_leaders in 1..committee.len() {
+    let number_of_leaders = 1;
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, 5);
 
@@ -61,8 +56,6 @@ fn idempotence() {
             block_writer.into_block_store(),
             test_metrics(),
         )
-        .with_wave_length(wave_length)
-        .with_number_of_leaders(number_of_leaders)
         .build();
 
         // Commit one block.
@@ -75,7 +68,7 @@ fn idempotence() {
         let sequence = committer.try_commit(last_committed);
         tracing::info!("Commit sequence: {sequence:?}");
         assert!(sequence.is_empty());
-    }
+
 }
 
 /// Commit one by one each wave as the dag progresses in ideal conditions.
@@ -84,7 +77,7 @@ fn idempotence() {
 fn multiple_direct_commit() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let mut last_committed = BlockReference::new_test(0, 0);
     for n in 1..=10 {
@@ -97,19 +90,14 @@ fn multiple_direct_commit() {
             block_writer.into_block_store(),
             test_metrics(),
         )
-        .with_wave_length(wave_length)
-        .with_number_of_leaders(number_of_leaders)
         .build();
 
         let sequence = committer.try_commit(last_committed);
         tracing::info!("Commit sequence: {sequence:?}");
-        assert_eq!(sequence.len(), number_of_leaders);
-
-        let leader_round = n as u64 * wave_length;
+        assert_eq!(sequence.len(), wave_length as usize );
         for (i, leader) in sequence.iter().enumerate() {
             if let LeaderStatus::Commit(block) = leader {
-                let leader_offset = i as u64;
-                let expected = committee.elect_leader(leader_round + leader_offset);
+                let expected = committee.elect_leader(i as u64 + 3*(n-1) +1);
                 assert_eq!(block.author(), expected);
             } else {
                 panic!("Expected a committed leader")
@@ -127,7 +115,7 @@ fn multiple_direct_commit() {
 fn direct_commit_partial_round() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let first_leader_round = wave_length;
     let first_leader = committee.elect_leader(first_leader_round);
@@ -142,8 +130,6 @@ fn direct_commit_partial_round() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let sequence = committer.try_commit(last_committed);
@@ -167,7 +153,7 @@ fn direct_commit_partial_round() {
 fn direct_commit_late_call() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let n = 10;
     let enough_blocks = n + 2;
@@ -179,8 +165,6 @@ fn direct_commit_late_call() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
@@ -208,9 +192,8 @@ fn direct_commit_late_call() {
 fn no_genesis_commit() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
 
-    let first_commit_round = 2 * wave_length - 1;
+    let first_commit_round =  wave_length - 1;
     for r in 0..first_commit_round {
         let mut block_writer = TestBlockWriter::new(&committee);
         build_dag(&committee, &mut block_writer, None, r);
@@ -220,8 +203,6 @@ fn no_genesis_commit() {
             block_writer.into_block_store(),
             test_metrics(),
         )
-        .with_wave_length(wave_length)
-        .with_number_of_leaders(number_of_leaders)
         .build();
 
         let last_committed = BlockReference::new_test(0, 0);
@@ -237,7 +218,7 @@ fn no_genesis_commit() {
 fn no_leader() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let mut block_writer = TestBlockWriter::new(&committee);
 
@@ -269,20 +250,16 @@ fn no_leader() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
 
-    assert_eq!(sequence.len(), number_of_leaders);
+    assert_eq!(sequence.len(), number_of_leaders * wave_length as usize);
     for (i, leader) in sequence.iter().enumerate() {
-        let leader_round = wave_length;
-        let leader_offset = i as u64;
-        let expected_leader = committee.elect_leader(leader_round + leader_offset);
-        if i == 0 {
+        let expected_leader = committee.elect_leader(i as u64 +1);
+        if i == 2 {
             if let LeaderStatus::Skip(leader, round) = sequence[i] {
                 assert_eq!(leader, expected_leader);
                 assert_eq!(round, leader_round_1);
@@ -305,7 +282,7 @@ fn no_leader() {
 fn direct_skip() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let mut block_writer = TestBlockWriter::new(&committee);
 
@@ -334,20 +311,16 @@ fn direct_skip() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
-
-    assert_eq!(sequence.len(), number_of_leaders);
+    let total_leaders = wave_length as usize *number_of_leaders;
+    assert_eq!(sequence.len(), total_leaders);
     for (i, leader) in sequence.iter().enumerate() {
-        let leader_round = wave_length;
-        let leader_offset = i as u64;
-        let expected_leader = committee.elect_leader(leader_round + leader_offset);
-        if i == 0 {
+        let expected_leader = committee.elect_leader(i as u64 + 1);
+        if i == 2 {
             if let LeaderStatus::Skip(leader, round) = sequence[i] {
                 assert_eq!(leader, expected_leader);
                 assert_eq!(round, leader_round_1);
@@ -370,7 +343,7 @@ fn direct_skip() {
 fn indirect_commit() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
+    let number_of_leaders = 1;
 
     let mut block_writer = TestBlockWriter::new(&committee);
 
@@ -445,18 +418,16 @@ fn indirect_commit() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
-    assert_eq!(sequence.len(), 2 * number_of_leaders);
+    assert_eq!(sequence.len(), 6);
 
     let leader_round = wave_length;
     let leader = committee.elect_leader(leader_round);
-    if let LeaderStatus::Commit(ref block) = sequence[0] {
+    if let LeaderStatus::Commit(ref block) = sequence[2] {
         assert_eq!(block.author(), leader);
     } else {
         panic!("Expected a committed leader")
@@ -469,8 +440,7 @@ fn indirect_commit() {
 fn indirect_skip() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
-
+    let number_of_leaders = 1;
     let mut block_writer = TestBlockWriter::new(&committee);
 
     // Add enough blocks to reach the leaders of wave 2.
@@ -523,21 +493,17 @@ fn indirect_skip() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
-    assert_eq!(sequence.len(), 3 * number_of_leaders);
+    assert_eq!(sequence.len(), 9);
 
     // Ensure we commit the leaders of wave 1.
-    for n in 0..number_of_leaders {
-        let leader_round_1 = wave_length;
-        let leader_offset = n as u64;
-        let leader_1 = committee.elect_leader(leader_round_1 + leader_offset);
-        if let LeaderStatus::Commit(ref block) = sequence[n] {
+    for n in 1..5 {
+        let leader_1 = committee.elect_leader(n);
+        if let LeaderStatus::Commit(ref block) = sequence[n as usize - 1] {
             assert_eq!(block.author(), leader_1);
         } else {
             panic!("Expected a committed leader")
@@ -546,43 +512,19 @@ fn indirect_skip() {
 
     // Ensure we skip the first leader of wave 2 but commit the other leaders of wave 2.
     let leader_round_2 = 2 * wave_length;
-    if let LeaderStatus::Skip(leader, round) = sequence[number_of_leaders] {
+    if let LeaderStatus::Skip(leader, round) = sequence[5] {
         assert_eq!(leader, leader_2);
         assert_eq!(round, leader_round_2);
     } else {
         panic!("Expected a skipped leader")
     }
-
-    for n in 0..number_of_leaders {
-        let leader_round_2 = 2 * wave_length;
-        let leader_offset = n as u64;
-        if n == 0 {
-            if let LeaderStatus::Skip(leader, round) = sequence[number_of_leaders + n] {
-                assert_eq!(leader, leader_2);
-                assert_eq!(round, leader_round_2);
-            } else {
-                panic!("Expected a skipped leader")
-            }
-        } else {
-            let leader_2 = committee.elect_leader(leader_round_2 + leader_offset);
-            if let LeaderStatus::Commit(ref block) = sequence[number_of_leaders + n] {
-                assert_eq!(block.author(), leader_2);
-            } else {
-                panic!("Expected a committed leader")
-            }
-        }
-    }
-
-    // Ensure we commit the leaders of wave 3.
-    for n in 0..number_of_leaders {
-        let leader_round_3 = 3 * wave_length;
-        let leader_offset = n as u64;
-        let leader_3 = committee.elect_leader(leader_round_3 + leader_offset);
-        if let LeaderStatus::Commit(ref block) = sequence[2 * number_of_leaders + n] {
-            assert_eq!(block.author(), leader_3);
+    for n in 7..10 {
+        let leader_1 = committee.elect_leader(n);
+        if let LeaderStatus::Commit(ref block) = sequence[n as usize - 1] {
+            assert_eq!(block.author(), leader_1);
         } else {
             panic!("Expected a committed leader")
-        }
+        };
     }
 }
 
@@ -592,7 +534,6 @@ fn indirect_skip() {
 fn undecided() {
     let committee = committee(4);
     let wave_length = WAVE_LENGTH;
-    let number_of_leaders = committee.quorum_threshold() as usize;
 
     let mut block_writer = TestBlockWriter::new(&committee);
 
@@ -633,12 +574,10 @@ fn undecided() {
         block_writer.into_block_store(),
         test_metrics(),
     )
-    .with_wave_length(wave_length)
-    .with_number_of_leaders(number_of_leaders)
     .build();
 
     let last_committed = BlockReference::new_test(0, 0);
     let sequence = committer.try_commit(last_committed);
     tracing::info!("Commit sequence: {sequence:?}");
-    assert!(sequence.is_empty());
+    assert_eq!(sequence.len(), wave_length as usize - 1);
 }

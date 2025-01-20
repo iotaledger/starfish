@@ -93,7 +93,13 @@ impl ProtocolCommands for MysticetiProtocol {
         I: Iterator<Item = &'a Instance>,
     {
         let ips = instances
-            .map(|x| x.main_ip.to_string())
+            .map(|x| {
+                match parameters.use_internal_ip_address {
+                    true => x.private_ip,
+                    false => x.main_ip,
+                }
+                .to_string()
+            })
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -225,7 +231,15 @@ impl ProtocolMetrics for MysticetiProtocol {
     {
         let (ips, instances): (_, Vec<_>) = instances
             .into_iter()
-            .map(|x| (IpAddr::V4(x.main_ip), x))
+            .map(|x| {
+                (
+                    match parameters.use_internal_ip_address {
+                        true => IpAddr::V4(x.private_ip),
+                        false => IpAddr::V4(x.main_ip),
+                    },
+                    x,
+                )
+            })
             .unzip();
 
         let node_parameters = Some(parameters.node_parameters.deref().clone());

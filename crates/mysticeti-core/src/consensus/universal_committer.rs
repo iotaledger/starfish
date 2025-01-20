@@ -145,7 +145,6 @@ pub struct UniversalCommitterBuilder {
     block_store: BlockStore,
     metrics: Arc<Metrics>,
     wave_length: RoundNumber,
-    number_of_leaders: usize,
     pipeline: bool,
 }
 
@@ -156,41 +155,22 @@ impl UniversalCommitterBuilder {
             block_store,
             metrics,
             wave_length: WAVE_LENGTH,
-            number_of_leaders: 1,
             pipeline: true,
         }
-    }
-
-    pub fn with_wave_length(mut self, wave_length: RoundNumber) -> Self {
-        self.wave_length = wave_length;
-        self
-    }
-
-    pub fn with_number_of_leaders(mut self, number_of_leaders: usize) -> Self {
-        self.number_of_leaders = number_of_leaders;
-        self
-    }
-
-    pub fn with_pipeline(mut self, pipeline: bool) -> Self {
-        self.pipeline = pipeline;
-        self
     }
 
     pub fn build(self) -> UniversalCommitter {
         let mut committers = Vec::new();
         let pipeline_stages = if self.pipeline { self.wave_length } else { 1 };
         for round_offset in 0..pipeline_stages {
-            for leader_offset in 0..self.number_of_leaders {
-                let options = BaseCommitterOptions {
-                    wave_length: self.wave_length,
-                    round_offset,
-                    leader_offset: leader_offset as RoundNumber,
-                };
-                let committer =
-                    BaseCommitter::new(self.committee.clone(), self.block_store.clone())
-                        .with_options(options);
-                committers.push(committer);
-            }
+            let options = BaseCommitterOptions {
+                wave_length: self.wave_length,
+                round_offset,
+            };
+            let committer =
+                BaseCommitter::new(self.committee.clone(), self.block_store.clone())
+                    .with_options(options);
+            committers.push(committer);
         }
 
         UniversalCommitter {
