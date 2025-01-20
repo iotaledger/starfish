@@ -1,9 +1,12 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
+DESIRED_TPS=${DESIRED_TPS:-120000}
 STARFISH=1 #enable starfish (1) or mysticeti (0)
-DESIRED_TPS=${DESIRED_TPS:-10000}
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-honest} #possible "honest" | "delayed" | "equivocate" | "timeout"
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1} # Number of Byzantine nodes (must be < NUM_VALIDATORS / 3)
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-two-chains} #possible values
+# "honest" | "timeout-leader" | "leader-withholding"| "equivocating-chains" |
+# "equivocating-two-chains" |"chain-bomb"| "equivocating-chains-bomb"
 REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
 
 
@@ -92,11 +95,11 @@ fi
 
 # Start Validators
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace
+  export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
-  if [[ $i -eq 0 ]]; then
-    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
+  if [[ $i -lt $NUM_BYZANTINE_NODES ]]; then
+    echo -e "${GREEN}Starting ${YELLOW}$BYZANTINE_STRATEGY ${GREEN}validator ${YELLOW}$i${RESET} with load 0..."
     tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- dry-run --committee-size $NUM_VALIDATORS --load $TPS_PER_VALIDATOR --mimic-extra-latency --byzantine-strategy $BYZANTINE_STRATEGY --authority $i $STARFISH_FLAG 2>&1 | tee $LOG_FILE"
   else
     echo -e "${GREEN}Starting honest validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."

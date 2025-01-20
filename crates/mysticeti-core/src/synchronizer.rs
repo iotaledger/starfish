@@ -4,7 +4,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use std::cmp::max;
 use futures::future::join_all;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
+use rand::prelude::StdRng;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -374,7 +375,9 @@ where
         mut round: RoundNumber,
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
+        let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+        let batch_byzantine_own_block_size = 50 * batch_own_block_size;
         let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
         let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner
@@ -383,6 +386,7 @@ where
             .unwrap_or_default()
             .round();
         let leader_timeout = Duration::from_secs(1);
+        let withholding_timeout = Duration::from_millis(450);
         loop {
             let notified = inner.notify.notified();
             match byzantine_strategy {
@@ -397,27 +401,83 @@ where
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_own_block_size,
+                        batch_byzantine_own_block_size,
                     )
                     .await?;
 
                     notified.await;
                 }
-                // Send an equivocating block to the authority whenever it is created
-                Some(ByzantineStrategy::EquivocatingBlocks) => {
+                // Send your leader block (together with all previous non-leader blocks)  to a
+                // random set of validators
+                // Do not send own blocks if you are not a leader.
+                Some(ByzantineStrategy::LeaderWithholding) => {
+                    let leaders_current_round = universal_committer.get_leaders(current_round);
+                    if leaders_current_round.contains(&own_authority_index) {
+                        // Sleep a bit to delay the broadcasting of the leader block
+                        let _sleep = sleep(withholding_timeout).await;
+                        // Decide probabilistically whether to send blocks to the current authority
+                        let send: bool = rng.gen_bool(0.5);
+                        if send {
+                            // Send blocks to the authority
+                            sending_batch_own_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_byzantine_own_block_size,
+                            ).await?;
+                        }
+                    }
+                    notified.await;
+                }
+                // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
+                Some(ByzantineStrategy::ChainBomb) => {
+                    let k = 10; // Define K, the interval at which to send blocks (e.g., every 10th round)
+                    // Check if this round is a multiple of K
+                    if current_round % k == 0 {
+                        let leaders_next_round = universal_committer.get_leaders(current_round + 1);
+                        // Only send blocks if the next leader is the intended recipient
+                        if leaders_next_round.contains(&to_whom_authority_index) {
+                            sending_batch_own_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_byzantine_own_block_size,
+                            ).await?;
+                        }
+                    }
+                    notified.await;
+                }
+                // Create two equivocating blocks and, send the first one to the first 50% and the
+                // second to the other 50% of the validators
+                Some(ByzantineStrategy::EquivocatingTwoChains) => {
                     sending_batch_own_blocks(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
                         &mut round,
-                        batch_own_block_size,
+                        batch_byzantine_own_block_size,
+                    )
+                        .await?;
+
+                    notified.await;
+                }
+                // Send an equivocating block to the authority whenever it is created
+                Some(ByzantineStrategy::EquivocatingChains) => {
+                    sending_batch_own_blocks(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        &mut round,
+                        batch_byzantine_own_block_size,
                     )
                     .await?;
 
                     notified.await;
                 }
                 // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
-                Some(ByzantineStrategy::DelayedEquivocatingBlocks) => {
+                Some(ByzantineStrategy::EquivocatingChainsBomb) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
                         sending_batch_own_blocks(
@@ -425,13 +485,14 @@ where
                             to.clone(),
                             to_whom_authority_index,
                             &mut round,
-                            batch_own_block_size,
+                            batch_byzantine_own_block_size,
                         )
                         .await?;
                     }
                     notified.await;
                 }
                 // Send block to the authority whenever a new block is created
+                // Additionally try to send blocks after a timeout
                 _ => {
                     sending_batch_own_blocks(
                         inner.clone(),
@@ -456,6 +517,10 @@ where
                 .round();
         }
     }
+
+
+
+
 
     async fn disseminate_own_blocks_and_encoded_past_blocks(
         to_whom_authority_index: AuthorityIndex,
@@ -498,6 +563,32 @@ where
     }
 }
 
+
+async fn fake_sending_batch_own_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    round: &mut RoundNumber,
+    batch_size: usize,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let peer = format_authority_index(to_whom_authority_index);
+    let blocks =
+        inner
+            .block_store
+            .get_own_transmission_blocks(to_whom_authority_index, round.clone(), batch_size);
+    for block in blocks.iter() {
+        inner
+            .block_store
+            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+        *round = max(*round, block.round());
+    }
+    tracing::debug!("Blocks {blocks:?} are dropped to {peer}");
+    Some(())
+}
 async fn sending_batch_own_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,

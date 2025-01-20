@@ -15,7 +15,7 @@ use crate::{
     block_manager::BlockManager,
     block_store::{
         BlockStore, BlockWriter, CommitData, OwnBlockData, WAL_ENTRY_COMMIT,
-        WAL_ENTRY_STATE,
+        WAL_ENTRY_STATE, ByzantineStrategy,
     },
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
@@ -296,9 +296,6 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
-        let info_length = self.committee.info_length();
-        let parity_length = self.committee.len() - info_length;
-
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);
             let storage_block = self.decoder.decode_shards(&self.committee, &mut self.encoder, block, self.authority);
@@ -346,9 +343,36 @@ impl<H: BlockHandler> Core<H> {
         mem::swap(&mut taken, &mut self.pending);
 
         let mut blocks = vec![];
-        if self.block_store.byzantine_strategy.is_some() && self.last_own_block.len() < self.committee.len() {
-            for _j in self.last_own_block.len()..self.committee.len() {
-                self.last_own_block.push(self.last_own_block[0].clone());
+   
+        if let Some(ref strategy) = self.block_store.byzantine_strategy {
+            match strategy {
+                //  Equivocating crates equivocating chains of blocks
+                ByzantineStrategy::EquivocatingChains => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        // Clone the first block to create N-1 equivocated blocks
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                //  Skipping Equivocating crates two equivocating blocks
+                ByzantineStrategy::EquivocatingTwoChains => {
+                    for _ in self.last_own_block.len()..2 {
+                        // Create two equivocated blocks
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                // Strategy 4: Equivocation Chain Bomb creates chains of own blocks that are
+                // released to respected validators
+                ByzantineStrategy::EquivocatingChainsBomb => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        // Clone the first block for each validator, creating a unique block per validator
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+
+                // Default case: No Equivocation of blocks
+                _ => {}
             }
         }
         let mut statements =  Vec::new();
@@ -434,8 +458,18 @@ impl<H: BlockHandler> Core<H> {
 
         let mut return_blocks = vec![];
         let mut authority_bounds = vec![0];
-        for i in 1..=blocks.len() {
-            authority_bounds.push(i * self.committee.len() / blocks.len());
+        match self.block_store.byzantine_strategy {
+            // Skipping Equivocating: Divide the authorities into two groups
+            Some(ByzantineStrategy::EquivocatingTwoChains) => {
+                authority_bounds.push((self.committee.len() as f64 / 2.0).ceil() as usize);
+                authority_bounds.push(self.committee.len());
+            }
+            // Default behavior: Distribute blocks evenly across all authorities
+            _ => {
+                for i in 1..=blocks.len() {
+                    authority_bounds.push(i * self.committee.len() / blocks.len());
+                }
+            }
         }
         self.last_own_block = vec![];
         let mut block_id = 0;

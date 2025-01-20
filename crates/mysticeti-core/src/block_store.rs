@@ -31,9 +31,12 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
-    TimeoutLeader,
-    EquivocatingBlocks,
-    DelayedEquivocatingBlocks,
+    TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
+    EquivocatingChains,                  // Equivocation attack: N-1 equivocations per round
+    EquivocatingTwoChains,          // Skipping rule equivocation: 2 equivocations split across validators
+    LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
+    ChainBomb,                       // Fork bomb: withhold a chain of blocks and release it all at once
+    EquivocatingChainsBomb,          // Equivocation fork bomb: send different chains to each validator
 }
 #[derive(Clone)]
 pub struct BlockStore {
@@ -54,7 +57,7 @@ struct BlockStoreInner {
     // Blocks for which has available transactions data and didn't yet acknowledge.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
-    cached_blocks: BTreeMap<BlockReference, (CachedStatementBlock, usize)>,
+    cached_blocks: HashMap<BlockReference, (CachedStatementBlock, usize)>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
@@ -161,10 +164,13 @@ impl BlockStore {
             tracing::info!("Wal is empty, will start from genesis");
         }
         let byzantine_strategy = match byzantine_strategy.as_str() {
-            "equivocate" => Some(ByzantineStrategy::EquivocatingBlocks),
-            "delayed" => Some(ByzantineStrategy::DelayedEquivocatingBlocks),
-            "timeout" => Some(ByzantineStrategy::TimeoutLeader),
-            _ => None, // honest by default
+            "timeout-leader" => Some(ByzantineStrategy::TimeoutLeader),
+            "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
+            "equivocating-chains" => Some(ByzantineStrategy::EquivocatingChains),
+            "equivocating-two-chains" => Some(ByzantineStrategy::EquivocatingTwoChains),
+            "chain-bomb" => Some(ByzantineStrategy::ChainBomb),
+            "equivocating-chains-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
+            _ => None, // Default to honest behavior
         };
         if starfish {
             tracing::info!("Starting Starfish protocol");
@@ -344,7 +350,7 @@ impl BlockStore {
 
 
     pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool {
-        self.inner.write().is_sufficient_shards(block_reference)
+        self.inner.read().is_sufficient_shards(block_reference)
     }
 
     pub fn get_cached_block(&self, block_reference: &BlockReference) -> CachedStatementBlock {
@@ -536,7 +542,7 @@ impl BlockStoreInner {
         if self.data_availability.contains(block_reference) {
             return self.committee_size;
         }
-        self.cached_blocks.get(block_reference).map_or(0, |x| x.1)
+        self.cached_blocks.get(block_reference).map_or(0, |x| x.1.clone())
     }
 
     pub fn read_pending_unavailable(&self) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>{
@@ -595,15 +601,20 @@ impl BlockStoreInner {
                     if cached_block.encoded_statements()[position].is_none() {
                         cached_block.add_encoded_shard(position, encoded_shard);
                         *count += 1;
+                        tracing::debug!("Updated cached block {:?}. Now shards {:?}", block, count);
+                    } else {
+                        tracing::debug!("Not updated cached block {:?}. Still shards {:?}. Position {:?}", block, count, position);
                     }
 
             }
+        } else {
+            tracing::debug!("Block {:?} is not cached", block);
         }
     }
 
 
 
-    pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool{
+    pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool {
         let count_shards = self.shard_count(block_reference);
         if count_shards >= self.info_length {
             return true;
@@ -788,11 +799,15 @@ pub fn get_blocks_at_authority_round(
                 self.data_availability.insert(block.reference().clone());
                 self.pending_acknowledgment.push(block.reference().clone());
             }
+            tracing::debug!("Remove cached block {:?}", block.reference());
             self.cached_blocks.remove(block.reference());
         } else  {
             if !self.data_availability.contains(&block.reference()) {
                 let cached_block = block.to_cached_block(self.committee_size);
                 self.cached_blocks.insert(block.reference().clone(), (cached_block, count));
+                tracing::debug!("Insert cached block {:?}", block.reference());
+            } else {
+                tracing::debug!("Block is already available {:?}", block.reference());
             }
         }
     }
