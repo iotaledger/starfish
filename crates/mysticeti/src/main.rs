@@ -60,9 +60,9 @@ enum Operation {
         /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
-        /// Which Byzantine Strategy to deploy
-        #[clap(long, global = true, default_value_t = false)]
-        starfish: bool,
+        /// Consensus to deploy : Mysticeti = 0, Starfish mixed pull-push = 1, Starfish push = 2
+        #[clap(long, value_name = "INT", default_value_t = 1, global = true)]
+        starfish: usize,
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
@@ -81,9 +81,9 @@ enum Operation {
         /// Seed for mimicing latency between nodes, 0 for zero latency
         #[clap(long, global = true, default_value_t = false)]
         mimic_extra_latency: bool,
-        /// Which Byzantine Strategy to deploy
-        #[clap(long, global = true, default_value_t = false)]
-        starfish: bool,
+        /// Consensus to deploy : Mysticeti = 0, Starfish mixed pull-push = 1, Starfish push = 2
+        #[clap(long, value_name = "INT", default_value_t = 1, global = true)]
+        starfish: usize,
     },
 }
 
@@ -200,7 +200,7 @@ async fn run(
     private_config_path: String,
     client_parameters_path: String,
     byzantine_strategy: String,
-    starfish: bool,
+    starfish: usize,
 ) -> Result<()> {
     tracing::info!("Starting validator {authority}");
 
@@ -254,7 +254,7 @@ async fn dryrun(
     load: usize,
     byzantine_strategy: String,
     mimic_latency: bool,
-    starfish: bool,
+    starfish: usize,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"

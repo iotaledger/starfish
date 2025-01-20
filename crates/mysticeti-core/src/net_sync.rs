@@ -246,8 +246,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let round = 0;
                         disseminator.disseminate_own_blocks(round).await;
                     } else {
-                        disseminator.disseminate_own_blocks(round).await;
-                        //disseminator.disseminate_all_blocks_push().await;
+                        // For Mysticeti pull and Starfish mixed pull-push strategy disseminate
+                        // own blocks only. For Starfish push, psuh all blocks
+                        if starfish <= 1 {
+                            disseminator.disseminate_own_blocks(round).await;
+                        } else {
+                            disseminator.disseminate_all_blocks_push().await;
+                        }
                     }
                 }
                 NetworkMessage::Batch(blocks) => {
@@ -282,7 +287,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = if starfish {
+                        let transmission_block = if starfish >= 1 {
                             storage_block.from_storage_to_transmission(own_id)
                         } else {
                             storage_block.clone()
@@ -299,7 +304,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        if starfish {
+                        if starfish >= 1 {
                             let mut max_round_pending_block_reference = None;
                             for block_reference in pending_block_references {
                                 if max_round_pending_block_reference.is_none() {
@@ -354,7 +359,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                         let storage_block = block;
-                        let transmission_block = if starfish {
+                        let transmission_block = if starfish >= 1 {
                             storage_block.from_storage_to_transmission(own_id)
                         } else {
                             storage_block.clone()

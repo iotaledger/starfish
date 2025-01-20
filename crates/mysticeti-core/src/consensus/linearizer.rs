@@ -174,7 +174,7 @@ impl Linearizer {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-           let mut sub_dag = if starfish {
+           let mut sub_dag = if starfish >= 1 {
                self.collect_subdag_starfish(block_store, leader_block)
            } else {
                self.collect_subdag_mysticeti(block_store, leader_block)

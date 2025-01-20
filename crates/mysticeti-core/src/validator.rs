@@ -39,7 +39,7 @@ impl Validator {
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
         byzantine_strategy: String,
-        starfish: bool,
+        starfish: usize,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)

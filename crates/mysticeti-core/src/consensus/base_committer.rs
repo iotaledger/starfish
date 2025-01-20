@@ -165,7 +165,7 @@ impl BaseCommitter {
         }
     }
 
-    fn decide_skip(&self, voting_round: RoundNumber, leader: AuthorityIndex, voters_for_leaders: &HashSet<(BlockReference, BlockReference)>) -> bool {
+    fn decide_skip_starfish(&self, voting_round: RoundNumber, leader: AuthorityIndex, voters_for_leaders: &HashSet<(BlockReference, BlockReference)>) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for voting_block in &voting_blocks {
@@ -204,6 +204,31 @@ impl BaseCommitter {
             }
         }
         to_skip
+    }
+
+    /// Check whether the specified leader has enough blames (that is, 2f+1 non-votes) to be
+    /// directly skipped.
+    fn decide_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
+        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+
+        let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for voting_block in &voting_blocks {
+            let voter = voting_block.reference().authority;
+            if voting_block
+                .includes()
+                .iter()
+                .all(|include| include.authority != leader)
+            {
+                tracing::trace!(
+                    "[{self}] {voting_block:?} is a blame for leader {}",
+                    format_authority_round(leader, voting_round - 1)
+                );
+                if blame_stake_aggregator.add(voter, &self.committee) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Check whether the specified leader has enough support (that is, 2f+1 certificates)
@@ -274,8 +299,14 @@ impl BaseCommitter {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
-        if self.decide_skip(voting_round, leader, voters_for_leaders) {
-            return LeaderStatus::Skip(leader, leader_round);
+        if self.block_store.starfish >= 1 {
+            if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
+                return LeaderStatus::Skip(leader, leader_round);
+            }
+        } else {
+            if self.decide_skip_mysticeti(voting_round, leader) {
+                return LeaderStatus::Skip(leader, leader_round);
+            }
         }
 
         // Check whether the leader(s) has enough support. That is, whether there are 2f+1
