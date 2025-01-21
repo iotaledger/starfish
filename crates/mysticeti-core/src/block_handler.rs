@@ -247,7 +247,6 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
                         .transaction_committed_latency_squared_micros
                         .inc_by(latency.as_micros().pow(2) as u64);
 
-
                     self.metrics.sequenced_transactions_total.inc();
                 }
             }
@@ -279,16 +278,19 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
-                let block_timestamp = current_timestamp.saturating_sub(block_creation_time);
+
+                if block_creation_time.is_zero() {
+                    continue
+                }
+
+                let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
 
-                self.metrics
-                    .block_committed_latency
-                    .observe(block_timestamp);
+                self.metrics.block_committed_latency.observe(block_latency);
 
                 self.metrics
                     .block_committed_latency_squared_micros
-                    .inc_by(block_timestamp.as_micros().pow(2) as u64);
+                    .inc_by(block_latency.as_micros().pow(2) as u64);
 
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }
