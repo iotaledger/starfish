@@ -284,6 +284,7 @@ where
         let batch_block_size = self.parameters.batch_own_block_size;
         let mut blocks = Vec::new();
         let mut block_counter = 0;
+        let unknown_blocks_by_peer = self.inner.block_store.get_unknown_by_authority(peer_id);
         for block_reference in block_references {
             let block = self.inner
                 .block_store
@@ -291,21 +292,28 @@ where
             if block.is_some() {
                 let block = block.expect("Should be some");
                 for parent_reference in block.includes() {
-                    let parent = self.inner
-                        .block_store
-                        .get_storage_block(parent_reference.clone());
-                    if parent.is_some() {
-                        block_counter += 1;
-                        if block_counter >= batch_block_size{
-                            break;
+                    if unknown_blocks_by_peer.contains(parent_reference) {
+                        let parent = self.inner
+                            .block_store
+                            .get_storage_block(parent_reference.clone());
+                        if parent.is_some() {
+                            block_counter += 1;
+                            if block_counter >= batch_block_size {
+                                break;
+                            }
+                            blocks.push(parent.expect("Should be some"));
                         }
-                        blocks.push(parent.expect("Should be some"));
                     }
                 }
             }
             if block_counter >= batch_block_size{
                 break;
             }
+        }
+        for block in blocks.iter() {
+            self.inner
+                .block_store
+                .update_known_by_authority(block.reference().clone(), peer_id);
         }
         tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
@@ -641,7 +649,6 @@ where
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
-    tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
     let own_index = inner.block_store.get_own_authority_index();
     let blocks = inner
         .block_store

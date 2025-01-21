@@ -388,7 +388,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         disseminator.push_block_history_with_shards(block_reference).await;
                     }
                 }
-                NetworkMessage::MissingBlocksRequest(block_references) => {
+                NetworkMessage::MissingParentsRequest(block_references) => {
                     tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                     if inner.block_store.byzantine_strategy.is_none() {
                         let authority = connection.peer_id as AuthorityIndex;
@@ -438,7 +438,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         sender: &mpsc::Sender<NetworkMessage>,
     ) {
         if let Ok(permit) = sender.try_reserve() {
-            permit.send(NetworkMessage::MissingBlocksRequest(blocks));
+            permit.send(NetworkMessage::MissingParentsRequest(blocks));
         }
     }
 

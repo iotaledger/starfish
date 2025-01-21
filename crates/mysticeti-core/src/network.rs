@@ -75,7 +75,7 @@ pub enum NetworkMessage {
     /// Request a potentially missing history of a given block (only shards are sent)
     MissingHistoryRequest(BlockReference),
     /// Request specific block (blocks with full data are sent)
-    MissingBlocksRequest(Vec<BlockReference>),
+    MissingParentsRequest(Vec<BlockReference>),
     /// Request a tx data for a few specific block references (only shards are sent).
     MissingTxDataRequest(Vec<BlockReference>),
 }
