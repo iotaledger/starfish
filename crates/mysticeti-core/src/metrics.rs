@@ -8,12 +8,7 @@ use std::{
     time::Duration,
 };
 
-use prometheus::{
-    register_counter_vec_with_registry, register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry, register_int_counter_with_registry,
-    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, CounterVec,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-};
+use prometheus::{register_int_counter_vec_with_registry, register_int_counter_with_registry, register_int_gauge_vec_with_registry, register_int_gauge_with_registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 use tabled::{Table, Tabled};
 use tokio::time::Instant;
 
@@ -25,24 +20,18 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
 };
 
-const LATENCY_SEC_BUCKETS: &[f64] = &[
-    0.1, 0.25, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2., 2.5, 3.0, 4.0, 5., 10., 20., 30., 60., 90.,
-];
-
 /// Metrics collected by the benchmark.
 pub const BENCHMARK_DURATION: &str = "benchmark_duration";
-pub const LATENCY_S: &str = "latency_s";
-pub const LATENCY_SQUARED_S: &str = "latency_squared_s";
+
+pub const TRANSACTION_CERTIFIED_LATENCY: &str = "transaction_certified_latency";
+pub const TRANSACTION_CERTIFIED_LATENCY_SQUARED: &str = "latency_s";
 
 #[derive(Clone)]
 pub struct Metrics {
     pub benchmark_duration: IntCounter,
-    pub latency_s: HistogramVec,
-    pub latency_squared_s: CounterVec,
     pub committed_leaders_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
     pub sequenced_transactions_total: IntCounter,
-    pub inter_block_latency_s: HistogramVec,
 
     pub block_store_unloaded_blocks: IntCounter,
     pub block_store_loaded_blocks: IntCounter,
@@ -55,24 +44,21 @@ pub struct Metrics {
     pub core_lock_enqueued: IntCounter,
     pub core_lock_dequeued: IntCounter,
 
-    pub block_handler_pending_certificates: IntGauge,
     pub block_handler_cleanup_util: IntCounter,
-
-    pub commit_handler_pending_certificates: IntGauge,
 
     pub missing_blocks: IntGaugeVec,
     pub block_sync_requests_sent: IntCounterVec,
-    pub block_sync_requests_received: IntCounterVec,
+    pub block_sync_requests_received: IntCounterVec, // TODO: do we want to track this metric?
 
     pub block_committed_latency: HistogramSender<Duration>,
+    pub block_committed_latency_squared_micros: IntCounter,
 
-    pub transaction_certified_latency: HistogramSender<Duration>,
-    pub certificate_committed_latency: HistogramSender<Duration>,
     pub transaction_committed_latency: HistogramSender<Duration>,
+    pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
-    pub proposed_block_transaction_count: HistogramSender<usize>,
-    pub proposed_block_vote_count: HistogramSender<usize>,
+    pub proposed_block_transaction_count: HistogramSender<usize>, // TODO: do we want to track this metric?
+    pub proposed_block_vote_count: HistogramSender<usize>, // TODO: do we want to track this metric?
 
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
@@ -83,8 +69,6 @@ pub struct Metrics {
 pub struct MetricReporter {
     // When adding field here make sure to update
     // MetricsReporter::receive_all and MetricsReporter::run_report.
-    pub transaction_certified_latency: HistogramReporter<Duration>,
-    pub certificate_committed_latency: HistogramReporter<Duration>,
     pub transaction_committed_latency: HistogramReporter<Duration>,
     pub block_committed_latency: HistogramReporter<Duration>,
 
@@ -110,8 +94,6 @@ pub struct VecHistogramReporter<T> {
 
 impl Metrics {
     pub fn new(registry: &Registry, committee: Option<&Committee>) -> (Arc<Self>, MetricReporter) {
-        let (transaction_certified_latency_hist, transaction_certified_latency) = histogram();
-        let (certificate_committed_latency_hist, certificate_committed_latency) = histogram();
         let (transaction_committed_latency_hist, transaction_committed_latency) = histogram();
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
@@ -133,16 +115,6 @@ impl Metrics {
             })
             .unzip();
         let reporter = MetricReporter {
-            transaction_certified_latency: HistogramReporter::new_in_registry(
-                transaction_certified_latency_hist,
-                registry,
-                "transaction_certified_latency",
-            ),
-            certificate_committed_latency: HistogramReporter::new_in_registry(
-                certificate_committed_latency_hist,
-                registry,
-                "certificate_committed_latency",
-            ),
             transaction_committed_latency: HistogramReporter::new_in_registry(
                 transaction_committed_latency_hist,
                 registry,
@@ -198,21 +170,6 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            latency_s: register_histogram_vec_with_registry!(
-                LATENCY_S,
-                "Buckets measuring the end-to-end latency of a workload in seconds",
-                &["workload"],
-                LATENCY_SEC_BUCKETS.to_vec(),
-                registry,
-            )
-            .unwrap(),
-            latency_squared_s: register_counter_vec_with_registry!(
-                LATENCY_SQUARED_S,
-                "Square of total end-to-end latency of a workload in seconds",
-                &["workload"],
-                registry,
-            )
-            .unwrap(),
             committed_leaders_total: register_int_counter_vec_with_registry!(
                 "committed_leaders_total",
                 "Total number of (direct or indirect) committed leaders per authority",
@@ -220,13 +177,6 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            inter_block_latency_s: register_histogram_vec_with_registry!(
-                "inter_block_latency_s",
-                "Buckets measuring the inter-block latency in seconds",
-                &["workload"],
-                LATENCY_SEC_BUCKETS.to_vec(),
-                registry,
-            ).unwrap(),
             submitted_transactions: register_int_counter_with_registry!(
                 "submitted_transactions",
                 "Total number of submitted transactions",
@@ -296,27 +246,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-
-            block_handler_pending_certificates: register_int_gauge_with_registry!(
-                "block_handler_pending_certificates",
-                "Number of pending certificates in block handler",
-                registry,
-            )
-            .unwrap(),
             block_handler_cleanup_util: register_int_counter_with_registry!(
                 "block_handler_cleanup_util",
                 "block_handler_cleanup_util",
                 registry,
             )
             .unwrap(),
-
-            commit_handler_pending_certificates: register_int_gauge_with_registry!(
-                "commit_handler_pending_certificates",
-                "Number of pending certificates in commit handler",
-                registry,
-            )
-            .unwrap(),
-
             missing_blocks: register_int_gauge_vec_with_registry!(
                 "missing_blocks",
                 "Number of missing blocks per authority",
@@ -347,9 +282,19 @@ impl Metrics {
             )
             .unwrap(),
             block_committed_latency,
-            transaction_certified_latency,
-            certificate_committed_latency,
+            block_committed_latency_squared_micros: register_int_counter_with_registry!(
+                "block_committed_latency_squared_micros",
+                "Square of total end-to-end latency of a block commitment in seconds",
+                registry,
+            )
+            .unwrap(),
             transaction_committed_latency,
+            transaction_committed_latency_squared_micros: register_int_counter_with_registry!(
+                "transaction_committed_latency_squared_micros",
+                "Square of total end-to-end latency of a transaction commitment in seconds",
+                registry,
+            )
+            .unwrap(),
 
             proposed_block_size_bytes,
             proposed_block_transaction_count,
@@ -463,8 +408,6 @@ impl MetricReporter {
     }
 
     pub fn clear_receive_all(&mut self) {
-        self.transaction_certified_latency.clear_receive_all();
-        self.certificate_committed_latency.clear_receive_all();
         self.transaction_committed_latency.clear_receive_all();
         self.block_committed_latency.clear_receive_all();
 
@@ -494,8 +437,6 @@ impl MetricReporter {
 
         self.clear_receive_all();
 
-        self.transaction_certified_latency.report();
-        self.certificate_committed_latency.report();
         self.transaction_committed_latency.report();
         self.block_committed_latency.report();
 
