@@ -195,8 +195,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
     ) -> Option<()> {
 
-        let starfish = inner.block_store.starfish;
-
+        let mysticeti_starfish_flag = inner.block_store.starfish;
+        let committee_size = inner.block_store.committee_size;
+        let synchronizer_parameters = SynchronizerParameters::new(committee_size);
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -211,7 +212,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             connection.sender.clone(),
             universal_committer,
             inner.clone(),
-            SynchronizerParameters::default(),
+            synchronizer_parameters.clone(),
             metrics.clone(),
         );
 
@@ -219,7 +220,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),
-            SynchronizerParameters::default(),
+            synchronizer_parameters.clone(),
             metrics.clone(),
         );
 
@@ -227,10 +228,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
-                                                  64).unwrap();
+                                                  64).expect("Encoder should be created");
         let mut decoder = ReedSolomonDecoder::new(2,
                                               4,
-                                              64).unwrap();
+                                              64).expect("Decoder should be created");
 
         let peer_id = connection.peer_id as AuthorityIndex;
         inner.syncer.authority_connection(peer_id, true).await;
@@ -238,7 +239,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
 
-        tracing::debug!("Connection from {} to {} is established", own_id, peer_id);
+        tracing::debug!("Connection from {:?} to {:?} is established", own_id, peer_id);
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
                 NetworkMessage::SubscribeBroadcastRequest(round) => {
@@ -247,8 +248,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         disseminator.disseminate_own_blocks(round).await;
                     } else {
                         // For Mysticeti pull and Starfish mixed pull-push strategy disseminate
-                        // own blocks only. For Starfish push, psuh all blocks
-                        if starfish <= 1 {
+                        // own blocks only. For Starfish push, push all blocks
+                        if mysticeti_starfish_flag <= 1 {
                             disseminator.disseminate_own_blocks(round).await;
                         } else {
                             disseminator.disseminate_all_blocks_push().await;
@@ -287,7 +288,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = if starfish >= 1 {
+                        let transmission_block = if mysticeti_starfish_flag >= 1 {
                             storage_block.from_storage_to_transmission(own_id)
                         } else {
                             storage_block.clone()
@@ -304,7 +305,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        if starfish >= 1 {
+                        if mysticeti_starfish_flag >= 1 {
                             let mut max_round_pending_block_reference = None;
                             for block_reference in pending_block_references {
                                 if max_round_pending_block_reference.is_none() {
@@ -359,7 +360,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                         let storage_block = block;
-                        let transmission_block = if starfish >= 1 {
+                        let transmission_block = if mysticeti_starfish_flag >= 1 {
                             storage_block.from_storage_to_transmission(own_id)
                         } else {
                             storage_block.clone()

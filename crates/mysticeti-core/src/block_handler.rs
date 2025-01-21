@@ -59,11 +59,10 @@ pub struct RealBlockHandler {
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Vec<Transaction>>,
     pending_transactions: usize,
+    max_transactions_per_block: usize, // max number of transaction in block. Depends on the committee size
 }
 
-/// The max number of transactions per block.
-// todo - This value should be in bytes because it is capped by the wal entry size.
-pub const SOFT_MAX_PROPOSED_PER_BLOCK: usize = 4 * 1000;
+
 
 impl RealBlockHandler {
 
@@ -71,16 +70,19 @@ impl RealBlockHandler {
     pub fn new(
         certified_transactions_log_path: &Path,
         metrics: Arc<Metrics>,
+        committee: &Committee,
     ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
         let transaction_log = TransactionLog::start(certified_transactions_log_path)
             .expect("Failed to open certified transaction log for write");
-
+        let max_transactions_per_block = 8 * 1024 / committee.len();
         let this = Self {
             transaction_votes: TransactionAggregator::with_handler(transaction_log),
             transaction_time: Default::default(),
+            max_transactions_per_block,
             metrics,
             receiver,
+
             pending_transactions: 0, // todo - need to initialize correctly when loaded from disk
         };
         (this, sender)
@@ -89,7 +91,7 @@ impl RealBlockHandler {
 
 impl RealBlockHandler {
     fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
-        if self.pending_transactions >= SOFT_MAX_PROPOSED_PER_BLOCK {
+        if self.pending_transactions >= self.max_transactions_per_block {
             return None;
         }
         let received = self.receiver.try_recv().ok()?;
@@ -136,6 +138,9 @@ impl BlockHandler for RealBlockHandler {
         response
     }
 }
+
+/// The max number of transactions per block for TestBlockHandler
+pub const SOFT_MAX_PROPOSED_PER_BLOCK: usize = 4 * 1000;
 
 // Immediately votes and generates new transactions
 #[allow(dead_code)]

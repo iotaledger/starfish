@@ -81,6 +81,7 @@ impl Validator {
         let (block_handler, block_sender) = RealBlockHandler::new(
             &private_config.certified_transactions_log(),
             metrics.clone(),
+            &committee,
         );
         TransactionGenerator::start(
             block_sender,

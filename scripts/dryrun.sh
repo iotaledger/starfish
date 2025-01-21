@@ -1,10 +1,10 @@
 #!/bin/bash
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-10000}
-STARFISH=2 #enable mysticeti pull (0), starfish pull-push (1), starfish push (2)
+DESIRED_TPS=${DESIRED_TPS:-1000}
+STARFISH=0 #deploy consensus protocol: mysticeti pull (0), starfish pull-push (1), starfish push (2)
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1} # Number of Byzantine nodes (must be < NUM_VALIDATORS / 3)
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-two-chains} #possible values
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #possible values
 # "honest" | "timeout-leader" | "leader-withholding"| "equivocating-chains" |
 # "equivocating-two-chains" |"chain-bomb"| "equivocating-chains-bomb"
 REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"

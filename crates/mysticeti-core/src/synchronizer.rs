@@ -35,6 +35,16 @@ pub struct SynchronizerParameters {
     pub sample_precision: Duration,
 }
 
+impl SynchronizerParameters {
+    pub fn new(committee_size: usize) -> Self {
+        Self {
+            batch_own_block_size: 4 * committee_size,
+            batch_other_block_size: 4 * committee_size * committee_size,
+            sample_precision: Duration::from_millis(600),
+        }
+    }
+}
+
 impl Default for SynchronizerParameters {
     fn default() -> Self {
         Self {

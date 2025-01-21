@@ -33,7 +33,10 @@ use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
-const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
+// Max buffer size controls the max amount of data (in bytes) to be sent/received when sending
+// batches of blocks. Based on the committee size we control the max number of transactions in a block
+// We aim to send 4 * committee_size own blocks and 4 * committee_size * committee_size other blocks (encoded)
+const MAX_BUFFER_SIZE: u32 = 80 * 1024 * 1024;
 
 #[allow(unused)]
 // AWS regions and their names
