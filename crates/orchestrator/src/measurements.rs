@@ -172,7 +172,7 @@ impl Measurement {
         };
 
         // Compute `avg^2`.
-        let squared_avg = self.average_latency().as_secs_f64().powi(2_i32);
+        let squared_avg = self.average_latency().as_micros().pow(2) as f64;
 
         // Compute `squared_sum / count - avg^2`.
         let variance = if squared_avg > first_term {
@@ -183,7 +183,7 @@ impl Measurement {
 
         // Compute `sqrt( squared_sum / count - avg^2 )`.
         let stdev = variance.sqrt();
-        Duration::from_secs_f64(stdev)
+        Duration::from_micros(stdev as u64)
     }
 }
 
@@ -300,11 +300,12 @@ impl MeasurementsCollection {
         table.set_format(display::default_table_format());
 
         let duration = self.benchmark_duration();
-
         table.set_titles(row![bH2->"Benchmark Summary"]);
         table.add_row(row![b->"Benchmark type:", self.parameters.node_parameters]);
         table.add_row(row![bH2->""]);
         table.add_row(row![b->"Nodes:", self.parameters.nodes]);
+        table.add_row(row![b->"Byzantine strategy:", self.parameters.byzantine_strategy]);
+        table.add_row(row![b->"Byzantine nodes:", self.parameters.byzantine_nodes]);
         table.add_row(
             row![b->"Use internal IPs:", format!("{}", self.parameters.use_internal_ip_address)],
         );
@@ -315,6 +316,7 @@ impl MeasurementsCollection {
         let mut labels: Vec<_> = self.labels().collect();
         labels.sort();
         for label in labels {
+            println!("label: {} {} {:?} {:?} {}", label, self.max_result(label, |x| x.count), self.max_result(label, |x| x.timestamp), self.max_result(label, |x| x.sum), self.max_result(label, |x| x.squared_sum as u64));
             let total_tps = self.aggregate_tps(label);
             let average_latency = self.aggregate_average_latency(label);
             let stdev_latency = self.max_stdev_latency(label);
