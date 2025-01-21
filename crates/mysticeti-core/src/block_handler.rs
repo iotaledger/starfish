@@ -274,11 +274,13 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         let mut committed = self
             .commit_interpreter
             .handle_commit(block_store, committed_leaders);
+        let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
-                let block_timestamp = runtime::timestamp_utc() - block_creation_time;
+                let block_timestamp = current_timestamp.saturating_sub(block_creation_time);
+
 
                 self.metrics
                     .block_committed_latency
