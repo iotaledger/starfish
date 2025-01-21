@@ -212,6 +212,7 @@ pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
     commit_interpreter: Linearizer,
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committed_leaders: Vec<BlockReference>,
+    start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
 
@@ -227,6 +228,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
             commit_interpreter: Linearizer::new((*committee).clone()),
             transaction_votes: TransactionAggregator::with_handler(handler),
             committed_leaders: vec![],
+            start_time: TimeInstant::now(),
             metrics,
         }
     }
@@ -287,6 +289,13 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                     .inc_by(block_timestamp.as_micros().pow(2) as u64);
 
                 tracing::debug!("Latency of block {} is computed", block.reference());
+            }
+
+            // Record benchmark start time.
+            let time_from_start = self.start_time.elapsed();
+            let benchmark_duration = self.metrics.benchmark_duration.get();
+            if let Some(delta) = time_from_start.as_secs().checked_sub(benchmark_duration) {
+                self.metrics.benchmark_duration.inc_by(delta);
             }
         }
         // Compute transaction end-to-end latency
