@@ -142,6 +142,18 @@ impl Measurement {
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
+                x if x == "bytes_received_total" => match sample.value {
+                    prometheus_parse::Value::Counter(value) => {
+                        measurement.count = value as usize;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
+                x if x == "bytes_sent_total" => match sample.value {
+                    prometheus_parse::Value::Counter(value) => {
+                        measurement.count = value as usize;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
                 _ => {
                     measurements.remove(&sample.metric);
                 }
@@ -241,8 +253,7 @@ impl MeasurementsCollection {
         self.data
             .get(label)
             .map(|data| {
-                let mut keys: Vec<&ScraperId> = data.keys().collect();
-                keys.sort();
+                let keys: Vec<&ScraperId> = data.keys().sorted().collect();
                 let mut result = Vec::with_capacity(keys.len());
                 for key in keys {
                     result.push(data[&key].clone());
@@ -287,6 +298,20 @@ impl MeasurementsCollection {
     }
 
     /// Aggregate the average latency of multiple data points by taking the average.
+    pub fn aggregate_bandwidth(&self, label: &Label) -> Vec<usize> {
+        let all_measurements = self.all_measurements(label);
+        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
+        last_data_points
+            .iter()
+            .map(|x| {
+                x.count
+                    .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Aggregate the average latency of multiple data points by taking the average.
     pub fn aggregate_average_latency(&self, label: &Label) -> Duration {
         let all_measurements = self.all_measurements(label);
         let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
@@ -319,17 +344,20 @@ impl MeasurementsCollection {
     pub fn aggregate_count_buckets(&self, label: &Label) -> HashMap<Label, Vec<usize>> {
         let all_measurements = self.all_measurements(label);
         let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
-        last_data_points.iter().map(|x| x.count_buckets.clone()).fold(
-            HashMap::new(),
-            |mut acc: HashMap<BucketId, Vec<usize>>, val| {
-                for (key, value) in val {
-                    let sum = acc.entry(key).or_default();
-                    sum.push(value);
-                }
+        last_data_points
+            .iter()
+            .map(|x| x.count_buckets.clone())
+            .fold(
+                HashMap::new(),
+                |mut acc: HashMap<BucketId, Vec<usize>>, val| {
+                    for (key, value) in val {
+                        let sum = acc.entry(key).or_default();
+                        sum.push(value);
+                    }
 
-                acc
-            },
-        )
+                    acc
+                },
+            )
     }
 
     /// Aggregate the stdev latency of multiple data points by taking the max.
@@ -367,14 +395,6 @@ impl MeasurementsCollection {
         let mut labels: Vec<_> = self.labels().collect();
         labels.sort();
         for label in labels {
-            println!(
-                "label: {} {} {:?} {:?} {}",
-                label,
-                self.max_result(label, |x| x.count),
-                self.max_result(label, |x| x.timestamp),
-                self.max_result(label, |x| x.sum),
-                self.max_result(label, |x| x.squared_sum as u64)
-            );
             let total_tps = self.aggregate_tps(label);
             let average_latency = self.aggregate_average_latency(label);
             let stdev_latency = self.max_stdev_latency(label);
@@ -409,6 +429,11 @@ impl MeasurementsCollection {
                 "sequenced_transactions_total" => {
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                 }
+                "bytes_sent_total" | "bytes_received_total" => {
+                    let bandwidth = self.aggregate_bandwidth(label);
+                    table.add_row(row![b->"Bandwidth:", bandwidth.iter().map(|x| format!("{x} bytes/s")).collect::<Vec<_>>().join(", ")]);
+                }
+
                 "committed_leaders_total" => {
                     for (label, count) in count_buckets {
                         table.add_row(row![
@@ -502,6 +527,12 @@ mod test {
             # HELP transaction_committed_latency_squared_micros Square of total end-to-end latency of a transaction commitment in seconds
             # TYPE transaction_committed_latency_squared_micros counter
             transaction_committed_latency_squared_micros 745207728837251500
+            # HELP bytes_received_total Total number of bytes sent
+            # TYPE bytes_received_total counter
+            bytes_received_total 86639456
+            # HELP bytes_sent_total Total number of bytes sent
+            # TYPE bytes_sent_total counter
+            bytes_sent_total 6284648
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
@@ -511,7 +542,7 @@ mod test {
             aggregator.add(scraper_id, label, measurement);
         }
 
-        assert_eq!(aggregator.data.keys().filter(|x| !x.is_empty()).count(), 3);
+        assert_eq!(aggregator.data.keys().filter(|x| !x.is_empty()).count(), 5);
 
         let transaction_committed_latency = aggregator
             .data
@@ -572,6 +603,30 @@ mod test {
         assert_eq!(sequenced_transactions_total.len(), 1);
         let data = &sequenced_transactions_total[0];
         assert_eq!(data.count, 2310200);
+
+        let bytes_received_total = aggregator
+            .data
+            .get("bytes_received_total")
+            .expect("The `bytes_received_total` label is defined above")
+            .get(&scraper_id)
+            .unwrap();
+        assert_eq!(bytes_received_total.len(), 1);
+
+        let data = &bytes_received_total[0];
+        assert_eq!(data.count, 86639456);
+        assert_eq!(data.timestamp.as_secs(), 300);
+
+        let bytes_sent_total = aggregator
+            .data
+            .get("bytes_sent_total")
+            .expect("The `bytes_sent_total` label is defined above")
+            .get(&scraper_id)
+            .unwrap();
+        assert_eq!(bytes_sent_total.len(), 1);
+
+        let data = &bytes_sent_total[0];
+        assert_eq!(data.count, 6284648);
+        assert_eq!(data.timestamp.as_secs(), 300);
     }
 
     #[test]
@@ -731,7 +786,6 @@ mod test {
         let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
         let scraper_id = 1;
         for (label, measurement) in measurements {
-            println!("{:?} - {:?}", label, measurement);
             aggregator.add(scraper_id, label, measurement);
         }
 
