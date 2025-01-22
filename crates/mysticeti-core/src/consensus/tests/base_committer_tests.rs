@@ -90,7 +90,7 @@ fn direct_commit_late_call() {
 
     assert_eq!(sequence.len(), n as usize);
     for (i, leader_block) in sequence.iter().enumerate() {
-        let leader_round = (i as u64 + 1) ;
+        let leader_round = i as u64 + 1;
         if let LeaderStatus::Commit(ref block) = leader_block {
             assert_eq!(block.author(), committee.elect_leader(leader_round));
         } else {

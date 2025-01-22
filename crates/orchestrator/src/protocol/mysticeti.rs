@@ -216,10 +216,6 @@ impl ProtocolCommands for MysticetiProtocol {
 
 impl ProtocolMetrics for MysticetiProtocol {
     const BENCHMARK_DURATION: &'static str = mysticeti_core::metrics::BENCHMARK_DURATION;
-    const TOTAL_TRANSACTIONS: &'static str = "latency_s_count";
-    const LATENCY_BUCKETS: &'static str = "latency_s";
-    const LATENCY_SUM: &'static str = "latency_s_sum";
-    const LATENCY_SQUARED_SUM: &'static str = mysticeti_core::metrics::LATENCY_SQUARED_S;
 
     fn nodes_metrics_path<I>(
         &self,

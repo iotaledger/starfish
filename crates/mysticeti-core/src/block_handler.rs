@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 
-use minibytes::Bytes;
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use crate::data::Data;
+use crate::transactions_generator::TransactionGenerator;
+use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
     committee::{Committee, ProcessedTransactionHandler, QuorumThreshold, TransactionAggregator},
@@ -19,22 +19,15 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
-    types::{
-        AuthorityIndex, BlockReference, Transaction,
-        TransactionLocator,
-    },
+    types::{AuthorityIndex, BlockReference, Transaction, TransactionLocator},
 };
-use crate::data::Data;
-use crate::transactions_generator::TransactionGenerator;
-use crate::types::{BaseStatement, VerifiedStatementBlock};
+use minibytes::Bytes;
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 pub trait BlockHandler: Send + Sync {
-
     fn handle_proposal(&mut self, number_transactions: usize);
-    fn handle_blocks(
-        &mut self,
-        require_response: bool,
-    ) -> Vec<BaseStatement>;
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement>;
     fn state(&self) -> Bytes;
 
     fn recover_state(&mut self, _state: &Bytes);
@@ -65,8 +58,6 @@ pub struct RealBlockHandler {
 
 
 impl RealBlockHandler {
-
-
     pub fn new(
         certified_transactions_log_path: &Path,
         metrics: Arc<Metrics>,
@@ -115,7 +106,6 @@ impl BlockHandler for RealBlockHandler {
         self.transaction_votes.with_state(state);
     }
 
-
     fn cleanup(&self) {
         let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
         // todo - all of this should go away and we should measure tx latency differently
@@ -123,10 +113,7 @@ impl BlockHandler for RealBlockHandler {
         l.retain(|_k, v| v.elapsed() < Duration::from_secs(10));
     }
 
-    fn handle_blocks(
-        &mut self,
-        require_response: bool,
-    ) -> Vec<BaseStatement> {
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {
@@ -161,7 +148,7 @@ impl TestBlockHandler {
         committee: Arc<Committee>,
         authority: AuthorityIndex,
         metrics: Arc<Metrics>,
-    ) -> (Self, mpsc::Sender<Vec<Transaction>>)  {
+    ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
         let this = Self {
             last_transaction,
@@ -195,8 +182,6 @@ impl TestBlockHandler {
 }
 
 impl BlockHandler for TestBlockHandler {
-
-
     fn handle_proposal(&mut self, number_transactions: usize) {
         self.pending_transactions -= number_transactions;
     }
@@ -214,10 +199,7 @@ impl BlockHandler for TestBlockHandler {
         self.last_transaction = last_transaction;
     }
 
-    fn handle_blocks(
-        &mut self,
-        require_response: bool,
-    ) -> Vec<BaseStatement> {
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
         // todo - this is ugly, but right now we need a way to recover self.last_transaction
         let mut response = vec![];
         if require_response {
@@ -235,54 +217,49 @@ pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
     commit_interpreter: Linearizer,
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committed_leaders: Vec<BlockReference>,
+    start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
 
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHandler<H> {
-    pub fn new(
-        committee: Arc<Committee>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
-        Self::new_with_handler(
-            committee,
-            metrics,
-            Default::default(),
-        )
+    pub fn new(committee: Arc<Committee>, metrics: Arc<Metrics>) -> Self {
+        Self::new_with_handler(committee, metrics, Default::default())
     }
 }
 
-
-
 impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
-    pub fn new_with_handler(
-        committee: Arc<Committee>,
-        metrics: Arc<Metrics>,
-        handler: H,
-    ) -> Self {
+    pub fn new_with_handler(committee: Arc<Committee>, metrics: Arc<Metrics>, handler: H) -> Self {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
             transaction_votes: TransactionAggregator::with_handler(handler),
             committed_leaders: vec![],
+            start_time: TimeInstant::now(),
             metrics,
         }
     }
-
-
 
     fn transaction_observer(&self, block: Data<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.statements().as_ref() {
             for statement in vec {
                 if let BaseStatement::Share(transaction) = statement {
-                    let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
+                    let tx_submission_timestamp =
+                        TransactionGenerator::extract_timestamp(transaction);
                     let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
                     self.metrics.transaction_committed_latency.observe(latency);
+                    self.metrics
+                        .transaction_committed_latency_squared_micros
+                        .inc_by(latency.as_micros().pow(2) as u64);
+
                     self.metrics.sequenced_transactions_total.inc();
                 }
             }
         } else {
-            tracing::debug!("Transactions from block {:?} are committed, but not available", block);
+            tracing::debug!(
+                "Transactions from block {:?} are committed, but not available",
+                block
+            );
         }
     }
     pub fn committed_leaders(&self) -> &Vec<BlockReference> {
@@ -301,14 +278,34 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         let mut committed = self
             .commit_interpreter
             .handle_commit(block_store, committed_leaders);
+        let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
-                let block_timestamp = runtime::timestamp_utc() - block_creation_time;
+                let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
-                self.metrics.block_committed_latency.observe(block_timestamp);
+                if block_creation_time.is_zero()  ||  block_latency.as_secs() > 60 {
+                    tracing::debug!("Latency of block {} is too large, skip updating metrics - (latency: {:?}; block creation time: {:?})", block.reference(), block_latency, block_creation_time);
+                    continue
+                }
+
+
+
+                self.metrics.block_committed_latency.observe(block_latency);
+
+                self.metrics
+                    .block_committed_latency_squared_micros
+                    .inc_by(block_latency.as_micros().pow(2) as u64);
+
                 tracing::debug!("Latency of block {} is computed", block.reference());
+            }
+
+            // Record benchmark start time.
+            let time_from_start = self.start_time.elapsed();
+            let benchmark_duration = self.metrics.benchmark_duration.get();
+            if let Some(delta) = time_from_start.as_secs().checked_sub(benchmark_duration) {
+                self.metrics.benchmark_duration.inc_by(delta);
             }
         }
         // Compute transaction end-to-end latency
@@ -338,11 +335,14 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
                         // Block is supposed to have uncoded transactions
                         self.transaction_observer(updated_block);
 
-                        tracing::debug!("Latency of transactions from block {} is computed", block.reference());
+                        tracing::debug!(
+                            "Latency of transactions from block {} is computed",
+                            block.reference()
+                        );
                     }
                 }
             } else {
-               break;
+                break;
             }
             // todo: need to change the committed subdag again, but it is ok for now as the storage
             // is not used.
@@ -353,8 +353,6 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         block_store.update_pending_unavailable(committed[slice_index..].to_vec());
         resulted_committed
     }
-
-
 
     fn aggregator_state(&self) -> Bytes {
         self.transaction_votes.state()

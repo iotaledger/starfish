@@ -2043,6 +2043,7 @@ dependencies = [
  "eyre",
  "futures",
  "glob",
+ "itertools",
  "mysticeti-core",
  "plotters",
  "prettytable-rs",

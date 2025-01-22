@@ -390,33 +390,13 @@ pub fn print_stats<S: SyncerSignals>(
     reporters: &mut [MetricReporter],
 ) {
     assert_eq!(syncers.len(), reporters.len());
-    eprintln!("val ||    cert(ms)   ||cert commit(ms)|| tx commit(ms) |");
-    eprintln!("    ||  p90  |  avg  ||  p90  |  avg  ||  p90  |  avg  |");
+    eprintln!("val || tx commit(ms) |");
+    eprintln!("    ||  p90  |  avg  |");
     syncers.iter().zip(reporters.iter_mut()).for_each(|(s, r)| {
         r.clear_receive_all();
         eprintln!(
-            "  {} || {:05} | {:05} || {:05} | {:05} || {:05} | {:05} |",
+            "  {} || {:05} | {:05} |",
             format_authority_index(s.core().authority()),
-            r.transaction_certified_latency
-                .histogram
-                .pct(900)
-                .unwrap_or_default()
-                .as_millis(),
-            r.transaction_certified_latency
-                .histogram
-                .avg()
-                .unwrap_or_default()
-                .as_millis(),
-            r.certificate_committed_latency
-                .histogram
-                .pct(900)
-                .unwrap_or_default()
-                .as_millis(),
-            r.certificate_committed_latency
-                .histogram
-                .avg()
-                .unwrap_or_default()
-                .as_millis(),
             r.transaction_committed_latency
                 .histogram
                 .pct(900)

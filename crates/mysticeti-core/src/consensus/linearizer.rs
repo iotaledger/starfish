@@ -9,7 +9,7 @@ use crate::{
 };
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
-use crate::types::{StatementBlock, VerifiedStatementBlock};
+use crate::types::VerifiedStatementBlock;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
