@@ -1,6 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use itertools::Itertools;
+use prettytable::{row, Table};
+use prometheus_parse::Scrape;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -9,10 +13,6 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-
-use prettytable::{row, Table};
-use prometheus_parse::Scrape;
-use serde::{Deserialize, Serialize};
 
 use crate::{benchmark::BenchmarkParameters, display, protocol::ProtocolMetrics};
 
@@ -28,6 +28,8 @@ pub struct Measurement {
     timestamp: Duration,
     /// Latency buckets.
     buckets: HashMap<BucketId, Duration>,
+    /// Count buckets.
+    count_buckets: HashMap<BucketId, usize>,
     /// Sum of the latencies of all finalized transactions.
     sum: Duration,
     /// Total number of finalized transactions
@@ -49,6 +51,7 @@ impl Measurement {
                 .labels
                 .values()
                 .cloned()
+                .sorted()
                 .collect::<Vec<_>>()
                 .join(",");
 
@@ -131,6 +134,12 @@ impl Measurement {
                         }
                         _ => panic!("Unexpected scraped value: '{bucket_id}'"),
                     },
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
+                x if x == "committed_leaders_total" => match sample.value {
+                    prometheus_parse::Value::Counter(value) => {
+                        measurement.count_buckets.insert(label, value as usize);
+                    }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
                 _ => {
@@ -306,6 +315,23 @@ impl MeasurementsCollection {
         )
     }
 
+    /// Aggregate the count buckets of multiple data points.
+    pub fn aggregate_count_buckets(&self, label: &Label) -> HashMap<Label, Vec<usize>> {
+        let all_measurements = self.all_measurements(label);
+        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
+        last_data_points.iter().map(|x| x.count_buckets.clone()).fold(
+            HashMap::new(),
+            |mut acc: HashMap<BucketId, Vec<usize>>, val| {
+                for (key, value) in val {
+                    let sum = acc.entry(key).or_default();
+                    sum.push(value);
+                }
+
+                acc
+            },
+        )
+    }
+
     /// Aggregate the stdev latency of multiple data points by taking the max.
     pub fn max_stdev_latency(&self, label: &Label) -> Duration {
         self.max_result(label, |x| x.stdev_latency())
@@ -353,6 +379,7 @@ impl MeasurementsCollection {
             let average_latency = self.aggregate_average_latency(label);
             let stdev_latency = self.max_stdev_latency(label);
             let buckets_latency = self.aggregate_latency_buckets(label);
+            let count_buckets = self.aggregate_count_buckets(label);
 
             table.add_row(row![bH2->""]);
             table.add_row(row![b->"Workload:", label]);
@@ -382,6 +409,14 @@ impl MeasurementsCollection {
                 "sequenced_transactions_total" => {
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                 }
+                "committed_leaders_total" => {
+                    for (label, count) in count_buckets {
+                        table.add_row(row![
+                                b->format!("Committed leaders ({}):", label),
+                                count.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ")
+                        ]);
+                    }
+                }
                 _ => {
                     table.add_row(row![b->"Unknown metric", ""]);
                 }
@@ -406,6 +441,7 @@ mod test {
         let data = Measurement {
             timestamp: Duration::from_secs(10),
             buckets: HashMap::new(),
+            count_buckets: HashMap::new(),
             sum: Duration::from_secs(2),
             count: 100,
             squared_sum: 0.0,
@@ -419,6 +455,7 @@ mod test {
         let data = Measurement {
             timestamp: Duration::from_secs(10),
             buckets: HashMap::new(),
+            count_buckets: HashMap::new(),
             sum: Duration::from_secs(50),
             count: 100,
             squared_sum: 75.0,
@@ -698,14 +735,44 @@ mod test {
             aggregator.add(scraper_id, label, measurement);
         }
 
-        let shared_workload_data_points = aggregator
+        let block_committed_latency_data_points = aggregator
             .data
             .get("block_committed_latency")
             .expect("Unable to find label")
             .get(&scraper_id)
             .unwrap();
 
-        let data = &shared_workload_data_points[shared_workload_data_points.len() - 1];
+        let data =
+            &block_committed_latency_data_points[block_committed_latency_data_points.len() - 1];
         assert_ne!(data, &Measurement::default());
+
+        let committed_leaders_data_points = aggregator
+            .data
+            .get("committed_leaders_total")
+            .expect("Unable to find label")
+            .get(&scraper_id)
+            .unwrap();
+
+        let data = &committed_leaders_data_points[committed_leaders_data_points.len() - 1];
+        assert_eq!(
+            data.count_buckets,
+            [
+                ("9,direct-commit".into(), 301),
+                ("0,direct-commit".into(), 1),
+                ("1,direct-commit".into(), 302),
+                ("5,direct-commit".into(), 301),
+                ("3,direct-commit".into(), 302),
+                ("4,direct-commit".into(), 302),
+                ("2,direct-commit".into(), 301),
+                ("2,indirect-commit".into(), 1),
+                ("7,direct-commit".into(), 301),
+                ("6,direct-commit".into(), 301),
+                ("8,direct-commit".into(), 301),
+                ("0,indirect-skip".into(), 301),
+            ]
+            .iter()
+            .cloned()
+            .collect()
+        );
     }
 }
