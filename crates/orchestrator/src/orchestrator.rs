@@ -523,17 +523,23 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::status(format!("{}/{}", i + 1, clients.len()));
 
             let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
-            let client_log_content = connection.download("client.log")?;
+            match connection.download("client.log") {
+                Err(e) => display::error(format!(
+                    "Failed to download client logs from {} - {}",
+                    instance.main_ip, e
+                )),
+                Ok(client_log_content) => {
+                    let client_log_file = [path.clone(), format!("client-{i}.log").into()]
+                        .iter()
+                        .collect::<PathBuf>();
+                    fs::write(&client_log_file, client_log_content.as_bytes())
+                        .expect("Cannot write client log file");
 
-            let client_log_file = [path.clone(), format!("client-{i}.log").into()]
-                .iter()
-                .collect::<PathBuf>();
-            fs::write(&client_log_file, client_log_content.as_bytes())
-                .expect("Cannot write log file");
-
-            let mut log_parser = LogsAnalyzer::default();
-            log_parser.set_client_errors(&client_log_content);
-            log_parsers.push(log_parser)
+                    let mut log_parser = LogsAnalyzer::default();
+                    log_parser.set_client_errors(&client_log_content);
+                    log_parsers.push(log_parser)
+                }
+            }
         }
         display::done();
 
@@ -542,16 +548,23 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::status(format!("{}/{}", i + 1, nodes.len()));
 
             let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
-            let node_log_content = connection.download("node.log")?;
+            match connection.download("node.log") {
+                Err(e) => display::error(format!(
+                    "Failed to download node logs from {} - {}",
+                    instance.main_ip, e
+                )),
+                Ok(node_log_content) => {
+                    let node_log_file = [path.clone(), format!("node-{i}.log").into()]
+                        .iter()
+                        .collect::<PathBuf>();
+                    fs::write(&node_log_file, node_log_content.as_bytes())
+                        .expect("Cannot write log file");
 
-            let node_log_file = [path.clone(), format!("node-{i}.log").into()]
-                .iter()
-                .collect::<PathBuf>();
-            fs::write(&node_log_file, node_log_content.as_bytes()).expect("Cannot write log file");
-
-            let mut log_parser = LogsAnalyzer::default();
-            log_parser.set_node_errors(&node_log_content);
-            log_parsers.push(log_parser)
+                    let mut log_parser = LogsAnalyzer::default();
+                    log_parser.set_node_errors(&node_log_content);
+                    log_parsers.push(log_parser)
+                }
+            }
         }
         display::done();
 

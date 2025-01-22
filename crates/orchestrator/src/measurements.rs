@@ -231,12 +231,20 @@ impl MeasurementsCollection {
     pub fn all_measurements(&self, label: &Label) -> Vec<Vec<Measurement>> {
         self.data
             .get(label)
-            .map(|data| data.values().cloned().collect())
+            .map(|data| {
+                let mut keys: Vec<&ScraperId> = data.keys().collect();
+                keys.sort();
+                let mut result = Vec::with_capacity(keys.len());
+                for key in keys {
+                    result.push(data[&key].clone());
+                }
+                result
+            })
             .unwrap_or_default()
     }
 
     /// Get all labels.
-    pub fn labels(&self) -> impl Iterator<Item=&Label> {
+    pub fn labels(&self) -> impl Iterator<Item = &Label> {
         self.data.keys()
     }
 
@@ -281,6 +289,23 @@ impl MeasurementsCollection {
             .unwrap_or_default()
     }
 
+    /// Aggregate the buckets of multiple data points.
+    pub fn aggregate_latency_buckets(&self, label: &Label) -> HashMap<Label, Vec<Duration>> {
+        let all_measurements = self.all_measurements(label);
+        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
+        last_data_points.iter().map(|x| x.buckets.clone()).fold(
+            HashMap::new(),
+            |mut acc: HashMap<BucketId, Vec<Duration>>, val| {
+                for (key, value) in val {
+                    let sum = acc.entry(key).or_default();
+                    sum.push(value);
+                }
+
+                acc
+            },
+        )
+    }
+
     /// Aggregate the stdev latency of multiple data points by taking the max.
     pub fn max_stdev_latency(&self, label: &Label) -> Duration {
         self.max_result(label, |x| x.stdev_latency())
@@ -316,10 +341,18 @@ impl MeasurementsCollection {
         let mut labels: Vec<_> = self.labels().collect();
         labels.sort();
         for label in labels {
-            println!("label: {} {} {:?} {:?} {}", label, self.max_result(label, |x| x.count), self.max_result(label, |x| x.timestamp), self.max_result(label, |x| x.sum), self.max_result(label, |x| x.squared_sum as u64));
+            println!(
+                "label: {} {} {:?} {:?} {}",
+                label,
+                self.max_result(label, |x| x.count),
+                self.max_result(label, |x| x.timestamp),
+                self.max_result(label, |x| x.sum),
+                self.max_result(label, |x| x.squared_sum as u64)
+            );
             let total_tps = self.aggregate_tps(label);
             let average_latency = self.aggregate_average_latency(label);
             let stdev_latency = self.max_stdev_latency(label);
+            let buckets_latency = self.aggregate_latency_buckets(label);
 
             table.add_row(row![bH2->""]);
             table.add_row(row![b->"Workload:", label]);
@@ -328,11 +361,23 @@ impl MeasurementsCollection {
                     table.add_row(row![b->"BPS:", format!("{total_tps} blocks/s")]);
                     table.add_row(row![b->"Block latency (avg):", format!("{} ms", average_latency.as_millis())]);
                     table.add_row(row![b->"Block latency (stdev):", format!("{} ms", stdev_latency.as_millis())]);
+                    for (label, latency_vec) in buckets_latency {
+                        table.add_row(                            row![
+                                b->format!("Block latency ({}):", label),
+                                latency_vec.iter().map(|x| format!("{} ms", x.as_millis())).collect::<Vec<String>>().join(", ")
+                            ]);
+                    }
                 }
                 "transaction_committed_latency" => {
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                     table.add_row(row![b->"Transaction latency (avg):", format!("{} ms", average_latency.as_millis())]);
                     table.add_row(row![b->"Transaction latency (stdev):", format!("{} ms", stdev_latency.as_millis())]);
+                    for (label, latency_vec) in buckets_latency {
+                        table.add_row(row![
+                                b->format!("Transaction latency ({}):", label),
+                                latency_vec.iter().map(|x| format!("{} ms", x.as_millis())).collect::<Vec<String>>().join(", ")
+                        ]);
+                    }
                 }
                 "sequenced_transactions_total" => {
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
@@ -447,9 +492,9 @@ mod test {
                 ("p90".into(), Duration::from_micros(740793)),
                 ("p99".into(), Duration::from_micros(857100)),
             ])
-                .iter()
-                .cloned()
-                .collect()
+            .iter()
+            .cloned()
+            .collect()
         );
         assert_eq!(data.sum, Duration::from_micros(1147380944831));
         assert_eq!(data.count, 2065300);
@@ -472,9 +517,9 @@ mod test {
                 ("p90".into(), Duration::from_micros(719253)),
                 ("p99".into(), Duration::from_micros(848723)),
             ])
-                .iter()
-                .cloned()
-                .collect()
+            .iter()
+            .cloned()
+            .collect()
         );
         assert_eq!(data.sum, Duration::from_micros(17374616335344112));
         assert_eq!(data.count, 28547);
