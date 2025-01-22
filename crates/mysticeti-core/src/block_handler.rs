@@ -278,12 +278,13 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
                 let block_creation_time = block.meta_creation_time();
+                let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
-                if block_creation_time.is_zero() {
+                if block_creation_time.is_zero()  ||  block_latency.as_secs() > 60 {
+                    tracing::debug!("Latency of block {} is too large, skip updating metrics - (latency: {:?}; block creation time: {:?})", block.reference(), block_latency, block_creation_time);
                     continue
                 }
 
-                let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
 
                 self.metrics.block_committed_latency.observe(block_latency);
