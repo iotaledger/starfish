@@ -788,7 +788,7 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "committed_leaders_total{instance=\"host.docker.internal:1522\"}",
+          "expr": "committed_leaders_total{instance=\"host.docker.internal:1512\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "Node {{authority}} - {{commit_type}}",
@@ -799,6 +799,107 @@
       ],
       "title": "Committed Leaders (view of Node 1)",
       "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "rate(bytes_sent_total[1m])*8/1024/1024",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "Network sent (Mbps)",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -886,11 +987,16 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
+          "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(node_network_receive_bytes_total{device=\"ens5\"}[1m]) / 1024 / 1024 * 8",
+          "expr": "rate(bytes_received_total[1m])*8/1024/1024",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
           "instant": false,
+          "legendFormat": "__auto",
           "range": true,
-          "refId": "A"
+          "refId": "A",
+          "useBackend": false
         }
       ],
       "title": "Network receive (Mbps)",
@@ -905,13 +1011,13 @@
     "list": []
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "Mysticeti",
   "uid": "bdd54ee7-84de-4018-8bb7-92af2defc041",
-  "version": 7,
+  "version": 4,
   "weekStart": ""
 }

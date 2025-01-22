@@ -64,6 +64,10 @@ pub struct Metrics {
 
     pub utilization_timer: IntCounterVec,
     pub submitted_transactions: IntCounter,
+
+    // tracking total bytes sent and received
+    pub bytes_sent_total: IntCounter,
+    pub bytes_received_total: IntCounter,
 }
 
 pub struct MetricReporter {
@@ -73,8 +77,6 @@ pub struct MetricReporter {
     pub block_committed_latency: HistogramReporter<Duration>,
 
     pub proposed_block_size_bytes: HistogramReporter<usize>,
-    pub proposed_block_transaction_count: HistogramReporter<usize>,
-    pub proposed_block_vote_count: HistogramReporter<usize>,
 
     pub connection_latency: VecHistogramReporter<Duration>,
 
@@ -132,16 +134,7 @@ impl Metrics {
                 registry,
                 "proposed_block_size_bytes",
             ),
-            proposed_block_transaction_count: HistogramReporter::new_in_registry(
-                proposed_block_transaction_count_hist,
-                registry,
-                "proposed_block_transaction_count",
-            ),
-            proposed_block_vote_count: HistogramReporter::new_in_registry(
-                proposed_block_vote_count_hist,
-                registry,
-                "proposed_block_vote_count",
-            ),
+
 
             connection_latency: VecHistogramReporter::new_in_registry(
                 connection_latency_hist,
@@ -183,6 +176,16 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            bytes_sent_total: register_int_counter_with_registry!(
+                "bytes_sent_total",
+                "Total number of bytes sent",
+                registry,
+            ).unwrap(),
+            bytes_received_total: register_int_counter_with_registry!(
+                "bytes_received_total",
+                "Total number of bytes sent",
+                registry,
+            ).unwrap(),
             leader_timeout_total: register_int_counter_with_registry!(
                 "leader_timeout_total",
                 "Total number of leader timeouts",
@@ -412,8 +415,6 @@ impl MetricReporter {
         self.block_committed_latency.clear_receive_all();
 
         self.proposed_block_size_bytes.clear_receive_all();
-        self.proposed_block_transaction_count.clear_receive_all();
-        self.proposed_block_vote_count.clear_receive_all();
 
         self.connection_latency.clear_receive_all();
     }
@@ -441,8 +442,6 @@ impl MetricReporter {
         self.block_committed_latency.report();
 
         self.proposed_block_size_bytes.report();
-        self.proposed_block_transaction_count.report();
-        self.proposed_block_vote_count.report();
 
         self.connection_latency.report();
     }

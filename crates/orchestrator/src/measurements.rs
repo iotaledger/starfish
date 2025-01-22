@@ -282,7 +282,7 @@ impl MeasurementsCollection {
     /// Aggregate the tps of multiple data points.
     pub fn aggregate_tps(&self, label: &Label) -> u64 {
         self.max_result(label, |x| x.count)
-            .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize))
+            .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize)) // TODO: transactions are injected in blocks after a timeout (10 sec)
             .unwrap_or_default() as u64
     }
 

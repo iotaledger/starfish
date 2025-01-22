@@ -2,12 +2,12 @@
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
 DESIRED_TPS=${DESIRED_TPS:-1000}
-STARFISH=0 #deploy consensus protocol: mysticeti pull (0), starfish pull-push (1), starfish push (2)
+STARFISH=2 #deploy consensus protocol: mysticeti pull (0), starfish pull-push (1), starfish push (2)
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1} # Number of Byzantine nodes (must be < NUM_VALIDATORS / 3)
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #possible values
 # "honest" | "timeout-leader" | "leader-withholding"| "equivocating-chains" |
 # "equivocating-two-chains" |"chain-bomb"| "equivocating-chains-bomb"
-REMOVE_VOLUMES=0 # remove Grafana and Prometheus data volumes "0" | "1"
+REMOVE_VOLUMES=1 # remove Grafana and Prometheus data volumes "0" | "1"
 
 
 # Perform the division of DESIRED_TPS by NUM_VALIDATORS
@@ -85,6 +85,17 @@ fi
 if [ $? -ne 0 ]; then
   echo "Error: Failed to start Docker Compose in the 'monitoring' directory."
   exit 1
+fi
+
+# Output the consensus protocol mode
+if [ "$STARFISH" -eq 0 ]; then
+    echo "${BLUE}Deploy consensus protocol: mysticeti pull (0)"
+elif [ "$STARFISH" -eq 1 ]; then
+    echo "${BLUE}Deploy consensus protocol: starfish pull-push (1)"
+elif [ "$STARFISH" -eq 2 ]; then
+    echo "${BLUE}Deploy consensus protocol: starfish push (2)"
+else
+    echo "${RED}Invalid consensus protocol mode."
 fi
 
 # Add the --starfish flag with its value

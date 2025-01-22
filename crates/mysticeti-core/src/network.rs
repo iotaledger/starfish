@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
+use prometheus::IntCounter;
 use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -32,7 +33,7 @@ use crate::{
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(3);
 // Max buffer size controls the max amount of data (in bytes) to be sent/received when sending
 // batches of blocks. Based on the committee size we control the max number of transactions in a block
 // We aim to send 4 * committee_size own blocks and 4 * committee_size * committee_size other blocks (encoded)
@@ -163,9 +164,9 @@ impl Network {
                     peer_id: id,
                     connection_sender: connection_sender.clone(),
                     bind_addr: bind_addr(local_addr),
+                    metrics: metrics.clone(),
                     active_immediately: id < our_id,
-                    latency_sender: metrics.connection_latency_sender.get(id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone(),
-                    connection_latency: latency_table[id][our_id],
+                    extra_connection_latency: latency_table[id][our_id],
                 }
                 .run(receiver),
             );
@@ -252,16 +253,16 @@ struct Worker {
     peer_id: usize,
     connection_sender: mpsc::Sender<Connection>,
     bind_addr: SocketAddr,
+    metrics: Arc<Metrics>,
     active_immediately: bool,
-    latency_sender: HistogramSender<Duration>,
-    connection_latency: f64,
+    extra_connection_latency: f64,
 }
 
 struct WorkerConnection {
     sender: mpsc::Sender<NetworkMessage>,
     receiver: mpsc::Receiver<NetworkMessage>,
+    metrics: Arc<Metrics>,
     peer_id: usize,
-    latency_sender: HistogramSender<Duration>,
 }
 
 impl Worker {
@@ -324,7 +325,7 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection, self.connection_latency).await
+        Self::handle_stream(stream, connection, self.extra_connection_latency).await
     }
 
     async fn handle_passive_stream(&self, mut stream: TcpStream) -> io::Result<()> {
@@ -339,19 +340,19 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection, self.connection_latency).await
+        Self::handle_stream(stream, connection, self.extra_connection_latency).await
     }
 
     async fn handle_stream(
         stream: TcpStream,
         connection: WorkerConnection,
-        connection_latency: f64,
+        extra_connection_latency: f64,
     ) -> io::Result<()> {
         let WorkerConnection {
             sender,
             receiver,
+            metrics,
             peer_id,
-            latency_sender,
         } = connection;
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
@@ -360,11 +361,18 @@ impl Worker {
             writer,
             receiver,
             pong_receiver,
-            latency_sender,
-            connection_latency,
+            metrics.connection_latency_sender.get(peer_id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone(),
+            metrics.bytes_sent_total.clone(),
+            extra_connection_latency,
         )
         .boxed();
-        let read_fut = Self::handle_read_stream(reader, sender, pong_sender).boxed();
+        let read_fut = Self::handle_read_stream(
+            reader,
+            sender,
+            pong_sender,
+            metrics.bytes_received_total.clone(),
+        )
+            .boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
         r
@@ -375,6 +383,7 @@ impl Worker {
         mut receiver: mpsc::Receiver<NetworkMessage>,
         mut pong_receiver: mpsc::Receiver<i64>,
         latency_sender: HistogramSender<Duration>,
+        bytes_sent_total: IntCounter,
         connection_latency: f64,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
@@ -383,6 +392,7 @@ impl Worker {
 
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
+        let bytes_sent_total_clone = bytes_sent_total.clone();
         let ping_task = tokio::spawn(async move {
             let mut ping_deadline = start + PING_INTERVAL;
             loop {
@@ -400,11 +410,13 @@ impl Worker {
                     tracing::error!("Failed to write ping: {e}");
                     break;
                 }
+                bytes_sent_total_clone.inc_by(12); // ping is 12-byte sized
             }
         });
 
         // Spawn the second task for handling pong responses
         let writer_clone = Arc::clone(&writer);
+        let bytes_sent_total_clone = bytes_sent_total.clone();
         let pong_task = tokio::spawn(async move {
             while let Some(ping) = pong_receiver.recv().await {
                 if ping == 0 {
@@ -422,6 +434,7 @@ impl Worker {
                                 tracing::error!("Failed to write pong: {e}");
                                 break;
                             }
+                            bytes_sent_total_clone.inc_by(12); // pong is 12-byte sized
                         }
                         None => {
                             tracing::warn!("Invalid ping: {ping}");
@@ -456,6 +469,7 @@ impl Worker {
 
             while let Some(message) = receiver.recv().await {
                 let writer = writer.clone();
+                let bytes_sent_total_clone = bytes_sent_total.clone();
                 let latency = generate_latency(connection_latency);
 
                 // Spawn an inner task and collect its handle
@@ -474,6 +488,8 @@ impl Worker {
                         let mut writer_guard = writer.lock().await;
                         // Write the length
                         writer_guard.write_u32(serialized.len() as u32).await?;
+
+                        bytes_sent_total_clone.inc_by(serialized.len() as u64 + 4); // u32 and serialized
                         // Write the serialized data
                         writer_guard.write_all(&serialized).await
                     }.await {
@@ -505,6 +521,7 @@ impl Worker {
         mut stream: OwnedReadHalf,
         sender: mpsc::Sender<NetworkMessage>,
         pong_sender: mpsc::Sender<i64>,
+        bytes_received_total: IntCounter,
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
@@ -521,6 +538,7 @@ impl Worker {
                 let buf = &mut buf[..PING_SIZE - 4 /*Already read size(u32)*/];
                 let read = stream.read_exact(buf).await?;
                 assert_eq!(read, buf.len());
+                bytes_received_total.inc_by(read as u64);
                 let pong = decode_ping(buf);
                 if pong_sender.send(pong).await.is_err() {
                     return Ok(()); // write stream closed
@@ -530,6 +548,7 @@ impl Worker {
             let buf = &mut buf[..size as usize];
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
+            bytes_received_total.inc_by(read as u64);
             match bincode::deserialize::<NetworkMessage>(buf) {
                 Ok(message) => {
                     if sender.send(message).await.is_err() {
@@ -557,8 +576,8 @@ impl Worker {
         Some(WorkerConnection {
             sender: network_in_sender,
             receiver: network_out_receiver,
+            metrics: self.metrics.clone(),
             peer_id: self.peer_id,
-            latency_sender: self.latency_sender.clone(),
         })
     }
 }
