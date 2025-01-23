@@ -112,7 +112,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let timer_core_commit = self
             .metrics
             .utilization_timer
-            .utilization_timer("Core::try_new_commit");
+            .utilization_timer("Core::commit leaders");
         let newly_committed = self.core.try_commit();
         drop(timer_core_commit);
         let utc_now = timestamp_utc();

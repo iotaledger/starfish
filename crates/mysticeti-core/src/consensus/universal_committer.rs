@@ -30,23 +30,23 @@ impl UniversalCommitter {
     /// ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
-
+        // Auxiliary structures
+        let universal_committer_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Committer: Direct and indirect commit");
 
         let highest_known_round = self.block_store.highest_round();
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
         let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
 
-        // Auxiliary structures
-        let timer_to_read_dag = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Committer: Read DAG");
+
         let dag = self.block_store.get_dag_between_rounds(last_decided_round, highest_known_round);
         let directly_committed_leaders
             = self.block_store.get_directly_committed_leaders();
         // Auxiliary structures
-        drop(timer_to_read_dag);
+
         // Try to decide as many leaders as possible, starting with the highest round.
         let mut leaders = VecDeque::new();
 
@@ -113,6 +113,7 @@ impl UniversalCommitter {
                 leaders.push_front(status);
             }
         }
+        drop(universal_committer_timer);
 
         // The decided sequence is the longest prefix of decided leaders.
         leaders
