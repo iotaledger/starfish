@@ -38,10 +38,15 @@ impl UniversalCommitter {
         let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
 
         // Auxiliary structures
+        let timer_to_read_dag = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Committer: Read DAG");
         let dag = self.block_store.get_dag_between_rounds(last_decided_round, highest_known_round);
         let directly_committed_leaders
             = self.block_store.get_directly_committed_leaders();
-
+        // Auxiliary structures
+        drop(timer_to_read_dag);
         // Try to decide as many leaders as possible, starting with the highest round.
         let mut leaders = VecDeque::new();
 
