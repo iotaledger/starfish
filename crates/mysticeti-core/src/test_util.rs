@@ -446,20 +446,6 @@ impl TestBlockWriter {
         }
     }
 
-    #[allow(unused)]
-    pub fn get_dag(&self) -> Vec<(BlockReference, Vec<BlockReference>)> {
-        let mut dag: Vec<(BlockReference, Vec<BlockReference>)> = self
-            .block_store
-            .get_dag()
-            .iter()
-            .map(|(block_reference, refs_and_indices)| {
-                (block_reference.clone(), refs_and_indices.0.clone())
-            })
-            .collect();
-
-        dag.sort_by_key(|(block_reference, _)| block_reference.round());
-        dag
-    }
 
     pub fn add_block(&mut self, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) -> WalPosition {
         let pos = self

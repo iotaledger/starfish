@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{fmt::Display, sync::Arc};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use super::{LeaderStatus, WAVE_LENGTH};
 use crate::{
     block_store::BlockStore,
     committee::{Committee, QuorumThreshold, StakeAggregator},
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::block_store::{CertificateForLeader, CertifiedStake, VoteForLeader};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
@@ -97,7 +98,7 @@ impl BaseCommitter {
         &self,
         potential_certificate: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let mut votes_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for reference in potential_certificate.includes() {
@@ -123,7 +124,7 @@ impl BaseCommitter {
         anchor: &Data<VerifiedStatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>,
     ) -> LeaderStatus {
         // Get the block(s) proposed by the leader. There could be more than one leader block
         // per round (produced by a Byzantine leader).
@@ -165,7 +166,7 @@ impl BaseCommitter {
         }
     }
 
-    fn decide_skip_starfish(&self, voting_round: RoundNumber, leader: AuthorityIndex, voters_for_leaders: &HashSet<(BlockReference, BlockReference)>) -> bool {
+    fn try_direct_skip_starfish(&self, voting_round: RoundNumber, leader: AuthorityIndex, voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for voting_block in &voting_blocks {
@@ -208,7 +209,7 @@ impl BaseCommitter {
 
     /// Check whether the specified leader has enough blames (that is, 2f+1 non-votes) to be
     /// directly skipped.
-    fn decide_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
+    fn try_direct_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
 
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
@@ -237,7 +238,7 @@ impl BaseCommitter {
         &self,
         decision_round: RoundNumber,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 
@@ -264,7 +265,7 @@ impl BaseCommitter {
         leader: AuthorityIndex,
         leader_round: RoundNumber,
         leaders: impl Iterator<Item = &'a LeaderStatus>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>,
     ) -> LeaderStatus {
         // The anchor is the first committed leader with round higher than the decision round of the
         // target leader. We must stop the iteration upon encountering an undecided leader.
@@ -294,17 +295,18 @@ impl BaseCommitter {
         &self,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &BTreeSet<(BlockReference, BlockReference)>,
+        directly_committed_leaders: &HashSet<BlockReference>,
     ) -> LeaderStatus {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
         if self.block_store.starfish >= 1 {
-            if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
+            if self.try_direct_skip_starfish(voting_round, leader, voters_for_leaders) {
                 return LeaderStatus::Skip(leader, leader_round);
             }
         } else {
-            if self.decide_skip_mysticeti(voting_round, leader) {
+            if self.try_direct_skip_mysticeti(voting_round, leader) {
                 return LeaderStatus::Skip(leader, leader_round);
             }
         }
@@ -312,15 +314,13 @@ impl BaseCommitter {
         // Check whether the leader(s) has enough support. That is, whether there are 2f+1
         // certificates over the leader. Note that there could be more than one leader block
         // (created by Byzantine leaders).
-        let wave = self.wave_number(leader_round);
-        let decision_round = self.decision_round(wave);
         let leader_blocks = self
             .block_store
             .get_blocks_at_authority_round(leader, leader_round);
 
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|l| self.enough_leader_support(decision_round, l,voters_for_leaders))
+            .filter(|l| directly_committed_leaders.contains(l.reference()))
             .map(LeaderStatus::Commit)
             .collect();
 

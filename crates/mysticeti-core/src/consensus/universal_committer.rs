@@ -9,7 +9,7 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::{HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::{collections::VecDeque, sync::Arc};
 use crate::metrics::UtilizationTimerVecExt;
 
@@ -30,12 +30,17 @@ impl UniversalCommitter {
     /// ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+
+
         let highest_known_round = self.block_store.highest_round();
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
-
-
         let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
+
+        // Auxiliary structures
+        let dag = self.block_store.get_dag_between_rounds(last_decided_round, highest_known_round);
+        let directly_committed_leaders
+            = self.block_store.get_directly_committed_leaders();
 
         // Try to decide as many leaders as possible, starting with the highest round.
         let mut leaders = VecDeque::new();
@@ -51,24 +56,31 @@ impl UniversalCommitter {
                     "Trying to decide {} with {committer}",
                     format_authority_round(leader, round)
                 );
-                let mut voters_for_leaders: HashSet<(BlockReference, BlockReference)> = HashSet::new();
-                // this logic is only correct for wave of length 3
-                let voting_round = round + 1 as RoundNumber;
-                let potential_voting_blocks = self.block_store.get_blocks_by_round(voting_round);
-                for potential_voting_block in potential_voting_blocks {
-                    for reference in potential_voting_block.includes() {
-                        if reference.round == round && reference.authority == leader {
-                            voters_for_leaders.insert((reference.clone(), potential_voting_block.reference().clone()));
-                            break;
-                        }
-                    }
-                }
+
+
+
+
+
                 // Try to directly decide the leader.
                 let timer_direct_decide = self
                     .metrics
                     .utilization_timer
                     .utilization_timer("Committer::direct_decide");
-                let mut status = committer.try_direct_decide(leader, round, &voters_for_leaders);
+
+                let mut voters_for_leaders: BTreeSet<(BlockReference, BlockReference)> = BTreeSet::new();
+                let voting_round = round + 1;
+                let potential_voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+                for potential_block in potential_voting_blocks {
+                    if let Some((_parents, _authorities, vote_for_leader, _cert, _stake)) =
+                        dag.get(&voting_round)
+                            .and_then(|round_map| round_map.get(&(potential_block.author(), potential_block.digest()))) {
+                        if let Some(leader) = vote_for_leader {
+                            voters_for_leaders.insert((leader.clone(), potential_block.reference().clone()));
+                        }
+                    }
+                }
+
+                let mut status = committer.try_direct_decide(leader, round, &voters_for_leaders, &directly_committed_leaders);
                 if !self.committed.contains(&(leader, round)) {
                     self.update_metrics(&status, true);
                 }

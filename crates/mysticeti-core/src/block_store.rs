@@ -26,6 +26,7 @@ use crate::{
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 use crate::committee::{QuorumThreshold, StakeAggregator};
+use crate::consensus::WAVE_LENGTH;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 #[allow(unused)]
@@ -48,6 +49,14 @@ pub struct BlockStore {
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
 
+// VoteForLeader says whether a block is voting for a leader in previous round. It is Some when voting.
+pub(crate) type VoteForLeader = Option<BlockReference>;
+
+// CertificateForLeader says whether a block is certificate for a leader in two rounds before. It is Some when certificate.
+pub(crate) type CertificateForLeader = Option<BlockReference>;
+
+// CertifiedStake collects stake of certificate if a given block is a leader
+pub(crate) type CertifiedStake = Option<StakeAggregator<QuorumThreshold>>;
 
 #[derive(Default)]
 struct BlockStoreInner {
@@ -64,14 +73,17 @@ struct BlockStoreInner {
     authority: AuthorityIndex,
     info_length: usize,
     committee_size: usize,
+    committee: Committee,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     // for each authority, the set of unknown blocks
     not_known_by_authority: Vec<HashSet<BlockReference>>,
-    // this dag structure store for each block its predecessors and who knows the block
-    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    // this dag structure store for each block (a,b,c,d) a: its predecessors, b: who knows the block
+    // c: is a vote for the leader in the previous round, d: if a leader, StakeAggregator for certificates
+    dag: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)>>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
+    directly_committed_leaders: HashSet<BlockReference>,
 }
 
 pub trait BlockWriter {
@@ -111,6 +123,7 @@ impl BlockStore {
             not_known_by_authority,
             info_length: committee.info_length(),
             committee_size: committee.len(),
+            committee: committee.clone(),
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -192,21 +205,42 @@ impl BlockStore {
 
     pub fn get_dag(
         &self,
-    ) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
+    ) -> BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)>> {
         self.inner.read().dag.clone()
     }
 
-    pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> {
-        let mut dag: Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> = self
-            .get_dag()
-            .iter()
-            .map(|(block_reference, refs_and_indices)| {
-                (block_reference.clone(), refs_and_indices.0.clone(), refs_and_indices.1.clone())
-            })
-            .collect();
+    pub fn get_dag_between_rounds(
+        &self,
+        lower_round: RoundNumber,
+        upper_round: RoundNumber,
+    ) -> BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)>> {
+        self.inner.read().dag
+            .range(lower_round..=upper_round)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
 
-        dag.sort_by_key(|(block_reference, _, _)| block_reference.round());
-        dag
+    pub fn get_directly_committed_leaders(&self) -> HashSet<BlockReference> {
+        self.inner.read().directly_committed_leaders.clone()
+    }
+
+    pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> {
+        self.get_dag()
+            .iter()
+            .flat_map(|(round, hashmap)| {
+                hashmap.iter().map(|((authority, digest), value)| {
+                    (
+                        BlockReference {
+                            authority: authority.clone(),
+                            round: round.clone(),
+                            digest: digest.clone(),
+                        },
+                        value.0.clone(),
+                        value.1.clone()
+                    )
+                }).collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
@@ -740,46 +774,137 @@ pub fn get_blocks_at_authority_round(
         }
     }
 
+    pub fn contains_block_reference(&self, block_ref: &BlockReference) -> bool {
+        self.dag.get(&block_ref.round)
+            .map_or(false, |hashmap|
+                hashmap.contains_key(&(block_ref.authority, block_ref.digest))
+            )
+    }
+
+    pub fn read_block_reference(&self, block_ref: &BlockReference) -> Option<(Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)> {
+        self.dag.get(&block_ref.round)
+            .and_then(|hashmap|
+                hashmap.get(&(block_ref.authority, block_ref.digest)).cloned()
+            )
+    }
+
+    pub fn get_mut_block_reference(&mut self, block_ref: &BlockReference) -> Option<&mut (Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)> {
+        self.dag.get_mut(&block_ref.round)
+            .and_then(|hashmap|
+                hashmap.get_mut(&(block_ref.authority, block_ref.digest))
+            )
+    }
     // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
     // of the block, and we assume that others are not aware of this block
-    pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
-        if block_reference.round == 0 {
+    pub fn update_dag(&mut self, new_block_reference: BlockReference, parents: Vec<BlockReference>) {
+        let committee = self.committee.clone();
+        // don't update if it is already there
+        if self.contains_block_reference(&new_block_reference) {
             return;
         }
-        // don't update if it is already there
-        if self.dag.contains_key(&block_reference) {
-            return;
+        // TODO: this is manual logic to not have recursive dependency with UniversalCommitter
+        let stake_aggregator: Option<StakeAggregator<QuorumThreshold>> = if leader_in_round(new_block_reference.round, committee.len()) == new_block_reference.authority  {
+            Some(StakeAggregator::new())
+        } else {
+            None
+        };
+
+        // TODO: this is manual logic for updating whether a block is a voter
+        // for a past leader, assuming one leader in every round
+        let new_vote_for_leader: VoteForLeader = if new_block_reference.round >= 1 {
+            let previous_round = new_block_reference.round - 1 as RoundNumber;
+            let leader_previous_round = leader_in_round(previous_round, committee.len()) as RoundNumber;
+            parents.iter().find_map(|parent| {
+                if parent.round == previous_round && parent.authority == leader_previous_round {
+                    Some(parent.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+
+        // TODO: this is manual logic for updating whether a block is a certificate
+        // for a leader two rounds before, assuming one leader in every round
+        let mut leader_votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
+        let mut new_certificate_for_leader = None;
+
+        for parent in &parents {
+            let previous_round = new_block_reference.round - 1 as RoundNumber;
+            // Safely fetch and clone the value from the DAG
+            if parent.round == previous_round {
+                if let Some((_, _, vote_for_leader, _,_)) = self.read_block_reference(parent) {
+                    if let Some(leader) = vote_for_leader {
+                        // Get or initialize the StakeAggregator for this leader
+                        let votes_for_leader = leader_votes.entry(leader).or_insert_with(|| StakeAggregator::new());
+
+
+                        // Add the parent's authority and check if the leader is certified
+                        if votes_for_leader.add(parent.authority, &committee) {
+                            new_certificate_for_leader = Some(leader);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tracing::debug!("Added {:?}, Vote {:?}, Stake  {:?}", new_block_reference, new_vote_for_leader, stake_aggregator);
+        if let Some(leader) = new_certificate_for_leader.clone() {
+            let mut leader_committed = false;
+            // Safely get the leader's DAG entry
+            if let Some((_, _, _, _,ref mut stake_aggregator)) = self.get_mut_block_reference(&leader) {
+                if let Some(aggregator) = stake_aggregator {
+                    // Add the block reference's authority to the leader's StakeAggregator
+                    if aggregator.add(new_block_reference.authority, &committee) {
+                        leader_committed = true;
+                        tracing::debug!("Leader {:?} is directly committed, Stake  {:?}", leader, aggregator);
+                    }
+                }
+            } else {
+                panic!("The DAG must contain the certified leader");
+            }
+            if leader_committed {
+                self.directly_committed_leaders.insert(leader);
+            }
         }
         // update information about block_reference
-       self.dag.insert(
-            block_reference,
-            (
-                parents,
-                vec![block_reference.authority, self.authority]
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-            ),
-        );
+        self.dag.entry(new_block_reference.round)
+            .or_insert_with(HashMap::new)
+            .insert(
+                (new_block_reference.authority, new_block_reference.digest),
+                (
+                    parents,
+                    vec![new_block_reference.authority, self.authority]
+                        .into_iter()
+                        .collect::<HashSet<_>>(),
+                    new_vote_for_leader,
+                    new_certificate_for_leader,
+                    stake_aggregator,
+                )
+            );
+
         for authority in 0..self.not_known_by_authority.len() {
             if authority == self.authority as usize
-                || authority == block_reference.authority as usize
+                || authority == new_block_reference.authority as usize
             {
                 continue;
             }
-            self.not_known_by_authority[authority].insert(block_reference);
+            self.not_known_by_authority[authority].insert(new_block_reference);
         }
         // traverse the DAG from block_reference and update the blocks known by block_reference.authority
-        let authority = block_reference.authority;
-        let mut buffer = vec![block_reference];
+        let authority = new_block_reference.authority;
+        let mut buffer = vec![new_block_reference];
 
         while !buffer.is_empty() {
             let block_reference = buffer.pop().unwrap();
-            let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
+            let (parents, _,_,_,_) = self.read_block_reference(&block_reference).unwrap();
             for parent in parents {
                 if parent.round == 0 {
                     continue;
                 }
-                let (_, known_by) = self.dag.get_mut(&parent).unwrap();
+                let (_, known_by,_,_,_) = self.get_mut_block_reference(&parent).unwrap();
                 if known_by.insert(authority) {
                     self.not_known_by_authority[authority as usize].remove(&parent);
                     buffer.push(parent);
@@ -836,7 +961,7 @@ pub fn get_blocks_at_authority_round(
         authority: AuthorityIndex,
     ) {
         self.not_known_by_authority[authority as usize].remove(&block_reference);
-        let (_, known_by) = self.dag.get_mut(&block_reference).unwrap();
+        let (_, known_by,_,_,_) = self.get_mut_block_reference(&block_reference).unwrap();
         known_by.insert(authority);
     }
 
@@ -1035,6 +1160,10 @@ pub fn get_blocks_at_authority_round(
     pub fn last_own_block(&self) -> Option<BlockReference> {
         self.last_own_block
     }
+}
+
+pub fn leader_in_round(round: RoundNumber, committee_size: usize) -> AuthorityIndex {
+    (round as u64) % (committee_size as u64) as AuthorityIndex
 }
 
 pub const WAL_ENTRY_BLOCK: Tag = 1;
