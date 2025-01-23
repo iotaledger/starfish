@@ -9,9 +9,15 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{collections::VecDeque, sync::Arc};
+use digest::Digest;
+use crate::block_store::{leader_in_round, CertificateForLeader, CertifiedStake, VoteForLeader};
+use crate::committee::{QuorumThreshold, StakeAggregator};
+use crate::consensus::LeaderStatus::Commit;
+use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
+use crate::types::{BlockDigest, VerifiedStatementBlock};
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
 /// It can be configured to use a combination of different commit strategies, including
@@ -21,15 +27,125 @@ pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
+    committee: Committee,
     /// Keep track of all committed blocks to avoid computing the metrics for the same block twice.
     committed: HashSet<(AuthorityIndex, RoundNumber)>,
+    last_committed_round: RoundNumber,
+    sequence_leaders_with_decision: Vec<LeaderDecision>,
+    dag: BTreeMap<(RoundNumber, AuthorityIndex), HashMap<BlockDigest, (Vec<BlockReference>, VoteForLeader, CertificateForLeader, CertifiedStake)>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum LeaderDecision {
+    Commit(BlockReference),
+    Skip(),
+    Undecided(),
 }
 
 impl UniversalCommitter {
+
+    pub fn contains_block_reference(&self, block_ref: &BlockReference) -> bool {
+        self.dag.get(&(block_ref.round, block_ref.authority))
+            .map_or(false, |hashmap|
+                hashmap.contains_key(&block_ref.digest)
+            )
+    }
+
+    pub fn update_sequence_leaders(&mut self, round: RoundNumber, leader_decision: LeaderDecision) {
+        if self.sequence_leaders_with_decision.len() < round as usize + 1 {
+            self.sequence_leaders_with_decision.resize(round as usize + 1, LeaderDecision::Undecided());
+        }
+        self.sequence_leaders_with_decision[round as usize] = leader_decision;
+    }
+
+
+
+
+    pub fn update_dag(&mut self, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) {
+        let committee = self.committee.clone();
+        for new_block in newly_processed_blocks {
+            let new_block_reference = new_block.reference().clone();
+            if self.contains_block_reference(&new_block_reference) {
+                continue;
+            }
+            let parents = new_block.includes().clone();
+            let stake_aggregator: Option<StakeAggregator<QuorumThreshold>> = if leader_in_round(new_block_reference.round, committee.len()) == new_block_reference.authority  {
+                Some(StakeAggregator::new())
+            } else {
+                None
+            };
+            let new_vote_for_leader: VoteForLeader = if new_block_reference.round >= 1 {
+                let previous_round = new_block_reference.round - 1 as RoundNumber;
+                let leader_previous_round = leader_in_round(previous_round, committee.len()) as RoundNumber;
+                parents.iter().find_map(|parent| {
+                    if parent.round == previous_round && parent.authority == leader_previous_round {
+                        Some(parent.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            let mut leader_votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
+            let mut new_certificate_for_leader = None;
+
+            for parent in &parents {
+                let previous_round = new_block_reference.round - 1 as RoundNumber;
+                // Safely fetch and clone the value from the DAG
+                if parent.round == previous_round {
+                    if let Some((_, _, vote_for_leader, _,_)) = self.read_block_reference(parent) {
+                        if let Some(leader) = vote_for_leader {
+                            // Get or initialize the StakeAggregator for this leader
+                            let votes_for_leader = leader_votes.entry(leader).or_insert_with(|| StakeAggregator::new());
+
+
+                            // Add the parent's authority and check if the leader is certified
+                            if votes_for_leader.add(parent.authority, &committee) {
+                                new_certificate_for_leader = Some(leader);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::debug!("Added {:?}, Vote {:?}, Stake  {:?}", new_block_reference, new_vote_for_leader, stake_aggregator);
+            if let Some(leader) = new_certificate_for_leader.clone() {
+                let mut leader_committed = false;
+                // Safely get the leader's DAG entry
+                if let Some((_, _, _, _,ref mut stake_aggregator)) = self.get_mut_block_reference(&leader) {
+                    if let Some(aggregator) = stake_aggregator {
+                        // Add the block reference's authority to the leader's StakeAggregator
+                        if aggregator.add(new_block_reference.authority, &committee) {
+                            self.update_sequence_leaders(leader.round, Commit(leader));
+                            tracing::debug!("Leader {:?} is directly committed, Stake  {:?}", leader, aggregator);
+                        }
+                    }
+                } else {
+                    panic!("The DAG must contain the certified leader");
+                }
+            }
+            // update information about block_reference
+            self.dag.entry((new_block_reference.round, new_block_reference.authority))
+                .or_insert_with(HashMap::new)
+                .insert(
+                    (new_block_reference.digest),
+                    (
+                        parents,
+                        new_vote_for_leader,
+                        new_certificate_for_leader,
+                        stake_aggregator,
+                    )
+                );
+        }
+    }
     /// Try to commit part of the dag. This function is idempotent and returns a list of
     /// ordered decided leaders.
+    ///
+    ///
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
-    pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+    pub fn try_commit(&mut self, last_decided: BlockReference, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) -> Vec<LeaderStatus> {
         // Auxiliary structures
         let universal_committer_timer = self
             .metrics

@@ -189,7 +189,7 @@ impl<H: BlockHandler> Core<H> {
     // It return true if any update was made successfully
     // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
     // For such blocks we need to send a missing history request
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>)  {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>, Vec<Data<VerifiedStatementBlock>>)  {
         let _timer = self
             .metrics
             .utilization_timer
@@ -225,7 +225,7 @@ impl<H: BlockHandler> Core<H> {
         };
         tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
         self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-
+        let processed_blocks = processed.iter().map(|(_,b)| b.clone()).collect();
         let mut result = Vec::with_capacity(processed.len());
         for (position, processed) in processed.into_iter() {
             self.threshold_clock
@@ -235,7 +235,8 @@ impl<H: BlockHandler> Core<H> {
             result.push(processed);
         }
         self.run_block_handler();
-        (success, not_processed_blocks)
+
+        (success, not_processed_blocks, processed_blocks)
     }
 
     fn run_block_handler(&mut self) {
@@ -316,14 +317,14 @@ impl<H: BlockHandler> Core<H> {
     }
 
 
-    pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
+    pub fn try_new_block(&mut self) -> Vec<Data<VerifiedStatementBlock>> {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::try_new_block");
         let clock_round = self.threshold_clock.get_round();
         if clock_round <= self.last_proposed() {
-            return None;
+            return vec![];
         }
 
         // Sort includes in pending to include all blocks up to the given round
@@ -529,7 +530,7 @@ impl<H: BlockHandler> Core<H> {
             return_blocks.push(storage_and_transmission_blocks);
             block_id += 1;
         }
-        Some(return_blocks[0].0.clone())
+        return_blocks.iter().map(|(a,_)|a.clone()).collect()
     }
 
 
@@ -545,10 +546,10 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(&mut self) -> Vec<Data<VerifiedStatementBlock>> {
+    pub fn try_commit(&mut self, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) -> Vec<Data<VerifiedStatementBlock>> {
         let sequence: Vec<_> = self
             .committer
-            .try_commit(self.last_commit_leader)
+            .try_commit(self.last_commit_leader, newly_processed_blocks)
             .into_iter()
             .filter_map(|leader| leader.into_decided_block())
             .collect();

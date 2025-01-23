@@ -65,10 +65,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) -> Vec<BlockReference> {
         // todo: when block is updated we might return false here and it can make committing longer
-        let (success, pending_blocks_with_statements) = self.core.add_blocks(blocks);
+        let (success, pending_blocks_with_statements, newly_processed_blocks) = self.core.add_blocks(blocks);
         if success {
-            self.try_new_block();
-            self.try_new_commit();
+            let newly_created_blocks = self.try_new_block();
+            let all_new_blocks = newly_processed_blocks.iter().chain(newly_created_blocks.iter()).collect();
+            self.try_new_commit(all_new_blocks);
         }
         pending_blocks_with_statements
     }
@@ -77,8 +78,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.core.last_proposed() == round {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
-            if self.try_new_block() {
-                self.try_new_commit();
+            let newly_created_blocks = self.try_new_block();
+            if newly_created_blocks.len() > 0 {
+                self.try_new_commit(newly_created_blocks);
             }
             true
         } else {
@@ -86,21 +88,22 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    fn try_new_block(&mut self) -> bool {
+    fn try_new_block(&mut self) -> Vec<Data<VerifiedStatementBlock>> {
         if self.force_new_block
             || self
             .core
             .ready_new_block(self.commit_period, &self.connected_authorities)
         {
-            if self.core.try_new_block().is_some() {
+            let new_blocks= self.core.try_new_block();
+            if new_blocks.len() > 0 {
                 self.signals.new_block_ready();
                 self.force_new_block = false;
-                return true;
+                return new_blocks;
             }
         }
-        return false;
+        vec![]
     }
-    fn try_new_commit(&mut self) {
+    fn try_new_commit(&mut self, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) {
         let _timer = self
             .metrics
             .utilization_timer
@@ -113,7 +116,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::commit leaders");
-        let newly_committed = self.core.try_commit();
+        let newly_committed = self.core.try_commit(newly_processed_blocks);
         drop(timer_core_commit);
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {

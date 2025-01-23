@@ -78,11 +78,12 @@ struct BlockStoreInner {
     last_own_block: Option<BlockReference>,
     // for each authority, the set of unknown blocks
     not_known_by_authority: Vec<HashSet<BlockReference>>,
+    // committed subdag which contains blocks with at least one unavailable transaction data
+    pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
     // this dag structure store for each block (a,b,c,d) a: its predecessors, b: who knows the block
     // c: is a vote for the leader in the previous round, d: if a leader, StakeAggregator for certificates
     dag: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, HashSet<AuthorityIndex>, VoteForLeader, CertificateForLeader, CertifiedStake)>>,
-    // committed subdag which contains blocks with at least one unavailable transaction data
-    pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
+
     directly_committed_leaders: HashSet<BlockReference>,
 }
 

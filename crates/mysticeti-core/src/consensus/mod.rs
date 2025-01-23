@@ -6,7 +6,7 @@ use crate::{
     types::{format_authority_round, AuthorityIndex, RoundNumber},
 };
 use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
+use crate::types::{BlockReference, VerifiedStatementBlock};
 
 pub mod base_committer;
 pub mod linearizer;
