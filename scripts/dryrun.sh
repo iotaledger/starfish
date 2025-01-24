@@ -1,9 +1,9 @@
 #!/bin/bash
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10} #With N physical cores, it is recommended to have less than N validators
-DESIRED_TPS=${DESIRED_TPS:-1000}
-STARFISH=2 #deploy consensus protocol: mysticeti pull (0), starfish pull-push (1), starfish push (2)
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1} # Number of Byzantine nodes (must be < NUM_VALIDATORS / 3)
+NUM_VALIDATORS=${NUM_VALIDATORS:-15} #With N physical cores, it is recommended to have less than N validators
+DESIRED_TPS=${DESIRED_TPS:-15000}
+STARFISH=1 #deploy consensus protocol: mysticeti pull (0), starfish pull-push (1), starfish push (2)
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0} # Number of Byzantine nodes (must be < NUM_VALIDATORS / 3)
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #possible values
 # "honest" | "timeout-leader" | "leader-withholding"| "equivocating-chains" |
 # "equivocating-two-chains" |"chain-bomb"| "equivocating-chains-bomb"
@@ -24,8 +24,6 @@ RESET=$(tput sgr0)
 tmux kill-server || true
 # Output Validators
 echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-# Output Byzantine strategy
-echo -e "${GREEN}Byzantine strategy: ${YELLOW}$BYZANTINE_STRATEGY${RESET}"
 
 # Cleanup
 echo -e "${CYAN}Cleaning up .ansi files and dryrun-validator directories...${RESET}"

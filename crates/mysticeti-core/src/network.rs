@@ -36,8 +36,10 @@ use crate::types::VerifiedStatementBlock;
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 // Max buffer size controls the max amount of data (in bytes) to be sent/received when sending
 // batches of blocks. Based on the committee size we control the max number of transactions in a block
-// We aim to send 4 * committee_size own blocks and 4 * committee_size * committee_size other blocks (encoded)
-const MAX_BUFFER_SIZE: u32 = 80 * 1024 * 1024;
+// We aim to send committee_size own blocks and committee_size * committee_size other blocks (encoded)
+// 80*1024 transactions in blocks in one round = 40 MB pure txs data
+// encoded shards could take up to 120 MB, resulting in 160 MB total
+const MAX_BUFFER_SIZE: u32 = 170 * 1024 * 1024;
 
 #[allow(unused)]
 // AWS regions and their names

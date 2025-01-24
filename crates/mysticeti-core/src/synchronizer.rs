@@ -38,8 +38,8 @@ pub struct SynchronizerParameters {
 impl SynchronizerParameters {
     pub fn new(committee_size: usize) -> Self {
         Self {
-            batch_own_block_size: 4 * committee_size,
-            batch_other_block_size: 4 * committee_size * committee_size,
+            batch_own_block_size: committee_size,
+            batch_other_block_size: committee_size * committee_size,
             sample_precision: Duration::from_millis(600),
         }
     }
