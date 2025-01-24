@@ -100,6 +100,10 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
+        /// Consensus to deploy : Mysticeti = 0, Starfish mixed pull-push = 1, Starfish push = 2
+        #[clap(long, value_name = "INT", default_value_t = 1, global = true)]
+        starfish: usize,
+
         /// Flag indicating whether nodes should advertise their internal or public IP address for inter-node communication.
         /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
         /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
@@ -219,6 +223,7 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
+            starfish,
             mimic_extra_latency,
             use_internal_ip_addresses,
             loads,
@@ -263,6 +268,7 @@ async fn run<C: ServerProviderClient>(
                 committee,
                 use_internal_ip_addresses,
                 loads,
+                starfish,
                 byzantine_nodes,
                 byzantine_strategy,
             );

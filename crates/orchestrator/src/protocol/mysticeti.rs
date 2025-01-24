@@ -164,10 +164,12 @@ impl ProtocolCommands for MysticetiProtocol {
                 if i < byzantine_nodes {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
+                let starfish = parameters.starfish;
 
                 let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
                     "run",
                     &format!("--authority {authority}"),
+                    &format!("--starfish {starfish}"),
                     &format!("--committee-path {}", committee_path.display()),
                     &format!("--public-config-path {}", public_config_path.display()),
                     &format!("--private-config-path {}", private_config_path.display()),
@@ -183,6 +185,7 @@ impl ProtocolCommands for MysticetiProtocol {
                         &format!("./{BINARY_PATH}/mysticeti"),
                         "run",
                         &format!("--authority {authority}"),
+                        &format!("--starfish {starfish}"),
                         &format!("--committee-path {}", committee_path.display()),
                         &format!("--public-config-path {}", public_config_path.display()),
                         &format!("--private-config-path {}", private_config_path.display()),

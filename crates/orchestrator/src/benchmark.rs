@@ -28,6 +28,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
     /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
+    // Consensus protocol to deploy (0 | mysticeti, 1 | starfish pull-push, 2 | starfish push)
+    pub starfish: usize,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
     /// Byzantine strategy
@@ -38,11 +40,12 @@ impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}-{:?}-{:?}-{}-{}-{}-{}-{}",
+            "{:?}-{:?}-{:?}-{}-{}-{}-{}-{}-{}",
             self.node_parameters,
             self.client_parameters,
             self.settings.faults,
             self.nodes,
+            self.starfish,
             self.byzantine_nodes,
             self.byzantine_strategy,
             self.load,
@@ -55,7 +58,8 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {})",
+            "Consensus choice: {}. Settings:{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {})",
+            self.starfish,
             self.nodes,
             self.byzantine_nodes,
             self.byzantine_strategy,
@@ -75,6 +79,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         nodes: usize,
         use_internal_ip_address: bool,
         loads: Vec<usize>,
+        starfish: usize,
         byzantine_nodes: usize,
         byzantine_strategy: String,
     ) -> Vec<Self> {
@@ -87,6 +92,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 use_internal_ip_address,
                 nodes,
                 load,
+                starfish,
                 byzantine_nodes,
                 byzantine_strategy: byzantine_strategy.clone(),
             })
