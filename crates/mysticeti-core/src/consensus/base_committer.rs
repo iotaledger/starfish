@@ -241,6 +241,26 @@ impl BaseCommitter {
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 
+        let mut total_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        // Quickly reject if there isn't enough stake to support the leader from
+        // the potential certificates.
+        let mut early_stop = true;
+        for decision_block in &decision_blocks {
+
+            if total_stake_aggregator.add(decision_block.author(), &self.committee) {
+                early_stop = false;
+                break;
+            }
+        }
+        let total_stake = total_stake_aggregator.get_stake();
+        if early_stop {
+            tracing::debug!(
+                "Not enough support for {leader_block}. Stake not enough: {total_stake} < {}",
+                self.committee.quorum_threshold()
+            );
+            return false;
+        }
+
         let mut certificate_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for decision_block in &decision_blocks {
             let authority = decision_block.reference().authority;
