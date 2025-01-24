@@ -58,6 +58,9 @@ pub(crate) type CertificateForLeader = Option<BlockReference>;
 // CertifiedStake collects stake of certificate if a given block is a leader
 pub(crate) type CertifiedStake = Option<StakeAggregator<QuorumThreshold>>;
 
+// NonVotingStake collects stake of non_votes if a given block is a leader
+pub(crate) type NonVotingStake = Option<StakeAggregator<QuorumThreshold>>;
+
 #[derive(Default)]
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
@@ -1163,9 +1166,7 @@ pub fn get_blocks_at_authority_round(
     }
 }
 
-pub fn leader_in_round(round: RoundNumber, committee_size: usize) -> AuthorityIndex {
-    (round as u64) % (committee_size as u64) as AuthorityIndex
-}
+
 
 pub const WAL_ENTRY_BLOCK: Tag = 1;
 pub const WAL_ENTRY_PAYLOAD: Tag = 2;

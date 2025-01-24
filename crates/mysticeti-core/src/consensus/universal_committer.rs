@@ -12,7 +12,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{collections::VecDeque, sync::Arc};
 use digest::Digest;
-use crate::block_store::{leader_in_round, CertificateForLeader, CertifiedStake, VoteForLeader};
+use crate::block_store::{leader_in_round, CertificateForLeader, CertifiedStake, NonVotingStake, VoteForLeader};
 use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::consensus::LeaderStatus::Commit;
 use crate::data::Data;
@@ -32,7 +32,7 @@ pub struct UniversalCommitter {
     committed: HashSet<(AuthorityIndex, RoundNumber)>,
     last_committed_round: RoundNumber,
     sequence_leaders_with_decision: Vec<LeaderDecision>,
-    dag: BTreeMap<(RoundNumber, AuthorityIndex), HashMap<BlockDigest, (Vec<BlockReference>, VoteForLeader, CertificateForLeader, CertifiedStake)>>,
+    dag: BTreeMap<(RoundNumber, AuthorityIndex), HashMap<BlockDigest, (Vec<BlockReference>, VoteForLeader, CertificateForLeader, CertifiedStake, NonVotingStake)>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -58,10 +58,30 @@ impl UniversalCommitter {
         self.sequence_leaders_with_decision[round as usize] = leader_decision;
     }
 
+    pub fn all_leaders(&self, round: RoundNumber) -> Vec<BlockReference> {
+        let leader = self.leader_in_round(round);
+
+        // Get blocks from leader authority in this round
+        self.dag.get(&(round, leader))
+            .map(|blocks| {
+                blocks.keys()
+                    .map(|digest| BlockReference {
+                        round,
+                        authority: leader,
+                        digest: *digest
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn leader_in_round(&self, round: RoundNumber) -> AuthorityIndex {
+        (round as u64) % (self.committee.len() as u64) as AuthorityIndex
+    }
 
 
 
-    pub fn update_dag(&mut self, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) {
+    pub fn update_dag(&mut self, newly_processed_blocks: &Vec<Data<VerifiedStatementBlock>>) {
         let committee = self.committee.clone();
         for new_block in newly_processed_blocks {
             let new_block_reference = new_block.reference().clone();
@@ -69,14 +89,17 @@ impl UniversalCommitter {
                 continue;
             }
             let parents = new_block.includes().clone();
-            let stake_aggregator: Option<StakeAggregator<QuorumThreshold>> = if leader_in_round(new_block_reference.round, committee.len()) == new_block_reference.authority  {
-                Some(StakeAggregator::new())
+            // Initialize certificate_stake_aggregator and non_voting_stake_aggreagator for leaders
+            let (certified_stake_aggregator, non_voting_stake_aggregator): (CertifiedStake, NonVotingStake) = if self.leader_in_round(new_block_reference.round) == new_block_reference.authority  {
+                (Some(StakeAggregator::new()), Some(StakeAggregator::new()))
             } else {
-                None
+                (None, None)
             };
+
+            // Compute the vote for a leader in the previous round
             let new_vote_for_leader: VoteForLeader = if new_block_reference.round >= 1 {
                 let previous_round = new_block_reference.round - 1 as RoundNumber;
-                let leader_previous_round = leader_in_round(previous_round, committee.len()) as RoundNumber;
+                let leader_previous_round = self.leader_in_round(previous_round) as RoundNumber;
                 parents.iter().find_map(|parent| {
                     if parent.round == previous_round && parent.authority == leader_previous_round {
                         Some(parent.clone())
@@ -88,6 +111,8 @@ impl UniversalCommitter {
                 None
             };
 
+
+            // Compute whether this is a certificate for a leader two rounds before
             let mut leader_votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>> = HashMap::new();
             let mut new_certificate_for_leader = None;
 
@@ -110,7 +135,9 @@ impl UniversalCommitter {
                     }
                 }
             }
-            tracing::debug!("Added {:?}, Vote {:?}, Stake  {:?}", new_block_reference, new_vote_for_leader, stake_aggregator);
+            tracing::debug!("Added {:?}, Vote {:?}, Stake  {:?}", new_block_reference, new_vote_for_leader, certified_stake_aggregator);
+
+            // If certificate, add stake to a certified leader
             if let Some(leader) = new_certificate_for_leader.clone() {
                 let mut leader_committed = false;
                 // Safely get the leader's DAG entry
@@ -126,7 +153,8 @@ impl UniversalCommitter {
                     panic!("The DAG must contain the certified leader");
                 }
             }
-            // update information about block_reference
+
+            // update dag with a new block
             self.dag.entry((new_block_reference.round, new_block_reference.authority))
                 .or_insert_with(HashMap::new)
                 .insert(
@@ -135,10 +163,88 @@ impl UniversalCommitter {
                         parents,
                         new_vote_for_leader,
                         new_certificate_for_leader,
-                        stake_aggregator,
+                        certified_stake_aggregator,
+                        non_voting_stake_aggregator,
                     )
                 );
         }
+    }
+
+    pub fn update_non_voting_for_leaders(&mut self, newly_processed_blocks: &Vec<Data<VerifiedStatementBlock>>) {
+        let committee = self.committee.clone();
+        let mut new_leader_refs = HashSet::new();
+
+        // Track new leader blocks
+        for block in newly_processed_blocks {
+            let block_ref = block.reference();
+            let leader = self.leader_in_round(block_ref.round);
+            if block_ref.authority == leader {
+                new_leader_refs.insert(block_ref.clone());
+            }
+        }
+
+        // For new leaders, check non-votes from all existing blocks in DAG
+        for leader_ref in &new_leader_refs {
+            if let Some(leader_blocks) = self.dag.get_mut(&(leader_ref.round, leader_ref.authority)) {
+                if let Some(leader_block) = leader_blocks.get_mut(&leader_ref.digest) {
+                    let next_round = leader_ref.round + 1;
+                    for authority in committee.authorities() {
+                        for round_blocks_from_authority in self.dag.get(&(next_round, authority)) {
+                            for (_, (_, vote, _, _, _)) in round_blocks_from_authority {
+                                // If block didn't vote for this leader, add to non-voting
+                                if Some(leader_ref.clone()) != *vote {
+                                    if let Some((_, _, _, _, non_voting)) = leader_blocks.get_mut(&leader_ref.digest) {
+                                        if let Some(non_voting_aggregator) = non_voting {
+                                            non_voting_aggregator.add(authority, &committee);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process new blocks for voting/non-voting
+        for block in newly_processed_blocks {
+            let block_ref = block.reference();
+            if block_ref.round == 0 {
+                continue;
+            }
+            let previous_round = block_ref.round - 1 as RoundNumber;
+            let leader = self.leader_in_round(previous_round);
+
+            if block_ref.authority == leader {
+                continue;
+            }
+
+            let (_, voted_leader, _, _, _) = self.dag.get(&(block_ref.round, block_ref.authority))
+                .expect("Block is already processed")
+                .get(&(block_ref.digest))
+                .expect("Block is already processed");
+
+            if let Some(leader_blocks) = self.dag.get_mut(&(block_ref.round, leader)) {
+                for (digest, (_, _, _, _, non_voting)) in leader_blocks.iter_mut() {
+                    let leader_ref = BlockReference {
+                        round: block_ref.round,
+                        authority: leader,
+                        digest: *digest,
+                    };
+                    if voted_leader.is_none() || Some(leader_ref.clone()) != *voted_leader {
+                        if let Some(aggregator) = non_voting {
+                            aggregator.add(block_ref.authority, &committee);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    pub fn try_resolve_sequence(&mut self, newly_processed_blocks: Vec<Data<VerifiedStatementBlock>>) {
+        self.update_dag(&newly_processed_blocks);
+        self.update_non_voting_for_leaders(&newly_processed_blocks);
     }
     /// Try to commit part of the dag. This function is idempotent and returns a list of
     /// ordered decided leaders.
