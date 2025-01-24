@@ -68,7 +68,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let (success, pending_blocks_with_statements) = self.core.add_blocks(blocks);
         if success {
             self.try_new_block();
-            self.try_new_commit();
+            //self.try_new_commit();
         }
         pending_blocks_with_statements
     }
@@ -78,7 +78,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
             if self.try_new_block() {
-                self.try_new_commit();
+                //self.try_new_commit();
             }
             true
         } else {
@@ -100,7 +100,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
         return false;
     }
-    fn try_new_commit(&mut self) {
+    pub fn try_new_commit(&mut self) {
         let _timer = self
             .metrics
             .utilization_timer

@@ -40,6 +40,10 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.syncer.lock().force_new_block(round);
     }
 
+    pub async fn force_commit(&self) {
+        self.syncer.lock().try_new_commit();
+    }
+
     pub async fn cleanup(&self) {
         self.syncer.lock().core().cleanup();
     }

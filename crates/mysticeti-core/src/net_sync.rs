@@ -154,6 +154,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             epoch_close_signal,
             shutdown_grace_period,
         ));
+
+        let commit_timeout_task = handle.spawn(Self::commit_timeout_task(
+            inner.clone(),
+            shutdown_grace_period,
+        ));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
             let peer_id = connection.peer_id;
@@ -178,7 +183,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         join_all(
             connections
                 .into_values()
-                .chain([leader_timeout_task, cleanup_task].into_iter()),
+                .chain([leader_timeout_task, commit_timeout_task, cleanup_task].into_iter()),
         )
         .await;
         Arc::try_unwrap(block_fetcher)
@@ -479,6 +484,47 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 _epoch_shutdown = sleep(shutdown_duration) => {
                     tracing::info!("Shutting down sync after epoch close");
                     epoch_close_signal.close();
+                }
+                _stopped = inner.stopped() => {
+                    return None;
+                }
+            }
+        }
+    }
+
+    async fn commit_timeout_task(
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        shutdown_grace_period: Duration,
+    ) -> Option<()> {
+        let commit_timeout = Duration::from_millis(10);
+        loop {
+            let notified = inner.notify.notified();
+            let round = inner
+                .block_store
+                .last_own_block_ref()
+                .map(|b| b.round())
+                .unwrap_or_default();
+            let closing_time = inner.epoch_closing_time.load(Ordering::Relaxed);
+            let shutdown_duration = if closing_time != 0 {
+                shutdown_grace_period.saturating_sub(
+                    timestamp_utc().saturating_sub(Duration::from_millis(closing_time)),
+                )
+            } else {
+                Duration::MAX
+            };
+            if Duration::is_zero(&shutdown_duration) {
+                return None;
+            }
+            select! {
+                _sleep = sleep(commit_timeout) => {
+                    tracing::debug!("Commit timeout in round {round}");
+                    // try commit
+                    inner.syncer.force_commit().await;
+
+                }
+                _notified = notified => {
+                    // todo - more then one round timeout can happen, need to fix this
+                    inner.syncer.force_commit().await;
                 }
                 _stopped = inner.stopped() => {
                     return None;

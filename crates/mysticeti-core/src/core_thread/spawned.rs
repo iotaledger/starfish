@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, sync::Arc, thread};
-
+use futures::SinkExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -27,6 +27,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 enum CoreThreadCommand {
     AddBlocks(Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>, oneshot::Sender<Vec<BlockReference>>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
+    ForceCommit(oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
     /// Request missing blocks that need to be synched.
     GetMissing(oneshot::Sender<Vec<HashSet<BlockReference>>>),
@@ -62,6 +63,13 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> Vec<BlockReference> {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop")
+    }
+
+    pub async fn force_commit(&self) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ForceCommit(sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -120,6 +128,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
                     self.syncer.force_new_block(round);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::ForceCommit(sender) => {
+                    self.syncer.try_new_commit();
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::Cleanup(sender) => {
