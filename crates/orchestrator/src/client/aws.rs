@@ -311,7 +311,7 @@ impl ServerProviderClient for AwsClient {
     where
         S: Into<String> + Serialize + Send,
     {
-        let random_delay_secs = rand::thread_rng().gen_range(0..=200);
+        let random_delay_secs = rand::thread_rng().gen_range(0..=120);
         println!("Sleeping for {} seconds...", random_delay_secs);
 
         // Sleep for the random delay

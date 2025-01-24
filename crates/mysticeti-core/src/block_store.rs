@@ -26,6 +26,7 @@ use crate::{
     wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 use crate::committee::{QuorumThreshold, StakeAggregator};
+use crate::metrics::UtilizationTimerVecExt;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 #[allow(unused)]
@@ -1048,10 +1049,12 @@ pub const WAL_ENTRY_COMMIT: Tag = 5;
 impl BlockWriter for (&mut WalWriter, &BlockStore) {
 
     fn insert_block(&mut self, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)) -> WalPosition {
+        let timer = self.1.metrics.utilization_timer.utilization_timer("Writer: write to disk");
         let pos = self
             .0
             .write(WAL_ENTRY_BLOCK, storage_and_transmission_blocks.0.serialized_bytes())
             .expect("Writing to wal failed");
+        drop(timer);
         self.1
             .insert_block(storage_and_transmission_blocks, pos, 0, self.1.committee_size as AuthorityIndex);
         pos

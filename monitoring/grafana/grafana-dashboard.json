@@ -788,7 +788,7 @@
           "disableTextWrap": false,
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "committed_leaders_total{instance=\"host.docker.internal:1517\"}",
+          "expr": "committed_leaders_total{instance=\"host.docker.internal:1507\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "Node {{authority}} - {{commit_type}}",
