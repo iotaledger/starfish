@@ -400,7 +400,7 @@ impl<H: BlockHandler> Core<H> {
         let encoded_statements = self.encoder.encode_statements(statements.clone(), info_length, parity_length);
         drop(timer_for_encoding);
 
-        let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round.saturating_sub(1));
+        let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round);
 
         for j in 0..self.last_own_block.len() {
             // Compress the references in the block
