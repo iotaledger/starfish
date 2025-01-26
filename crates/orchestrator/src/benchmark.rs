@@ -28,8 +28,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
     /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
-    // Consensus protocol to deploy (0 | mysticeti, 1 | starfish pull-push, 2 | starfish push)
-    pub starfish: usize,
+    // Consensus protocol to deploy (mysticeti | starfish | starfish-push | cordial-miners)
+    pub consensus_protocol: String,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
     /// Byzantine strategy
@@ -45,7 +45,7 @@ impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
             self.client_parameters,
             self.settings.faults,
             self.nodes,
-            self.starfish,
+            self.consensus_protocol,
             self.byzantine_nodes,
             self.byzantine_strategy,
             self.load,
@@ -59,7 +59,7 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
         write!(
             f,
             "Consensus choice: {}. Settings:{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {})",
-            self.starfish,
+            self.consensus_protocol,
             self.nodes,
             self.byzantine_nodes,
             self.byzantine_strategy,
@@ -79,7 +79,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         nodes: usize,
         use_internal_ip_address: bool,
         loads: Vec<usize>,
-        starfish: usize,
+        consensus_protocol: String,
         byzantine_nodes: usize,
         byzantine_strategy: String,
     ) -> Vec<Self> {
@@ -92,7 +92,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 use_internal_ip_address,
                 nodes,
                 load,
-                starfish,
+                consensus_protocol: consensus_protocol.clone(),
                 byzantine_nodes,
                 byzantine_strategy: byzantine_strategy.clone(),
             })
@@ -107,7 +107,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             client_parameters: C::default(),
             use_internal_ip_address: false,
             nodes: 4,
-            starfish: 1,
+            consensus_protocol: "starfish".to_string(),
             byzantine_nodes: 0,
             byzantine_strategy: "honest".to_string(),
             load: 500,
