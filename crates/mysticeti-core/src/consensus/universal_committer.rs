@@ -11,6 +11,7 @@ use crate::{
 };
 use std::collections::{HashSet};
 use std::{collections::VecDeque, sync::Arc};
+use crate::block_store::ConsensusProtocol;
 use crate::metrics::UtilizationTimerVecExt;
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
@@ -150,12 +151,25 @@ pub struct UniversalCommitterBuilder {
 
 impl UniversalCommitterBuilder {
     pub fn new(committee: Arc<Committee>, block_store: BlockStore, metrics: Arc<Metrics>) -> Self {
-        Self {
-            committee,
-            block_store,
-            metrics,
-            wave_length: WAVE_LENGTH,
-            pipeline: true,
+        match block_store.consensus_protocol {
+            ConsensusProtocol::Starfish | ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPush => {
+                Self {
+                    committee,
+                    block_store,
+                    metrics,
+                    wave_length: WAVE_LENGTH,
+                    pipeline: true,
+                }
+            }
+            ConsensusProtocol::CordialMiners => {
+                    Self {
+                        committee,
+                        block_store,
+                        metrics,
+                        wave_length: WAVE_LENGTH,
+                        pipeline: false,
+                    }
+                }
         }
     }
 

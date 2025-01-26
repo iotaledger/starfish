@@ -8,6 +8,8 @@ services:
       - prometheus_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: always
+
   grafana:
     image: grafana/grafana
     ports:
@@ -15,12 +17,15 @@ services:
     depends_on:
       - prometheus
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=supers3cret
+      - GF_AUTH_GENERIC_OAUTH_PERSISTENT_TOKEN=true
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml
       - ./grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml
       - ./grafana/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json
+    restart: always
 
 volumes:
   prometheus_data:

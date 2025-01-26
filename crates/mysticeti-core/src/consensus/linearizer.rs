@@ -7,6 +7,7 @@ use crate::{
     block_store::BlockStore,
     types::{BlockReference},
 };
+use crate::block_store::ConsensusProtocol;
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
@@ -170,16 +171,19 @@ impl Linearizer {
         block_store: &BlockStore,
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
-        let starfish = block_store.starfish;
+        let consensus_protocol = block_store.consensus_protocol;
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-           let mut sub_dag = if starfish >= 1 {
-               self.collect_subdag_starfish(block_store, leader_block)
-           } else {
-               self.collect_subdag_mysticeti(block_store, leader_block)
+           let mut sub_dag = match consensus_protocol
+           {
+               ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+                   self.collect_subdag_starfish(block_store, leader_block)
+               }
+               ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                   self.collect_subdag_mysticeti(block_store, leader_block)
+               }
            };
-           //let mut sub_dag = self.collect_sub_dag(block_store, leader_block);
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
             let acknowledgement_authorities: Vec<_> =

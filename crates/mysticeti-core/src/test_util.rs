@@ -166,7 +166,7 @@ pub fn committee_and_cores_persisted_epoch_duration(
                 metrics.clone(),
                 &committee,
                 byzantine_strategy_string,
-                1,
+                "starfish".to_string(),
             );
 
             let private_config = NodePrivateConfig::new_for_tests(authority);
@@ -437,7 +437,7 @@ impl TestBlockWriter {
             test_metrics(),
             committee,
             "honest".to_string(),
-            1,
+            "starfish".to_string(),
         );
         let block_store = state.block_store;
         Self {

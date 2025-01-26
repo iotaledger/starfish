@@ -9,6 +9,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 
@@ -319,13 +320,16 @@ impl BaseCommitter {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
-        if self.block_store.starfish >= 1 {
-            if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
-                return LeaderStatus::Skip(leader, leader_round);
+        match self.block_store.consensus_protocol  {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+                if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
+                    return LeaderStatus::Skip(leader, leader_round);
+                }
             }
-        } else {
-            if self.decide_skip_mysticeti(voting_round, leader) {
-                return LeaderStatus::Skip(leader, leader_round);
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                if self.decide_skip_mysticeti(voting_round, leader) {
+                    return LeaderStatus::Skip(leader, leader_round);
+                }
             }
         }
 

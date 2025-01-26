@@ -29,6 +29,37 @@ use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum ConsensusProtocol {
+    Mysticeti,
+    Starfish,
+    CordialMiners,
+    StarfishPush,
+}
+
+
+impl ConsensusProtocol {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "mysticeti" => ConsensusProtocol::Mysticeti,
+            "starfish" => ConsensusProtocol::Starfish,
+            "cordial-miners" => ConsensusProtocol::CordialMiners,
+            "starfish-push" => ConsensusProtocol::StarfishPush,
+            _ => ConsensusProtocol::Starfish, // Default to Starfish
+        }
+    }
+
+    pub fn to_usize(&self) -> usize {
+        match self {
+            ConsensusProtocol::Mysticeti => 0,
+            ConsensusProtocol::CordialMiners => 1,
+            ConsensusProtocol::Starfish => 2,
+            ConsensusProtocol::StarfishPush => 3,
+        }
+    }
+}
+
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum ByzantineStrategy {
@@ -44,7 +75,7 @@ pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
     block_wal_reader: Arc<WalReader>,
     metrics: Arc<Metrics>,
-    pub(crate) starfish: usize,
+    pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
 }
@@ -102,7 +133,7 @@ impl BlockStore {
         metrics: Arc<Metrics>,
         committee: &Committee,
         byzantine_strategy: String,
-        starfish: usize,
+        consensus: String,
     ) -> RecoveredState {
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
@@ -173,19 +204,20 @@ impl BlockStore {
             "equivocating-chains-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
             _ => None, // Default to honest behavior
         };
-        if starfish == 1 {
-            tracing::info!("Starting Starfish mixed push-pull protocol");
-        } else if starfish == 2 {
-            tracing::info!("Starting Starfish push protocol");
-        } else {
-            tracing::info!("Starting Mysticeti protocol");
+        let consensus_protocol = ConsensusProtocol::from_str(&consensus);
+
+        match &consensus_protocol {
+            ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
+            ConsensusProtocol::Starfish => tracing::info!("Starting Starfish mixed push-pull protocol"),
+            ConsensusProtocol::StarfishPush => tracing::info!("Starting Starfish push protocol"),
+            ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let this = Self {
             block_wal_reader,
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
-            starfish,
+            consensus_protocol,
             committee_size: committee.len(),
         };
         builder.build(this)

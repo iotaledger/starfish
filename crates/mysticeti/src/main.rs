@@ -30,60 +30,44 @@ enum Operation {
     /// Generate a committee file, parameters files and the private config files of all validators
     /// from a list of initial peers. This is only suitable for benchmarks as it exposes all keys.
     BenchmarkGenesis {
-        /// The list of ip addresses of the all validators.
         #[clap(long, value_name = "ADDR", value_delimiter = ' ', num_args(4..))]
         ips: Vec<IpAddr>,
-        /// The working directory where the files will be generated.
         #[clap(long, value_name = "FILE", default_value = "genesis")]
         working_directory: PathBuf,
-        /// Path to the file holding the node parameters. If not provided, default parameters are used.
         #[clap(long, value_name = "FILE")]
         node_parameters_path: Option<PathBuf>,
     },
     /// Run a validator node.
     Run {
-        /// The authority index of this node.
         #[clap(long, value_name = "INT")]
         authority: AuthorityIndex,
-        /// Path to the file holding the public committee information.
         #[clap(long, value_name = "FILE")]
         committee_path: String,
-        /// Path to the file holding the public validator configurations (such as network addresses).
         #[clap(long, value_name = "FILE")]
         public_config_path: String,
-        /// Path to the file holding the private validator configurations (including keys).
         #[clap(long, value_name = "FILE")]
         private_config_path: String,
-        /// Path to the file holding the client parameters (for benchmarks).
         #[clap(long, value_name = "FILE")]
         client_parameters_path: String,
-        /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
-        /// Consensus to deploy : Mysticeti = 0, Starfish mixed pull-push = 1, Starfish push = 2
-        #[clap(long, value_name = "INT", default_value_t = 1, global = true)]
-        starfish: usize,
+        #[clap(long, value_name = "STRING", default_value = "starfish")]
+        consensus: String,
     },
     /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
     DryRun {
-        /// The authority index of this node.
         #[clap(long, value_name = "INT")]
         authority: AuthorityIndex,
-        /// The number of authorities in the committee.
         #[clap(long, value_name = "INT")]
         committee_size: usize,
-        /// The load for the node
-        #[clap(long, value_name = "INT", default_value_t = 10, global = true)]
+        #[clap(long, value_name = "INT", default_value_t = 10)]
         load: usize,
-        /// Which Byzantine Strategy to deploy
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
-        /// Seed for mimicing latency between nodes, 0 for zero latency
-        #[clap(long, global = true, default_value_t = false)]
+        #[clap(long, default_value_t = false)]
         mimic_extra_latency: bool,
-        /// Consensus to deploy : Mysticeti = 0, Starfish mixed pull-push = 1, Starfish push = 2
-        #[clap(long, value_name = "INT", default_value_t = 1, global = true)]
-        starfish: usize,
+        #[clap(long, value_name = "STRING", default_value = "starfish")]
+        consensus: String,
     },
 }
 
@@ -110,7 +94,7 @@ async fn main() -> Result<()> {
             private_config_path,
             client_parameters_path,
             byzantine_strategy,
-            starfish,
+            consensus: consensus_protocol,
         } => {
             run(
                 authority,
@@ -119,7 +103,7 @@ async fn main() -> Result<()> {
                 private_config_path,
                 client_parameters_path,
                 byzantine_strategy,
-                starfish
+                consensus_protocol,
             )
             .await?
         }
@@ -129,8 +113,8 @@ async fn main() -> Result<()> {
             load,
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
-            starfish,
-        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency, starfish).await?,
+            consensus: consensus_protocol,
+        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency, consensus_protocol).await?,
     }
 
     Ok(())
@@ -200,7 +184,7 @@ async fn run(
     private_config_path: String,
     client_parameters_path: String,
     byzantine_strategy: String,
-    starfish: usize,
+    consensus_protocol: String,
 ) -> Result<()> {
     tracing::info!("Starting validator {authority}");
 
@@ -240,7 +224,7 @@ async fn run(
         private_config,
         client_parameters,
         byzantine_strategy,
-        starfish,
+        consensus_protocol,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;
@@ -254,7 +238,7 @@ async fn dryrun(
     load: usize,
     byzantine_strategy: String,
     mimic_latency: bool,
-    starfish: usize,
+    consensus_protocol: String,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
@@ -296,7 +280,7 @@ async fn dryrun(
         private_config,
         client_parameters,
         byzantine_strategy,
-        starfish,
+        consensus_protocol,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;

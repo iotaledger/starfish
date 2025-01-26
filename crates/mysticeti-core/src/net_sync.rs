@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-
+use std::cmp::PartialEq;
 use futures::future::join_all;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
@@ -33,6 +33,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
     wal::WalSyncer,
 };
+use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
@@ -59,6 +60,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     epoch_close_signal: mpsc::Sender<()>,
     pub epoch_closing_time: Arc<AtomicU64>,
 }
+
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
     pub fn start(
@@ -200,7 +202,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
     ) -> Option<()> {
 
-        let mysticeti_starfish_flag = inner.block_store.starfish;
+        let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
         let synchronizer_parameters = SynchronizerParameters::new(committee_size);
         let last_seen = inner
@@ -252,12 +254,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let round = 0;
                         disseminator.disseminate_own_blocks(round).await;
                     } else {
-                        // For Mysticeti pull and Starfish mixed pull-push strategy disseminate
-                        // own blocks only. For Starfish push, push all blocks
-                        if mysticeti_starfish_flag <= 1 {
-                            disseminator.disseminate_own_blocks(round).await;
-                        } else {
-                            disseminator.disseminate_all_blocks_push().await;
+                        // For Mysticeti and Starfish disseminate
+                        // own blocks only. For Starfish push and Cordial Miners, push all blocks
+                        match consensus_protocol {
+                            ConsensusProtocol::Mysticeti | ConsensusProtocol::Starfish => {
+                                disseminator.disseminate_own_blocks(round).await;
+                            }
+                            ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
+                                disseminator.disseminate_all_blocks_push().await;
+                            }
                         }
                     }
                 }
@@ -293,11 +298,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block = if mysticeti_starfish_flag >= 1 {
-                            storage_block.from_storage_to_transmission(own_id)
-                        } else {
-                            storage_block.clone()
-                        };
+                        let transmission_block =
+                            match consensus_protocol {
+                                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                                    storage_block.clone()
+                                }
+                                ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+                                    storage_block.from_storage_to_transmission(own_id)
+                                }
+                            };
                         let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;
@@ -310,78 +319,80 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
                         let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        if mysticeti_starfish_flag >= 1 {
-                            let mut max_round_pending_block_reference = None;
-                            for block_reference in pending_block_references {
-                                if max_round_pending_block_reference.is_none() {
-                                    max_round_pending_block_reference = Some(block_reference.clone());
-                                } else {
-                                    if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                        match consensus_protocol {
+                            ConsensusProtocol::Starfish |ConsensusProtocol::StarfishPush => {
+                                let mut max_round_pending_block_reference = None;
+                                for block_reference in pending_block_references {
+                                    if max_round_pending_block_reference.is_none() {
                                         max_round_pending_block_reference = Some(block_reference.clone());
+                                    } else {
+                                        if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                                            max_round_pending_block_reference = Some(block_reference.clone());
+                                        }
                                     }
                                 }
+                                if max_round_pending_block_reference.is_some() {
+                                    tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                                    Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
+                                }
                             }
-                            if max_round_pending_block_reference.is_some() {
-                                tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
-                                Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
-                            }
-                        } else {
-                            if !pending_block_references.is_empty() {
-                                tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", pending_block_references, peer);
-                                Self::request_parents_blocks(pending_block_references, &connection.sender);
+                            ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti=> {
+                                if !pending_block_references.is_empty() {
+                                    tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", pending_block_references, peer);
+                                    Self::request_parents_blocks(pending_block_references, &connection.sender);
+                                }
                             }
                         }
                     }
 
-                    // Second process blocks without statements
-                    let mut verified_data_blocks = Vec::new();
-                    for data_block in blocks_without_statements {
-                        let mut block: VerifiedStatementBlock = (*data_block).clone();
-                        tracing::debug!("Received {} from {}", block, peer);
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
-                        if !contains_new_shard_or_header {
-                            continue;
-                        }
-                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
-                            tracing::warn!(
-                                "Rejected incorrect block {} from {}: {:?}",
-                                block.reference(),
-                                peer,
-                                e
-                            );
-                            // todo: Terminate connection upon receiving incorrect block.
-                            break;
-                        }
-                        let (ready_to_reconstruct, cached_block) = inner.block_store.ready_to_reconstruct(&block);
-                        if ready_to_reconstruct {
-                            let mut cached_block = cached_block.expect("Should be Some");
-                            cached_block.copy_shard(&block);
-                            let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
-                            if reconstructed_block.is_some() {
-                                block = reconstructed_block.expect("Should be Some");
-                                tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
-                            } else {
-                                tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
-                            }
-                        }
-                        let storage_block = block;
-                        let transmission_block = if mysticeti_starfish_flag >= 1 {
-                            storage_block.from_storage_to_transmission(own_id)
-                        } else {
-                            storage_block.clone()
-                        };
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
-                        if !contains_new_shard_or_header {
-                            continue;
-                        }
-                        let data_storage_block = Data::new(storage_block);
-                        let data_transmission_block = Data::new(transmission_block);
-                        verified_data_blocks.push((data_storage_block, data_transmission_block));
-                    }
+                    if consensus_protocol == ConsensusProtocol::Starfish || consensus_protocol == ConsensusProtocol::StarfishPush {
 
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
-                    if !verified_data_blocks.is_empty() {
-                        inner.syncer.add_blocks(verified_data_blocks).await;
+                        // Second process blocks without statements
+                        let mut verified_data_blocks = Vec::new();
+                        for data_block in blocks_without_statements {
+                            let mut block: VerifiedStatementBlock = (*data_block).clone();
+                            tracing::debug!("Received {} from {}", block, peer);
+                            let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                            if !contains_new_shard_or_header {
+                                continue;
+                            }
+                            if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
+                                tracing::warn!(
+                                    "Rejected incorrect block {} from {}: {:?}",
+                                    block.reference(),
+                                    peer,
+                                    e
+                                );
+                                // todo: Terminate connection upon receiving incorrect block.
+                                break;
+                            }
+                            let (ready_to_reconstruct, cached_block) = inner.block_store.ready_to_reconstruct(&block);
+                            if ready_to_reconstruct {
+                                let mut cached_block = cached_block.expect("Should be Some");
+                                cached_block.copy_shard(&block);
+                                let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
+                                if reconstructed_block.is_some() {
+                                    block = reconstructed_block.expect("Should be Some");
+                                    tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
+                                } else {
+                                    tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
+                                }
+                            }
+                            let storage_block = block;
+                            let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                            let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                            if !contains_new_shard_or_header {
+                                continue;
+                            }
+                            let data_storage_block = Data::new(storage_block);
+                            let data_transmission_block = Data::new(transmission_block);
+                            verified_data_blocks.push((data_storage_block, data_transmission_block));
+                        }
+
+                        tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                        if !verified_data_blocks.is_empty() {
+                            inner.syncer.add_blocks(verified_data_blocks).await;
+                        }
                     }
 
                     drop(timer);

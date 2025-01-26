@@ -39,7 +39,7 @@ impl Validator {
         private_config: NodePrivateConfig,
         client_parameters: ClientParameters,
         byzantine_strategy: String,
-        starfish: usize,
+        consensus: String,
     ) -> Result<Self> {
         let network_address = public_config
             .network_address(authority)
@@ -74,7 +74,7 @@ impl Validator {
             metrics.clone(),
             &committee,
             byzantine_strategy,
-            starfish,
+            consensus,
         );
 
         // Boot the validator node.
@@ -217,7 +217,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                1,
+                "starfish".to_string(),
             )
             .await
             .unwrap();
@@ -264,7 +264,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                1,
+                "starfish".to_string(),
             )
             .await
             .unwrap();
@@ -294,7 +294,7 @@ mod smoke_tests {
             private_config,
             client_parameters,
             "honest".to_string(),
-            1,
+            "starfish".to_string(),
         )
         .await
         .unwrap();
@@ -341,7 +341,7 @@ mod smoke_tests {
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                1,
+                "starfish".to_string(),
             )
             .await
             .unwrap();
