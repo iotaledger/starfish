@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use reed_solomon_simd::{ReedSolomonDecoder};
 use crate::committee::Committee;
-use crate::crypto::MerkleRoot;
+use crate::crypto::TransactionsCommitment;
 use crate::encoder::{Encoder, ShardEncoder};
 use crate::types::{AuthorityIndex,  CachedStatementBlock, Shard, VerifiedStatementBlock};
 
@@ -58,7 +58,7 @@ impl CachedStatementBlockDecoder for Decoder {
         drop(result);
 
         let recovered_statements = encoder.encode_shards(data, info_length, parity_length);
-        let (computed_merkle_root, computed_merkle_proof) = MerkleRoot::new_from_encoded_statements(&recovered_statements, own_id as usize);
+        let (computed_merkle_root, computed_merkle_proof) = TransactionsCommitment::new_from_encoded_statements(&recovered_statements, own_id as usize);
 
         if computed_merkle_root == cached_block.merkle_root() {
             let mut reconstructed_cached_block = cached_block;

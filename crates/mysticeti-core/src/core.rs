@@ -33,7 +33,7 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
     wal::{WalPosition, WalSyncer, WalWriter},
 };
-use crate::block_store::WAL_ENTRY_PAYLOAD;
+use crate::block_store::{ConsensusProtocol, WAL_ENTRY_PAYLOAD};
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
 use crate::types::{Encoder, Decoder, VerifiedStatementBlock};
@@ -224,7 +224,13 @@ impl<H: BlockHandler> Core<H> {
             false
         };
         tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
-        self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+        match self.block_store.consensus_protocol {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+                self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+            }
+            _ => {
+            }
+        };
 
         let mut result = Vec::with_capacity(processed.len());
         for (position, processed) in processed.into_iter() {
@@ -397,7 +403,14 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::try_new_block::encoding");
-        let encoded_statements = self.encoder.encode_statements(statements.clone(), info_length, parity_length);
+        let encoded_statements = match self.block_store.consensus_protocol {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+                Some(self.encoder.encode_statements(statements.clone(), info_length, parity_length))
+            }
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+               None
+            }
+        };
         drop(timer_for_encoding);
 
         let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round);
@@ -451,6 +464,7 @@ impl<H: BlockHandler> Core<H> {
                 &self.signer,
                 statements.clone(),
                 encoded_statements.clone(),
+                self.block_store.consensus_protocol,
             );
             drop(timer_for_building_block);
             blocks.push(storage_block);
@@ -525,7 +539,7 @@ impl<H: BlockHandler> Core<H> {
             }
             drop(timer_for_disk);
 
-            tracing::debug!("Created block {storage_and_transmission_blocks:?} with refs {:?}", storage_and_transmission_blocks.0.includes().len());
+            tracing::debug!("Created block {:?} with refs {:?}", storage_and_transmission_blocks.0, storage_and_transmission_blocks.0.includes().len());
             return_blocks.push(storage_and_transmission_blocks);
             block_id += 1;
         }

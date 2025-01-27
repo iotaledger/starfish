@@ -34,8 +34,9 @@ use minibytes::Bytes;
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::crypto::{MerkleRoot};
+use crate::crypto::{TransactionsCommitment};
 use crate::{committee::{Committee}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data};
+use crate::block_store::ConsensusProtocol;
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 use crate::encoder::ShardEncoder;
 use crate::threshold_clock::threshold_clock_valid_verified_block;
@@ -110,7 +111,7 @@ pub struct VerifiedStatementBlock {
     // This is Some only when the above has one some
     merkle_proof_encoded_shard:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
-    merkle_root_encoded_statements: MerkleRoot,
+    transactions_commitment: TransactionsCommitment,
 
 }
 
@@ -142,7 +143,7 @@ pub struct CachedStatementBlock {
     // This is Some only when the above has one some
     merkle_proof_encoded_shard:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
-    merkle_root_encoded_statements: MerkleRoot,
+    merkle_root_encoded_statements: TransactionsCommitment,
 
 }
 
@@ -165,7 +166,7 @@ impl CachedStatementBlock {
                 statements: self.statements.clone(),
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
-                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.merkle_root_encoded_statements.clone(),
             }
         } else {
             let info_shards: Vec<Vec<u8>> = self.encoded_statements()
@@ -211,7 +212,7 @@ impl CachedStatementBlock {
                 statements: Some(reconstructed_statements),
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
-                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.merkle_root_encoded_statements.clone(),
             }
 
         }
@@ -241,7 +242,7 @@ impl CachedStatementBlock {
     }
 
 
-    pub fn merkle_root(&self) -> MerkleRoot {
+    pub fn merkle_root(&self) -> TransactionsCommitment {
         self.merkle_root_encoded_statements.clone()
     }
 
@@ -260,7 +261,7 @@ impl VerifiedStatementBlock {
         statements: Vec<BaseStatement>,
         encoded_shard: Option<(Shard,usize)>,
         merkle_proof: Option<Vec<u8>>,
-        merkle_root: MerkleRoot,
+        merkle_root: TransactionsCommitment,
     ) -> Self {
         Self {
             reference: BlockReference {
@@ -285,7 +286,7 @@ impl VerifiedStatementBlock {
             statements: Some(statements),
             encoded_shard,
             merkle_proof_encoded_shard: merkle_proof,
-            merkle_root_encoded_statements: merkle_root,
+            transactions_commitment: merkle_root,
         }
     }
 
@@ -313,7 +314,7 @@ impl VerifiedStatementBlock {
             statements: self.statements.clone(),
             encoded_statements, // Replace `0` with the actual position logic
             merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
-            merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+            merkle_root_encoded_statements: self.transactions_commitment.clone(),
         }
     }
 
@@ -331,7 +332,7 @@ impl VerifiedStatementBlock {
                         statements: None,
                         encoded_shard: None,
                         merkle_proof_encoded_shard: None,
-                        merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                        transactions_commitment: self.transactions_commitment.clone(),
                     }
                 }
             }
@@ -345,7 +346,7 @@ impl VerifiedStatementBlock {
                 statements: None,
                 encoded_shard: self.encoded_shard.clone(),
                 merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
-                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.transactions_commitment.clone(),
             }
         } else {
             Self {
@@ -358,7 +359,7 @@ impl VerifiedStatementBlock {
                 statements: self.statements.clone(),
                 encoded_shard: None,
                 merkle_proof_encoded_shard: None,
-                merkle_root_encoded_statements: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.transactions_commitment.clone(),
             }
         }
     }
@@ -375,12 +376,12 @@ impl VerifiedStatementBlock {
             vec![],
             None,
             None,
-            MerkleRoot::default(),
+            TransactionsCommitment::default(),
         ))
     }
 
-    pub fn merkle_root(&self) -> MerkleRoot {
-        self.merkle_root_encoded_statements.clone()
+    pub fn merkle_root(&self) -> TransactionsCommitment {
+        self.transactions_commitment.clone()
     }
 
     pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
@@ -463,9 +464,17 @@ impl VerifiedStatementBlock {
         epoch_marker: EpochStatus,
         signer: &Signer,
         statements: Vec<BaseStatement>,
-        encoded_statements: Vec<Shard>,
+        encoded_statements: Option<Vec<Shard>>,
+        consensus_protocol: ConsensusProtocol,
     ) -> Self {
-        let (merkle_root, _merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&encoded_statements, authority as usize);
+        let transactions_commitment = match consensus_protocol {
+            ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+                TransactionsCommitment::new_from_encoded_statements(&encoded_statements.as_ref().unwrap(), authority as usize).0
+            }
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                TransactionsCommitment::new_from_statements(&statements)
+            }
+        };
         let signature = signer.sign_block(
             authority,
             round,
@@ -473,7 +482,7 @@ impl VerifiedStatementBlock {
             &acknowledgement_statements,
             meta_creation_time_ns,
             epoch_marker,
-            merkle_root,
+            transactions_commitment,
         );
 
 
@@ -488,36 +497,46 @@ impl VerifiedStatementBlock {
             statements,
             None,
             None,
-            merkle_root,
+            transactions_commitment,
         )
     }
 
-    pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder) -> eyre::Result<()> {
+    pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder, consensus_protocol: ConsensusProtocol) -> eyre::Result<()> {
         let round = self.round();
-        let committee_size = committee.len();
-        let info_length = committee.info_length();
-        let parity_length = committee_size-info_length;
-        if self.statements.is_some() {
-            let computed_encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
-            let (computed_merkle_tree_root, merkle_proof_bytes) = MerkleRoot::new_from_encoded_statements(&computed_encoded_statements, own_id);
-            ensure!(computed_merkle_tree_root== self.merkle_root_encoded_statements, "Incorrect Merkle root");
-            self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
-            self.encoded_shard = Some((computed_encoded_statements[own_id as usize].clone(), own_id));
-        } else {
-            if self.encoded_shard.is_some() {
-                    let (encoded_shard, position) = self.encoded_shard.clone().expect("We expect an encoded shard");
-                    if position != peer_id {
-                        bail!("The peer delivers a wrong encoded chunk");
-                    }
-                    if self.merkle_proof_encoded_shard.is_none() {
-                        bail!("The peer didn't include the proof for the chunk");
-                    }
-                    ensure!(MerkleRoot::check_correctness_merkle_leaf(encoded_shard, self.merkle_root_encoded_statements, self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(), committee_size, position),
+        match consensus_protocol {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+                let committee_size = committee.len();
+                let info_length = committee.info_length();
+                let parity_length = committee_size-info_length;
+                if self.statements.is_some() {
+                    let encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
+                    let (transactions_commitment, merkle_proof_bytes) = TransactionsCommitment::new_from_encoded_statements(&encoded_statements, own_id);
+                    ensure!(transactions_commitment== self.transactions_commitment, "Incorrect Merkle root");
+                    self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
+                    self.encoded_shard = Some((encoded_statements[own_id as usize].clone(), own_id));
+                } else {
+                    if self.encoded_shard.is_some() {
+                        let (encoded_shard, position) = self.encoded_shard.clone().expect("We expect an encoded shard");
+                        if position != peer_id {
+                            bail!("The peer delivers a wrong encoded chunk");
+                        }
+                        if self.merkle_proof_encoded_shard.is_none() {
+                            bail!("The peer didn't include the proof for the encoded shard");
+                        }
+                        ensure!(TransactionsCommitment::check_correctness_merkle_leaf(encoded_shard, self.transactions_commitment, self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(), committee_size, position),
                     "Merkle proof check failed");
+                    }
+                }
+            }
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                if self.statements.is_some() {
+                    let transactions_commitment = TransactionsCommitment::new_from_statements(&self.statements.as_ref().unwrap());
+                    ensure!(transactions_commitment== self.transactions_commitment, "Incorrect Merkle root");
+                } else {
+                    bail!("The peer didn't include statements in block");
+                }
             }
         }
-
-        // TODO: check correctness of encoded data/ chunks and merkle_root
 
         let digest = BlockDigest::new(
             self.author(),
@@ -527,7 +546,7 @@ impl VerifiedStatementBlock {
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
-            self.merkle_root_encoded_statements,
+            self.transactions_commitment,
         );
         ensure!(
             digest == self.digest(),
@@ -593,7 +612,7 @@ pub struct StatementBlock {
     // This is Some only when the above is a vector with 1 Some and all other Nones
     merkle_proof:  Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
-    merkle_root: MerkleRoot,
+    merkle_root: TransactionsCommitment,
 
 }
 
@@ -1010,7 +1029,7 @@ mod test {
                 statements: None,
                 encoded_shard: None,
                 merkle_proof_encoded_shard: None,
-                merkle_root_encoded_statements: MerkleRoot::default(),
+                transactions_commitment: TransactionsCommitment::default(),
             }
         }
 

@@ -287,7 +287,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         if !contains_new_shard_or_header {
                             continue;
                         }
-                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
+                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),
@@ -356,7 +356,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             if !contains_new_shard_or_header {
                                 continue;
                             }
-                            if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder) {
+                            if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
                                 tracing::warn!(
                                     "Rejected incorrect block {} from {}: {:?}",
                                     block.reference(),

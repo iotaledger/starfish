@@ -28,7 +28,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
-use crate::crypto::MerkleRoot;
+use crate::crypto::TransactionsCommitment;
 use crate::types::{VerifiedStatementBlock};
 
 pub fn test_metrics() -> Arc<Metrics> {
@@ -555,7 +555,7 @@ pub fn build_dag(
                     vec![],
                     None,
                     None,
-                    MerkleRoot::default(),
+                    TransactionsCommitment::default(),
                 ));
                 let transmission_block = data_storage_block.from_storage_to_transmission(authority);
                 let data_transmission_block = Data::new(transmission_block);
@@ -590,7 +590,7 @@ pub fn build_dag_layer(
             vec![],
             None,
             None,
-            MerkleRoot::default(),
+            TransactionsCommitment::default(),
         ));
 
         let transmission_block = data_storage_block.from_storage_to_transmission(authority);

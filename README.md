@@ -15,7 +15,7 @@ Also supports other BFT protocols based on uncertified DAGs:
 - [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf)
 - [Cordial Miners](https://arxiv.org/pdf/2205.09174)
 
-The goal of Starfish is to mitigate Byzantine behavior, ensure consensus liveness, and provide linear communication complexity with validator count.
+The goal of Starfish is to mitigate Byzantine behavior, ensure consensus liveness, and provide linear communication complexity with validator number.
 
 ## Requirements
 
