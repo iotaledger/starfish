@@ -5,21 +5,20 @@ use std::collections::{BTreeMap, HashSet};
 use minibytes::Bytes;
 
 use crate::{
-    block_store::{BlockStore, CommitData, OwnBlockData},
+    block_store::{BlockStore, CommitData},  // Remove OwnBlockData
     core::MetaStatement,
     data::Data,
     types::{BlockReference},
-    wal::WalPosition,
+    // Remove wal import
 };
 use crate::types::VerifiedStatementBlock;
 
 pub struct RecoveredState {
     pub block_store: BlockStore,
-    pub last_own_block: Option<OwnBlockData>,
-    pub pending: Vec<(WalPosition, MetaStatement)>,
+    // Remove last_own_block: Option<OwnBlockData>,
+    // Remove pending: Vec<(WalPosition, MetaStatement)>,
     pub state: Option<Bytes>,
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: HashSet<BlockReference>,
     pub committed_state: Option<Bytes>,
@@ -27,11 +26,10 @@ pub struct RecoveredState {
 
 #[derive(Default)]
 pub struct RecoveredStateBuilder {
-    pending: BTreeMap<WalPosition, RawMetaStatement>,
-    last_own_block: Option<OwnBlockData>,
+    pending: BTreeMap<u64, RawMetaStatement>,  // Use sequence number instead of WalPosition
+    // Remove last_own_block
     state: Option<Bytes>,
-    unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>) >,
-
+    unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: HashSet<BlockReference>,
     committed_state: Option<Bytes>,
@@ -42,22 +40,17 @@ impl RecoveredStateBuilder {
         Self::default()
     }
 
-    pub fn block(&mut self, pos: WalPosition, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) {
+    pub fn block(&mut self, sequence: u64, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) {
         self.pending
-            .insert(pos, RawMetaStatement::Include(*storage_and_transmission_blocks.0.reference()));
+            .insert(sequence, RawMetaStatement::Include(*storage_and_transmission_blocks.0.reference()));
         self.unprocessed_blocks.push(storage_and_transmission_blocks);
     }
 
-    pub fn payload(&mut self, pos: WalPosition, payload: Bytes) {
-        self.pending.insert(pos, RawMetaStatement::Payload(payload));
+    pub fn payload(&mut self, sequence: u64, payload: Bytes) {
+        self.pending.insert(sequence, RawMetaStatement::Payload(payload));
     }
 
-    pub fn own_block(&mut self, own_block_data: OwnBlockData) {
-        // Edge case of WalPosition::MAX is automatically handled here, empty map is returned
-        self.pending = self.pending.split_off(&own_block_data.next_entry);
-        self.unprocessed_blocks.push(own_block_data.storage_transmission_blocks.clone());
-        self.last_own_block = Some(own_block_data);
-    }
+    // Remove own_block method as it's RocksDB specific now
 
     pub fn state(&mut self, state: Bytes) {
         self.state = Some(state);
@@ -74,14 +67,13 @@ impl RecoveredStateBuilder {
     }
 
     pub fn build(self, block_store: BlockStore) -> RecoveredState {
-        let pending = self
+        let pending_meta = self
             .pending
             .into_iter()
-            .map(|(pos, raw)| (pos, raw.into_meta_statement()))
+            .map(|(_, raw)| raw.into_meta_statement())
             .collect();
+
         RecoveredState {
-            pending,
-            last_own_block: self.last_own_block,
             block_store,
             state: self.state,
             unprocessed_blocks: self.unprocessed_blocks,
@@ -91,6 +83,8 @@ impl RecoveredStateBuilder {
         }
     }
 }
+
+// RawMetaStatement remains the same
 
 enum RawMetaStatement {
     Include(BlockReference),

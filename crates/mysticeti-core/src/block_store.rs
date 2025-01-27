@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-
+use std::path::Path;
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::{
 };
 use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::metrics::UtilizationTimerVecExt;
+use crate::rocks_store::RocksStore;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 
@@ -73,7 +74,7 @@ pub enum ByzantineStrategy {
 #[derive(Clone)]
 pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
-    block_wal_reader: Arc<WalReader>,
+    rocks_store: Arc<RocksStore>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
@@ -128,13 +129,14 @@ enum IndexEntry {
 impl BlockStore {
     pub fn open(
         authority: AuthorityIndex,
-        block_wal_reader: Arc<WalReader>,
-        wal_writer: &WalWriter,
+        path: impl AsRef<Path>,
         metrics: Arc<Metrics>,
         committee: &Committee,
         byzantine_strategy: String,
         consensus: String,
     ) -> RecoveredState {
+        let rocks_store = Arc::new(RocksStore::open(path)
+            .expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
         let mut inner = BlockStoreInner {
@@ -146,55 +148,39 @@ impl BlockStore {
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
-        let mut replay_started: Option<Instant> = None;
+        let replay_started = Instant::now();
         let mut block_count = 0u64;
-        for (pos, (tag, data)) in block_wal_reader.iter_until(wal_writer) {
-            if replay_started.is_none() {
-                replay_started = Some(Instant::now());
-                tracing::info!("Wal is not empty, starting replay");
+        // Recover blocks from RocksDB
+        let mut current_round = 0;
+        loop {
+            let blocks = rocks_store.get_blocks_by_round(current_round)
+                .expect("Failed to read blocks from RocksDB");
+
+            if blocks.is_empty() {
+                break;
             }
-            let block = match tag {
-                WAL_ENTRY_BLOCK => {
-                    let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(data)
-                        .expect("Failed to deserialize data from wal");
-                    let transmission_block = data_storage_block.from_storage_to_transmission(authority);
-                    let data_transmission_block = Data::new(transmission_block);
-                    let data_storage_transmission_blocks = (data_storage_block,data_transmission_block);
-                    builder.block(pos, data_storage_transmission_blocks.clone());
-                    data_storage_transmission_blocks
-                }
-                WAL_ENTRY_PAYLOAD => {
-                    builder.payload(pos, data);
-                    continue;
-                }
-                WAL_ENTRY_OWN_BLOCK => {
-                    let (own_block_data, own_storage_transmission_blocks) = OwnBlockData::from_bytes(data)
-                        .expect("Failed to deserialized own block data from wal");
-                    builder.own_block(own_block_data);
-                    own_storage_transmission_blocks
-                }
-                WAL_ENTRY_STATE => {
-                    builder.state(data);
-                    continue;
-                }
-                WAL_ENTRY_COMMIT => {
-                    let (commit_data, state) = bincode::deserialize(&data)
-                        .expect("Failed to deserialized commit data from wal");
-                    builder.commit_data(commit_data, state);
-                    continue;
-                }
-                _ => panic!("Unknown wal tag {tag} at position {pos}"),
-            };
-            // todo - we want to keep some last blocks in the cache
-            block_count += 1;
-            inner.add_unloaded(block, pos, 0, committee.len() as AuthorityIndex);
+
+            for block in blocks {
+                let transmission_block = block.from_storage_to_transmission(authority);
+                let data_transmission_block = Data::new(transmission_block);
+                let data_storage_transmission_blocks = (block.clone(), data_transmission_block);
+
+                builder.block(current_round, data_storage_transmission_blocks.clone());
+                block_count += 1;
+                inner.add_unloaded(
+                    data_storage_transmission_blocks,
+                    current_round,
+                    0,
+                    committee.len() as AuthorityIndex
+                );
+            }
+
+            current_round += 1;
         }
+
         metrics.block_store_entries.inc_by(block_count);
-        if let Some(replay_started) = replay_started {
-            tracing::info!("Wal replay completed in {:?}", replay_started.elapsed());
-        } else {
-            tracing::info!("Wal is empty, will start from genesis");
-        }
+        tracing::info!("RocksDB replay completed in {:?}, recovered {} blocks",
+        replay_started.elapsed(), block_count);
         let byzantine_strategy = match byzantine_strategy.as_str() {
             "timeout-leader" => Some(ByzantineStrategy::TimeoutLeader),
             "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
@@ -213,7 +199,7 @@ impl BlockStore {
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let this = Self {
-            block_wal_reader,
+            rocks_store,
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
@@ -409,7 +395,7 @@ impl BlockStore {
         self.metrics
             .block_store_unloaded_blocks
             .inc_by(unloaded as u64);
-        let retained_maps = self.block_wal_reader.cleanup();
+        let retained_maps = self.rocks_store.cleanup();
         self.metrics.wal_mappings.set(retained_maps as i64);
     }
 
@@ -501,7 +487,7 @@ impl BlockStore {
             IndexEntry::WalPosition(position) => {
                 self.metrics.block_store_loaded_blocks.inc();
                 let (tag, data) = self
-                    .block_wal_reader
+                    .rocks_store
                     .read(position)
                     .expect("Failed to read wal");
                 match tag {

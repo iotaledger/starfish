@@ -3,6 +3,7 @@
 
 use std::{collections::HashSet, fmt};
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use crate::{
     block_store::BlockStore,
     types::{BlockReference},
@@ -14,7 +15,7 @@ use crate::types::VerifiedStatementBlock;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,

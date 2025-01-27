@@ -3,12 +3,13 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-5}     # Default: 5 validators (recommend < number of physical cores)
+NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
 DESIRED_TPS=${DESIRED_TPS:-15000}       # Target transactions per second
 CONSENSUS=${CONSENSUS:-mysticeti}         # Options: mysticeti, starfish, cordial-miners, starfish-push
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}
-REMOVE_VOLUMES=0                       # Set to 1 to clear Grafana/Prometheus volumes
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}  # Must be < NUM_VALIDATORS / 3
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
+                                                      #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
+REMOVE_VOLUMES=1                       # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)

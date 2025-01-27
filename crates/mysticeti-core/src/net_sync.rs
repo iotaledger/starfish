@@ -9,7 +9,6 @@ use std::{
     },
     time::Duration,
 };
-use std::cmp::PartialEq;
 use futures::future::join_all;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
