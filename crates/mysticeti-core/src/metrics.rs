@@ -57,8 +57,6 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
-    pub proposed_block_transaction_count: HistogramSender<usize>, // TODO: do we want to track this metric?
-    pub proposed_block_vote_count: HistogramSender<usize>, // TODO: do we want to track this metric?
 
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
@@ -100,8 +98,7 @@ impl Metrics {
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
         let (proposed_block_size_bytes_hist, proposed_block_size_bytes) = histogram();
-        let (proposed_block_transaction_count_hist, proposed_block_transaction_count) = histogram();
-        let (proposed_block_vote_count_hist, proposed_block_vote_count) = histogram();
+
 
         let committee_size = committee.map(Committee::len).unwrap_or_default();
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
@@ -300,8 +297,6 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
-            proposed_block_transaction_count,
-            proposed_block_vote_count,
 
             connection_latency_sender,
         };

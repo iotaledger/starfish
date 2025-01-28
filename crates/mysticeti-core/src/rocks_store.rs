@@ -69,7 +69,6 @@ impl RocksStore {
     pub fn store_commit(
         &self,
         sub_dag: CommittedSubDag,
-        aggregators: Vec<StakeAggregator<QuorumThreshold>>,
     ) -> io::Result<()> {
         let commit_data = CommitData {
             sub_dag,

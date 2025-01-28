@@ -64,7 +64,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     pub fn start(
         network: Network,
         mut core: Core<H>,
-        commit_period: u64,
         mut commit_observer: C,
         shutdown_grace_period: Duration,
         metrics: Arc<Metrics>,
@@ -82,7 +81,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(
             core,
-            commit_period,
             notify.clone(),
             commit_observer,
             metrics.clone(),

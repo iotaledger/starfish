@@ -105,7 +105,7 @@ pub trait BlockWriter {
     ) -> io::Result<()>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum IndexEntry {
     // Block needs to be loaded from RocksDB
     Unloaded(BlockReference),
@@ -761,6 +761,8 @@ pub fn get_blocks_at_authority_round(
             reference.author_digest(),
             IndexEntry::Loaded(storage_and_transmission_blocks.clone()),
         );
+
+        tracing::debug!("Current index map in round {} is : {:?}", reference.round(), map);
 
         self.update_dag(reference.clone(), storage_and_transmission_blocks.0.includes().clone());
         self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);

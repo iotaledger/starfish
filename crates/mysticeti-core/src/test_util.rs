@@ -202,7 +202,7 @@ pub fn committee_and_syncers(
                     committee.clone(),
                     test_metrics(),
                 );
-                Syncer::new(core, 3, Default::default(), commit_handler, test_metrics())
+                Syncer::new(core,  Default::default(), commit_handler, test_metrics())
             })
             .collect(),
     )
@@ -267,7 +267,6 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
         let network_syncer = NetworkSyncer::start(
             network,
             core,
-            3,
             commit_handler,
             config::node_defaults::default_shutdown_grace_period(),
             test_metrics(),
@@ -301,7 +300,6 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
         let network_syncer = NetworkSyncer::start(
             network,
             core,
-            3,
             commit_handler,
             config::node_defaults::default_shutdown_grace_period(),
             test_metrics(),
@@ -333,7 +331,6 @@ pub async fn network_syncers_with_epoch_duration(
         let network_syncer = NetworkSyncer::start(
             network,
             core,
-            3,
             commit_handler,
             config::node_defaults::default_shutdown_grace_period(),
             test_metrics(),

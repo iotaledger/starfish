@@ -36,7 +36,7 @@ use crate::block_store::{ConsensusProtocol};
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
 use crate::rocks_store::RocksStore;
-use crate::types::{Encoder, Decoder, VerifiedStatementBlock};
+use crate::types::{Encoder, Decoder, VerifiedStatementBlock, Shard};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -234,6 +234,7 @@ impl<H: BlockHandler> Core<H> {
                 .push(MetaStatement::Include(*processed.reference()));
             result.push(processed.clone());
         }
+        tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
         (success, not_processed_blocks)
     }
@@ -312,20 +313,57 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::try_new_block");
+        let _timer = self.metrics.utilization_timer.utilization_timer("Core::try_new_block");
+        // Check if we're ready for a new block
         let clock_round = self.threshold_clock.get_round();
+        tracing::debug!("Attemp to construct block in round {}. Current pending: {:?}", clock_round, self.pending);
         if clock_round <= self.last_proposed() {
             return None;
         }
 
-        // Sort includes in pending to include all blocks up to the given round
+        // Get relevant pending statements for this round
+        let pending_statements = self.get_pending_statements(clock_round);
+        let (statements, block_references) = self.collect_statements_and_references(&pending_statements);
+        // Create blocks based on byzantine strategy
+        self.prepare_last_blocks();
+
+        // Prepare encoded statements if needed
+        let encoded_statements = self.prepare_encoded_statements(statements.clone());
+        let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
+
+        // Build blocks with collected data
+        let mut return_blocks = Vec::new();
+        let number_of_blocks_to_create = self.last_own_block.len();
+        let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
+
+        // Create and store blocks
+        for block_id in 0..number_of_blocks_to_create {
+            let block_data = self.build_block(
+                &block_references,
+                &statements,
+                &encoded_statements,
+                &acknowledgments,
+                clock_round,
+                block_id,
+            );
+            tracing::debug!("Created block {:?}", block_data.0);
+
+            self.store_block(block_data.clone(), &authority_bounds, block_id);
+            return_blocks.push(block_data);
+        }
+
+        // Sync if needed
+        if self.options.fsync {
+            self.rocks_store.sync().expect("RocksDB sync failed");
+        }
+
+        Some(return_blocks[0].0.clone())
+    }
+
+    fn get_pending_statements(&mut self, clock_round: RoundNumber) -> Vec<MetaStatement> {
         self.sort_includes_in_pending();
 
-        let first_include_index = self
-            .pending
+        let split_point = self.pending
             .iter()
             .position(|statement| match statement {
                 MetaStatement::Include(block_ref) => block_ref.round >= clock_round,
@@ -333,134 +371,96 @@ impl<H: BlockHandler> Core<H> {
             })
             .unwrap_or(self.pending.len());
 
-        let mut taken = self.pending.split_off(first_include_index);
-        // Split off returns the "tail", what we want is keep the tail in "pending" and get the head
+        let mut taken = self.pending.split_off(split_point);
         mem::swap(&mut taken, &mut self.pending);
+        taken
+    }
 
-        let mut blocks = vec![];
-   
-        if let Some(ref strategy) = self.block_store.byzantine_strategy {
-            match strategy {
-                //  Equivocating crates equivocating chains of blocks
-                ByzantineStrategy::EquivocatingChains => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        // Clone the first block to create N-1 equivocated blocks
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-
-                //  Skipping Equivocating crates two equivocating blocks
-                ByzantineStrategy::EquivocatingTwoChains => {
-                    for _ in self.last_own_block.len()..2 {
-                        // Create two equivocated blocks
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-
-                // Strategy 4: Equivocation Chain Bomb creates chains of own blocks that are
-                // released to respected validators
-                ByzantineStrategy::EquivocatingChainsBomb => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        // Clone the first block for each validator, creating a unique block per validator
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-
-                // Default case: No Equivocation of blocks
-                _ => {}
-            }
-        }
-        let mut statements =  Vec::new();
-        for statement in taken.clone().into_iter() {
-            match statement {
-                MetaStatement::Include(_) => {
-                }
-                MetaStatement::Payload(payload) => {
-                    if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
-                        statements.extend(payload);
-                    }
+    fn collect_statements_and_references(&self, pending: &[MetaStatement]) -> (Vec<BaseStatement>, Vec<BlockReference>) {
+        let mut statements = Vec::new();
+        for meta_statement in pending {
+            if let MetaStatement::Payload(payload) = meta_statement {
+                if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
+                    statements.extend(payload.clone());
                 }
             }
         }
-        let number_statements = statements.len();
-        tracing::debug!("Include in block {} transactions", number_statements);
+        let block_references = self.compress_pending_block_references(pending);
+        (statements, block_references)
+    }
+
+    fn prepare_encoded_statements(&mut self, statements: Vec<BaseStatement>) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
-
-        let timer_for_encoding = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::try_new_block::encoding");
-        let encoded_statements = match self.block_store.consensus_protocol {
+        match self.block_store.consensus_protocol {
             ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
-                Some(self.encoder.encode_statements(statements.clone(), info_length, parity_length))
+                Some(self.encoder.encode_statements(
+                    statements.clone(),
+                    info_length,
+                    parity_length,
+                ))
             }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-               None
-            }
-        };
-        drop(timer_for_encoding);
-
-        let acknowledgment_statements_retrieved = self.block_store.get_pending_acknowledgment(clock_round);
-
-        for j in 0..self.last_own_block.len() {
-            // Compress the references in the block
-            // Iterate through all the include statements in the block, and make a set of all the references in their includes.
-            let mut references_in_block: HashSet<BlockReference> = HashSet::new();
-            references_in_block.extend(self.last_own_block[j].storage_transmission_blocks.0.includes());
-            for statement in &taken {
-                if let MetaStatement::Include(block_ref) = statement {
-                    // for all the includes in the block, add the references in the block to the set
-                    if let Some(block) = self.block_store.get_storage_block(*block_ref) {
-                        references_in_block.extend(block.includes());
-                    }
-                }
-            }
-            let mut includes = vec![];
-            includes.push(*self.last_own_block[j].storage_transmission_blocks.0.reference());
-            for statement in taken.clone().into_iter() {
-                match statement {
-                    MetaStatement::Include(include) => {
-                        if !references_in_block.contains(&include)
-                            && include.authority != self.authority
-                        {
-                            includes.push(include);
-                        }
-                    }
-                    MetaStatement::Payload(_) => {
-
-                    }
-                }
-            }
-
-            assert!(!includes.is_empty());
-            let time_ns = timestamp_utc().as_nanos() + j as u128;
-            // Todo change this once we track known transactions
-
-            let acknowledgement_statements = acknowledgment_statements_retrieved.clone();
-            let timer_for_building_block = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::try_new_block::build block");
-            let storage_block = VerifiedStatementBlock::new_with_signer(
-                self.authority,
-                clock_round,
-                includes.clone(),
-                acknowledgement_statements,
-                time_ns,
-                self.epoch_changing(),
-                &self.signer,
-                statements.clone(),
-                encoded_statements.clone(),
-                self.block_store.consensus_protocol,
-            );
-            drop(timer_for_building_block);
-            blocks.push(storage_block);
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }
+    }
 
-        let mut return_blocks = vec![];
+    fn build_block(
+        &self,
+        block_references_without_own: &[BlockReference],
+        statements: &[BaseStatement],
+        encoded_statements: &Option<Vec<Shard>>,
+        acknowledgments: &[BlockReference],
+        clock_round: RoundNumber,
+        block_id_in_round: usize,
+    ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
+        let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
+        let mut block_references = vec![self.last_own_block[block_id_in_round].storage_transmission_blocks.0.reference().clone()];
+        block_references.extend(block_references_without_own.iter().cloned());
+        let block = VerifiedStatementBlock::new_with_signer(
+            self.authority,
+            clock_round,
+            block_references,
+            acknowledgments.to_vec(),
+            time_ns,
+            self.epoch_changing(),
+            &self.signer,
+            statements.to_vec(),
+            encoded_statements.clone(),
+            self.block_store.consensus_protocol,
+        );
+
+        let data_block = Data::new(block);
+        (data_block.clone(), data_block)
+    }
+
+    fn prepare_last_blocks(&mut self)  {
+
+        if let Some(ref strategy) = self.block_store.byzantine_strategy {
+            match strategy {
+                ByzantineStrategy::EquivocatingChains => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+                ByzantineStrategy::EquivocatingTwoChains => {
+                    for _ in self.last_own_block.len()..2 {
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+                ByzantineStrategy::EquivocatingChainsBomb => {
+                    for _ in self.last_own_block.len()..self.committee.len() {
+                        self.last_own_block.push(self.last_own_block[0].clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn calculate_authority_bounds(&self, num_blocks: usize) -> Vec<usize> {
         let mut authority_bounds = vec![0];
+
         match self.block_store.byzantine_strategy {
             // Skipping Equivocating: Divide the authorities into two groups
             Some(ByzantineStrategy::EquivocatingTwoChains) => {
@@ -469,52 +469,56 @@ impl<H: BlockHandler> Core<H> {
             }
             // Default behavior: Distribute blocks evenly across all authorities
             _ => {
-                for i in 1..=blocks.len() {
-                    authority_bounds.push(i * self.committee.len() / blocks.len());
+                for i in 1..=num_blocks {
+                    authority_bounds.push(i * self.committee.len() / num_blocks);
                 }
             }
         }
-        self.last_own_block = vec![];
-        let mut block_id = 0;
-        for block in blocks {
-            assert_eq!(
-                block.includes().get(0).unwrap().authority,
-                self.authority,
-                "Invalid block {}",
-                block.reference()
-            );
-            let timer_for_serialization = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::try_new_block::serialize block");
-            // Todo: for own blocks no need to serialize twice
-            let data_block = Data::new(block);
-            let storage_and_transmission_blocks = (data_block.clone(), data_block);
-            drop(timer_for_serialization);
-            self.threshold_clock
-                .add_block(*storage_and_transmission_blocks.0.reference(), &self.committee);
-            self.block_handler.handle_proposal(number_statements);
-            self.proposed_block_stats(&storage_and_transmission_blocks.0);
+        authority_bounds
+    }
 
-            self.last_own_block.push(OwnBlockData {
-                storage_transmission_blocks: storage_and_transmission_blocks.clone(),
-                authority_index_start: authority_bounds[block_id] as AuthorityIndex,
-                authority_index_end: authority_bounds[block_id+1] as AuthorityIndex,
-            });
-            let timer_for_disk = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::try_new_block::writing to disk");
-            self.block_store.insert_own_block(self.last_own_block.last().expect("Pushed own blocks already").clone());
-            drop(timer_for_disk);
-            tracing::debug!("Created block {:?} with refs {:?}", storage_and_transmission_blocks.0, storage_and_transmission_blocks.0.includes().len());
-            return_blocks.push(storage_and_transmission_blocks);
-            block_id += 1;
+    fn compress_pending_block_references(&self, pending: &[MetaStatement]) -> Vec<BlockReference> {
+        let mut references_in_block: HashSet<BlockReference> = HashSet::new();
+
+        for statement in pending {
+            if let MetaStatement::Include(block_ref) = statement {
+                if let Some(block) = self.block_store.get_storage_block(*block_ref) {
+                    references_in_block.extend(block.includes());
+                }
+            }
         }
-        if self.options.fsync {
-            self.rocks_store.sync().expect("RocksDB sync failed");
+
+        let mut includes = vec![];
+
+        for statement in pending {
+            if let MetaStatement::Include(include) = statement {
+                if !references_in_block.contains(include) && include.authority != self.authority {
+                    includes.push(*include);
+                }
+            }
         }
-        Some(return_blocks[0].0.clone())
+
+        assert!(!includes.is_empty());
+        includes
+    }
+
+    fn store_block(
+        &mut self,
+        block_data: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+        authority_bounds: &[usize],
+        block_id: usize,
+    ) {
+        self.threshold_clock.add_block(*block_data.0.reference(), &self.committee);
+        self.block_handler.handle_proposal(block_data.0.number_transactions());
+        self.proposed_block_stats(&block_data.0);
+
+        let own_block = OwnBlockData {
+            storage_transmission_blocks: block_data.clone(),
+            authority_index_start: authority_bounds[block_id] as AuthorityIndex,
+            authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
+        };
+        self.last_own_block[block_id] = own_block.clone();
+        self.block_store.insert_own_block(own_block);
     }
 
 
@@ -563,16 +567,16 @@ impl<H: BlockHandler> Core<H> {
     /// The algorithm to calling is roughly: if timeout || commit_ready_new_block then try_new_block(..)
     pub fn ready_new_block(
         &self,
-        period: u64,
         connected_authorities: &HashSet<AuthorityIndex>,
     ) -> bool {
         let quorum_round = self.threshold_clock.get_round();
-
+        tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
         // Leader round we check if we have a leader block
-        if quorum_round > self.last_commit_leader.round().max(period - 1) {
+        if quorum_round >= self.last_commit_leader.round().max(1) {
             let leader_round = quorum_round - 1;
             let mut leaders = self.committer.get_leaders(leader_round);
             leaders.retain(|leader| connected_authorities.contains(leader));
+            tracing::debug!("Attempt ready new block, quorum round {}, Before exist at authority round", quorum_round);
             self.block_store
                 .all_blocks_exists_at_authority_round(&leaders, leader_round)
         } else {

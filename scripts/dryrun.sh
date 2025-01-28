@@ -3,9 +3,9 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-4}     # Default: 5 validators (recommend < number of physical cores)
-DESIRED_TPS=${DESIRED_TPS:-1000}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-mysticeti}         # Options: mysticeti, starfish, cordial-miners, starfish-push
+NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
+DESIRED_TPS=${DESIRED_TPS:-10000}       # Target transactions per second
+CONSENSUS=${CONSENSUS:-starfish}         # Options: mysticeti, starfish, cordial-miners, starfish-push
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
@@ -91,7 +91,8 @@ export RUST_BACKTRACE=1
 export RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,\
 mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,\
 mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,\
-mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace
+mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace,\
+mysticeti_core::threshold_core=trace,mysticeti_core::syncer=trace,
 
 BYZANTINE_COUNT=0
 for ((i=0; i<NUM_VALIDATORS; i++)); do

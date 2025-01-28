@@ -125,7 +125,6 @@ impl Validator {
         let network_synchronizer = NetworkSyncer::start(
             network,
             core,
-            public_config.parameters.wave_length,
             commit_handler,
             public_config.parameters.shutdown_grace_period,
             metrics,

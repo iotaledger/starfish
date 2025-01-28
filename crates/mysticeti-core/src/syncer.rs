@@ -20,7 +20,6 @@ use crate::types::VerifiedStatementBlock;
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
     force_new_block: bool,
-    commit_period: u64,
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: HashSet<AuthorityIndex>,
@@ -46,7 +45,6 @@ pub trait CommitObserver: Send + Sync {
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn new(
         core: Core<H>,
-        commit_period: u64,
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
@@ -55,7 +53,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         Self {
             core,
             force_new_block: false,
-            commit_period,
             signals,
             commit_observer,
             connected_authorities: HashSet::with_capacity(committee_size),
@@ -67,8 +64,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         // todo: when block is updated we might return false here and it can make committing longer
         let (success, pending_blocks_with_statements) = self.core.add_blocks(blocks);
         if success {
+            tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
-            //self.try_new_commit();
         }
         pending_blocks_with_statements
     }
@@ -77,8 +74,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.core.last_proposed() == round {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
+            tracing::debug!("Attempt to force new block after timeout");
             if self.try_new_block() {
-                //self.try_new_commit();
+
             }
             true
         } else {
@@ -90,8 +88,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.force_new_block
             || self
             .core
-            .ready_new_block(self.commit_period, &self.connected_authorities)
+            .ready_new_block(&self.connected_authorities)
         {
+            tracing::debug!("Attempt to create new block in syncer after one trigger");
             if self.core.try_new_block().is_some() {
                 self.signals.new_block_ready();
                 self.force_new_block = false;

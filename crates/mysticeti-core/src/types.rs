@@ -408,6 +408,13 @@ impl VerifiedStatementBlock {
             .statements
     }
 
+    pub fn number_transactions(&self) -> usize {
+        if self.statements.is_some() {
+            return self.statements().as_ref().clone().unwrap().len()
+        }
+        return 0;
+    }
+
 
 
     pub fn author(&self) -> AuthorityIndex {
