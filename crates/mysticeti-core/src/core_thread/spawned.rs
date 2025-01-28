@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, sync::Arc, thread};
-use futures::SinkExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{

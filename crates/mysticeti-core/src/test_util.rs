@@ -148,21 +148,13 @@ pub fn committee_and_cores_persisted_epoch_duration(
                 authority,
                 metrics.clone(),
             );
-            let wal_file = if let Some(path) = path {
-                let wal_path = path.join(format!("{:03}.wal", authority));
-                open_file_for_wal(&wal_path).unwrap()
-            } else {
-                tempfile::tempfile().unwrap()
-            };
-            let (wal_writer, wal_reader) = walf(wal_file).expect("Failed to open wal");
             let mut byzantine_strategy_string = "honest".to_string();
             if authority < number_byzantine as u64 {
                 byzantine_strategy_string = byzantine_strategy.clone();
             }
             let recovered = BlockStore::open(
                 authority,
-                Arc::new(wal_reader),
-                &wal_writer,
+                path,
                 metrics.clone(),
                 &committee,
                 byzantine_strategy_string,
@@ -423,26 +415,26 @@ fn is_prefix(short: &[BlockReference], long: &[BlockReference]) -> bool {
 
 pub struct TestBlockWriter {
     block_store: BlockStore,
-    wal_writer: WalWriter,
 }
 
 impl TestBlockWriter {
     pub fn new(committee: &Committee) -> Self {
-        let file = tempfile::tempfile().unwrap();
-        let (wal_writer, wal_reader) = walf(file).unwrap();
+        // Create a temporary directory for RocksDB
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create BlockStore with RocksDB
         let state = BlockStore::open(
             0,
-            Arc::new(wal_reader),
-            &wal_writer,
+            temp_dir.path(),  // Use temp directory for RocksDB
             test_metrics(),
             committee,
             "honest".to_string(),
             "starfish".to_string(),
         );
         let block_store = state.block_store;
+
         Self {
-            block_store,
-            wal_writer,
+            block_store,  // Keep temp_dir alive while TestBlockWriter exists
         }
     }
 
@@ -466,7 +458,7 @@ impl TestBlockWriter {
             .wal_writer
             .write(WAL_ENTRY_BLOCK, storage_and_transmission_blocks.0.serialized_bytes())
             .unwrap();
-        self.block_store.insert_block(
+        self.block_store.insert_block_bounds(
             storage_and_transmission_blocks,
             pos,
             0,

@@ -14,8 +14,8 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     block_store::{
-        BlockStore, BlockWriter, CommitData, OwnBlockData, WAL_ENTRY_COMMIT,
-        WAL_ENTRY_STATE, ByzantineStrategy,
+        BlockStore, CommitData, OwnBlockData,
+        ByzantineStrategy,
     },
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
@@ -31,24 +31,24 @@ use crate::{
     state::RecoveredState,
     threshold_clock::ThresholdClockAggregator,
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
-    wal::{WalPosition, WalSyncer, WalWriter},
 };
-use crate::block_store::{ConsensusProtocol, WAL_ENTRY_PAYLOAD};
+use crate::block_store::{ConsensusProtocol};
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
+use crate::rocks_store::RocksStore;
 use crate::types::{Encoder, Decoder, VerifiedStatementBlock};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
-    pending: Vec<(WalPosition, MetaStatement)>,
+    pending: Vec<MetaStatement>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
+    rocks_store: Arc<RocksStore>,
     authority: AuthorityIndex,
     threshold_clock: ThresholdClockAggregator,
     pub(crate) committee: Arc<Committee>,
     last_commit_leader: BlockReference,
-    wal_writer: WalWriter,
     block_store: BlockStore,
     pub(crate) metrics: Arc<Metrics>,
     options: CoreOptions,
@@ -82,49 +82,42 @@ impl<H: BlockHandler> Core<H> {
         public_config: &NodePublicConfig,
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
-        mut wal_writer: WalWriter,
         options: CoreOptions,
     ) -> Self {
         let RecoveredState {
             block_store,
-            last_own_block,
-            mut pending,
+            rocks_store,
             state,
             unprocessed_blocks,
             last_committed_leader,
             committed_blocks,
             committed_state,
         } = recovered;
+
         let mut threshold_clock = ThresholdClockAggregator::new(0);
-        let last_own_block = if let Some(own_block) = last_own_block {
-            for (_, pending_block) in pending.iter() {
-                if let MetaStatement::Include(include) = pending_block {
-                    threshold_clock.add_block(*include, &committee);
-                }
-            }
-            own_block
-        } else {
-            // todo(fix) - this technically has a race condition if node crashes after genesis
-            assert!(pending.is_empty());
-            // Initialize empty block store
-            // A lot of this code is shared with Self::add_blocks, this is not great and some code reuse would be great
-            let (own_genesis_block, other_genesis_blocks) = committee.genesis_blocks(authority);
-            assert_eq!(own_genesis_block.author(), authority);
-            let mut block_writer = (&mut wal_writer, &block_store);
-            for block in other_genesis_blocks {
-                let reference = *block.reference();
-                threshold_clock.add_block(reference, &committee);
-                let position = block_writer.insert_block((block.clone(), block));
-                pending.push((position, MetaStatement::Include(reference)));
-            }
-            threshold_clock.add_block(*own_genesis_block.reference(), &committee);
-            let own_block_data = OwnBlockData {
-                next_entry: WalPosition::MAX,
-                storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block),
-            };
-            block_writer.insert_own_block(&own_block_data, 0, committee.len() as AuthorityIndex);
-            own_block_data
-        };
+
+        // Initialize genesis blocks if needed
+        let (own_genesis_block, other_genesis_blocks) = committee.genesis_blocks(authority);
+        assert_eq!(own_genesis_block.author(), authority);
+
+        // Pending references for inclusion
+        let mut pending = Vec::new();
+        // Store genesis blocks if necessary
+        for block in other_genesis_blocks {
+            let reference = *block.reference();
+            threshold_clock.add_block(reference, &committee);
+            block_store.insert_block_bounds((block.clone(), block.clone()), 0, committee.len() as AuthorityIndex);
+            pending.push(MetaStatement::Include(*block.reference()));
+        }
+
+        threshold_clock.add_block(*own_genesis_block.reference(), &committee);
+        block_store.insert_block_bounds(
+            (own_genesis_block.clone(), own_genesis_block.clone()),
+            0,
+            committee.len() as AuthorityIndex,
+        );
+        pending.push(MetaStatement::Include(*own_genesis_block.reference()));
+
         let block_manager = BlockManager::new(block_store.clone(), &committee);
 
         if let Some(state) = state {
@@ -136,22 +129,23 @@ impl<H: BlockHandler> Core<H> {
         let committer =
             UniversalCommitterBuilder::new(committee.clone(), block_store.clone(), metrics.clone())
                 .build();
-        let encoder = ReedSolomonEncoder::new(2,
-                                              4,
-                                              64).unwrap();
-        let decoder = ReedSolomonDecoder::new(2,
-                                              4,
-                                              64).unwrap();
+        let encoder = ReedSolomonEncoder::new(2, 4, 64).unwrap();
+        let decoder = ReedSolomonDecoder::new(2, 4, 64).unwrap();
+
         let this = Self {
             block_manager,
+            rocks_store,
             pending,
-            last_own_block: vec![last_own_block],
+            last_own_block: vec![OwnBlockData{
+                storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
+                authority_index_start: 0 as AuthorityIndex,
+                authority_index_end: committee.len() as AuthorityIndex,
+            }],
             block_handler,
             authority,
             threshold_clock,
             committee,
             last_commit_leader: last_committed_leader.unwrap_or_default(),
-            wal_writer,
             block_store,
             metrics,
             options,
@@ -205,12 +199,12 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("BlockManager::add_blocks");
         let (processed, new_blocks_to_reconstruct, updated_statements) = self
             .block_manager
-            .add_blocks(blocks, &mut (&mut self.wal_writer, &self.block_store));
+            .add_blocks(blocks);
         drop(block_manager_timer);
         let processed_references: Vec<_> = processed
             .iter()
-            .filter(|(_,b)|b.statements().is_some())
-            .map(|(_,b)| b.reference().clone())
+            .filter(|b|b.statements().is_some())
+            .map(|b| b.reference().clone())
             .collect();
         let not_processed_blocks: Vec<_> = block_references_with_statements
             .iter()
@@ -233,12 +227,12 @@ impl<H: BlockHandler> Core<H> {
         };
 
         let mut result = Vec::with_capacity(processed.len());
-        for (position, processed) in processed.into_iter() {
+        for processed in &processed {
             self.threshold_clock
                 .add_block(*processed.reference(), &self.committee);
             self.pending
-                .push((position, MetaStatement::Include(*processed.reference())));
-            result.push(processed);
+                .push(MetaStatement::Include(*processed.reference()));
+            result.push(processed.clone());
         }
         self.run_block_handler();
         (success, not_processed_blocks)
@@ -252,14 +246,10 @@ impl<H: BlockHandler> Core<H> {
         let statements = self
             .block_handler
             .handle_blocks(!self.epoch_changing());
-        let serialized_statements =
+        let _serialized_statements =
             bincode::serialize(&statements).expect("Payload serialization failed");
-        let position = self
-            .wal_writer
-            .write(WAL_ENTRY_PAYLOAD, &serialized_statements)
-            .expect("Failed to write statements to wal");
         self.pending
-            .push((position, MetaStatement::Payload(statements)));
+            .push(MetaStatement::Payload(statements));
     }
 
     fn sort_includes_in_pending(&mut self) {
@@ -268,12 +258,12 @@ impl<H: BlockHandler> Core<H> {
             .pending
             .iter()
             .enumerate()
-            .filter(|(_, (_, meta))| matches!(meta, MetaStatement::Include(_)))
+            .filter(|(_, meta)| matches!(meta, MetaStatement::Include(_)))
             .map(|(index, _)| index)
             .collect();
         // Sort the Include entries by round
         include_positions.sort_by_key(|&index| {
-            if let MetaStatement::Include(block_ref) = &self.pending[index].1 {
+            if let MetaStatement::Include(block_ref) = &self.pending[index] {
                 block_ref.round()
             } else {
                 unreachable!() // This should never happen
@@ -287,8 +277,8 @@ impl<H: BlockHandler> Core<H> {
                 let j_pos = include_positions[j];
 
                 if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) = (
-                    &self.pending[i_pos].1,
-                    &self.pending[j_pos].1,
+                    &self.pending[i_pos],
+                    &self.pending[j_pos],
                 ) {
                     if j_meta.round() < i_meta.round() {
                         // Swap the positions and the entries directly
@@ -311,8 +301,7 @@ impl<H: BlockHandler> Core<H> {
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);
-
-                (&mut self.wal_writer, &self.block_store).insert_block((data_storage_block,data_transmission_block));
+                self.block_store().insert_general_block((data_storage_block, data_transmission_block));
                 self.block_store.updated_unknown_by_others(block_reference);
             }
             else {
@@ -338,7 +327,7 @@ impl<H: BlockHandler> Core<H> {
         let first_include_index = self
             .pending
             .iter()
-            .position(|(_, statement)| match statement {
+            .position(|statement| match statement {
                 MetaStatement::Include(block_ref) => block_ref.round >= clock_round,
                 _ => false,
             })
@@ -382,7 +371,7 @@ impl<H: BlockHandler> Core<H> {
             }
         }
         let mut statements =  Vec::new();
-        for (_, statement) in taken.clone().into_iter() {
+        for statement in taken.clone().into_iter() {
             match statement {
                 MetaStatement::Include(_) => {
                 }
@@ -420,7 +409,7 @@ impl<H: BlockHandler> Core<H> {
             // Iterate through all the include statements in the block, and make a set of all the references in their includes.
             let mut references_in_block: HashSet<BlockReference> = HashSet::new();
             references_in_block.extend(self.last_own_block[j].storage_transmission_blocks.0.includes());
-            for (_, statement) in &taken {
+            for statement in &taken {
                 if let MetaStatement::Include(block_ref) = statement {
                     // for all the includes in the block, add the references in the block to the set
                     if let Some(block) = self.block_store.get_storage_block(*block_ref) {
@@ -430,7 +419,7 @@ impl<H: BlockHandler> Core<H> {
             }
             let mut includes = vec![];
             includes.push(*self.last_own_block[j].storage_transmission_blocks.0.reference());
-            for (_, statement) in taken.clone().into_iter() {
+            for statement in taken.clone().into_iter() {
                 match statement {
                     MetaStatement::Include(include) => {
                         if !references_in_block.contains(&include)
@@ -502,56 +491,33 @@ impl<H: BlockHandler> Core<H> {
             let data_block = Data::new(block);
             let storage_and_transmission_blocks = (data_block.clone(), data_block);
             drop(timer_for_serialization);
-            if storage_and_transmission_blocks.0.serialized_bytes().len() > crate::wal::MAX_ENTRY_SIZE / 2 {
-                // Sanity check for now
-                panic!(
-                    "Created an oversized block (check all limits set properly: {} > {}): {:?}",
-                    storage_and_transmission_blocks.0.serialized_bytes().len(),
-                    crate::wal::MAX_ENTRY_SIZE / 2,
-                    storage_and_transmission_blocks,
-                );
-            }
             self.threshold_clock
                 .add_block(*storage_and_transmission_blocks.0.reference(), &self.committee);
             self.block_handler.handle_proposal(number_statements);
             self.proposed_block_stats(&storage_and_transmission_blocks.0);
-            let next_entry = if let Some((pos, _)) = self.pending.get(0) {
-                *pos
-            } else {
-                WalPosition::MAX
-            };
+
             self.last_own_block.push(OwnBlockData {
-                next_entry,
                 storage_transmission_blocks: storage_and_transmission_blocks.clone(),
+                authority_index_start: authority_bounds[block_id] as AuthorityIndex,
+                authority_index_end: authority_bounds[block_id+1] as AuthorityIndex,
             });
             let timer_for_disk = self
                 .metrics
                 .utilization_timer
                 .utilization_timer("Core::try_new_block::writing to disk");
-            (&mut self.wal_writer, &self.block_store).insert_own_block(
-                &self.last_own_block.last().unwrap(),
-                authority_bounds[block_id] as AuthorityIndex,
-                authority_bounds[block_id + 1] as AuthorityIndex,
-            );
-
-            if self.options.fsync {
-                self.wal_writer.sync().expect("Wal sync failed");
-            }
+            self.block_store.insert_own_block(self.last_own_block.last().expect("Pushed own blocks already").clone());
             drop(timer_for_disk);
-
             tracing::debug!("Created block {:?} with refs {:?}", storage_and_transmission_blocks.0, storage_and_transmission_blocks.0.includes().len());
             return_blocks.push(storage_and_transmission_blocks);
             block_id += 1;
+        }
+        if self.options.fsync {
+            self.rocks_store.sync().expect("RocksDB sync failed");
         }
         Some(return_blocks[0].0.clone())
     }
 
 
-    pub fn wal_syncer(&self) -> WalSyncer {
-        self.wal_writer
-            .syncer()
-            .expect("Failed to create wal syncer")
-    }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
         self.metrics
@@ -635,23 +601,9 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn write_state(&mut self) {
-        #[cfg(feature = "simulator")]
-        if self.block_handler().state().len() >= crate::wal::MAX_ENTRY_SIZE {
-            // todo - this is something needs a proper fix
-            // Need to revisit this after we have a proper synchronizer
-            // We need to put some limit/backpressure on the accumulator state
-            return;
-        }
-        self.wal_writer
-            .write(WAL_ENTRY_STATE, &self.block_handler().state())
-            .expect("Write to wal has failed");
     }
 
-    pub fn write_commits(&mut self, commits: &[CommitData], state: &Bytes) {
-        let commits = bincode::serialize(&(commits, state)).expect("Commits serialization failed");
-        self.wal_writer
-            .write(WAL_ENTRY_COMMIT, &commits)
-            .expect("Write to wal has failed");
+    pub fn write_commits(&mut self, _commits: &[CommitData], state: &Bytes) {
     }
 
     pub fn take_recovered_committed_blocks(&mut self) -> (HashSet<BlockReference>, Option<Bytes>) {

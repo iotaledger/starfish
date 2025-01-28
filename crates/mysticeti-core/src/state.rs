@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use minibytes::Bytes;
 
 use crate::{
@@ -11,10 +12,12 @@ use crate::{
     types::{BlockReference},
     // Remove wal import
 };
+use crate::rocks_store::RocksStore;
 use crate::types::VerifiedStatementBlock;
 
 pub struct RecoveredState {
     pub block_store: BlockStore,
+    pub rocks_store: Arc<RocksStore>,
     // Remove last_own_block: Option<OwnBlockData>,
     // Remove pending: Vec<(WalPosition, MetaStatement)>,
     pub state: Option<Bytes>,
@@ -66,15 +69,10 @@ impl RecoveredStateBuilder {
         self.committed_state = Some(committed_state);
     }
 
-    pub fn build(self, block_store: BlockStore) -> RecoveredState {
-        let pending_meta = self
-            .pending
-            .into_iter()
-            .map(|(_, raw)| raw.into_meta_statement())
-            .collect();
-
+    pub fn build(self, rocks_store: Arc<RocksStore>, block_store: BlockStore) -> RecoveredState {
         RecoveredState {
             block_store,
+            rocks_store,
             state: self.state,
             unprocessed_blocks: self.unprocessed_blocks,
             last_committed_leader: self.last_committed_leader,

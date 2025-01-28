@@ -30,7 +30,6 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
-    wal::WalSyncer,
 };
 use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
@@ -78,7 +77,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let (committed, state) = core.take_recovered_committed_blocks();
         commit_observer.recover_committed(committed, state);
         let committee = core.committee().clone();
-        let wal_syncer = core.wal_syncer();
         let block_store = core.block_store().clone();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
@@ -119,7 +117,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
         ));
-        let syncer_task = AsyncWalSyncer::start(wal_syncer, stop_sender, epoch_sender);
+        let syncer_task = AsyncWalSyncer::start(stop_sender, epoch_sender);
         Self {
             inner,
             main_task,
@@ -600,7 +598,6 @@ impl SyncerSignals for Arc<Notify> {
 }
 
 pub struct AsyncWalSyncer {
-    wal_syncer: WalSyncer,
     stop: mpsc::Sender<()>,
     epoch_signal: mpsc::Sender<()>,
     _sender: oneshot::Sender<()>,
@@ -610,13 +607,11 @@ pub struct AsyncWalSyncer {
 impl AsyncWalSyncer {
     #[cfg(not(feature = "simulator"))]
     pub fn start(
-        wal_syncer: WalSyncer,
         stop: mpsc::Sender<()>,
         epoch_signal: mpsc::Sender<()>,
     ) -> oneshot::Receiver<()> {
         let (sender, receiver) = oneshot::channel();
         let this = Self {
-            wal_syncer,
             stop,
             epoch_signal,
             _sender: sender,
@@ -631,7 +626,6 @@ impl AsyncWalSyncer {
 
     #[cfg(feature = "simulator")]
     pub fn start(
-        _wal_syncer: WalSyncer,
         _stop: mpsc::Sender<()>,
         _epoch_signal: mpsc::Sender<()>,
     ) -> oneshot::Receiver<()> {
@@ -644,7 +638,7 @@ impl AsyncWalSyncer {
             if runtime.block_on(self.wait_next()) {
                 return;
             }
-            self.wal_syncer.sync().expect("Failed to sync wal");
+            //self.wal_syncer.sync().expect("Failed to sync wal");
         }
     }
 
