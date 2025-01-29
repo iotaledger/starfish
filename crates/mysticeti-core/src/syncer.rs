@@ -134,7 +134,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
         self.core.handle_committed_subdag(
             committed_subdag,
-            &self.commit_observer.aggregator_state(),
         );
 
 
@@ -169,7 +168,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_handler::{TestBlockHandler, TestCommitHandler},
+        block_handler::{TestBlockHandler, RealCommitHandler},
         data::Data,
         simulator::{Scheduler, SimulatorState},
     };
@@ -182,7 +181,7 @@ mod tests {
         DeliverBlock(Data<VerifiedStatementBlock>),
     }
 
-    impl SimulatorState for Syncer<TestBlockHandler, bool, TestCommitHandler> {
+    impl SimulatorState for Syncer<TestBlockHandler, bool, RealCommitHandler> {
         type Event = SyncerEvent;
 
         fn handle_event(&mut self, event: Self::Event) {

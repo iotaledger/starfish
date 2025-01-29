@@ -15,7 +15,7 @@ use crate::future_simulator::OverrideNodeContext;
 #[cfg(feature = "simulator")]
 use crate::simulated_network::SimulatedNetwork;
 use crate::{
-    block_handler::{BlockHandler, TestBlockHandler, TestCommitHandler},
+    block_handler::{BlockHandler, TestBlockHandler, RealCommitHandler},
     block_store::{BlockStore, BlockWriter, OwnBlockData, WAL_ENTRY_BLOCK},
     committee::Committee,
     config::{self, NodePrivateConfig, NodePublicConfig},
@@ -190,7 +190,7 @@ pub fn committee_and_syncers(
     n: usize,
 ) -> (
     Arc<Committee>,
-    Vec<Syncer<TestBlockHandler, bool, TestCommitHandler>>,
+    Vec<Syncer<TestBlockHandler, bool, RealCommitHandler>>,
 ) {
     let (committee, cores, _) = honest_committee_and_cores(n);
     (
@@ -198,7 +198,7 @@ pub fn committee_and_syncers(
         cores
             .into_iter()
             .map(|core| {
-                let commit_handler = TestCommitHandler::new(
+                let commit_handler = RealCommitHandler::new(
                     committee.clone(),
                     test_metrics(),
                 );
@@ -230,7 +230,7 @@ pub fn simulated_network_syncers(
     n: usize,
 ) -> (
     SimulatedNetwork,
-    Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
+    Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>>,
     Vec<MetricReporter>,
 ) {
     honest_simulated_network_syncers_with_epoch_duration(
@@ -247,7 +247,7 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
     rounds_in_epoch: RoundNumber,
 ) -> (
     SimulatedNetwork,
-    Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
+    Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>>,
     Vec<MetricReporter>,
 ) {
     let (committee, cores, reporters) = byzantine_committee_and_cores_epoch_duration(
@@ -259,7 +259,7 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = TestCommitHandler::new(
+        let commit_handler = RealCommitHandler::new(
             committee.clone(),
             core.metrics.clone(),
         );
@@ -284,7 +284,7 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     rounds_in_epoch: RoundNumber,
 ) -> (
     SimulatedNetwork,
-    Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
+    Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>>,
     Vec<MetricReporter>,
 ) {
     let (committee, cores, reporters) =
@@ -292,7 +292,7 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = TestCommitHandler::new(
+        let commit_handler = RealCommitHandler::new(
             committee.clone(),
             core.metrics.clone(),
         );
@@ -311,20 +311,20 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     (simulated_network, network_syncers, reporters)
 }
 
-pub async fn network_syncers(n: usize) -> Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>> {
+pub async fn network_syncers(n: usize) -> Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>> {
     network_syncers_with_epoch_duration(n, config::node_defaults::default_rounds_in_epoch()).await
 }
 
 pub async fn network_syncers_with_epoch_duration(
     n: usize,
     rounds_in_epoch: RoundNumber,
-) -> Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>> {
+) -> Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>> {
     let (committee, cores, _) = honest_committee_and_cores_epoch_duration(n, rounds_in_epoch);
     let metrics: Vec<_> = cores.iter().map(|c| c.metrics.clone()).collect();
     let (networks, _) = networks_and_addresses(&metrics).await;
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = TestCommitHandler::new(
+        let commit_handler = RealCommitHandler::new(
             committee.clone(),
             test_metrics(),
         );
@@ -350,7 +350,7 @@ pub fn rng_at_seed(seed: u64) -> StdRng {
 }
 
 pub fn check_commits<H: BlockHandler, S: SyncerSignals>(
-    syncers: &[Syncer<H, S, TestCommitHandler>],
+    syncers: &[Syncer<H, S, RealCommitHandler>],
 ) {
     let commits = syncers
         .iter()
@@ -375,7 +375,7 @@ pub fn check_commits<H: BlockHandler, S: SyncerSignals>(
 
 #[allow(dead_code)]
 pub fn print_stats<S: SyncerSignals>(
-    syncers: &[Syncer<TestBlockHandler, S, TestCommitHandler>],
+    syncers: &[Syncer<TestBlockHandler, S, RealCommitHandler>],
     reporters: &mut [MetricReporter],
 ) {
     assert_eq!(syncers.len(), reporters.len());

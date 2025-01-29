@@ -1109,7 +1109,7 @@ impl OwnBlockData {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CommitData {
     pub leader: BlockReference,
     // All committed blocks, including the leader

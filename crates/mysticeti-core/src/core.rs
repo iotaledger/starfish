@@ -1,11 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashSet},
-    mem,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::{collections::{HashSet}, io, mem, sync::{atomic::AtomicU64, Arc}};
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;
@@ -587,8 +583,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn handle_committed_subdag(
         &mut self,
         committed: Vec<CommittedSubDag>,
-        state: &Bytes,
-    ) -> Vec<CommitData> {
+    ) {
         let mut commit_data = vec![];
         for commit in &committed {
             for block in &commit.blocks {
@@ -597,17 +592,14 @@ impl<H: BlockHandler> Core<H> {
             }
             commit_data.push(CommitData::from(commit));
         }
-        self.write_state(); // todo - this can be done less frequently to reduce IO
-        self.write_commits(&commit_data, state);
-        // todo - We should also persist state of the epoch manager, otherwise if validator
-        // restarts during epoch change it will fork on the epoch change state.
-        commit_data
+        self.rocks_store.store_commits(commit_data).expect("Store commits should not fail");
+        // Sync if needed
+        if self.options.fsync {
+            self.rocks_store.sync().expect("RocksDB sync failed");
+        }
     }
 
-    pub fn write_state(&mut self) {
-    }
-
-    pub fn write_commits(&mut self, _commits: &[CommitData], state: &Bytes) {
+    pub fn write_commits(&mut self, _commits: &[CommitData]) {
     }
 
     pub fn take_recovered_committed_blocks(&mut self) -> (HashSet<BlockReference>, Option<Bytes>) {

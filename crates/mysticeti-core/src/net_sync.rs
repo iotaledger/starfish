@@ -693,7 +693,7 @@ mod sim_tests {
     use super::NetworkSyncer;
     use crate::test_util::byzantine_simulated_network_syncers_with_epoch_duration;
     use crate::{
-        block_handler::{TestBlockHandler, TestCommitHandler},
+        block_handler::{TestBlockHandler, RealCommitHandler},
         config,
         future_simulator::SimulatedExecutorState,
         runtime,
@@ -707,8 +707,8 @@ mod sim_tests {
     use crate::runtime::sleep;
 
     async fn wait_for_epoch_to_close(
-        network_syncers: Vec<NetworkSyncer<TestBlockHandler, TestCommitHandler>>,
-    ) -> Vec<Syncer<TestBlockHandler, Arc<Notify>, TestCommitHandler>> {
+        network_syncers: Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>>,
+    ) -> Vec<Syncer<TestBlockHandler, Arc<Notify>, RealCommitHandler>> {
         let mut any_closed = false;
         while !any_closed {
             for net_sync in network_syncers.iter() {
