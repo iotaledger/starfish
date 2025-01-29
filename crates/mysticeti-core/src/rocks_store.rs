@@ -23,7 +23,7 @@ use crate::types::{
 use crate::data::Data;
 use crate::consensus::linearizer::CommittedSubDag;
 use crate::committee::{QuorumThreshold, StakeAggregator};
-const FLUSH_INTERVAL_MS: u64 = 10;
+const FLUSH_INTERVAL_MS: u64 = 50;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
@@ -82,7 +82,7 @@ impl RocksStore {
         opts.set_min_write_buffer_number_to_merge(2);
         opts.set_level_zero_file_num_compaction_trigger(4);
         opts.set_max_background_jobs(4); // Adjust based on CPU cores
-        opts.set_bytes_per_sync(1048576); // 1MB
+        opts.set_bytes_per_sync(4*1048576); // 4MB
 
         // Additional performance optimizations
         opts.set_allow_concurrent_memtable_write(true);
@@ -90,7 +90,6 @@ impl RocksStore {
         opts.increase_parallelism(4); // Adjust based on CPU cores
 
         let mut cf_opts = Options::default();
-        cf_opts.set_compression_type(DBCompressionType::Lz4);
         cf_opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
         cf_opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB per CF
 
