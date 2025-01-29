@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::{HashSet}, io, mem, sync::{atomic::AtomicU64, Arc}};
+use std::{collections::{HashSet}, mem, sync::{atomic::AtomicU64, Arc}};
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
 use minibytes::Bytes;

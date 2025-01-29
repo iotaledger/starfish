@@ -113,7 +113,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   fi
 
   echo -e "${GREEN}Starting $TYPE validator ${YELLOW}$i${RESET} with load $LOAD..."
-  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
+  tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin mysticeti -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $LOAD \

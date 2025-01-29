@@ -7,22 +7,18 @@ use std::{
 use std::time::Duration;
 use rocksdb::{
     DB, Options, ColumnFamilyDescriptor, WriteOptions,
-    ReadOptions, DBCompressionType,
+    ReadOptions,
 };
-use serde::{Serialize, Deserialize};
 use bincode::{serialize, deserialize};
 use parking_lot::RwLock;
-use bytes::Bytes;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use crate::block_store::CommitData;
 use crate::types::{
-    AuthorityIndex, BlockReference,
+    BlockReference,
     RoundNumber, VerifiedStatementBlock,
 };
 use crate::data::Data;
-use crate::consensus::linearizer::CommittedSubDag;
-use crate::committee::{QuorumThreshold, StakeAggregator};
 const FLUSH_INTERVAL_MS: u64 = 50;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
@@ -104,7 +100,7 @@ impl RocksStore {
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async writes for better performance
 
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let store = Self {
             db: Arc::new(db),
             write_opts,
