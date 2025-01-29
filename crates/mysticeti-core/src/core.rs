@@ -594,7 +594,7 @@ impl<H: BlockHandler> Core<H> {
         }
         self.rocks_store.store_commits(commit_data).expect("Store commits should not fail");
         // Sync if needed
-        if self.options.fsync {
+        if self.options.fsync && committed.len() > 0 {
             self.rocks_store.sync().expect("RocksDB sync failed");
         }
     }

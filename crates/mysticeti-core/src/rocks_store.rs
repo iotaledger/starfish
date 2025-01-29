@@ -308,6 +308,7 @@ impl RocksStore {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+
         // First flush any pending batch operations
         self.flush()?;
 
@@ -315,6 +316,9 @@ impl RocksStore {
         let mut sync_opts = WriteOptions::default();
         sync_opts.set_sync(true);
         self.db.write_opt(rocksdb::WriteBatch::default(), &sync_opts)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        tracing::debug!("Data is flushed and synced with disk");
+        Ok(())
     }
 }
