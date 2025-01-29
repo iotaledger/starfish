@@ -309,7 +309,8 @@ impl<H: BlockHandler> Core<H> {
 
 
     pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
-        let _timer = self.metrics.utilization_timer.utilization_timer("Core::try_new_block");
+        let _block_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::try_new_block");
+
         // Check if we're ready for a new block
         let clock_round = self.threshold_clock.get_round();
         tracing::debug!("Attemp to construct block in round {}. Current pending: {:?}", clock_round, self.pending);
@@ -318,22 +319,40 @@ impl<H: BlockHandler> Core<H> {
         }
 
         // Get relevant pending statements for this round
+        let _pending_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::get_pending_statements");
         let pending_statements = self.get_pending_statements(clock_round);
+        drop(_pending_timer);
+
+        // Collect statements and references
+        let _collect_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::collect_statements_and_references");
         let (statements, block_references) = self.collect_statements_and_references(&pending_statements);
+        drop(_collect_timer);
+
         // Create blocks based on byzantine strategy
+        let _prepare_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_last_blocks");
         self.prepare_last_blocks();
+        drop(_prepare_timer);
 
         // Prepare encoded statements if needed
+        let _encode_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_encoded_statements");
         let encoded_statements = self.prepare_encoded_statements(statements.clone());
-        let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
+        drop(_encode_timer);
 
-        // Build blocks with collected data
-        let mut return_blocks = Vec::new();
+        // Get pending acknowledgments
+        let _ack_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::get_pending_acknowledgment");
+        let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
+        drop(_ack_timer);
+
+        // Calculate authority bounds
         let number_of_blocks_to_create = self.last_own_block.len();
+        let _bounds_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::calculate_authority_bounds");
         let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
+        drop(_bounds_timer);
 
         // Create and store blocks
+        let mut return_blocks = Vec::new();
         for block_id in 0..number_of_blocks_to_create {
+            let _build_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::build_block");
             let block_data = self.build_block(
                 &block_references,
                 &statements,
@@ -342,15 +361,26 @@ impl<H: BlockHandler> Core<H> {
                 clock_round,
                 block_id,
             );
+            drop(_build_timer);
+
             tracing::debug!("Created block {:?}", block_data.0);
 
+            let _store_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::store_block");
             self.store_block(block_data.clone(), &authority_bounds, block_id);
+            drop(_store_timer);
+
             return_blocks.push(block_data);
         }
 
         // Sync if needed
         if self.options.fsync {
+            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::sync_with_disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
+            drop(_sync_timer);
+        } else {
+            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::flush_to_buffer");
+            self.rocks_store.flush().expect("RocksDB sync failed");
+            drop(_sync_timer);
         }
 
         Some(return_blocks[0].0.clone())
@@ -595,7 +625,13 @@ impl<H: BlockHandler> Core<H> {
         self.rocks_store.store_commits(commit_data).expect("Store commits should not fail");
         // Sync if needed
         if self.options.fsync && committed.len() > 0 {
+            let timer = self.metrics.utilization_timer.utilization_timer("Core::commit::sync with disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
+            drop(timer);
+        } else {
+            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::commit::flush_to_buffer");
+            self.rocks_store.flush().expect("RocksDB sync failed");
+            drop(_sync_timer);
         }
     }
 
@@ -657,7 +693,7 @@ impl<H: BlockHandler> Core<H> {
 
 impl Default for CoreOptions {
     fn default() -> Self {
-        Self::production()
+        Self::test()
     }
 }
 

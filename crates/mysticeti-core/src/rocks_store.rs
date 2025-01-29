@@ -19,7 +19,8 @@ use crate::types::{
     RoundNumber, VerifiedStatementBlock,
 };
 use crate::data::Data;
-const FLUSH_INTERVAL_MS: u64 = 50;
+const FLUSH_INTERVAL_MS: u64 = 20;
+const SYNC_INTERVAL_MS: u64 = 500;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
@@ -38,6 +39,7 @@ pub struct RocksStore {
     write_opts: WriteOptions,
     batch: Arc<RwLock<BatchedOperations>>,
     last_flush: Arc<RwLock<Instant>>,
+    last_sync: Arc<RwLock<Instant>>,
     shutdown: Arc<watch::Sender<bool>>,
 }
 
@@ -51,6 +53,7 @@ impl Clone for RocksStore {
             write_opts,
             batch: self.batch.clone(),
             last_flush: self.last_flush.clone(),
+            last_sync: Arc::new(RwLock::new(Instant::now())),
             shutdown: self.shutdown.clone(),
         }
     }
@@ -72,13 +75,22 @@ impl RocksStore {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Optimize for high-throughput writes
-        opts.set_write_buffer_size(512 * 1024 * 1024); // 512MB write buffer
-        opts.set_max_write_buffer_number(6);
+        // Optimize for frequent syncs
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_max_write_buffer_number(4);
         opts.set_min_write_buffer_number_to_merge(2);
         opts.set_level_zero_file_num_compaction_trigger(4);
-        opts.set_max_background_jobs(4); // Adjust based on CPU cores
-        opts.set_bytes_per_sync(4*1048576); // 4MB
+        opts.set_max_background_jobs(8);
+        opts.set_bytes_per_sync(4 * 1048576);  // Reduce to 1MB for more frequent but smaller syncs
+
+        // Add these settings for sync optimization
+        opts.set_use_fsync(false);  // Use fdatasync instead of fsync
+        opts.set_writable_file_max_buffer_size(4 * 1048576);  // 4MB buffer
+        opts.set_use_direct_io_for_flush_and_compaction(true);  // Use direct I/O for background ops
+
+        // Additional optimizations for high write throughput
+        opts.set_max_subcompactions(2);                   // Allow parallel compactions
+        opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
 
         // Additional performance optimizations
         opts.set_allow_concurrent_memtable_write(true);
@@ -106,18 +118,30 @@ impl RocksStore {
             write_opts,
             batch: Arc::new(RwLock::new(BatchedOperations::default())),
             last_flush: Arc::new(RwLock::new(Instant::now())),
+            last_sync: Arc::new(RwLock::new(Instant::now())),
             shutdown: Arc::new(shutdown_tx),
         };
 
-        // Start background flusher using the constant interval
+        // Start background flusher
         let store_clone = store.clone();
+        let flush_rx = shutdown_rx.clone();  // Clone for first task
         tokio::spawn(async move {
             let flush_interval = Duration::from_millis(FLUSH_INTERVAL_MS);
-            while !*shutdown_rx.borrow() {
+            while !*flush_rx.borrow() {
                 tokio::time::sleep(flush_interval).await;
                 if store_clone.should_flush() {
                     let _ = store_clone.flush();
                 }
+            }
+        });
+
+        // Start background syncer
+        let store_clone = store.clone();
+        tokio::spawn(async move {
+            let sync_interval = Duration::from_millis(SYNC_INTERVAL_MS);
+            while !*shutdown_rx.borrow() {
+                tokio::time::sleep(sync_interval).await;
+                let _ = store_clone.sync();  // background sync
             }
         });
 
@@ -130,52 +154,52 @@ impl RocksStore {
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        let mut batch_ops = self.batch.write();
-        if batch_ops.blocks.is_empty() && batch_ops.commits.is_empty() {
-            return Ok(());
+        // Quick check with read lock
+        {
+            let batch_read = self.batch.read();
+            if batch_read.blocks.is_empty() && batch_read.commits.is_empty() {
+                return Ok(());
+            }
         }
 
+        // Create batch outside of lock
         let mut batch = rocksdb::WriteBatch::default();
 
-        // Create batch in memory first
+        // Take a snapshot of data under brief write lock
+        let (blocks_to_write, commits_to_write) = {
+            let mut batch_ops = self.batch.write();
+            (
+                std::mem::take(&mut batch_ops.blocks),
+                std::mem::take(&mut batch_ops.commits)
+            )
+            // Lock is dropped here
+        };
+
         let cf_blocks = self.db.cf_handle(CF_BLOCKS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
         let cf_commits = self.db.cf_handle(CF_COMMITS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
-        // Pre-allocate vectors for serialized data
-        let blocks_count = batch_ops.blocks.len();
-        let commits_count = batch_ops.commits.len();
-        let mut serialized_keys = Vec::with_capacity(blocks_count + commits_count);
-
-        // Process blocks
-        for (reference, block) in batch_ops.blocks.iter() {
-            let key = serialize(reference)
+        // Process without holding locks
+        for (reference, block) in blocks_to_write {
+            let key = serialize(&reference)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-            serialized_keys.push(key.clone());
             batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
         }
 
-        // Process commits
-        for (anchor, commit_data) in batch_ops.commits.iter() {
-            let key = serialize(anchor)
+        for (anchor, commit_data) in commits_to_write {
+            let key = serialize(&anchor)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             let value = serialize(&commit_data)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-            serialized_keys.push(key.clone());
             batch.put_cf(&cf_commits, key, value);
         }
 
-        // Write batch to DB
+        // Single write operation
         self.db.write_opt(batch, &self.write_opts)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        // Clear the batch after successful write
-        batch_ops.blocks.clear();
-        batch_ops.commits.clear();
-
-        // Update last flush time
+        // Update timestamp with minimal lock duration
         *self.last_flush.write() = Instant::now();
 
         Ok(())
@@ -303,17 +327,59 @@ impl RocksStore {
     }
 
     pub fn sync(&self) -> io::Result<()> {
+        // Quick check with read lock
+        {
+            let batch_read = self.batch.read();
+            if batch_read.blocks.is_empty() && batch_read.commits.is_empty() {
+                return Ok(());
+            }
+        }
 
-        // First flush any pending batch operations
-        self.flush()?;
-
-        // Then sync the DB
         let mut sync_opts = WriteOptions::default();
         sync_opts.set_sync(true);
-        self.db.write_opt(rocksdb::WriteBatch::default(), &sync_opts)
+
+        // Create batch outside of lock
+        let mut batch = rocksdb::WriteBatch::default();
+
+        // Take a snapshot of data under brief write lock
+        let (blocks_to_write, commits_to_write) = {
+            let mut batch_ops = self.batch.write();
+            (
+                std::mem::take(&mut batch_ops.blocks),
+                std::mem::take(&mut batch_ops.commits)
+            )
+        };
+
+        // Only process if we have data
+        if !blocks_to_write.is_empty() || !commits_to_write.is_empty() {
+            let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
+            let cf_commits = self.db.cf_handle(CF_COMMITS)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
+
+            // Process blocks without holding any locks
+            for (reference, block) in blocks_to_write {
+                let key = serialize(&reference)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
+            }
+
+            // Process commits without holding any locks
+            for (anchor, commit_data) in commits_to_write {
+                let key = serialize(&anchor)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let value = serialize(&commit_data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                batch.put_cf(&cf_commits, key, value);
+            }
+        }
+
+        // Single write operation with sync
+        self.db.write_opt(batch, &sync_opts)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        tracing::debug!("Data is flushed and synced with disk");
+        tracing::debug!("Data is synced with disk");
+        *self.last_sync.write() = Instant::now();
         Ok(())
     }
 }
