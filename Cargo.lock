@@ -1955,6 +1955,7 @@ dependencies = [
  "bincode",
  "blake2",
  "blake3",
+ "bytes",
  "crc32fast",
  "digest 0.10.7",
  "ed25519-consensus",

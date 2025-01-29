@@ -9,7 +9,8 @@ CONSENSUS=${CONSENSUS:-starfish}         # Options: mysticeti, starfish, cordial
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
-REMOVE_VOLUMES=1                       # Set to 1 to clear Grafana/Prometheus volumes
+TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
+REMOVE_VOLUMES=0                       # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
@@ -130,8 +131,8 @@ DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/myst
 echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
 echo -e "${CYAN}Credentials: admin/supers3cret${RESET}"
 
-# Run for 10 minutes
-sleep 600
+
+sleep "$TEST_TIME"
 
 # Cleanup
 echo -e "${RED}Terminating experiment...${RESET}"

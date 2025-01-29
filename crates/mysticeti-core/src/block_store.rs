@@ -239,7 +239,7 @@ impl BlockStore {
         self.metrics.block_store_entries.inc();
 
         // Store in RocksDB
-        self.rocks_store.store_block(&storage_and_transmission_blocks.0, authority_index_start, authority_index_end)
+        self.rocks_store.store_block(storage_and_transmission_blocks.0.clone())
             .expect("Failed to store block in RocksDB");
 
         self.inner.write().add_loaded(storage_and_transmission_blocks, authority_index_start, authority_index_end);
@@ -253,6 +253,8 @@ impl BlockStore {
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(storage_and_transmission_blocks, authority_index_start, authority_index_end);
     }
+
+    // Insert own blocks is primarily needed to capture Byzantine behavior with equivocating blocks
     pub fn insert_own_block(
         &self,
         own_block: OwnBlockData,
@@ -1077,34 +1079,6 @@ pub fn get_blocks_at_authority_round(
     }
 }
 
-impl BlockWriter for BlockStore {
-    fn insert_block(
-        &mut self,
-        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
-    ) -> io::Result<()> {
-        let authority_index_start = 0 as AuthorityIndex;
-        let authority_index_end  = self.committee_size as AuthorityIndex;
-
-        // Store in RocksDB
-        self.rocks_store.store_block(&blocks.0, authority_index_start, authority_index_end)?;
-        // Update in-memory state
-        self.inner.write().add_loaded(blocks, authority_index_start, authority_index_end);
-        Ok(())
-    }
-
-    fn insert_own_block(
-        &mut self,
-        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
-    ) -> io::Result<()> {
-        // Store in RocksDB
-        self.rocks_store.store_block(&blocks.0, authority_index_start, authority_index_end)?;
-        // Update in-memory state
-        self.inner.write().add_loaded(blocks, authority_index_start, authority_index_end);
-        Ok(())
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnBlockData {
