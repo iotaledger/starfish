@@ -35,6 +35,7 @@ use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
 use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
+use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
 use crate::synchronizer::DataRequestor;
 use crate::types::{BlockReference, VerifiedStatementBlock};
@@ -46,6 +47,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     main_task: JoinHandle<()>,
     syncer_task: oneshot::Receiver<()>,
+    flusher_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
 }
 
@@ -72,11 +74,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let authority_index = core.authority();
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
-        // todo - ugly, probably need to merge syncer and core
         let (committed, state) = core.take_recovered_committed_blocks();
         commit_observer.recover_committed(committed, state);
         let committee = core.committee().clone();
         let block_store = core.block_store().clone();
+        let rocks_store = core.rocks_store();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(
@@ -115,12 +117,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
         ));
-        let syncer_task = AsyncWalSyncer::start(stop_sender, epoch_sender);
+        let syncer_task = AsyncRocksDBSyncer::start(stop_sender.clone(), epoch_sender, rocks_store.clone());
+        let flusher_task = AsyncRocksDBFlusher::start(stop_sender, rocks_store);
         Self {
             inner,
             main_task,
             stop: stop_receiver,
             syncer_task,
+            flusher_task,
         }
     }
 
@@ -129,6 +133,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // todo - wait for network shutdown as well
         self.main_task.await.ok();
         self.syncer_task.await.ok();
+        self.flusher_task.await.ok();
         let Ok(inner) = Arc::try_unwrap(self.inner) else {
             panic!("Shutdown failed - not all resources are freed after main task is completed");
         };
@@ -595,6 +600,105 @@ impl SyncerSignals for Arc<Notify> {
     }
 }
 
+pub struct AsyncRocksDBSyncer {
+    stop: mpsc::Sender<()>,
+    epoch_signal: mpsc::Sender<()>,
+    rocks_store: Arc<RocksStore>,
+    runtime: tokio::runtime::Handle,
+}
+
+pub struct AsyncRocksDBFlusher {
+    stop: mpsc::Sender<()>,
+    rocks_store: Arc<RocksStore>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl AsyncRocksDBSyncer {
+    pub fn start(
+        stop: mpsc::Sender<()>,
+        epoch_signal: mpsc::Sender<()>,
+        rocks_store: Arc<RocksStore>,
+    ) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        let this = Self {
+            stop,
+            epoch_signal,
+            rocks_store,
+            runtime: tokio::runtime::Handle::current(),
+        };
+        std::thread::Builder::new()
+            .name("rocksdb-syncer".to_string())
+            .spawn(move || this.run())
+            .expect("Failed to spawn rocksdb-syncer");
+        receiver
+    }
+
+    pub fn run(mut self) {
+        let runtime = self.runtime.clone();
+        loop {
+            if runtime.block_on(self.wait_next()) {
+                return;
+            }
+            self.rocks_store.sync().expect("Failed to sync rocksdb store");
+        }
+    }
+
+    async fn wait_next(&mut self) -> bool {
+        const SYNC_INTERVAL_MS: u64 = 2000;
+        select! {
+            _wait = sleep(Duration::from_millis(SYNC_INTERVAL_MS)) => {
+                false
+            }
+            _signal = self.stop.send(()) => {
+                true
+            }
+            _ = self.epoch_signal.send(()) => {
+                false
+            }
+        }
+    }
+}
+
+impl AsyncRocksDBFlusher {
+    pub fn start(
+        stop: mpsc::Sender<()>,
+        rocks_store: Arc<RocksStore>,
+    ) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        let this = Self {
+            stop,
+            rocks_store,
+            runtime: tokio::runtime::Handle::current(),
+        };
+        std::thread::Builder::new()
+            .name("rocksdb-flusher".to_string())
+            .spawn(move || this.run())
+            .expect("Failed to spawn rocksdb-flusher");
+        receiver
+    }
+
+    pub fn run(mut self) {
+        let runtime = self.runtime.clone();
+        loop {
+            if runtime.block_on(self.wait_next()) {
+                return;
+            }
+            self.rocks_store.flush_pending_batches().expect("Failed to flush rocksdb store");
+        }
+    }
+
+    async fn wait_next(&mut self) -> bool {
+        const FLUSH_INTERVAL_MS: u64 = 20;
+        select! {
+            _wait = sleep(Duration::from_millis(FLUSH_INTERVAL_MS)) => {
+                false
+            }
+            _signal = self.stop.send(()) => {
+                true
+            }
+        }
+    }
+}
 pub struct AsyncWalSyncer {
     stop: mpsc::Sender<()>,
     epoch_signal: mpsc::Sender<()>,

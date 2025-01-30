@@ -647,6 +647,9 @@ impl<H: BlockHandler> Core<H> {
     pub fn block_store(&self) -> &BlockStore {
         &self.block_store
     }
+    pub fn rocks_store(&self) -> Arc<RocksStore> {
+        self.rocks_store.clone()
+    }
 
     // This function is needed only for signalling that we created a new block
     pub fn last_own_block(&self) -> &Data<VerifiedStatementBlock> {

@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
     collections::HashMap,
 };
+use std::collections::VecDeque;
 use std::time::Duration;
 use rocksdb::{
     DB, Options, ColumnFamilyDescriptor, WriteOptions,
@@ -19,25 +20,24 @@ use crate::types::{
     RoundNumber, VerifiedStatementBlock,
 };
 use crate::data::Data;
-const FLUSH_INTERVAL_MS: u64 = 20;
-const SYNC_INTERVAL_MS: u64 = 500;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
-
+const BATCH_SIZE_THRESHOLD: usize = 4 * 1024 * 1024; // target batch size
 
 // Keep the batched operations in memory
 #[derive(Default)]
 struct BatchedOperations {
     blocks: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
     commits: HashMap<BlockReference, CommitData>,
+    total_size: usize,
 }
-
 
 pub struct RocksStore {
     db: Arc<DB>,
     write_opts: WriteOptions,
     batch: Arc<RwLock<BatchedOperations>>,
+    pending_batches: Arc<parking_lot::Mutex<VecDeque<BatchedOperations>>>,
     last_flush: Arc<RwLock<Instant>>,
     last_sync: Arc<RwLock<Instant>>,
     shutdown: Arc<watch::Sender<bool>>,
@@ -53,6 +53,7 @@ impl Clone for RocksStore {
             write_opts,
             batch: self.batch.clone(),
             last_flush: self.last_flush.clone(),
+            pending_batches: self.pending_batches.clone(),
             last_sync: Arc::new(RwLock::new(Instant::now())),
             shutdown: self.shutdown.clone(),
         }
@@ -76,30 +77,30 @@ impl RocksStore {
         opts.create_missing_column_families(true);
 
         // Optimize for frequent syncs
-        opts.set_write_buffer_size(256 * 1024 * 1024);
-        opts.set_max_write_buffer_number(4);
-        opts.set_min_write_buffer_number_to_merge(2);
-        opts.set_level_zero_file_num_compaction_trigger(4);
-        opts.set_max_background_jobs(8);
-        opts.set_bytes_per_sync(4 * 1048576);  // Reduce to 1MB for more frequent but smaller syncs
+        opts.set_write_buffer_size(512 * 1024 * 1024);
+        opts.set_max_write_buffer_number(8);
+        opts.set_min_write_buffer_number_to_merge(4);
+        opts.set_level_zero_file_num_compaction_trigger(8);
+        opts.set_max_background_jobs(16);
+        opts.set_bytes_per_sync(32 * 1048576);
 
         // Add these settings for sync optimization
         opts.set_use_fsync(false);  // Use fdatasync instead of fsync
-        opts.set_writable_file_max_buffer_size(4 * 1048576);  // 4MB buffer
+        opts.set_writable_file_max_buffer_size(64 * 1048576);  // 64MB buffer
         opts.set_use_direct_io_for_flush_and_compaction(true);  // Use direct I/O for background ops
 
         // Additional optimizations for high write throughput
-        opts.set_max_subcompactions(2);                   // Allow parallel compactions
+        opts.set_max_subcompactions(4);                   // Allow parallel compactions
         opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
 
         // Additional performance optimizations
         opts.set_allow_concurrent_memtable_write(true);
         opts.optimize_for_point_lookup(1024);
-        opts.increase_parallelism(4); // Adjust based on CPU cores
+        opts.increase_parallelism(8); // Adjust based on CPU cores
 
         let mut cf_opts = Options::default();
-        cf_opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
-        cf_opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB per CF
+        cf_opts.set_target_file_size_base(128 * 1024 * 1024); // 64MB
+        cf_opts.set_write_buffer_size(512 * 1024 * 1024); // 256MB per CF
 
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(CF_BLOCKS, cf_opts.clone()),
@@ -116,44 +117,21 @@ impl RocksStore {
         let store = Self {
             db: Arc::new(db),
             write_opts,
+            pending_batches: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             batch: Arc::new(RwLock::new(BatchedOperations::default())),
             last_flush: Arc::new(RwLock::new(Instant::now())),
             last_sync: Arc::new(RwLock::new(Instant::now())),
             shutdown: Arc::new(shutdown_tx),
         };
 
-        // Start background flusher
-        let store_clone = store.clone();
-        let flush_rx = shutdown_rx.clone();  // Clone for first task
-        tokio::spawn(async move {
-            let flush_interval = Duration::from_millis(FLUSH_INTERVAL_MS);
-            while !*flush_rx.borrow() {
-                tokio::time::sleep(flush_interval).await;
-                if store_clone.should_flush() {
-                    let _ = store_clone.flush();
-                }
-            }
-        });
-
-        // Start background syncer
-        let store_clone = store.clone();
-        tokio::spawn(async move {
-            let sync_interval = Duration::from_millis(SYNC_INTERVAL_MS);
-            while !*shutdown_rx.borrow() {
-                tokio::time::sleep(sync_interval).await;
-                let _ = store_clone.sync();  // background sync
-            }
-        });
-
         Ok(store)
     }
 
-    fn should_flush(&self) -> bool {
-        let last_flush = *self.last_flush.read();
-        last_flush.elapsed() >= Duration::from_millis(FLUSH_INTERVAL_MS)
-    }
-
     pub fn flush(&self) -> io::Result<()> {
+
+        self.flush_pending_batches()?;
+
+        // Then do regular flush of current batch
         // Quick check with read lock
         {
             let batch_read = self.batch.read();
@@ -211,8 +189,58 @@ impl RocksStore {
         block: Data<VerifiedStatementBlock>,
     ) -> io::Result<()> {
         let reference = block.reference();
+        let size = block.serialized_bytes().len();
         let mut batch = self.batch.write();
         batch.blocks.insert(reference.clone(), block);
+        batch.total_size += size;
+        // If batch is large enough, move it to pending queue
+        if batch.total_size >= BATCH_SIZE_THRESHOLD {
+            let ops = std::mem::replace(&mut *batch, BatchedOperations::default());
+            drop(batch); // Release lock early
+
+            let mut pending = self.pending_batches.lock();
+            pending.push_back(ops);
+        }
+        Ok(())
+    }
+
+    pub fn flush_pending_batches(&self) -> io::Result<()> {
+        loop {
+            let ops = {
+                let mut pending = self.pending_batches.lock();
+                pending.pop_front()
+            };
+
+            let Some(ops) = ops else {
+                break;
+            };
+
+            let mut batch = rocksdb::WriteBatch::default();
+
+            let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
+            let cf_commits = self.db.cf_handle(CF_COMMITS)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
+
+            // Process without holding locks
+            for (reference, block) in ops.blocks {
+                let key = serialize(&reference)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
+            }
+
+            for (anchor, commit_data) in ops.commits {
+                let key = serialize(&anchor)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let value = serialize(&commit_data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                batch.put_cf(&cf_commits, key, value);
+            }
+
+            // Single write operation
+            self.db.write_opt(batch, &self.write_opts)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        }
         Ok(())
     }
 
@@ -230,11 +258,21 @@ impl RocksStore {
 
     pub fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
         // Check in-memory batch first
+        // Check current batch first
         let batch = self.batch.read();
         if let Some(block) = batch.blocks.get(reference) {
             return Ok(Some(block.clone()));
         }
         drop(batch);
+
+        // Check pending batches
+        let pending = self.pending_batches.lock();
+        for ops in pending.iter() {
+            if let Some(block) = ops.blocks.get(reference) {
+                return Ok(Some(block.clone()));
+            }
+        }
+        drop(pending);
 
         // If not in batch, check DB
         let key = serialize(reference)
