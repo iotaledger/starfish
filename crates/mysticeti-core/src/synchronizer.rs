@@ -10,7 +10,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 
-use crate::block_store::ByzantineStrategy;
+use crate::block_store::{ByzantineStrategy, ConsensusProtocol};
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::{
     block_handler::BlockHandler,
@@ -24,7 +24,6 @@ use crate::{
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::format_authority_index;
 
-// TODO: A central controller will eventually dynamically update these parameters.
 #[derive(Clone)]
 pub struct SynchronizerParameters {
     /// The number of own blocks to send in a single batch.
@@ -36,12 +35,24 @@ pub struct SynchronizerParameters {
 }
 
 impl SynchronizerParameters {
-    pub fn new(committee_size: usize) -> Self {
-        Self {
-            batch_own_block_size: committee_size,
-            batch_other_block_size: committee_size * committee_size,
-            sample_precision: Duration::from_millis(600),
+    pub fn new(committee_size: usize, consensus_protocol: ConsensusProtocol) -> Self {
+        match consensus_protocol {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                Self {
+                    batch_own_block_size: committee_size,
+                    batch_other_block_size: 3 * committee_size,
+                    sample_precision: Duration::from_millis(600),
+                }
+            }
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+                Self {
+                    batch_own_block_size: committee_size,
+                    batch_other_block_size: committee_size * committee_size,
+                    sample_precision: Duration::from_millis(600),
+                }
+            }
         }
+
     }
 }
 
