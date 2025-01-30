@@ -102,7 +102,7 @@ pub trait ServerProviderClient: Display {
         I: Iterator<Item = &'a Instance> + Send;
 
     /// Create an instance in a specific region.
-    async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
+    async fn create_instance<S>(&self, region: S, quantity: usize) -> CloudProviderResult<Instance>
     where
         S: Into<String> + Serialize + Send;
 
@@ -178,7 +178,7 @@ pub mod test_client {
             Ok(())
         }
 
-        async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
+        async fn create_instance<S>(&self, region: S, quantity: usize) -> CloudProviderResult<Instance>
         where
             S: Into<String> + Serialize + Send,
         {
