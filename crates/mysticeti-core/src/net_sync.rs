@@ -644,7 +644,7 @@ impl AsyncRocksDBSyncer {
     }
 
     async fn wait_next(&mut self) -> bool {
-        const SYNC_INTERVAL_MS: u64 = 2000;
+        const SYNC_INTERVAL_MS: u64 = 1000;
         select! {
             _wait = sleep(Duration::from_millis(SYNC_INTERVAL_MS)) => {
                 false
