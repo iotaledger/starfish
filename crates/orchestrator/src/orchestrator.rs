@@ -171,12 +171,12 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Disable "pending kernel upgrade" message.
             "sudo apt-get -y remove needrestart",
             // The following dependencies
-            // * build-essential: prevent the error: [error: linker `cc` not found].
+            // * build-essential: prevent the error: [error: linker *`cc`* not found].
             // * sysstat - for getting disk stats
             // * iftop - for getting network stats
             // * libssl-dev - Required to compile the orchestrator
-            // TODO: Remove libssl-dev dependency #7
-            "sudo apt-get -y install build-essential sysstat iftop libssl-dev",
+            // * clang, libclang-dev, etc. - Required for RocksDB compilation
+            "sudo apt-get -y install build-essential sysstat iftop libssl-dev clang libclang-dev libclang1 llvm",
             "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config",
             // Install rust (non-interactive).
             "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
@@ -225,7 +225,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             "git fetch origin",
             &format!("git checkout -B {commit} origin/{commit}"),
             "source $HOME/.cargo/env",
-            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --workspace --exclude orchestrator",
+            "CXX=g++-12 CC=gcc-12 RUSTFLAGS=-Ctarget-cpu=native cargo build --release --workspace --exclude orchestrator",
         ]
         .join(" && ");
 
