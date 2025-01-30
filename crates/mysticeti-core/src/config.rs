@@ -246,8 +246,8 @@ impl NodePrivateConfig {
         self.storage_path.join("committed.txt")
     }
 
-    pub fn wal(&self) -> PathBuf {
-        self.storage_path.join("wal")
+    pub fn rocksdb(&self) -> PathBuf {
+        self.storage_path.join("rocksdb")
     }
 }
 

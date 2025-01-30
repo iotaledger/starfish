@@ -63,6 +63,7 @@ impl ThresholdClockAggregator {
                     self.aggregator.clear();
                     // We have seen 2f+1 blocks for current round, advance
                     self.round = block.round + 1;
+                    tracing::debug!("Advanced round to {}", self.round);
                 }
             }
         }

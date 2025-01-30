@@ -215,7 +215,7 @@ impl BlockHandler for TestBlockHandler {
     }
 }
 
-pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
+pub struct RealCommitHandler<H = HashSet<TransactionLocator>> {
     commit_interpreter: Linearizer,
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committed_leaders: Vec<BlockReference>,
@@ -223,13 +223,13 @@ pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
     metrics: Arc<Metrics>,
 }
 
-impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> TestCommitHandler<H> {
+impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> RealCommitHandler<H> {
     pub fn new(committee: Arc<Committee>, metrics: Arc<Metrics>) -> Self {
         Self::new_with_handler(committee, metrics, Default::default())
     }
 }
 
-impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
+impl<H: ProcessedTransactionHandler<TransactionLocator>> RealCommitHandler<H> {
     pub fn new_with_handler(committee: Arc<Committee>, metrics: Arc<Metrics>, handler: H) -> Self {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
@@ -270,7 +270,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
 }
 
 impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObserver
-    for TestCommitHandler<H>
+    for RealCommitHandler<H>
 {
     fn handle_commit(
         &mut self,

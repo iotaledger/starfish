@@ -45,3 +45,4 @@ pub mod validator;
 mod wal;
 mod encoder;
 mod decoder;
+mod rocks_store;

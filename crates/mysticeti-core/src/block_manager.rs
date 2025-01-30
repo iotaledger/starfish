@@ -7,11 +7,10 @@ use std::{
 };
 
 use crate::{
-    block_store::{BlockStore, BlockWriter},
+    block_store::{BlockStore},
     committee::Committee,
     data::Data,
     types::{BlockReference},
-    wal::WalPosition,
 };
 use crate::types::VerifiedStatementBlock;
 
@@ -40,12 +39,12 @@ impl BlockManager {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-        block_writer: &mut impl BlockWriter,
-    ) -> (Vec<(WalPosition, Data<VerifiedStatementBlock>)>, HashSet<BlockReference>, bool) {
+        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>
+    ) -> (Vec<Data<VerifiedStatementBlock>>, HashSet<BlockReference>, bool) {
+        let block_store = self.block_store.clone();
         let mut updated_statements = false;
         let mut blocks: VecDeque<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)> = blocks.into();
-        let mut newly_storage_blocks_processed: Vec<(WalPosition, Data<VerifiedStatementBlock>)> = vec![];
+        let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
@@ -60,8 +59,8 @@ impl BlockManager {
                     tracing::debug!("Block contains new shard: {:?}", block_reference);
                     if storage_and_transmission_blocks.0.statements().is_some() {
                         // Block can be processed. So need to update indexes etc
-                        let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
-                        newly_storage_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
+                        block_store.insert_general_block(storage_and_transmission_blocks.clone());
+                        newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
                         updated_statements = true;
                         self.block_store.updated_unknown_by_others(storage_and_transmission_blocks.0.reference().clone());
                         recoverable_blocks.remove(storage_and_transmission_blocks.0.reference());
@@ -104,8 +103,8 @@ impl BlockManager {
                 let block_reference = *block_reference;
 
                 // Block can be processed. So need to update indexes etc
-                let position = block_writer.insert_block(storage_and_transmission_blocks.clone());
-                newly_storage_blocks_processed.push((position, storage_and_transmission_blocks.0.clone()));
+                block_store.insert_general_block(storage_and_transmission_blocks.clone());
+                newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =

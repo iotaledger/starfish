@@ -66,7 +66,7 @@ impl TransactionsCommitment {
         let merkle_proof_bytes =merkle_proof.to_bytes();
         (TransactionsCommitment(merkle_root), merkle_proof_bytes)
     }
-    pub fn new_from_statements(statements: &Vec<BaseStatement>) -> (TransactionsCommitment) {
+    pub fn new_from_statements(statements: &Vec<BaseStatement>) -> TransactionsCommitment {
         let mut hasher = crypto::BlockHasher::new();
         for statement in statements {
             statement.crypto_hash(&mut hasher);

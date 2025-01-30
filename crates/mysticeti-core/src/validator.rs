@@ -10,7 +10,7 @@ use ::prometheus::Registry;
 use eyre::{eyre, Context, Result};
 
 use crate::{
-    block_handler::{RealBlockHandler, TestCommitHandler},
+    block_handler::{RealBlockHandler, RealCommitHandler},
     block_store::BlockStore,
     committee::Committee,
     config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
@@ -23,11 +23,10 @@ use crate::{
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
     types::AuthorityIndex,
-    wal::{self, walf},
 };
 
 pub struct Validator {
-    network_synchronizer: NetworkSyncer<RealBlockHandler, TestCommitHandler<TransactionLog>>,
+    network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler<TransactionLog>>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
 }
 
@@ -41,6 +40,7 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
+        // Network and metrics setup remains the same
         let network_address = public_config
             .network_address(authority)
             .ok_or(eyre!("No network address for authority {authority}"))
@@ -63,26 +63,24 @@ impl Validator {
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
-        // Open the block store.
-        let wal_file =
-            wal::open_file_for_wal(private_config.wal()).expect("Failed to open wal file");
-        let (wal_writer, wal_reader) = walf(wal_file).expect("Failed to open wal");
+        // Open the block store with RocksDB
+        let rocks_path = private_config.rocksdb(); // You'll need to add this to NodePrivateConfig
         let recovered = BlockStore::open(
             authority,
-            Arc::new(wal_reader),
-            &wal_writer,
+            rocks_path,
             metrics.clone(),
             &committee,
             byzantine_strategy,
             consensus,
         );
 
-        // Boot the validator node.
+        // Rest of the function remains the same
         let (block_handler, block_sender) = RealBlockHandler::new(
             &private_config.certified_transactions_log(),
             metrics.clone(),
             &committee,
         );
+
         TransactionGenerator::start(
             block_sender,
             authority,
@@ -90,16 +88,19 @@ impl Validator {
             public_config.clone(),
             metrics.clone(),
         );
+
         let committed_transaction_log =
             TransactionLog::start(private_config.committed_transactions_log())
                 .expect("Failed to open committed transaction log for write");
         tracing::info!("Transaction log");
-        let commit_handler = TestCommitHandler::new_with_handler(
+
+        let commit_handler = RealCommitHandler::new_with_handler(
             committee.clone(),
             metrics.clone(),
             committed_transaction_log,
         );
         tracing::info!("Commit handler");
+
         let core = Core::open(
             block_handler,
             authority,
@@ -108,22 +109,22 @@ impl Validator {
             &public_config,
             metrics.clone(),
             recovered,
-            wal_writer,
             CoreOptions::default(),
         );
         tracing::info!("Core");
+
         let network = Network::load(
             &public_config,
             authority,
             binding_network_address,
             metrics.clone(),
         )
-        .await;
+            .await;
         tracing::info!("Network is created. Starting synchronizer");
+
         let network_synchronizer = NetworkSyncer::start(
             network,
             core,
-            public_config.parameters.wave_length,
             commit_handler,
             public_config.parameters.shutdown_grace_period,
             metrics,

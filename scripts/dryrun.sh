@@ -3,11 +3,13 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-5}     # Default: 5 validators (recommend < number of physical cores)
-DESIRED_TPS=${DESIRED_TPS:-15000}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-mysticeti}         # Options: mysticeti, starfish, cordial-miners, starfish-push
+NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
+DESIRED_TPS=${DESIRED_TPS:-50000}       # Target transactions per second
+CONSENSUS=${CONSENSUS:-starfish}         # Options: mysticeti, starfish, cordial-miners, starfish-push
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
+                                                      #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
+TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
 REMOVE_VOLUMES=0                       # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
@@ -90,7 +92,8 @@ export RUST_BACKTRACE=1
 export RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,\
 mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,\
 mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,\
-mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace
+mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace,\
+mysticeti_core::threshold_core=trace,mysticeti_core::syncer=trace,
 
 BYZANTINE_COUNT=0
 for ((i=0; i<NUM_VALIDATORS; i++)); do
@@ -110,7 +113,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   fi
 
   echo -e "${GREEN}Starting $TYPE validator ${YELLOW}$i${RESET} with load $LOAD..."
-  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
+  tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin mysticeti -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $LOAD \
@@ -128,8 +131,8 @@ DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/myst
 echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
 echo -e "${CYAN}Credentials: admin/supers3cret${RESET}"
 
-# Run for 10 minutes
-sleep 600
+
+sleep "$TEST_TIME"
 
 # Cleanup
 echo -e "${RED}Terminating experiment...${RESET}"

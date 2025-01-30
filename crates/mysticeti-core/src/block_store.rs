@@ -2,14 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashSet};
-use std::{
-    cmp::max,
-    collections::{BTreeMap, HashMap},
-    io::IoSlice,
-    sync::Arc,
-    time::Instant,
-};
-
+use std::{cmp::max, collections::{BTreeMap, HashMap}, io, sync::Arc, time::Instant};
+use std::path::Path;
 use minibytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -23,10 +17,10 @@ use crate::{
     types::{
         AuthorityIndex, BlockDigest, BlockReference, RoundNumber,
     },
-    wal::{Tag, WalPosition, WalReader, WalWriter},
 };
 use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::metrics::UtilizationTimerVecExt;
+use crate::rocks_store::RocksStore;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
 
@@ -49,15 +43,6 @@ impl ConsensusProtocol {
             _ => ConsensusProtocol::Starfish, // Default to Starfish
         }
     }
-
-    pub fn to_usize(&self) -> usize {
-        match self {
-            ConsensusProtocol::Mysticeti => 0,
-            ConsensusProtocol::CordialMiners => 1,
-            ConsensusProtocol::Starfish => 2,
-            ConsensusProtocol::StarfishPush => 3,
-        }
-    }
 }
 
 #[allow(unused)]
@@ -73,7 +58,7 @@ pub enum ByzantineStrategy {
 #[derive(Clone)]
 pub struct BlockStore {
     inner: Arc<RwLock<BlockStoreInner>>,
-    block_wal_reader: Arc<WalReader>,
+    rocks_store: Arc<RocksStore>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
@@ -107,34 +92,38 @@ struct BlockStoreInner {
 }
 
 pub trait BlockWriter {
-    fn insert_block(&mut self, block: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)) -> WalPosition;
+    fn insert_block(
+        &mut self,
+        block: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+    ) -> io::Result<()>;
 
     fn insert_own_block(
         &mut self,
-        block: &OwnBlockData,
+        block: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
-    );
+    ) -> io::Result<()>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum IndexEntry {
-    WalPosition(WalPosition),
-    //the first entry in the pair in the block for storage (may contain statements)
-    //the second entry is the block for transmission (no statements and possibly encoded shard)
-    Loaded(WalPosition, (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)),
+    // Block needs to be loaded from RocksDB
+    Unloaded(BlockReference),
+    // Block is currently in memory
+    Loaded((Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)),
 }
 
 impl BlockStore {
     pub fn open(
         authority: AuthorityIndex,
-        block_wal_reader: Arc<WalReader>,
-        wal_writer: &WalWriter,
+        path: impl AsRef<Path>,
         metrics: Arc<Metrics>,
         committee: &Committee,
         byzantine_strategy: String,
         consensus: String,
     ) -> RecoveredState {
+        let rocks_store = Arc::new(RocksStore::open(path)
+            .expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
         let mut inner = BlockStoreInner {
@@ -146,55 +135,38 @@ impl BlockStore {
             ..Default::default()
         };
         let mut builder = RecoveredStateBuilder::new();
-        let mut replay_started: Option<Instant> = None;
+        let replay_started = Instant::now();
         let mut block_count = 0u64;
-        for (pos, (tag, data)) in block_wal_reader.iter_until(wal_writer) {
-            if replay_started.is_none() {
-                replay_started = Some(Instant::now());
-                tracing::info!("Wal is not empty, starting replay");
+        // Recover blocks from RocksDB
+        let mut current_round = 0;
+        loop {
+            let blocks = rocks_store.get_blocks_by_round(current_round)
+                .expect("Failed to read blocks from RocksDB");
+
+            if blocks.is_empty() {
+                break;
             }
-            let block = match tag {
-                WAL_ENTRY_BLOCK => {
-                    let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(data)
-                        .expect("Failed to deserialize data from wal");
-                    let transmission_block = data_storage_block.from_storage_to_transmission(authority);
-                    let data_transmission_block = Data::new(transmission_block);
-                    let data_storage_transmission_blocks = (data_storage_block,data_transmission_block);
-                    builder.block(pos, data_storage_transmission_blocks.clone());
-                    data_storage_transmission_blocks
-                }
-                WAL_ENTRY_PAYLOAD => {
-                    builder.payload(pos, data);
-                    continue;
-                }
-                WAL_ENTRY_OWN_BLOCK => {
-                    let (own_block_data, own_storage_transmission_blocks) = OwnBlockData::from_bytes(data)
-                        .expect("Failed to deserialized own block data from wal");
-                    builder.own_block(own_block_data);
-                    own_storage_transmission_blocks
-                }
-                WAL_ENTRY_STATE => {
-                    builder.state(data);
-                    continue;
-                }
-                WAL_ENTRY_COMMIT => {
-                    let (commit_data, state) = bincode::deserialize(&data)
-                        .expect("Failed to deserialized commit data from wal");
-                    builder.commit_data(commit_data, state);
-                    continue;
-                }
-                _ => panic!("Unknown wal tag {tag} at position {pos}"),
-            };
-            // todo - we want to keep some last blocks in the cache
-            block_count += 1;
-            inner.add_unloaded(block, pos, 0, committee.len() as AuthorityIndex);
+
+            for block in blocks {
+                let transmission_block = block.from_storage_to_transmission(authority);
+                let data_transmission_block = Data::new(transmission_block);
+                let data_storage_transmission_blocks = (block.clone(), data_transmission_block);
+
+                builder.block(current_round, data_storage_transmission_blocks.clone());
+                block_count += 1;
+                inner.add_unloaded(
+                    data_storage_transmission_blocks,
+                    0,
+                    committee.len() as AuthorityIndex
+                );
+            }
+
+            current_round += 1;
         }
+
         metrics.block_store_entries.inc_by(block_count);
-        if let Some(replay_started) = replay_started {
-            tracing::info!("Wal replay completed in {:?}", replay_started.elapsed());
-        } else {
-            tracing::info!("Wal is empty, will start from genesis");
-        }
+        tracing::info!("RocksDB replay completed in {:?}, recovered {} blocks",
+        replay_started.elapsed(), block_count);
         let byzantine_strategy = match byzantine_strategy.as_str() {
             "timeout-leader" => Some(ByzantineStrategy::TimeoutLeader),
             "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
@@ -212,15 +184,15 @@ impl BlockStore {
             ConsensusProtocol::StarfishPush => tracing::info!("Starting Starfish push protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
-        let this = Self {
-            block_wal_reader,
+        let block_store = Self {
+            rocks_store: rocks_store.clone(),
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
             metrics,
             consensus_protocol,
             committee_size: committee.len(),
         };
-        builder.build(this)
+        builder.build(rocks_store, block_store)
     }
 
     pub fn get_dag(
@@ -258,29 +230,69 @@ impl BlockStore {
         self.inner.write().update_pending_unavailable(pending);
     }
 
-    pub fn insert_block(
+    pub fn insert_block_bounds(
         &self,
-        storage_and_transmission_blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>),
-        position: WalPosition,
+        storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
         self.metrics.block_store_entries.inc();
-        self.inner
-            .write()
-            .add_loaded(position, storage_and_transmission_blocks, authority_index_start, authority_index_end);
+
+        // Store in RocksDB
+        self.rocks_store.store_block(storage_and_transmission_blocks.0.clone())
+            .expect("Failed to store block in RocksDB");
+
+        self.inner.write().add_loaded(storage_and_transmission_blocks, authority_index_start, authority_index_end);
+    }
+
+    pub fn insert_general_block(
+        &self,
+        storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+    ) {
+        let authority_index_start = 0 as  AuthorityIndex;
+        let authority_index_end = self.committee_size as AuthorityIndex;
+        self.insert_block_bounds(storage_and_transmission_blocks, authority_index_start, authority_index_end);
+    }
+
+    // Insert own blocks is primarily needed to capture Byzantine behavior with equivocating blocks
+    pub fn insert_own_block(
+        &self,
+        own_block: OwnBlockData,
+    ) {
+        self.insert_block_bounds(own_block.storage_transmission_blocks, own_block.authority_index_start, own_block.authority_index_end);
     }
 
     pub fn get_storage_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
+        // First try to get from memory
         let entry = self.inner.read().get_block(reference);
-        // todo - consider adding loaded entries back to cache
-        entry.map(|pos| self.read_index(pos).0)
+        match entry {
+            Some(IndexEntry::Loaded(blocks)) => Some(blocks.0),
+            Some(IndexEntry::Unloaded(block_ref)) => {
+                // If not in memory, get from RocksDB
+                self.rocks_store.get_block(&block_ref)
+                    .expect("Failed to read from RocksDB")
+            },
+            None => None,
+        }
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
+        // First try to get from memory
         let entry = self.inner.read().get_block(reference);
-        // todo - consider adding loaded entries back to cache
-        entry.map(|pos| self.read_index(pos).1)
+        match entry {
+            Some(IndexEntry::Loaded(blocks)) => Some(blocks.1),
+            Some(IndexEntry::Unloaded(block_ref)) => {
+                // If not in memory, get from RocksDB and create transmission block
+                let own_id = self.inner.read().authority;
+                self.rocks_store.get_block(&block_ref)
+                    .expect("Failed to read from RocksDB")
+                    .map(|storage_block| {
+                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                        Data::new(transmission_block)
+                    })
+            },
+            None => None,
+        }
     }
 
 
@@ -405,12 +417,10 @@ impl BlockStore {
             return;
         }
         let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
+
+        // Only unload from RAM, keep everything in RocksDB
         let unloaded = self.inner.write().unload_below_round(threshold_round);
-        self.metrics
-            .block_store_unloaded_blocks
-            .inc_by(unloaded as u64);
-        let retained_maps = self.block_wal_reader.cleanup();
-        self.metrics.wal_mappings.set(retained_maps as i64);
+        self.metrics.block_store_unloaded_blocks.inc_by(unloaded as u64);
     }
 
     pub fn get_own_transmission_blocks(
@@ -495,33 +505,25 @@ impl BlockStore {
         self.inner.read().last_own_block()
     }
 
-    fn read_index(&self, entry: IndexEntry) -> (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>) {
+    fn read_index(&self, entry: IndexEntry) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
         let own_id = self.inner.read().authority;
         match entry {
-            IndexEntry::WalPosition(position) => {
+            IndexEntry::Loaded(blocks) => blocks,
+            IndexEntry::Unloaded(reference) => {
                 self.metrics.block_store_loaded_blocks.inc();
-                let (tag, data) = self
-                    .block_wal_reader
-                    .read(position)
-                    .expect("Failed to read wal");
-                match tag {
-                    WAL_ENTRY_BLOCK => {
 
-                        let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(data).expect("Failed to deserialize data from wal");
-                        let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
-                        let data_transmission_block = Data::new(transmission_block);
-                        (data_storage_block, data_transmission_block)
-                    }
-                    WAL_ENTRY_OWN_BLOCK => {
-                        OwnBlockData::from_bytes(data)
-                            .expect("Failed to deserialized own block from wal").1
-                    }
-                    _ => {
-                        panic!("Trying to load index entry at position {position}, found tag {tag}")
-                    }
-                }
+                // Get from RocksDB
+                let data_storage_block = self.rocks_store
+                    .get_block(&reference)
+                    .expect("Failed to read from RocksDB")
+                    .expect("Block not found in RocksDB");
+
+                // Create transmission block
+                let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
+                let data_transmission_block = Data::new(transmission_block);
+
+                (data_storage_block, data_transmission_block)
             }
-            IndexEntry::Loaded(_, block) => block,
         }
     }
 
@@ -695,69 +697,76 @@ pub fn get_blocks_at_authority_round(
             .cloned()
     }
 
-    // todo - also specify LRU criteria
-    /// Unload all entries from below or equal threshold_round
     pub fn unload_below_round(&mut self, threshold_round: RoundNumber) -> usize {
         let mut unloaded = 0usize;
+
+        // Keep the index entries but unload the actual block data from RAM
         for (round, map) in self.index.iter_mut() {
-            // todo - try BTreeMap for self.index?
             if *round > threshold_round {
                 continue;
             }
-            for entry in map.values_mut() {
-                match entry {
-                    IndexEntry::WalPosition(_) => {}
-                    // Unload entry
-                    IndexEntry::Loaded(position, _) => {
-                        unloaded += 1;
-                        *entry = IndexEntry::WalPosition(*position);
-                    }
+
+            // Only remove blocks from cache, keeping the references
+            for ((authority, digest), entry) in map.iter_mut() {
+                if let IndexEntry::Loaded(_block) = entry {
+                    unloaded += 1;
+                    // Convert to unloaded state with reference
+                    *entry = IndexEntry::Unloaded(BlockReference {
+                        round: *round,
+                        authority: *authority,
+                        digest: *digest,
+                    });
                 }
             }
         }
-        if unloaded > 0 {
-            tracing::debug!("Unloaded {unloaded} entries from block store cache");
-        }
+
+        tracing::debug!("Unloaded {unloaded} entries from block store cache");
         unloaded
     }
 
     pub fn add_unloaded(
         &mut self,
-        data_storage_transmission_blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>) ,
-        position: WalPosition,
+        data_storage_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
         let reference = data_storage_transmission_blocks.0.reference();
         self.highest_round = max(self.highest_round, reference.round());
+
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(reference.author_digest(), IndexEntry::WalPosition(position));
+        map.insert(reference.author_digest(), IndexEntry::Unloaded(reference.clone()));
+
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
-        self.update_dag(data_storage_transmission_blocks.0.reference().clone(), data_storage_transmission_blocks.0.includes().clone());
+        self.update_dag(reference.clone(), data_storage_transmission_blocks.0.includes().clone());
         self.update_data_availability_and_cached_blocks(&data_storage_transmission_blocks.0);
     }
 
     pub fn add_loaded(
         &mut self,
-        position: WalPosition,
         storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        self.highest_round = max(self.highest_round, storage_and_transmission_blocks.0.round());
+        let reference = storage_and_transmission_blocks.0.reference();
+        self.highest_round = max(self.highest_round, reference.round());
+
         self.add_own_index(
-            storage_and_transmission_blocks.0.reference(),
+            reference,
             authority_index_start,
             authority_index_end,
         );
-        self.update_last_seen_by_authority(storage_and_transmission_blocks.0.reference());
-        let map = self.index.entry(storage_and_transmission_blocks.0.round()).or_default();
+        self.update_last_seen_by_authority(reference);
+
+        let map = self.index.entry(reference.round()).or_default();
         map.insert(
-            (storage_and_transmission_blocks.0.author(), storage_and_transmission_blocks.0.digest()),
-            IndexEntry::Loaded(position, storage_and_transmission_blocks.clone()),
+            reference.author_digest(),
+            IndexEntry::Loaded(storage_and_transmission_blocks.clone()),
         );
-        self.update_dag(storage_and_transmission_blocks.0.reference().clone(), storage_and_transmission_blocks.0.includes().clone());
+
+        tracing::debug!("Current index map in round {} is : {:?}", reference.round(), map);
+
+        self.update_dag(reference.clone(), storage_and_transmission_blocks.0.includes().clone());
         self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);
     }
     // Update not known by authorities when the block gets recoverable after decoding
@@ -1070,81 +1079,37 @@ pub fn get_blocks_at_authority_round(
     }
 }
 
-pub const WAL_ENTRY_BLOCK: Tag = 1;
-pub const WAL_ENTRY_PAYLOAD: Tag = 2;
-pub const WAL_ENTRY_OWN_BLOCK: Tag = 3;
-pub const WAL_ENTRY_STATE: Tag = 4;
-// Commit entry includes both commit interpreter incremental state and committed transactions aggregator
-// todo - They could be separated for better performance, but this will require catching up for committed transactions aggregator state
-pub const WAL_ENTRY_COMMIT: Tag = 5;
 
-impl BlockWriter for (&mut WalWriter, &BlockStore) {
-
-    fn insert_block(&mut self, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)) -> WalPosition {
-        let timer = self.1.metrics.utilization_timer.utilization_timer("Writer: write to disk");
-        let pos = self
-            .0
-            .write(WAL_ENTRY_BLOCK, storage_and_transmission_blocks.0.serialized_bytes())
-            .expect("Writing to wal failed");
-        drop(timer);
-        self.1
-            .insert_block(storage_and_transmission_blocks, pos, 0, self.1.committee_size as AuthorityIndex);
-        pos
-    }
-
-    fn insert_own_block(
-        &mut self,
-        data: &OwnBlockData,
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
-    ) {
-        let block_pos = data.write_to_wal(self.0);
-        self.1.insert_block(
-            data.storage_transmission_blocks.clone(),
-            block_pos,
-            authority_index_start,
-            authority_index_end,
-        );
-    }
-}
-
-// This data structure has a special serialization in/from Bytes, see OwnBlockData::from_bytes/write_to_wal
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OwnBlockData {
-    pub next_entry: WalPosition,
     pub storage_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+    pub authority_index_start: AuthorityIndex,
+    pub authority_index_end: AuthorityIndex,
 }
-
-const OWN_BLOCK_HEADER_SIZE: usize = 8;
 
 impl OwnBlockData {
-    // A bit of custom serialization to minimize data copy, relies on own_block_serialization_test
-    pub fn from_bytes(bytes: Bytes) -> bincode::Result<(OwnBlockData, (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>))> {
-        let next_entry = &bytes[..OWN_BLOCK_HEADER_SIZE];
-        let next_entry: WalPosition = bincode::deserialize(next_entry)?;
-        let block = bytes.slice(OWN_BLOCK_HEADER_SIZE..);
-        let data_storage_block: Data<VerifiedStatementBlock> = Data::from_bytes(block)?;
-        let own_id = data_storage_block.author();
-        let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
-        let data_transmission_block = Data::new(transmission_block);
-        let own_block_data = OwnBlockData {
-            next_entry,
-            storage_transmission_blocks: (data_storage_block.clone(), data_transmission_block.clone()),
-        };
-        Ok((own_block_data, (data_storage_block,data_transmission_block)))
+    pub fn new(
+        storage_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+        authority_index_start: AuthorityIndex,
+        authority_index_end: AuthorityIndex,
+    ) -> Self {
+        Self {
+            storage_transmission_blocks,
+            authority_index_start,
+            authority_index_end,
+        }
     }
 
-    pub fn write_to_wal(&self, writer: &mut WalWriter) -> WalPosition {
-        let header = bincode::serialize(&self.next_entry).expect("Serialization failed");
-        let header = IoSlice::new(&header);
-        let block = IoSlice::new(self.storage_transmission_blocks.0.serialized_bytes());
-        writer
-            .writev(WAL_ENTRY_OWN_BLOCK, &[header, block])
-            .expect("Writing to wal failed")
+    pub fn from_bytes(bytes: Bytes) -> bincode::Result<Self> {
+        bincode::deserialize(&bytes)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("Serialization failed")
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CommitData {
     pub leader: BlockReference,
     // All committed blocks, including the leader
@@ -1158,17 +1123,5 @@ impl From<&CommittedSubDag> for CommitData {
             leader: value.anchor,
             sub_dag,
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn own_block_serialization_test() {
-        let next_entry = WalPosition::default();
-        let serialized = bincode::serialize(&next_entry).unwrap();
-        assert_eq!(serialized.len(), OWN_BLOCK_HEADER_SIZE);
     }
 }
