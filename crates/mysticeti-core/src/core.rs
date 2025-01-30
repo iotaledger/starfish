@@ -576,7 +576,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn cleanup(&self) {
-        const RETAIN_BELOW_COMMIT_ROUNDS: RoundNumber = 100;
+        const RETAIN_BELOW_COMMIT_ROUNDS: RoundNumber = 50;
 
         self.block_store.cleanup(
             self.last_commit_leader
