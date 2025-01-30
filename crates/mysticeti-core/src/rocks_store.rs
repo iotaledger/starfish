@@ -23,7 +23,7 @@ use crate::data::Data;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
-const BATCH_SIZE_THRESHOLD: usize = 4 * 1024 * 1024; // target batch size
+const BATCH_SIZE_THRESHOLD: usize = 2 * 1024 * 1024; // target batch size
 
 // Keep the batched operations in memory
 #[derive(Default)]

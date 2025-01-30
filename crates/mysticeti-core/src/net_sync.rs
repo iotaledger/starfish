@@ -204,7 +204,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
-        let synchronizer_parameters = SynchronizerParameters::new(committee_size);
+        let synchronizer_parameters = SynchronizerParameters::new(committee_size, consensus_protocol.clone());
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -688,7 +688,7 @@ impl AsyncRocksDBFlusher {
     }
 
     async fn wait_next(&mut self) -> bool {
-        const FLUSH_INTERVAL_MS: u64 = 1000;
+        const FLUSH_INTERVAL_MS: u64 = 20;
         select! {
             _wait = sleep(Duration::from_millis(FLUSH_INTERVAL_MS)) => {
                 false
