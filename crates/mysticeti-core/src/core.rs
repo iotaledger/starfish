@@ -335,7 +335,7 @@ impl<H: BlockHandler> Core<H> {
 
         // Prepare encoded statements if needed
         let _encode_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_encoded_statements");
-        let encoded_statements = self.prepare_encoded_statements(statements.clone());
+        let encoded_statements = self.prepare_encoded_statements(&statements);
         drop(_encode_timer);
 
         // Get pending acknowledgments
@@ -415,7 +415,7 @@ impl<H: BlockHandler> Core<H> {
         (statements, block_references)
     }
 
-    fn prepare_encoded_statements(&mut self, statements: Vec<BaseStatement>) -> Option<Vec<Shard>> {
+    fn prepare_encoded_statements(&mut self, statements: &Vec<BaseStatement>) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 

@@ -66,9 +66,9 @@ impl RealBlockHandler {
         let (sender, receiver) = mpsc::channel(1024);
         let transaction_log = TransactionLog::start(certified_transactions_log_path)
             .expect("Failed to open certified transaction log for write");
-        // Assuming max TPS to be 800.000 and 10 blocks per second, we limit the max number of
+        // Assuming max TPS to be 600.000 and 4 blocks per second (for this TPS), we limit the max number of
         // transactions per block to ensure fast processing
-        let max_transactions_per_block = 80 * 1024 / committee.len();
+        let max_transactions_per_block = 150 * 1024 / committee.len();
         let this = Self {
             transaction_votes: TransactionAggregator::with_handler(transaction_log),
             transaction_time: Default::default(),
