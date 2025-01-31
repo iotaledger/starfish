@@ -628,7 +628,7 @@ impl<H: BlockHandler> Core<H> {
             let timer = self.metrics.utilization_timer.utilization_timer("Core::commit::sync with disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
             drop(timer);
-        } else {
+        } else if committed.len() > 0 {
             let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::commit::flush_to_buffer");
             self.rocks_store.flush().expect("RocksDB sync failed");
             drop(_sync_timer);

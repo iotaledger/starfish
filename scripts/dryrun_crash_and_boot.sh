@@ -6,7 +6,7 @@ KILL_VALIDATORS=${KILL_VALIDATORS:-2}     # Number of first validators to kill a
 BOOT_VALIDATORS=${BOOT_VALIDATORS:-1}     # Number of last validators to boot after CRASH_TIME
 DESIRED_TPS=${DESIRED_TPS:-20000}        # Target total transactions per second
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
-CRASH_TIME=${CRASH_TIME:-60}             # When to crash first nodes and start the last one
+CRASH_TIME=${CRASH_TIME:-300}             # When to crash first nodes and start the last one
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}        # Whether to remove Grafana/Prometheus volumes (1=yes, 0=no)
 CONSENSUS=${CONSENSUS:-starfish-push}           # Consensus protocol: mysticeti, starfish, cordial-miners, starfish-push
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}  # Byzantine strategies: timeout-leader, leader-withholding,
@@ -59,7 +59,7 @@ for ((i=0; i<NUM_VALIDATORS - BOOT_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
   echo -e "${GREEN}Starting validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-  tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin mysticeti -- \
+  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $TPS_PER_VALIDATOR \
@@ -88,7 +88,7 @@ for ((i=NUM_VALIDATORS - BOOT_VALIDATORS; i<NUM_VALIDATORS; i++)); do
    SESSION_NAME="validator_$i"
    LOG_FILE="validator_${i}.log.ansi"
    echo -e "${GREEN}Starting validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-   tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin mysticeti -- \
+   tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $TPS_PER_VALIDATOR \

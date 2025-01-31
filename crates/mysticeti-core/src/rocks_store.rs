@@ -47,6 +47,7 @@ impl Clone for RocksStore {
     fn clone(&self) -> Self {
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false);
+        write_opts.disable_wal(true); // Might be problems when crashed
 
         Self {
             db: self.db.clone(),
@@ -88,18 +89,21 @@ impl RocksStore {
         opts.set_use_fsync(false);  // Use fdatasync instead of fsync
         opts.set_writable_file_max_buffer_size(64 * 1048576);  // 64MB buffer
         opts.set_use_direct_io_for_flush_and_compaction(true);  // Use direct I/O for background ops
-
+        opts.set_level_compaction_dynamic_level_bytes(true); // Dynamically change the level of compaction
         // Additional optimizations for high write throughput
+        opts.set_min_level_to_compress(2);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
         opts.set_max_subcompactions(4);                   // Allow parallel compactions
         opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
 
         // Additional performance optimizations
         opts.set_allow_concurrent_memtable_write(true);
         opts.optimize_for_point_lookup(1024);
-        opts.increase_parallelism(8); // Adjust based on CPU cores
+        opts.increase_parallelism(8); // Adjust based on CPU cores (NumCpu - 1)
 
         let mut cf_opts = Options::default();
-        cf_opts.set_target_file_size_base(128 * 1024 * 1024); // 64MB
+        cf_opts.set_target_file_size_base(128 * 1024 * 1024);
         cf_opts.set_write_buffer_size(512 * 1024 * 1024); // 256MB per CF
 
         let cf_descriptors = vec![
@@ -196,8 +200,7 @@ impl RocksStore {
         // If batch is large enough, move it to pending queue
         if batch.total_size >= BATCH_SIZE_THRESHOLD {
             let ops = std::mem::replace(&mut *batch, BatchedOperations::default());
-            drop(batch); // Release lock early
-
+            drop(batch);
             let mut pending = self.pending_batches.lock();
             pending.push_back(ops);
         }
