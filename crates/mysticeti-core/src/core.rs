@@ -696,7 +696,7 @@ impl<H: BlockHandler> Core<H> {
 
 impl Default for CoreOptions {
     fn default() -> Self {
-        Self::production()
+        Self::test()
     }
 }
 

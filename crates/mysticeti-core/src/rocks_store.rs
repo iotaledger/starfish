@@ -23,7 +23,7 @@ use crate::data::Data;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
-const BATCH_SIZE_THRESHOLD: usize = 2 * 1024 * 1024; // target batch size
+const BATCH_SIZE_THRESHOLD: usize = 8 * 1024 * 1024; // target batch size
 
 // Keep the batched operations in memory
 #[derive(Default)]
@@ -92,7 +92,7 @@ impl RocksStore {
         opts.set_level_compaction_dynamic_level_bytes(true); // Dynamically change the level of compaction
         // Additional optimizations for high write throughput
         opts.set_min_level_to_compress(2);
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
         opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
         opts.set_max_subcompactions(4);                   // Allow parallel compactions
         opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
