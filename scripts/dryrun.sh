@@ -3,11 +3,11 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
-DESIRED_TPS=${DESIRED_TPS:-50000}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-starfish}         # Options: mysticeti, starfish, cordial-miners, starfish-push
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
+NUM_VALIDATORS=${NUM_VALIDATORS:-19}     # Default: 5 validators (recommend < number of physical cores)
+DESIRED_TPS=${DESIRED_TPS:-1000}       # Target transactions per second
+CONSENSUS=${CONSENSUS:-mysticeti}         # Options: mysticeti, starfish, cordial-miners, starfish-push
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-6}  # Must be < NUM_VALIDATORS / 3
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-chain-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
 REMOVE_VOLUMES=0                       # Set to 1 to clear Grafana/Prometheus volumes
@@ -61,7 +61,13 @@ done
 # Update Grafana dashboard port
 PORT=$((1500 + NUM_VALIDATORS + 2))
 FILE="monitoring/grafana/grafana-dashboard.json"
-sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+else
+    # Linux/Ubuntu
+    sed -i -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+fi
 
 echo -e "${GREEN}Monitoring configuration updated${RESET}"
 

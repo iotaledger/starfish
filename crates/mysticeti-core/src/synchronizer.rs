@@ -404,6 +404,7 @@ where
         mut round: RoundNumber,
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
+        let committee_size = inner.committee.len();
         let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let batch_byzantine_own_block_size = 50 * batch_own_block_size;
@@ -461,9 +462,8 @@ where
                 }
                 // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
                 Some(ByzantineStrategy::ChainBomb) => {
-                    let k = 10; // Define K, the interval at which to send blocks (e.g., every 10th round)
-                    // Check if this round is a multiple of K
-                    if current_round % k == 0 {
+                    // send own chain of blocks after becomming the leader and only to the leader in the next round
+                    if current_round as usize % committee_size == own_authority_index as usize {
                         let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                         // Only send blocks if the next leader is the intended recipient
                         if leaders_next_round.contains(&to_whom_authority_index) {

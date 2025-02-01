@@ -688,7 +688,7 @@ impl AsyncRocksDBFlusher {
     }
 
     async fn wait_next(&mut self) -> bool {
-        const FLUSH_INTERVAL_MS: u64 = 10;
+        const FLUSH_INTERVAL_MS: u64 = 20;
         select! {
             _wait = sleep(Duration::from_millis(FLUSH_INTERVAL_MS)) => {
                 false

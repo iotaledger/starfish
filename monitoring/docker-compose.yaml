@@ -19,12 +19,14 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=supers3cret
+      - GF_SECURITY_ADMIN_PASSWORD_FILE=
       - GF_AUTH_GENERIC_OAUTH_PERSISTENT_TOKEN=true
+    user: "472"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml
-      - ./grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml
-      - ./grafana/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json
+      - ./grafana/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml:ro
+      - ./grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml:ro
+      - ./grafana/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
     restart: always
 
 volumes:
