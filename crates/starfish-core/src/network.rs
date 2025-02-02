@@ -625,7 +625,6 @@ fn generate_latency(mean: f64) -> Duration {
     // Generate latency by adding the random deviation to the mean
     let latency = mean + rng.gen_range(-deviation..=deviation);
 
-    tracing::info!("Generated latency {latency}");
     // Return the latency as a Duration (in milliseconds)
     Duration::from_millis(latency as u64)
 }

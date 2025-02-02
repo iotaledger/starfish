@@ -297,7 +297,7 @@ impl Metrics {
         (Arc::new(metrics), reporter)
     }
 
-    pub fn aggregate_and_display(metrics: Vec<Arc<Metrics>>, duration: Duration) {
+    pub fn aggregate_and_display(metrics: Vec<Arc<Metrics>>, duration_secs: u64) {
         let mut table = PrettyTable::new();
         table.set_format(default_table_format());
 
@@ -307,12 +307,12 @@ impl Metrics {
         let total_transactions: u64 = metrics.iter()
             .map(|m| m.sequenced_transactions_total.get())
             .sum();
-        let total_tps = total_transactions as f64 / duration.as_secs() as f64;
+        let total_tps = total_transactions as f64 / duration_secs as f64;
 
         let total_blocks_submitted = metrics.iter()
             .map(|m| m.block_store_entries.get())
             .sum::<u64>();
-        let total_bps = total_blocks_submitted as f64 / duration.as_secs() as f64;
+        let total_bps = total_blocks_submitted as f64 / duration_secs as f64;
 
         let total_bytes_sent: u64 = metrics.iter()
             .map(|m| m.bytes_sent_total.get())
@@ -324,7 +324,7 @@ impl Metrics {
         // Display basic metrics
         table.set_titles(row![bH2->"Metrics Summary"]);
         table.add_row(row![b->"Number of validators:", num_validators]);
-        table.add_row(row![b->"Duration:", format!("{} s", duration.as_secs())]);
+        table.add_row(row![b->"Duration:", format!("{} s", duration_secs)]);
 
         // Performance metrics
         table.add_row(row![bH2->""]);
@@ -338,9 +338,9 @@ impl Metrics {
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Network Metrics"]);
         table.add_row(row![b->"Total bytes sent:", format!("{} bytes", total_bytes_sent)]);
-        table.add_row(row![b->"Average bandwidth out:", format!("{:.2} bytes/s", total_bytes_sent as f64 / duration.as_secs() as f64)]);
+        table.add_row(row![b->"Average bandwidth out:", format!("{:.2} bytes/s", total_bytes_sent as f64 / duration_secs as f64)]);
         table.add_row(row![b->"Total bytes received:", format!("{} bytes", total_bytes_received)]);
-        table.add_row(row![b->"Average bandwidth in:", format!("{:.2} bytes/s", total_bytes_received as f64 / duration.as_secs() as f64)]);
+        table.add_row(row![b->"Average bandwidth in:", format!("{:.2} bytes/s", total_bytes_received as f64 / duration_secs as f64)]);
 
         // Core metrics
         table.add_row(row![bH2->""]);

@@ -133,6 +133,10 @@ impl Validator {
         })
     }
 
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
+    }
+
     pub async fn await_completion(
         self,
     ) -> (

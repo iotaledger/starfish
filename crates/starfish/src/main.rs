@@ -17,6 +17,7 @@ use mysticeti_core::{
     validator::Validator,
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
+use mysticeti_core::metrics::Metrics;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -232,6 +233,7 @@ async fn local_benchmark(
     fs::create_dir_all(&base_dir)?;
 
     let mut handles = Vec::with_capacity(committee_size);
+    let mut metrics_of_honest_validators = Vec::new();
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
@@ -260,7 +262,12 @@ async fn local_benchmark(
                 ))
             }
         }
-        let validator = if authority % 3 == 0 && authority / 3 < num_byzantine_nodes {
+        let is_byzantine = if authority % 3 == 0 && authority / 3 < num_byzantine_nodes {
+            true
+        } else {
+            false
+        };
+        let validator =  if is_byzantine{
             Validator::start(
                 authority as AuthorityIndex,
                 committee.clone(),
@@ -281,6 +288,9 @@ async fn local_benchmark(
                 consensus_protocol.clone(),
             ).await?
         };
+        if !is_byzantine {
+            metrics_of_honest_validators.push(validator.metrics());
+        }
 
 
         // Use the same pattern as the run method
@@ -294,7 +304,9 @@ async fn local_benchmark(
 
     // Run for specified duration
     tokio::time::sleep(std::time::Duration::from_secs(duration_secs)).await;
+    println!("Timeout expired");
 
+    Metrics::aggregate_and_display(metrics_of_honest_validators, duration_secs);
     // Wait for all validators to complete and check their results
     for handle in handles {
         handle.await?.expect("Validator crashed");
