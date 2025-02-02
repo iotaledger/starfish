@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{benchmark::BenchmarkParameters, client::Instance};
 
-pub mod mysticeti;
+pub mod starfish;
 
 pub const BINARY_PATH: &str = "target/release";
 

@@ -228,7 +228,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             connection.sender.clone(),
             inner.clone(),
             synchronizer_parameters.clone(),
-            metrics.clone(),
         );
 
         data_requestor.start().await;
@@ -619,7 +618,7 @@ impl AsyncRocksDBSyncer {
         epoch_signal: mpsc::Sender<()>,
         rocks_store: Arc<RocksStore>,
     ) -> oneshot::Receiver<()> {
-        let (sender, receiver) = oneshot::channel();
+        let (_sender, receiver) = oneshot::channel();
         let this = Self {
             stop,
             epoch_signal,
@@ -664,7 +663,7 @@ impl AsyncRocksDBFlusher {
         stop: mpsc::Sender<()>,
         rocks_store: Arc<RocksStore>,
     ) -> oneshot::Receiver<()> {
-        let (sender, receiver) = oneshot::channel();
+        let (_sender, receiver) = oneshot::channel();
         let this = Self {
             stop,
             rocks_store,

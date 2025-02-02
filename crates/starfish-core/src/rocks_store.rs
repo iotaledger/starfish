@@ -115,7 +115,7 @@ impl RocksStore {
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async writes for better performance
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let store = Self {
             db: Arc::new(db),
             write_opts,

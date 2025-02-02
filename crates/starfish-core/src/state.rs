@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    block_store::{BlockStore, CommitData},  // Remove OwnBlockData
+    block_store::{BlockStore},  // Remove OwnBlockData
     data::Data,
     types::{BlockReference},
-    // Remove wal import
 };
+use crate::core::MetaStatement;
+use crate::core::MetaStatement::Include;
 use crate::rocks_store::RocksStore;
 use crate::types::VerifiedStatementBlock;
 
@@ -23,7 +24,7 @@ pub struct RecoveredState {
 
 #[derive(Default)]
 pub struct RecoveredStateBuilder {
-    pending: BTreeMap<u64, RawMetaStatement>,  // Use sequence number instead of WalPosition
+    pending: BTreeMap<u64, MetaStatement>,  // Use sequence number instead of WalPosition
     unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: HashSet<BlockReference>,
@@ -36,18 +37,10 @@ impl RecoveredStateBuilder {
 
     pub fn block(&mut self, sequence: u64, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) {
         self.pending
-            .insert(sequence, RawMetaStatement::Include(*storage_and_transmission_blocks.0.reference()));
+            .insert(sequence, Include(*storage_and_transmission_blocks.0.reference()));
         self.unprocessed_blocks.push(storage_and_transmission_blocks);
     }
 
-
-    pub fn commit_data(&mut self, commits: Vec<CommitData>) {
-        for commit_data in commits {
-            self.last_committed_leader = Some(commit_data.leader);
-            self.committed_blocks
-                .extend(commit_data.sub_dag.into_iter());
-        }
-    }
 
     pub fn build(self, rocks_store: Arc<RocksStore>, block_store: BlockStore) -> RecoveredState {
         RecoveredState {
@@ -58,9 +51,5 @@ impl RecoveredStateBuilder {
             committed_blocks: self.committed_blocks,
         }
     }
-}
-
-enum RawMetaStatement {
-    Include(BlockReference),
 }
 

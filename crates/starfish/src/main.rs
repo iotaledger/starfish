@@ -7,9 +7,10 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use prettytable::{format, row, Table};
+use std::time::Duration;
 use clap::{command, Parser};
 use eyre::{eyre, Context, Result};
+use prettytable::format;
 use mysticeti_core::{
     committee::Committee,
     config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
@@ -94,7 +95,7 @@ async fn main() -> Result<()> {
     // Nice colored error messages.
     color_eyre::install()?;
     let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
+        .with_default_directive(LevelFilter::ERROR.into())
         .from_env_lossy();
     fmt().with_env_filter(filter).init();
 
@@ -213,17 +214,28 @@ fn benchmark_genesis(
 
 async fn local_benchmark(
     committee_size: usize,
-    load: usize,
+    mut load: usize,
     num_byzantine_nodes: usize,
     byzantine_strategy: String,
     mimic_latency: bool,
     consensus_protocol: String,
     duration_secs: u64,
 ) -> Result<()> {
-    tracing::info!("Starting local benchmark with {} validators", committee_size);
+    println!("\n=== Benchmark Configuration ===");
+    println!("Committee Size: {}", committee_size);
+    println!("Byzantine Nodes: {}", num_byzantine_nodes);
+    if num_byzantine_nodes != 0 {
 
+        println!("Byzantine Strategy: {}", byzantine_strategy);
+    }
+    println!("Transaction Load: {} tx/s", load);
+    println!("Consensus Protocol: {}", consensus_protocol);
+    println!("Network Latency: {}", if mimic_latency { "Enabled" } else { "Disabled" });
+    println!("Duration: {} seconds", duration_secs);
+    println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
+    load = load / committee.len();
     let client_parameters = ClientParameters::almost_default(load);
     let node_parameters = NodeParameters::almost_default(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
@@ -233,7 +245,9 @@ async fn local_benchmark(
     fs::create_dir_all(&base_dir)?;
 
     let mut handles = Vec::with_capacity(committee_size);
+    let mut abort_handles = Vec::with_capacity(committee_size);
     let mut metrics_of_honest_validators = Vec::new();
+    let mut reporters_of_honest_validators = Vec::new();
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
@@ -267,7 +281,7 @@ async fn local_benchmark(
         } else {
             false
         };
-        let validator =  if is_byzantine{
+        let validator =  if is_byzantine {
             Validator::start(
                 authority as AuthorityIndex,
                 committee.clone(),
@@ -290,6 +304,7 @@ async fn local_benchmark(
         };
         if !is_byzantine {
             metrics_of_honest_validators.push(validator.metrics());
+            reporters_of_honest_validators.push(validator.reporter())
         }
 
 
@@ -298,24 +313,39 @@ async fn local_benchmark(
             let (network_result, _metrics_result) = validator.await_completion().await;
             network_result
         });
-
+        abort_handles.push(handle.abort_handle());
         handles.push(handle);
     }
 
     // Run for specified duration
-    tokio::time::sleep(std::time::Duration::from_secs(duration_secs)).await;
-    println!("Timeout expired");
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {
+            println!("Benchmark completed after {} seconds", duration_secs);
+            // Display metrics before exiting
+            Metrics::aggregate_and_display(metrics_of_honest_validators,reporters_of_honest_validators, duration_secs);
 
-    Metrics::aggregate_and_display(metrics_of_honest_validators, duration_secs);
-    // Wait for all validators to complete and check their results
-    for handle in handles {
-        handle.await?.expect("Validator crashed");
+            // Abort all tasks
+            for abort_handle in abort_handles {
+                abort_handle.abort();
+            }
+
+            // Clean up
+            fs::remove_dir_all(base_dir)?;
+            Ok(())
+        }
+        _ = async {
+            for handle in handles {
+                if let Err(e) = handle.await {
+                    tracing::warn!("Validator terminated with error: {}", e);
+                }
+            }
+        } => {
+            println!("All validators completed before timeout");
+            Metrics::aggregate_and_display(metrics_of_honest_validators, reporters_of_honest_validators, duration_secs);
+            fs::remove_dir_all(base_dir)?;
+            Ok(())
+        }
     }
-
-    // Clean up temporary directories
-    fs::remove_dir_all(base_dir)?;
-
-    Ok(())
 }
 
 /// Boot a single validator node.

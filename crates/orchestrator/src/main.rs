@@ -30,9 +30,9 @@ mod ssh;
 mod testbed;
 
 /// NOTE: Link these types to the correct protocol.
-type Protocol = protocol::mysticeti::MysticetiProtocol;
-type NodeParameters = protocol::mysticeti::MysticetiNodeParameters;
-type ClientParameters = protocol::mysticeti::MysticetiClientParameters;
+type Protocol = protocol::starfish::StarfishProtocol;
+type NodeParameters = protocol::starfish::StarfishNodeParameters;
+type ClientParameters = protocol::starfish::StarfishClientParameters;
 
 /// The orchestrator command line options.
 #[derive(Parser, Debug)]

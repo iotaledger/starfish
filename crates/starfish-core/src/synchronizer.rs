@@ -96,8 +96,6 @@ pub struct DataRequestor<H: BlockHandler, C: CommitObserver> {
     /// The handle of the task disseminating our own blocks.
     data_requestor: Option<JoinHandle<Option<()>>>,
     parameters: SynchronizerParameters,
-    /// Metrics.
-    metrics: Arc<Metrics>,
 }
 
 impl<H, C> DataRequestor<H, C>
@@ -107,10 +105,9 @@ where
 {
     pub fn new(
         to_whom_authority_index: AuthorityIndex,
-        sender: mpsc::Sender<NetworkMessage>,
+        sender: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         parameters: SynchronizerParameters,
-        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             to_whom_authority_index,
@@ -118,7 +115,6 @@ where
             inner,
             data_requestor: None,
             parameters,
-            metrics,
         }
     }
 

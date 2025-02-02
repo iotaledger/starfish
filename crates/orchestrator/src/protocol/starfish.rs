@@ -19,15 +19,15 @@ use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
-pub struct MysticetiNodeParameters(NodeParameters);
+pub struct StarfishNodeParameters(NodeParameters);
 
-impl MysticetiNodeParameters {
-    pub fn almost_default(mimic_latency: bool) -> MysticetiNodeParameters {
-        MysticetiNodeParameters(NodeParameters::almost_default(mimic_latency))
+impl StarfishNodeParameters {
+    pub fn almost_default(mimic_latency: bool) -> StarfishNodeParameters {
+        StarfishNodeParameters(NodeParameters::almost_default(mimic_latency))
     }
 }
 
-impl Deref for MysticetiNodeParameters {
+impl Deref for StarfishNodeParameters {
     type Target = NodeParameters;
 
     fn deref(&self) -> &Self::Target {
@@ -35,25 +35,25 @@ impl Deref for MysticetiNodeParameters {
     }
 }
 
-impl Debug for MysticetiNodeParameters {
+impl Debug for StarfishNodeParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
        write!(f, "c")
     }
 }
 
-impl Display for MysticetiNodeParameters {
+impl Display for StarfishNodeParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Consensus-only mode")
     }
 }
 
-impl ProtocolParameters for MysticetiNodeParameters {}
+impl ProtocolParameters for StarfishNodeParameters {}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(transparent)]
-pub struct MysticetiClientParameters(ClientParameters);
+pub struct StarfishClientParameters(ClientParameters);
 
-impl Deref for MysticetiClientParameters {
+impl Deref for StarfishClientParameters {
     type Target = ClientParameters;
 
     fn deref(&self) -> &Self::Target {
@@ -61,25 +61,25 @@ impl Deref for MysticetiClientParameters {
     }
 }
 
-impl Debug for MysticetiClientParameters {
+impl Debug for StarfishClientParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.transaction_size)
     }
 }
 
-impl Display for MysticetiClientParameters {
+impl Display for StarfishClientParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}B tx", self.transaction_size)
     }
 }
 
-impl ProtocolParameters for MysticetiClientParameters {}
+impl ProtocolParameters for StarfishClientParameters {}
 
-pub struct MysticetiProtocol {
+pub struct StarfishProtocol {
     working_dir: PathBuf,
 }
 
-impl ProtocolCommands for MysticetiProtocol {
+impl ProtocolCommands for StarfishProtocol {
     fn protocol_dependencies(&self) -> Vec<&'static str> {
         vec!["sudo apt -y install libfontconfig1-dev"]
     }
@@ -217,7 +217,7 @@ impl ProtocolCommands for MysticetiProtocol {
     }
 }
 
-impl ProtocolMetrics for MysticetiProtocol {
+impl ProtocolMetrics for StarfishProtocol {
     const BENCHMARK_DURATION: &'static str = mysticeti_core::metrics::BENCHMARK_DURATION;
 
     fn nodes_metrics_path<I>(
@@ -263,7 +263,7 @@ impl ProtocolMetrics for MysticetiProtocol {
     }
 }
 
-impl MysticetiProtocol {
+impl StarfishProtocol {
     /// Make a new instance of the Mysticeti protocol commands generator.
     pub fn new(settings: &Settings) -> Self {
         Self {

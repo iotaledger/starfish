@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashSet};
-use std::{cmp::max, collections::{BTreeMap, HashMap}, io, sync::Arc, time::Instant};
+use std::{cmp::max, collections::{BTreeMap, HashMap}, sync::Arc, time::Instant};
 use std::path::Path;
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -35,7 +35,7 @@ pub enum ConsensusProtocol {
 impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "starfish" => ConsensusProtocol::Mysticeti,
+            "mysticeti" => ConsensusProtocol::Mysticeti,
             "starfish" => ConsensusProtocol::Starfish,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish-push" => ConsensusProtocol::StarfishPush,
@@ -88,20 +88,6 @@ struct BlockStoreInner {
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
-}
-
-pub trait BlockWriter {
-    fn insert_block(
-        &mut self,
-        block: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
-    ) -> io::Result<()>;
-
-    fn insert_own_block(
-        &mut self,
-        block: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
-    ) -> io::Result<()>;
 }
 
 #[derive(Clone, Debug)]

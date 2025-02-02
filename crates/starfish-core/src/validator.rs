@@ -23,11 +23,13 @@ use crate::{
     transactions_generator::TransactionGenerator,
     types::AuthorityIndex,
 };
+use crate::metrics::MetricReporter;
 
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
     metrics: Arc<Metrics>,
+    reporter: Arc<MetricReporter>
 }
 
 impl Validator {
@@ -58,7 +60,7 @@ impl Validator {
         // Boot the prometheus server.
         let registry = Registry::new();
         let (metrics, reporter) = Metrics::new(&registry, Some(&committee));
-        reporter.start();
+        reporter.clone().start();
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
@@ -130,11 +132,15 @@ impl Validator {
             network_synchronizer,
             metrics_handle,
             metrics,
+            reporter,
         })
     }
 
     pub fn metrics(&self) -> Arc<Metrics> {
         self.metrics.clone()
+    }
+    pub fn reporter(&self) -> Arc<MetricReporter> {
+        self.reporter.clone()
     }
 
     pub async fn await_completion(

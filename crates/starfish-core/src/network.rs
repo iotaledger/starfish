@@ -136,9 +136,7 @@ impl Network {
                 addresses.len()
             );
         }
-        tracing::info!("Before latency table");
         let latency_table = generate_latency_table(addresses.len(), mimic_latency);
-        tracing::info!("After latency table");
         if our_id == 0 {
             write_latency_delays(latency_table.clone()).unwrap();
         }
