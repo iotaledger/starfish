@@ -3,7 +3,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     sync::Arc,
     time::Duration,
 };
@@ -13,24 +12,19 @@ use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
-    committee::{Committee, ProcessedTransactionHandler, QuorumThreshold, TransactionAggregator},
+    committee::{Committee, QuorumThreshold, TransactionAggregator},
     consensus::linearizer::{CommittedSubDag, Linearizer},
-    log::TransactionLog,
     metrics::{Metrics, UtilizationTimerExt},
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, Transaction, TransactionLocator},
 };
-use minibytes::Bytes;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 pub trait BlockHandler: Send + Sync {
     fn handle_proposal(&mut self, number_transactions: usize);
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement>;
-    fn state(&self) -> Bytes;
-
-    fn recover_state(&mut self, _state: &Bytes);
 
     fn cleanup(&self) {}
 }
@@ -47,7 +41,6 @@ const fn assert_constants() {
 }
 
 pub struct RealBlockHandler {
-    transaction_votes: TransactionAggregator<QuorumThreshold, TransactionLog>,
     pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Vec<Transaction>>,
@@ -59,18 +52,14 @@ pub struct RealBlockHandler {
 
 impl RealBlockHandler {
     pub fn new(
-        certified_transactions_log_path: &Path,
         metrics: Arc<Metrics>,
         committee: &Committee,
     ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
-        let transaction_log = TransactionLog::start(certified_transactions_log_path)
-            .expect("Failed to open certified transaction log for write");
         // Assuming max TPS to be 600.000 and 4 blocks per second (for this TPS), we limit the max number of
         // transactions per block to ensure fast processing
         let max_transactions_per_block = 150 * 1024 / committee.len();
         let this = Self {
-            transaction_votes: TransactionAggregator::with_handler(transaction_log),
             transaction_time: Default::default(),
             max_transactions_per_block,
             metrics,
@@ -96,17 +85,10 @@ impl RealBlockHandler {
 }
 
 impl BlockHandler for RealBlockHandler {
-    fn state(&self) -> Bytes {
-        self.transaction_votes.state()
-    }
-
     fn handle_proposal(&mut self, number_transactions: usize) {
         self.pending_transactions -= number_transactions;
     }
 
-    fn recover_state(&mut self, state: &Bytes) {
-        self.transaction_votes.with_state(state);
-    }
 
     fn cleanup(&self) {
         let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
@@ -187,19 +169,6 @@ impl BlockHandler for TestBlockHandler {
     fn handle_proposal(&mut self, number_transactions: usize) {
         self.pending_transactions -= number_transactions;
     }
-    fn state(&self) -> Bytes {
-        let state = (&self.transaction_votes.state(), &self.last_transaction);
-        let bytes =
-            bincode::serialize(&state).expect("Failed to serialize transaction aggregator state");
-        bytes.into()
-    }
-
-    fn recover_state(&mut self, state: &Bytes) {
-        let (transaction_votes, last_transaction) = bincode::deserialize(state)
-            .expect("Failed to deserialize transaction aggregator state");
-        self.transaction_votes.with_state(&transaction_votes);
-        self.last_transaction = last_transaction;
-    }
 
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
         // todo - this is ugly, but right now we need a way to recover self.last_transaction
@@ -215,25 +184,23 @@ impl BlockHandler for TestBlockHandler {
     }
 }
 
-pub struct RealCommitHandler<H = HashSet<TransactionLocator>> {
+pub struct RealCommitHandler {
     commit_interpreter: Linearizer,
-    transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committed_leaders: Vec<BlockReference>,
     start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
 
-impl<H: ProcessedTransactionHandler<TransactionLocator> + Default> RealCommitHandler<H> {
+impl RealCommitHandler {
     pub fn new(committee: Arc<Committee>, metrics: Arc<Metrics>) -> Self {
-        Self::new_with_handler(committee, metrics, Default::default())
+        Self::new_with_handler(committee, metrics)
     }
 }
 
-impl<H: ProcessedTransactionHandler<TransactionLocator>> RealCommitHandler<H> {
-    pub fn new_with_handler(committee: Arc<Committee>, metrics: Arc<Metrics>, handler: H) -> Self {
+impl RealCommitHandler {
+    pub fn new_with_handler(committee: Arc<Committee>, metrics: Arc<Metrics>) -> Self {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
-            transaction_votes: TransactionAggregator::with_handler(handler),
             committed_leaders: vec![],
             start_time: TimeInstant::now(),
             metrics,
@@ -269,8 +236,8 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> RealCommitHandler<H> {
     }
 }
 
-impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObserver
-    for RealCommitHandler<H>
+impl CommitObserver
+    for RealCommitHandler
 {
     fn handle_commit(
         &mut self,
@@ -356,17 +323,9 @@ impl<H: ProcessedTransactionHandler<TransactionLocator> + Send + Sync> CommitObs
         resulted_committed
     }
 
-    fn aggregator_state(&self) -> Bytes {
-        self.transaction_votes.state()
-    }
 
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>) {
+    fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
-        if let Some(state) = state {
-            self.transaction_votes.with_state(&state);
-        } else {
-            assert!(committed.is_empty());
-        }
         self.commit_interpreter.committed = committed;
     }
 }

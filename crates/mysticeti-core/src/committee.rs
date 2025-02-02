@@ -326,17 +326,6 @@ impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
         }
     }
 
-    pub fn state(&self) -> Bytes {
-        bincode::serialize(&self.pending)
-            .expect("Serialization failed")
-            .into()
-    }
-
-    pub fn with_state(&mut self, state: &Bytes) {
-        assert!(self.pending.is_empty());
-        self.pending = bincode::deserialize(state).expect("Deserialization failed");
-    }
-
     /// Returns Ok(()) if this is first time we see transaction and Err otherwise
     /// When Err is returned transaction is ignored
     pub fn register(

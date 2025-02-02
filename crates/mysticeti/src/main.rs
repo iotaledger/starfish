@@ -69,6 +69,23 @@ enum Operation {
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
     },
+    // Deploy all validators
+    LocalBenchmark {
+        #[clap(long, value_name = "INT")]
+        committee_size: usize,
+        #[clap(long, value_name = "INT", default_value_t = 1000)]
+        load: usize,
+        #[clap(long, value_name = "INT", default_value_t = 0)]
+        num_byzantine_nodes: usize,
+        #[clap(long, value_name = "STRING", default_value = "")]
+        byzantine_strategy: String,
+        #[clap(long, default_value_t = true)]
+        mimic_extra_latency: bool,
+        #[clap(long, value_name = "STRING", default_value = "starfish")]
+        consensus: String,
+        #[clap(long, value_name = "INT", default_value_t = 600)]
+        duration_secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -115,6 +132,23 @@ async fn main() -> Result<()> {
             mimic_extra_latency: mimic_latency,
             consensus: consensus_protocol,
         } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency, consensus_protocol).await?,
+        Operation::LocalBenchmark {
+            committee_size,
+            load,
+            num_byzantine_nodes,
+            byzantine_strategy,
+            mimic_extra_latency,
+            consensus: consensus_protocol,
+            duration_secs,
+        } => local_benchmark(
+            committee_size,
+            load,
+            num_byzantine_nodes,
+            byzantine_strategy,
+            mimic_extra_latency,
+            consensus_protocol,
+            duration_secs,
+        ).await?,
     }
 
     Ok(())
@@ -172,6 +206,103 @@ fn benchmark_genesis(
             .wrap_err("Failed to print private config file")?;
         tracing::info!("Generated private config file: {}", path.display());
     }
+
+    Ok(())
+}
+
+async fn local_benchmark(
+    committee_size: usize,
+    load: usize,
+    num_byzantine_nodes: usize,
+    byzantine_strategy: String,
+    mimic_latency: bool,
+    consensus_protocol: String,
+    duration_secs: u64,
+) -> Result<()> {
+    tracing::info!("Starting local benchmark with {} validators", committee_size);
+
+    let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
+    let committee = Committee::new_for_benchmarks(committee_size);
+    let client_parameters = ClientParameters::almost_default(load);
+    let node_parameters = NodeParameters::almost_default(mimic_latency);
+    let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
+
+    // Create temporary directories for each validator
+    let base_dir = PathBuf::from("local-benchmark");
+    fs::create_dir_all(&base_dir)?;
+
+    let mut handles = Vec::with_capacity(committee_size);
+
+    // Start all validators
+    for authority in 0..committee_size {
+        tracing::warn!(
+        "Starting validator {authority} in local benchmark mode (committee size: {committee_size})"
+    );
+        let working_dir = base_dir.join(format!("validator-{}", authority));
+        fs::create_dir_all(&working_dir)?;
+        match fs::remove_dir_all(&working_dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).wrap_err(format!(
+                    "Failed to remove directory '{}'",
+                    working_dir.display()
+                ))
+            }
+        }
+        let mut private_configs = NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
+        let private_config = private_configs.remove(authority);
+        match fs::create_dir_all(&private_config.storage_path) {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(e).wrap_err(format!(
+                    "Failed to create directory '{}'",
+                    working_dir.display()
+                ))
+            }
+        }
+        let validator = if authority % 3 == 0 && authority / 3 < num_byzantine_nodes {
+            Validator::start(
+                authority as AuthorityIndex,
+                committee.clone(),
+                public_config.clone(),
+                private_config,
+                client_parameters.clone(),
+                byzantine_strategy.clone(),
+                consensus_protocol.clone(),
+            ).await?
+        } else {
+            Validator::start(
+                authority as AuthorityIndex,
+                committee.clone(),
+                public_config.clone(),
+                private_config,
+                client_parameters.clone(),
+                "honest".to_string(),
+                consensus_protocol.clone(),
+            ).await?
+        };
+
+
+        // Use the same pattern as the run method
+        let handle = tokio::spawn(async move {
+            let (network_result, _metrics_result) = validator.await_completion().await;
+            network_result
+        });
+
+        handles.push(handle);
+    }
+
+    // Run for specified duration
+    tokio::time::sleep(std::time::Duration::from_secs(duration_secs)).await;
+
+    // Wait for all validators to complete and check their results
+    for handle in handles {
+        handle.await?.expect("Validator crashed");
+    }
+
+    // Clean up temporary directories
+    fs::remove_dir_all(base_dir)?;
 
     Ok(())
 }

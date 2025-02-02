@@ -49,10 +49,6 @@ impl RecoveredStateBuilder {
         self.unprocessed_blocks.push(storage_and_transmission_blocks);
     }
 
-    pub fn payload(&mut self, sequence: u64, payload: Bytes) {
-        self.pending.insert(sequence, RawMetaStatement::Payload(payload));
-    }
-
     // Remove own_block method as it's RocksDB specific now
 
     pub fn state(&mut self, state: Bytes) {
@@ -82,20 +78,7 @@ impl RecoveredStateBuilder {
     }
 }
 
-// RawMetaStatement remains the same
-
 enum RawMetaStatement {
     Include(BlockReference),
-    Payload(Bytes),
 }
 
-impl RawMetaStatement {
-    fn into_meta_statement(self) -> MetaStatement {
-        match self {
-            RawMetaStatement::Include(include) => MetaStatement::Include(include),
-            RawMetaStatement::Payload(payload) => MetaStatement::Payload(
-                bincode::deserialize(&payload).expect("Failed to deserialize payload"),
-            ),
-        }
-    }
-}

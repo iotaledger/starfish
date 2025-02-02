@@ -161,7 +161,7 @@ impl ProtocolCommands for MysticetiProtocol {
                 let client_parameters_path = self.working_dir.join("client-parameters.yaml");
                 let byzantine_nodes = parameters.byzantine_nodes;
                 let mut byzantine_strategy = "honest".to_string();
-                if i < byzantine_nodes {
+                if i % 3 == 0 && i/3 < byzantine_nodes {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();

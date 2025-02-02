@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{fmt::Display, net::Ipv4Addr};
-
+use rand::Rng;
 use reqwest::{Client as NetworkClient, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -200,6 +200,9 @@ impl ServerProviderClient for VultrClient {
     where
         S: Into<String> + Serialize + Send,
     {
+        let random_delay_secs = rand::thread_rng().gen_range(0..=quantity) as u64;
+        println!("Sleeping for {} seconds...", random_delay_secs);
+
         let testbed_name = self.settings.testbed_id.clone();
         let ssh_key_id = match self.get_key().await? {
             Some(key) => key.id,

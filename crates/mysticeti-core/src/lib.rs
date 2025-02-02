@@ -17,7 +17,6 @@ mod epoch_close;
 mod future_simulator;
 #[allow(dead_code)] // todo - delete if unused after a while
 mod lock;
-mod log;
 pub mod metrics;
 pub mod net_sync;
 pub mod network;
@@ -42,7 +41,6 @@ mod threshold_clock;
 mod transactions_generator;
 pub mod types;
 pub mod validator;
-mod wal;
 mod encoder;
 mod decoder;
 mod rocks_store;

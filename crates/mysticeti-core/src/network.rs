@@ -598,8 +598,8 @@ fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
             }
         }
     } else {
-        let valid_sequence = [0,2,6,7,10]; // From Sailfish paper
-        // let valid_sequence = [2, 0, 4, 5, 13, 15, 10, 7, 9, 11]; // From Shoal++
+        // let valid_sequence = [0,2,6,7,10]; // From Sailfish paper
+        let valid_sequence = [2, 0, 4, 5, 13, 15, 10, 7, 9, 11]; // From Shoal++
         // let valid_sequence = [0, 5, 7, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15]; // All regions
         for i in 0..n {
             for j in 0..n {

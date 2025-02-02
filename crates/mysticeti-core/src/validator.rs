@@ -15,7 +15,6 @@ use crate::{
     committee::Committee,
     config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
     core::{Core, CoreOptions},
-    log::TransactionLog,
     metrics::Metrics,
     net_sync::NetworkSyncer,
     network::Network,
@@ -26,7 +25,7 @@ use crate::{
 };
 
 pub struct Validator {
-    network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler<TransactionLog>>,
+    network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
 }
 
@@ -76,7 +75,6 @@ impl Validator {
 
         // Rest of the function remains the same
         let (block_handler, block_sender) = RealBlockHandler::new(
-            &private_config.certified_transactions_log(),
             metrics.clone(),
             &committee,
         );
@@ -89,15 +87,9 @@ impl Validator {
             metrics.clone(),
         );
 
-        let committed_transaction_log =
-            TransactionLog::start(private_config.committed_transactions_log())
-                .expect("Failed to open committed transaction log for write");
-        tracing::info!("Transaction log");
-
         let commit_handler = RealCommitHandler::new_with_handler(
             committee.clone(),
             metrics.clone(),
-            committed_transaction_log,
         );
         tracing::info!("Commit handler");
 

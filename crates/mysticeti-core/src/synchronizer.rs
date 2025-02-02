@@ -91,7 +91,7 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
 pub struct DataRequestor<H: BlockHandler, C: CommitObserver> {
     to_whom_authority_index: AuthorityIndex,
     /// The sender to the network.
-    sender: mpsc::Sender<NetworkMessage>,
+    sender: Sender<NetworkMessage>,
     inner: Arc<NetworkSyncerInner<H, C>>,
     /// The handle of the task disseminating our own blocks.
     data_requestor: Option<JoinHandle<Option<()>>>,
@@ -592,32 +592,6 @@ where
     }
 }
 
-
-async fn fake_sending_batch_own_blocks<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
-    to_whom_authority_index: AuthorityIndex,
-    round: &mut RoundNumber,
-    batch_size: usize,
-) -> Option<()>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let peer = format_authority_index(to_whom_authority_index);
-    let blocks =
-        inner
-            .block_store
-            .get_own_transmission_blocks(to_whom_authority_index, round.clone(), batch_size);
-    for block in blocks.iter() {
-        inner
-            .block_store
-            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
-        *round = max(*round, block.round());
-    }
-    tracing::debug!("Blocks {blocks:?} are dropped to {peer}");
-    Some(())
-}
 async fn sending_batch_own_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,

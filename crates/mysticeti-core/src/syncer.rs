@@ -37,9 +37,7 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<Data<VerifiedStatementBlock>>,
     ) -> Vec<CommittedSubDag>;
 
-    fn aggregator_state(&self) -> Bytes;
-
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>, state: Option<Bytes>);
+    fn recover_committed(&mut self, committed: HashSet<BlockReference>);
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {

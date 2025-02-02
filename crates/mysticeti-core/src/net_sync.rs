@@ -74,8 +74,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let authority_index = core.authority();
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
-        let (committed, state) = core.take_recovered_committed_blocks();
-        commit_observer.recover_committed(committed, state);
+        let committed = core.take_recovered_committed_blocks();
+        commit_observer.recover_committed(committed);
         let committee = core.committee().clone();
         let block_store = core.block_store().clone();
         let rocks_store = core.rocks_store();

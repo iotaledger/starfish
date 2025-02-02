@@ -4,7 +4,6 @@
 use std::{collections::{HashSet}, mem, sync::{atomic::AtomicU64, Arc}};
 use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
-use minibytes::Bytes;
 
 use crate::{
     block_handler::BlockHandler,
@@ -50,7 +49,7 @@ pub struct Core<H: BlockHandler> {
     options: CoreOptions,
     signer: Signer,
     // todo - ugly, probably need to merge syncer and core
-    recovered_committed_blocks: Option<(HashSet<BlockReference>, Option<Bytes>)>,
+    recovered_committed_blocks: Option<HashSet<BlockReference>>,
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
@@ -116,9 +115,6 @@ impl<H: BlockHandler> Core<H> {
 
         let block_manager = BlockManager::new(block_store.clone(), &committee);
 
-        if let Some(state) = state {
-            block_handler.recover_state(&state);
-        }
 
         let epoch_manager = EpochManager::new();
 
@@ -146,7 +142,7 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             options,
             signer: private_config.keypair,
-            recovered_committed_blocks: Some((committed_blocks, committed_state)),
+            recovered_committed_blocks: Some(committed_blocks),
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
@@ -638,7 +634,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn write_commits(&mut self, _commits: &[CommitData]) {
     }
 
-    pub fn take_recovered_committed_blocks(&mut self) -> (HashSet<BlockReference>, Option<Bytes>) {
+    pub fn take_recovered_committed_blocks(&mut self) -> (HashSet<BlockReference>) {
         self.recovered_committed_blocks
             .take()
             .expect("take_recovered_committed_blocks called twice")
