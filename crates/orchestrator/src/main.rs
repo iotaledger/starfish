@@ -100,7 +100,7 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Consensus to deploy. Available options: mysticeti | starfish | starfish-push | cordial-miners
+        /// Consensus to deploy. Available options: starfish | starfish | starfish-push | cordial-miners
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,
 

@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-
+use prettytable::{format, row, Table};
 use clap::{command, Parser};
 use eyre::{eyre, Context, Result};
 use mysticeti_core::{
@@ -232,7 +232,6 @@ async fn local_benchmark(
     fs::create_dir_all(&base_dir)?;
 
     let mut handles = Vec::with_capacity(committee_size);
-
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
@@ -418,4 +417,19 @@ async fn dryrun(
     network_result.expect("Validator crashed");
 
     Ok(())
+}
+
+
+pub fn default_table_format() -> format::TableFormat {
+    format::FormatBuilder::new()
+        .separators(
+            &[
+                format::LinePosition::Top,
+                format::LinePosition::Bottom,
+                format::LinePosition::Title,
+            ],
+            format::LineSeparator::new('-', '-', '-', '-'),
+        )
+        .padding(1, 1)
+        .build()
 }

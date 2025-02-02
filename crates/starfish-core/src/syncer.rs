@@ -2,9 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, sync::Arc};
-
-use minibytes::Bytes;
-
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,

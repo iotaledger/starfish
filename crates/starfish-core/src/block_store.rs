@@ -19,7 +19,6 @@ use crate::{
     },
 };
 use crate::committee::{QuorumThreshold, StakeAggregator};
-use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 
@@ -36,7 +35,7 @@ pub enum ConsensusProtocol {
 impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "mysticeti" => ConsensusProtocol::Mysticeti,
+            "starfish" => ConsensusProtocol::Mysticeti,
             "starfish" => ConsensusProtocol::Starfish,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish-push" => ConsensusProtocol::StarfishPush,

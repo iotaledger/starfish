@@ -27,6 +27,7 @@ use crate::{
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
     metrics_handle: JoinHandle<Result<(), hyper::Error>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Validator {
@@ -58,7 +59,6 @@ impl Validator {
         let registry = Registry::new();
         let (metrics, reporter) = Metrics::new(&registry, Some(&committee));
         reporter.start();
-
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
@@ -119,7 +119,7 @@ impl Validator {
             core,
             commit_handler,
             public_config.parameters.shutdown_grace_period,
-            metrics,
+            metrics.clone(),
             &public_config,
         );
 
@@ -129,6 +129,7 @@ impl Validator {
         Ok(Self {
             network_synchronizer,
             metrics_handle,
+            metrics,
         })
     }
 

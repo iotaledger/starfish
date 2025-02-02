@@ -699,68 +699,6 @@ impl AsyncRocksDBFlusher {
         }
     }
 }
-pub struct AsyncWalSyncer {
-    stop: mpsc::Sender<()>,
-    epoch_signal: mpsc::Sender<()>,
-    _sender: oneshot::Sender<()>,
-    runtime: tokio::runtime::Handle,
-}
-
-impl AsyncWalSyncer {
-    #[cfg(not(feature = "simulator"))]
-    pub fn start(
-        stop: mpsc::Sender<()>,
-        epoch_signal: mpsc::Sender<()>,
-    ) -> oneshot::Receiver<()> {
-        let (sender, receiver) = oneshot::channel();
-        let this = Self {
-            stop,
-            epoch_signal,
-            _sender: sender,
-            runtime: tokio::runtime::Handle::current(),
-        };
-        std::thread::Builder::new()
-            .name("wal-syncer".to_string())
-            .spawn(move || this.run())
-            .expect("Failed to spawn wal-syncer");
-        receiver
-    }
-
-    #[cfg(feature = "simulator")]
-    pub fn start(
-        _stop: mpsc::Sender<()>,
-        _epoch_signal: mpsc::Sender<()>,
-    ) -> oneshot::Receiver<()> {
-        oneshot::channel().1
-    }
-
-    pub fn run(mut self) {
-        let runtime = self.runtime.clone();
-        loop {
-            if runtime.block_on(self.wait_next()) {
-                return;
-            }
-            //self.wal_syncer.sync().expect("Failed to sync wal");
-        }
-    }
-
-    // Returns true to stop the task
-    async fn wait_next(&mut self) -> bool {
-        select! {
-            _wait = sleep(Duration::from_secs(1)) => {
-                false
-            }
-            _signal = self.stop.send(()) => {
-                true
-            }
-            _ = self.epoch_signal.send(()) => {
-                // might need to sync wal completely before shutting down
-                true
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

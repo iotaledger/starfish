@@ -7,11 +7,12 @@ use std::{
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
-
+use prometheus::core::Collector;
+use std::collections::HashMap;
+use prettytable::{format, row, Table as PrettyTable};
 use prometheus::{register_int_counter_vec_with_registry, register_int_counter_with_registry, register_int_gauge_vec_with_registry, register_int_gauge_with_registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 use tabled::{Table, Tabled};
 use tokio::time::Instant;
-
 use crate::{
     committee::Committee,
     data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
@@ -48,7 +49,6 @@ pub struct Metrics {
 
     pub missing_blocks: IntGaugeVec,
     pub block_sync_requests_sent: IntCounterVec,
-    pub block_sync_requests_received: IntCounterVec, // TODO: do we want to track this metric?
 
     pub block_committed_latency: HistogramSender<Duration>,
     pub block_committed_latency_squared_micros: IntCounter,
@@ -266,13 +266,6 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            block_sync_requests_received: register_int_counter_vec_with_registry!(
-                "block_sync_requests_received",
-                "Number of block sync requests received per authority and whether they have been fulfilled",
-                &["authority", "fulfilled"],
-                registry,
-            )
-            .unwrap(),
 
             utilization_timer: register_int_counter_vec_with_registry!(
                 "utilization_timer",
@@ -303,6 +296,78 @@ impl Metrics {
 
         (Arc::new(metrics), reporter)
     }
+
+    pub fn aggregate_and_display(metrics: Vec<Arc<Metrics>>, duration: Duration) {
+        let mut table = PrettyTable::new();
+        table.set_format(default_table_format());
+
+        let num_validators = metrics.len();
+
+        // Calculate overall statistics
+        let total_transactions: u64 = metrics.iter()
+            .map(|m| m.sequenced_transactions_total.get())
+            .sum();
+        let total_tps = total_transactions as f64 / duration.as_secs() as f64;
+
+        let total_blocks_submitted = metrics.iter()
+            .map(|m| m.block_store_entries.get())
+            .sum::<u64>();
+        let total_bps = total_blocks_submitted as f64 / duration.as_secs() as f64;
+
+        let total_bytes_sent: u64 = metrics.iter()
+            .map(|m| m.bytes_sent_total.get())
+            .sum();
+        let total_bytes_received: u64 = metrics.iter()
+            .map(|m| m.bytes_received_total.get())
+            .sum();
+
+        // Display basic metrics
+        table.set_titles(row![bH2->"Metrics Summary"]);
+        table.add_row(row![b->"Number of validators:", num_validators]);
+        table.add_row(row![b->"Duration:", format!("{} s", duration.as_secs())]);
+
+        // Performance metrics
+        table.add_row(row![bH2->""]);
+        table.add_row(row![bH2->"Performance Metrics"]);
+        table.add_row(row![b->"Total transactions:", total_transactions]);
+        table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", total_tps)]);
+        table.add_row(row![b->"Total blocks:", total_blocks_submitted]);
+        table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", total_bps)]);
+
+        // Network metrics
+        table.add_row(row![bH2->""]);
+        table.add_row(row![bH2->"Network Metrics"]);
+        table.add_row(row![b->"Total bytes sent:", format!("{} bytes", total_bytes_sent)]);
+        table.add_row(row![b->"Average bandwidth out:", format!("{:.2} bytes/s", total_bytes_sent as f64 / duration.as_secs() as f64)]);
+        table.add_row(row![b->"Total bytes received:", format!("{} bytes", total_bytes_received)]);
+        table.add_row(row![b->"Average bandwidth in:", format!("{:.2} bytes/s", total_bytes_received as f64 / duration.as_secs() as f64)]);
+
+        // Core metrics
+        table.add_row(row![bH2->""]);
+        table.add_row(row![bH2->"Core Metrics"]);
+        let total_timeouts: u64 = metrics.iter()
+            .map(|m| m.leader_timeout_total.get())
+            .sum();
+        table.add_row(row![b->"Total leader timeouts:", total_timeouts]);
+
+        println!("\n");
+        table.printstd();
+        println!("\n");
+    }
+}
+
+pub fn default_table_format() -> format::TableFormat {
+    format::FormatBuilder::new()
+        .separators(
+            &[
+                format::LinePosition::Top,
+                format::LinePosition::Bottom,
+                format::LinePosition::Title,
+            ],
+            format::LineSeparator::new('-', '-', '-', '-'),
+        )
+        .padding(1, 1)
+        .build()
 }
 
 pub trait AsPrometheusMetric {

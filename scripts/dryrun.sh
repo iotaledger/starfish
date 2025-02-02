@@ -5,7 +5,7 @@
 #------------------------------------------------------------------------------
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
 DESIRED_TPS=${DESIRED_TPS:-1000}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-starfish}         # Options: mysticeti, starfish, cordial-miners, starfish-push
+CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish, cordial-miners, starfish-push
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-chain-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
@@ -31,7 +31,7 @@ tmux kill-server || true
 echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
 
 # Remove old logs and validator directories
-eqcho -e "${CYAN}Cleaning up previous run data...${RESET}"
+echo -e "${CYAN}Cleaning up previous run data...${RESET}"
 find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
 find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
 

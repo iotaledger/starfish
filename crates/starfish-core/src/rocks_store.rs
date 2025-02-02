@@ -5,7 +5,6 @@ use std::{
     collections::HashMap,
 };
 use std::collections::VecDeque;
-use std::time::Duration;
 use rocksdb::{
     DB, Options, ColumnFamilyDescriptor, WriteOptions,
     ReadOptions,

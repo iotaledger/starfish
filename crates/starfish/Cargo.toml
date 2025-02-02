@@ -8,8 +8,8 @@ edition = "2021"
 clap = { workspace = true }
 color-eyre = { workspace = true }
 eyre = { workspace = true }
-futures = { workspace = true }
-mysticeti-core = { path = "../mysticeti-core" }
+mysticeti-core = { path = "../starfish-core" }
 tokio = { workspace = true }
+prettytable-rs = "0.10"
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }

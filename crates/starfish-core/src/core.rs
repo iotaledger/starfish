@@ -70,7 +70,7 @@ pub enum MetaStatement {
 impl<H: BlockHandler> Core<H> {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
-        mut block_handler: H,
+        block_handler: H,
         authority: AuthorityIndex,
         committee: Arc<Committee>,
         private_config: NodePrivateConfig,
@@ -82,11 +82,9 @@ impl<H: BlockHandler> Core<H> {
         let RecoveredState {
             block_store,
             rocks_store,
-            state,
             unprocessed_blocks,
             last_committed_leader,
             committed_blocks,
-            committed_state,
         } = recovered;
 
         let mut threshold_clock = ThresholdClockAggregator::new(0);
@@ -634,7 +632,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn write_commits(&mut self, _commits: &[CommitData]) {
     }
 
-    pub fn take_recovered_committed_blocks(&mut self) -> (HashSet<BlockReference>) {
+    pub fn take_recovered_committed_blocks(&mut self) -> HashSet<BlockReference> {
         self.recovered_committed_blocks
             .take()
             .expect("take_recovered_committed_blocks called twice")

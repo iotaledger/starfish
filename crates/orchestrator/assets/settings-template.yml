@@ -1,5 +1,5 @@
 ---
-testbed_id: "${USER}-mysticeti"
+testbed_id: "${USER}-starfish"
 cloud_provider: aws
 token_file: "/Users/${USER}/.aws/credentials"
 ssh_private_key_file: "/Users/${USER}/.ssh/aws"

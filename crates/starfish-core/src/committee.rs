@@ -10,8 +10,6 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-
-use minibytes::Bytes;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 

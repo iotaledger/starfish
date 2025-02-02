@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/mysticeti",
-    "crates/mysticeti-core",
+    "crates/starfish",
+    "crates/starfish-core",
     "crates/orchestrator",
     "crates/third-party/minibytes",
 ]

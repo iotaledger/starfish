@@ -121,7 +121,7 @@ impl ProtocolCommands for MysticetiProtocol {
         );
 
         let genesis = [
-            &format!("./{BINARY_PATH}/mysticeti"),
+            &format!("./{BINARY_PATH}/starfish"),
             "benchmark-genesis",
             &format!(
                 "--ips {ips} --working-directory {} --node-parameters-path {}",
@@ -166,7 +166,7 @@ impl ProtocolCommands for MysticetiProtocol {
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();
 
-                let mut run = [&format!("./{BINARY_PATH}/mysticeti"),
+                let mut run = [&format!("./{BINARY_PATH}/starfish"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--consensus {consensus_protocol}"),
@@ -182,7 +182,7 @@ impl ProtocolCommands for MysticetiProtocol {
 
                 if byzantine_strategy != "honest" {
                     run = [
-                        &format!("./{BINARY_PATH}/mysticeti"),
+                        &format!("./{BINARY_PATH}/starfish"),
                         "run",
                         &format!("--authority {authority}"),
                         &format!("--consensus {consensus_protocol}"),

@@ -3,11 +3,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use minibytes::Bytes;
 
 use crate::{
     block_store::{BlockStore, CommitData},  // Remove OwnBlockData
-    core::MetaStatement,
     data::Data,
     types::{BlockReference},
     // Remove wal import
@@ -18,24 +16,17 @@ use crate::types::VerifiedStatementBlock;
 pub struct RecoveredState {
     pub block_store: BlockStore,
     pub rocks_store: Arc<RocksStore>,
-    // Remove last_own_block: Option<OwnBlockData>,
-    // Remove pending: Vec<(WalPosition, MetaStatement)>,
-    pub state: Option<Bytes>,
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: HashSet<BlockReference>,
-    pub committed_state: Option<Bytes>,
 }
 
 #[derive(Default)]
 pub struct RecoveredStateBuilder {
     pending: BTreeMap<u64, RawMetaStatement>,  // Use sequence number instead of WalPosition
-    // Remove last_own_block
-    state: Option<Bytes>,
     unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: HashSet<BlockReference>,
-    committed_state: Option<Bytes>,
 }
 
 impl RecoveredStateBuilder {
@@ -49,31 +40,22 @@ impl RecoveredStateBuilder {
         self.unprocessed_blocks.push(storage_and_transmission_blocks);
     }
 
-    // Remove own_block method as it's RocksDB specific now
 
-    pub fn state(&mut self, state: Bytes) {
-        self.state = Some(state);
-        self.unprocessed_blocks.clear();
-    }
-
-    pub fn commit_data(&mut self, commits: Vec<CommitData>, committed_state: Bytes) {
+    pub fn commit_data(&mut self, commits: Vec<CommitData>) {
         for commit_data in commits {
             self.last_committed_leader = Some(commit_data.leader);
             self.committed_blocks
                 .extend(commit_data.sub_dag.into_iter());
         }
-        self.committed_state = Some(committed_state);
     }
 
     pub fn build(self, rocks_store: Arc<RocksStore>, block_store: BlockStore) -> RecoveredState {
         RecoveredState {
             block_store,
             rocks_store,
-            state: self.state,
             unprocessed_blocks: self.unprocessed_blocks,
             last_committed_leader: self.last_committed_leader,
             committed_blocks: self.committed_blocks,
-            committed_state: self.committed_state,
         }
     }
 }
