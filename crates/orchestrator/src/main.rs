@@ -251,7 +251,7 @@ async fn run<C: ServerProviderClient>(
                 }
                 None => {
 
-                        NodeParameters::almost_default(mimic_extra_latency)
+                        NodeParameters::default_with_latency(mimic_extra_latency)
                 }
             };
             let client_parameters = match &settings.client_parameters_path {
