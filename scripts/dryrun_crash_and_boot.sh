@@ -59,7 +59,7 @@ for ((i=0; i<NUM_VALIDATORS - BOOT_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"
   echo -e "${GREEN}Starting validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
+  tmux new -d -s "$SESSION_NAME" "cargo run --release --bin starfish -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $TPS_PER_VALIDATOR \
@@ -88,7 +88,7 @@ for ((i=NUM_VALIDATORS - BOOT_VALIDATORS; i<NUM_VALIDATORS; i++)); do
    SESSION_NAME="validator_$i"
    LOG_FILE="validator_${i}.log.ansi"
    echo -e "${GREEN}Starting validator ${YELLOW}$i${RESET} with load $TPS_PER_VALIDATOR..."
-   tmux new -d -s "$SESSION_NAME" "cargo run --release --bin mysticeti -- \
+   tmux new -d -s "$SESSION_NAME" "cargo run --release --bin starfish -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $TPS_PER_VALIDATOR \

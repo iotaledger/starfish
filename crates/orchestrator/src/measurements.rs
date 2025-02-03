@@ -434,14 +434,14 @@ impl MeasurementsCollection {
                     table.add_row(row![b->"Bandwidth:", bandwidth.iter().map(|x| format!("{x} bytes/s")).collect::<Vec<_>>().join(", ")]);
                 }
 
-                "committed_leaders_total" => {
-                    for (label, count) in count_buckets {
-                        table.add_row(row![
-                                b->format!("Committed leaders ({}):", label),
-                                count.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ")
-                        ]);
-                    }
-                }
+                // "committed_leaders_total" => {
+                //     for (label, count) in count_buckets {
+                //         table.add_row(row![
+                //                 b->format!("Committed leaders ({}):", label),
+                //                 count.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ")
+                //         ]);
+                //     }
+                // }
                 _ => {
                     table.add_row(row![b->"Unknown metric", ""]);
                 }

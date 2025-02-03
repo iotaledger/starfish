@@ -1,5 +1,5 @@
 [package]
-name = "mysticeti"
+name = "starfish"
 version = "0.1.0"
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,7 +8,7 @@ edition = "2021"
 clap = { workspace = true }
 color-eyre = { workspace = true }
 eyre = { workspace = true }
-mysticeti-core = { path = "../starfish-core" }
+starfish-core = { path = "../starfish-core" }
 tokio = { workspace = true }
 prettytable-rs = "0.10"
 tracing = { workspace = true }

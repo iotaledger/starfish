@@ -50,6 +50,7 @@ pub enum ByzantineStrategy {
     TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
     EquivocatingChains,                  // Equivocation attack: N-1 equivocations per round
     EquivocatingTwoChains,          // Skipping rule equivocation: 2 equivocations split across validators
+    RandomDrop,                     // Drop messages randomly
     LeaderWithholding,             // Withholding leader blocks (sent to f+1+c validators)
     ChainBomb,                       // Fork bomb: withhold a chain of blocks and release it all at once
     EquivocatingChainsBomb,          // Equivocation fork bomb: send different chains to each validator
@@ -159,6 +160,7 @@ impl BlockStore {
             "equivocating-two-chains" => Some(ByzantineStrategy::EquivocatingTwoChains),
             "chain-bomb" => Some(ByzantineStrategy::ChainBomb),
             "equivocating-chains-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
+            "random-drop" => Some(ByzantineStrategy::RandomDrop),
             _ => None, // Default to honest behavior
         };
         let consensus_protocol = ConsensusProtocol::from_str(&consensus);

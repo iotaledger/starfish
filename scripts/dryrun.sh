@@ -95,11 +95,11 @@ echo "${CYAN}Deploying consensus protocol: ${GREEN}$CONSENSUS${RESET}"
 
 # Environment variables for logging
 export RUST_BACKTRACE=1
-export RUST_LOG=warn,mysticeti_core::block_manager=trace,mysticeti_core::block_handler=trace,\
-mysticeti_core::consensus=trace,mysticeti_core::net_sync=DEBUG,mysticeti_core::core=DEBUG,\
-mysticeti_core::synchronizer=DEBUG,mysticeti_core::transactions_generator=DEBUG,\
-mysticeti_core::validator=trace,mysticeti_core::network=trace,mysticeti_core::block_store=trace,\
-mysticeti_core::threshold_core=trace,mysticeti_core::syncer=trace,
+export RUST_LOG=warn,starfish_core::block_manager=trace,starfish_core::block_handler=trace,\
+starfish_core::consensus=trace,starfish_core::net_sync=DEBUG,starfish_core::core=DEBUG,\
+starfish_core::synchronizer=DEBUG,starfish_core::transactions_generator=DEBUG,\
+starfish_core::validator=trace,starfish_core::network=trace,starfish_core::block_store=trace,\
+starfish_core::threshold_core=trace,starfish_core::syncer=trace,
 
 BYZANTINE_COUNT=0
 for ((i=0; i<NUM_VALIDATORS; i++)); do
@@ -119,7 +119,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
   fi
 
   echo -e "${GREEN}Starting $TYPE validator ${YELLOW}$i${RESET} with load $LOAD..."
-  tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin mysticeti -- \
+  tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin starfish -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $LOAD \

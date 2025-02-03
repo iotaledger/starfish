@@ -21,6 +21,7 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use crate::core::MetaStatement::Payload;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::format_authority_index;
 
@@ -471,6 +472,22 @@ where
                                 batch_byzantine_own_block_size,
                             ).await?;
                         }
+                    }
+                    notified.await;
+                }
+                // Send block with a given probability
+                Some(ByzantineStrategy::RandomDrop) => {
+                    let send: bool = rng.gen_bool(0.5);
+                    if send {
+                        sending_batch_own_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            &mut round,
+                            batch_byzantine_own_block_size,
+                        ).await?;
+                    } else {
+                        round = current_round;
                     }
                     notified.await;
                 }
