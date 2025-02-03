@@ -21,7 +21,6 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::core::MetaStatement::Payload;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::format_authority_index;
 

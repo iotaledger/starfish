@@ -11,14 +11,14 @@ use std::time::Duration;
 use clap::{command, Parser};
 use eyre::{eyre, Context, Result};
 use prettytable::format;
-use mysticeti_core::{
+use starfish_core::{
     committee::Committee,
     config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
     types::AuthorityIndex,
     validator::Validator,
 };
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
-use mysticeti_core::metrics::Metrics;
+use starfish_core::metrics::Metrics;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
