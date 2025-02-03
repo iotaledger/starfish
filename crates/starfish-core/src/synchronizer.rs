@@ -476,7 +476,8 @@ where
                 }
                 // Send block with a given probability
                 Some(ByzantineStrategy::RandomDrop) => {
-                    let send: bool = rng.gen_bool(0.5);
+                    let probability = 1.0 / committee_size as f64;
+                    let send: bool = rng.gen_bool(probability);
                     if send {
                         sending_batch_own_blocks(
                             inner.clone(),
@@ -485,8 +486,6 @@ where
                             &mut round,
                             batch_byzantine_own_block_size,
                         ).await?;
-                    } else {
-                        round = current_round;
                     }
                     notified.await;
                 }
