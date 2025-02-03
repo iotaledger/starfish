@@ -317,6 +317,10 @@ impl Metrics {
             .filter_map(|r| r.block_committed_latency.lock().histogram.pcts([500]))
             .filter_map(|pcts| pcts.first().copied())
             .sum::<Duration>().as_millis() / num_validators as u128;
+        let p50_transaction_committed_latency = reporters.iter()
+            .filter_map(|r| r.transaction_committed_latency.lock().histogram.pcts([500]))
+            .filter_map(|pcts| pcts.first().copied())
+            .sum::<Duration>().as_millis() / num_validators as u128;
         // Display basic metrics
         table.set_titles(row![bH2->"Metrics Summary Across Honest Validators"]);
         table.add_row(row![b->"Number of honest validators:", num_validators]);
@@ -326,6 +330,7 @@ impl Metrics {
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Performance Metrics"]);
         table.add_row(row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)]);
+        table.add_row(row![b->"Average e2e latency:", format!("{:.2} millis", p50_transaction_committed_latency)]);
         table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
 
@@ -370,10 +375,16 @@ impl<T: Ord + AddAssign + DivUsize + Copy + Default + AsPrometheusMetric> Histog
     }
 
     pub fn report(&mut self) -> Option<()> {
-        let [p50, p90, p99] = self.histogram.pcts([500, 900, 990])?;
+        let [p25, p50, p75, p90, p99] = self.histogram.pcts([250, 500, 750, 900, 990])?;
+        self.gauge
+            .with_label_values(&["p25"])
+            .set(p25.as_prometheus_metric());
         self.gauge
             .with_label_values(&["p50"])
             .set(p50.as_prometheus_metric());
+        self.gauge
+            .with_label_values(&["p75"])
+            .set(p75.as_prometheus_metric());
         self.gauge
             .with_label_values(&["p90"])
             .set(p90.as_prometheus_metric());
