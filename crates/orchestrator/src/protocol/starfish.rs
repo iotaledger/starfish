@@ -21,8 +21,8 @@ use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings
 pub struct StarfishNodeParameters(NodeParameters);
 
 impl StarfishNodeParameters {
-    pub fn almost_default(mimic_latency: bool) -> StarfishNodeParameters {
-        StarfishNodeParameters(NodeParameters::almost_default(mimic_latency))
+    pub fn default_with_latency(mimic_latency: bool) -> StarfishNodeParameters {
+        StarfishNodeParameters(NodeParameters::default_with_latency(mimic_latency))
     }
 }
 

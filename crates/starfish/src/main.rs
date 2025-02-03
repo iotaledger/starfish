@@ -237,7 +237,7 @@ async fn local_benchmark(
     let committee = Committee::new_for_benchmarks(committee_size);
     load = load / committee.len();
     let client_parameters = ClientParameters::almost_default(load);
-    let node_parameters = NodeParameters::almost_default(mimic_latency);
+    let node_parameters = NodeParameters::default_with_latency(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
     // Create temporary directories for each validator
@@ -418,7 +418,7 @@ async fn dryrun(
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     let client_parameters = ClientParameters::almost_default(load);
-    let node_parameters = NodeParameters::almost_default(mimic_latency);
+    let node_parameters = NodeParameters::default_with_latency(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
     let working_dir = PathBuf::from(format!("dryrun-validator-{authority}"));

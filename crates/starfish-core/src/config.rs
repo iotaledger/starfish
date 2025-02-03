@@ -91,7 +91,7 @@ impl Default for NodeParameters {
 }
 
 impl NodeParameters {
-    pub fn almost_default(mimic_latency: bool) -> Self {
+    pub fn default_with_latency(mimic_latency: bool) -> Self {
         Self {
             wave_length: node_defaults::default_wave_length(),
             leader_timeout: node_defaults::default_leader_timeout(),
