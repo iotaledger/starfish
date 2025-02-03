@@ -399,7 +399,7 @@ impl MeasurementsCollection {
             let average_latency = self.aggregate_average_latency(label);
             let stdev_latency = self.max_stdev_latency(label);
             let buckets_latency = self.aggregate_latency_buckets(label);
-            let count_buckets = self.aggregate_count_buckets(label);
+            let _count_buckets = self.aggregate_count_buckets(label);
 
             table.add_row(row![bH2->""]);
             table.add_row(row![b->"Workload:", label]);

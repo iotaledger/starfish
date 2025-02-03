@@ -8,12 +8,11 @@ use std::{
     path::PathBuf,
 };
 
-use mysticeti_core::{
+use starfish_core::{
     config::{self, ClientParameters, NodeParameters},
     types::AuthorityIndex,
 };
 use serde::{Deserialize, Serialize};
-
 use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
 use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 
@@ -218,7 +217,7 @@ impl ProtocolCommands for StarfishProtocol {
 }
 
 impl ProtocolMetrics for StarfishProtocol {
-    const BENCHMARK_DURATION: &'static str = mysticeti_core::metrics::BENCHMARK_DURATION;
+    const BENCHMARK_DURATION: &'static str = starfish_core::metrics::BENCHMARK_DURATION;
 
     fn nodes_metrics_path<I>(
         &self,
@@ -245,7 +244,7 @@ impl ProtocolMetrics for StarfishProtocol {
         let node_config = config::NodePublicConfig::new_for_benchmarks(ips, node_parameters);
         let metrics_paths = node_config
             .all_metric_addresses()
-            .map(|x| format!("{x}{}", mysticeti_core::prometheus::METRICS_ROUTE));
+            .map(|x| format!("{x}{}", starfish_core::prometheus::METRICS_ROUTE));
 
         instances.into_iter().zip(metrics_paths).collect()
     }
