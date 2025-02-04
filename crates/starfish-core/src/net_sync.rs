@@ -222,15 +222,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             synchronizer_parameters.clone(),
             metrics.clone(),
         );
-
         let mut data_requestor = DataRequestor::new(
             connection.peer_id as AuthorityIndex,
             connection.sender.clone(),
             inner.clone(),
             synchronizer_parameters.clone(),
         );
-
-        data_requestor.start().await;
+        if consensus_protocol == ConsensusProtocol::Starfish {
+            data_requestor.start().await;
+        }
 
         let mut encoder = ReedSolomonEncoder::new(2,
                                                   4,
@@ -276,77 +276,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             blocks_without_statements.push(block);
                         }
                     }
-
-                    // First process blocks with statements
-                    let mut verified_data_blocks = Vec::new();
-                    for data_block in blocks_with_statements {
-                        let mut block: VerifiedStatementBlock = (*data_block).clone();
-                        tracing::debug!("Received {} from {}", block, peer);
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
-                        if !contains_new_shard_or_header {
-                            continue;
-                        }
-                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
-                            tracing::warn!(
-                                "Rejected incorrect block {} from {}: {:?}",
-                                block.reference(),
-                                peer,
-                                e
-                            );
-                            // todo: Terminate connection upon receiving incorrect block.
-                            break;
-                        }
-                        let storage_block = block;
-                        let transmission_block =
-                            match consensus_protocol {
-                                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                                    storage_block.clone()
-                                }
-                                ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
-                                    storage_block.from_storage_to_transmission(own_id)
-                                }
-                            };
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
-                        if !contains_new_shard_or_header {
-                            continue;
-                        }
-                        let data_storage_block = Data::new(storage_block);
-                        let data_transmission_block = Data::new(transmission_block);
-                        verified_data_blocks.push((data_storage_block, data_transmission_block));
-                    }
-
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
-                    if !verified_data_blocks.is_empty() {
-                        let pending_block_references = inner.syncer.add_blocks(verified_data_blocks).await;
-                        match consensus_protocol {
-                            ConsensusProtocol::Starfish |ConsensusProtocol::StarfishPush => {
-                                let mut max_round_pending_block_reference = None;
-                                for block_reference in pending_block_references {
-                                    if max_round_pending_block_reference.is_none() {
-                                        max_round_pending_block_reference = Some(block_reference.clone());
-                                    } else {
-                                        if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
-                                            max_round_pending_block_reference = Some(block_reference.clone());
-                                        }
-                                    }
-                                }
-                                if max_round_pending_block_reference.is_some() {
-                                    tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
-                                    Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
-                                }
-                            }
-                            ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti=> {
-                                if !pending_block_references.is_empty() {
-                                    tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", pending_block_references, peer);
-                                    Self::request_parents_blocks(pending_block_references, &connection.sender);
-                                }
-                            }
-                        }
-                    }
-
+                    // First process blocks without statements which could be in the causal history
                     if consensus_protocol == ConsensusProtocol::Starfish || consensus_protocol == ConsensusProtocol::StarfishPush {
 
-                        // Second process blocks without statements
+
                         let mut verified_data_blocks = Vec::new();
                         for data_block in blocks_without_statements {
                             let mut block: VerifiedStatementBlock = (*data_block).clone();
@@ -394,40 +327,123 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
 
+                    // Second process blocks with statements
+                    let mut verified_data_blocks = Vec::new();
+                    for data_block in blocks_with_statements {
+                        let mut block: VerifiedStatementBlock = (*data_block).clone();
+                        tracing::debug!("Received {} from {}", block, peer);
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
+                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
+                            tracing::warn!(
+                                "Rejected incorrect block {} from {}: {:?}",
+                                block.reference(),
+                                peer,
+                                e
+                            );
+                            // todo: Terminate connection upon receiving incorrect block.
+                            break;
+                        }
+                        let storage_block = block;
+                        let transmission_block =
+                            match consensus_protocol {
+                                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                                    storage_block.clone()
+                                }
+                                ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+                                    storage_block.from_storage_to_transmission(own_id)
+                                }
+                            };
+                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                        if !contains_new_shard_or_header {
+                            continue;
+                        }
+                        let data_storage_block = Data::new(storage_block);
+                        let data_transmission_block = Data::new(transmission_block);
+                        verified_data_blocks.push((data_storage_block, data_transmission_block));
+                    }
+
+                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
+                    if !verified_data_blocks.is_empty() {
+                        let (pending_block_references, missing_parents) = inner.syncer.add_blocks(verified_data_blocks).await;
+                        match consensus_protocol {
+                            ConsensusProtocol::Starfish  => {
+                                let mut max_round_pending_block_reference = None;
+                                for block_reference in pending_block_references {
+                                    if max_round_pending_block_reference.is_none() {
+                                        max_round_pending_block_reference = Some(block_reference.clone());
+                                    } else {
+                                        if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
+                                            max_round_pending_block_reference = Some(block_reference.clone());
+                                        }
+                                    }
+                                }
+                                if max_round_pending_block_reference.is_some() {
+                                    tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
+                                    Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
+                                }
+                            }
+                            ConsensusProtocol::Mysticeti=> {
+                                if !missing_parents.is_empty() {
+                                    let missing_parents = missing_parents
+                                        .iter()
+                                        .map(|r|r.clone())
+                                        .collect::<Vec<_>>();
+                                    tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", missing_parents, peer);
+                                    Self::request_parents_blocks(missing_parents, &connection.sender);
+                                }
+                            }
+                            ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
+
+                            }
+                        }
+                    }
+
+
+
                     drop(timer);
                 }
 
                 NetworkMessage::MissingHistoryRequest(block_reference) => {
-                    tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
-                    if inner.block_store.byzantine_strategy.is_none() {
-                        disseminator.push_block_history_with_shards(block_reference).await;
+                    if consensus_protocol == ConsensusProtocol::Starfish {
+                        tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
+                        if inner.block_store.byzantine_strategy.is_none() {
+                            disseminator.push_block_history_with_shards(block_reference).await;
+                        }
                     }
                 }
                 NetworkMessage::MissingParentsRequest(block_references) => {
-                    tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
-                    if inner.block_store.byzantine_strategy.is_none() {
-                        let authority = connection.peer_id as AuthorityIndex;
-                        if disseminator
-                            .send_parents_storage_blocks(authority, block_references)
-                            .await
-                            .is_none()
-                        {
-                            break;
+                    if consensus_protocol == ConsensusProtocol::Mysticeti {
+                        tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                        if inner.block_store.byzantine_strategy.is_none() {
+                            let authority = connection.peer_id as AuthorityIndex;
+                            if disseminator
+                                .send_parents_storage_blocks(authority, block_references)
+                                .await
+                                .is_none()
+                            {
+                                break;
+                            }
                         }
                     }
                 }
                 NetworkMessage::MissingTxDataRequest(block_references) => {
-                    tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
-                    if inner.block_store.byzantine_strategy.is_none() {
-                        let authority = connection.peer_id as AuthorityIndex;
-                        if disseminator
-                            .send_transmission_blocks(authority, block_references)
-                            .await
-                            .is_none()
-                        {
-                            break;
+                    if consensus_protocol == ConsensusProtocol::Starfish {
+                        tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                        if inner.block_store.byzantine_strategy.is_none() {
+                            let authority = connection.peer_id as AuthorityIndex;
+                            if disseminator
+                                .send_transmission_blocks(authority, block_references)
+                                .await
+                                .is_none()
+                            {
+                                break;
+                            }
                         }
                     }
+
                 }
             }
         }
