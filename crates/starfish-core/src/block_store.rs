@@ -45,7 +45,7 @@ impl ConsensusProtocol {
 }
 
 #[allow(unused)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ByzantineStrategy {
     TimeoutLeader,                 // Adversary waits timeout before sending their leader blocks
     EquivocatingChains,                  // Equivocation attack: N-1 equivocations per round

@@ -67,6 +67,7 @@ pub enum MetaStatement {
     Payload(Vec<BaseStatement>),
 }
 
+
 impl<H: BlockHandler> Core<H> {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
@@ -319,7 +320,7 @@ impl<H: BlockHandler> Core<H> {
 
         // Collect statements and references
         let _collect_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::collect_statements_and_references");
-        let (statements, block_references) = self.collect_statements_and_references(&pending_statements);
+        let (mut statements, block_references) = self.collect_statements_and_references(&pending_statements);
         drop(_collect_timer);
 
         // Create blocks based on byzantine strategy
@@ -329,7 +330,7 @@ impl<H: BlockHandler> Core<H> {
 
         // Prepare encoded statements if needed
         let _encode_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_encoded_statements");
-        let encoded_statements = self.prepare_encoded_statements(&statements);
+        let mut encoded_statements = self.prepare_encoded_statements(&statements);
         drop(_encode_timer);
 
         // Get pending acknowledgments
@@ -346,6 +347,12 @@ impl<H: BlockHandler> Core<H> {
         // Create and store blocks
         let mut return_blocks = Vec::new();
         for block_id in 0..number_of_blocks_to_create {
+            // Equivocators include their transactions only in first block, but leave other empty
+            // to not overload the bandwidth
+            if block_id == 1 {
+                statements = vec![];
+                encoded_statements = self.prepare_encoded_statements(&statements);
+            }
             let _build_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::build_block");
             let block_data = self.build_block(
                 &block_references,
@@ -400,7 +407,7 @@ impl<H: BlockHandler> Core<H> {
         let mut statements = Vec::new();
         for meta_statement in pending {
             if let MetaStatement::Payload(payload) = meta_statement {
-                if self.block_store.byzantine_strategy.is_none() && !self.epoch_changing() {
+                if !self.epoch_changing() {
                     statements.extend(payload.clone());
                 }
             }
