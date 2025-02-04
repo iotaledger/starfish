@@ -1,10 +1,11 @@
 #!/bin/bash
 COMMITTEE_SIZE=22
-LOAD=2000
+LOAD=10000
 DURATION_SECS=120
 
 # Strategy-specific byzantine nodes configuration
 declare -A BYZANTINE_NODES
+BYZANTINE_NODES["honest"]=0
 BYZANTINE_NODES["random-drop"]=7
 BYZANTINE_NODES["timeout-leader"]=7
 BYZANTINE_NODES["leader-withholding"]=7
@@ -14,6 +15,7 @@ BYZANTINE_NODES["equivocating-chains"]=7
 BYZANTINE_NODES["equivocating-chains-bomb"]=1
 
 STRATEGIES=(
+    "honest"
     "random-drop"
     "timeout-leader"
     "leader-withholding"
@@ -24,8 +26,10 @@ STRATEGIES=(
 )
 
 CONSENSUS_PROTOCOLS=(
-    "mysticeti"
+    "cordial-miners"
+    "starfish"
     "starfish-push"
+    "mysticeti"
 )
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
