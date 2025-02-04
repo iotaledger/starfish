@@ -420,7 +420,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         if inner.block_store.byzantine_strategy.is_none() {
                             let authority = connection.peer_id as AuthorityIndex;
                             if disseminator
-                                .send_parents_storage_blocks(authority, block_references)
+                                .send_storage_blocks(authority, block_references)
                                 .await
                                 .is_none()
                             {

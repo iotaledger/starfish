@@ -37,14 +37,14 @@ pub struct SynchronizerParameters {
 impl SynchronizerParameters {
     pub fn new(committee_size: usize, consensus_protocol: ConsensusProtocol) -> Self {
         match consensus_protocol {
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti  => {
                 Self {
                     batch_own_block_size: committee_size,
                     batch_other_block_size: 3 * committee_size,
                     sample_precision: Duration::from_millis(600),
                 }
             }
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
                 Self {
                     batch_own_block_size: committee_size,
                     batch_other_block_size: committee_size * committee_size,
@@ -281,6 +281,46 @@ where
         Some(())
     }
 
+    pub async fn send_storage_blocks(
+        &mut self,
+        peer_id: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    ) -> Option<()>{
+        let peer = format_authority_index(peer_id);
+        let own_index = self.inner.block_store.get_own_authority_index();
+        let batch_block_size = self.parameters.batch_own_block_size;
+        let mut blocks = Vec::new();
+        let mut block_counter = 0;
+        let unknown_blocks_by_peer = self.inner.block_store.get_unknown_by_authority(peer_id);
+        for block_reference in block_references {
+            if unknown_blocks_by_peer.contains(&block_reference) {
+                let block = self.inner
+                    .block_store
+                    .get_storage_block(block_reference);
+                if block.is_some() {
+                    let block = block.expect("Should be some");
+                    block_counter += 1;
+                    blocks.push(block);
+                    if block_counter >= batch_block_size {
+                        break;
+                    }
+                }
+            }
+            if block_counter >= batch_block_size{
+                break;
+            }
+        }
+        for block in blocks.iter() {
+            self.inner
+                .block_store
+                .update_known_by_authority(block.reference().clone(), peer_id);
+        }
+        tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
+        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        Some(())
+    }
+
+    #[allow(dead_code)]
     pub async fn send_parents_storage_blocks(
         &mut self,
         peer_id: AuthorityIndex,

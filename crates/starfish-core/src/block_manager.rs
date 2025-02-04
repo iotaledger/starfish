@@ -40,12 +40,14 @@ impl BlockManager {
     pub fn add_blocks(
         &mut self,
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>
-    ) -> (Vec<Data<VerifiedStatementBlock>>, HashSet<BlockReference>, bool) {
+    ) -> (Vec<Data<VerifiedStatementBlock>>, HashSet<BlockReference>, bool, HashSet<BlockReference>) {
         let block_store = self.block_store.clone();
         let mut updated_statements = false;
         let mut blocks: VecDeque<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)> = blocks.into();
         let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
         let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
+        // missing references that we don't currently have
+        let mut missing_references = HashSet::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
             let block_reference = storage_and_transmission_blocks.0.reference();
@@ -85,11 +87,14 @@ impl BlockManager {
                 // If we are missing a reference then we insert into pending and update the waiting index
                 if !self.block_store.block_exists(*included_reference) {
                     processed = false;
+
                     self.block_references_waiting
                         .entry(*included_reference)
                         .or_default()
                         .insert(*block_reference);
                     if !self.blocks_pending.contains_key(included_reference) {
+                        // add missing references if it is not available in both pending set and storage
+                        missing_references.insert(*included_reference);
                         self.missing[included_reference.authority as usize]
                             .insert(*included_reference);
                     }
@@ -129,7 +134,7 @@ impl BlockManager {
             }
         }
 
-        (newly_storage_blocks_processed, recoverable_blocks, updated_statements)
+        (newly_storage_blocks_processed, recoverable_blocks, updated_statements, missing_references)
     }
 
     pub fn missing_blocks(&self) -> &[HashSet<BlockReference>] {

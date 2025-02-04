@@ -173,7 +173,7 @@ impl<H: BlockHandler> Core<H> {
     // It return true if any update was made successfully
     // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
     // For such blocks we need to send a missing history request
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>)  {
+    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>, HashSet<BlockReference>)  {
         let _timer = self
             .metrics
             .utilization_timer
@@ -187,7 +187,7 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("BlockManager::add_blocks");
-        let (processed, new_blocks_to_reconstruct, updated_statements) = self
+        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) = self
             .block_manager
             .add_blocks(blocks);
         drop(block_manager_timer);
@@ -226,7 +226,7 @@ impl<H: BlockHandler> Core<H> {
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
-        (success, not_processed_blocks)
+        (success, not_processed_blocks, missing_references)
     }
 
     fn run_block_handler(&mut self) {

@@ -24,7 +24,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 }
 
 enum CoreThreadCommand {
-    AddBlocks(Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>, oneshot::Sender<Vec<BlockReference>>),
+    AddBlocks(Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>, oneshot::Sender<(Vec<BlockReference>, HashSet<BlockReference>)>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
@@ -59,7 +59,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.join_handle.join().unwrap()
     }
 
-    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> Vec<BlockReference> {
+    pub async fn add_blocks(&self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (Vec<BlockReference>, HashSet<BlockReference>) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
             .await;
@@ -122,8 +122,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
             metrics.core_lock_dequeued.inc();
             match command {
                 CoreThreadCommand::AddBlocks(blocks, sender) => {
-                    let pending_blocks_with_statements = self.syncer.add_blocks(blocks);
-                    sender.send(pending_blocks_with_statements).ok();
+                    let (pending_blocks_with_statements, missing_references) = self.syncer.add_blocks(blocks);
+                    sender.send((pending_blocks_with_statements, missing_references)).ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
                     self.syncer.force_new_block(round);

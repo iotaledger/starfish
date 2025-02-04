@@ -1,16 +1,16 @@
 #!/bin/bash
-COMMITTEE_SIZE=20
-LOAD=200
-DURATION_SECS=60
+COMMITTEE_SIZE=22
+LOAD=2000
+DURATION_SECS=120
 
 # Strategy-specific byzantine nodes configuration
 declare -A BYZANTINE_NODES
-BYZANTINE_NODES["random-drop"]=6
-BYZANTINE_NODES["timeout-leader"]=6
-BYZANTINE_NODES["leader-withholding"]=6
-BYZANTINE_NODES["chain-bomb"]=6
-BYZANTINE_NODES["equivocating-two-chains"]=6
-BYZANTINE_NODES["equivocating-chains"]=6
+BYZANTINE_NODES["random-drop"]=7
+BYZANTINE_NODES["timeout-leader"]=7
+BYZANTINE_NODES["leader-withholding"]=7
+BYZANTINE_NODES["chain-bomb"]=7
+BYZANTINE_NODES["equivocating-two-chains"]=7
+BYZANTINE_NODES["equivocating-chains"]=7
 BYZANTINE_NODES["equivocating-chains-bomb"]=1
 
 STRATEGIES=(
