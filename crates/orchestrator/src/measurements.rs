@@ -429,9 +429,11 @@ impl MeasurementsCollection {
                 "sequenced_transactions_total" => {
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                 }
-                "bytes_sent_total" | "bytes_received_total" => {
+                "bytes_sent_total"  => {
                     let bandwidth = self.aggregate_bandwidth(label);
-                    table.add_row(row![b->"Bandwidth:", bandwidth.iter().map(|x| format!("{x} bytes/s")).collect::<Vec<_>>().join(", ")]);
+                    let avg_bandwidth = bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64 / 1024.0 / 1024.0 ;
+                    table.add_row(row![b->"Bandwidth:", format!("{:.2} MB/s", avg_bandwidth)]);
+                    table.add_row(row![b->"Byte complexity:", format!("{:.2} ", avg_bandwidth/total_tps as f64 / 512.0)]);
                 }
 
                 // "committed_leaders_total" => {
