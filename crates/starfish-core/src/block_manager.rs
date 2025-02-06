@@ -78,6 +78,10 @@ impl BlockManager {
             }
 
             if self.blocks_pending.contains_key(block_reference) {
+                if storage_and_transmission_blocks.0.statements().is_some() {
+                    self.blocks_pending.insert(*block_reference, storage_and_transmission_blocks);
+                }
+
                 continue;
             }
 
