@@ -393,7 +393,9 @@ impl MeasurementsCollection {
         table.add_row(row![b->"Duration:", format!("{} s", duration.as_secs())]);
 
         let mut labels: Vec<_> = self.labels().collect();
-        labels.sort();
+        labels.sort_unstable_by(Ord::cmp);
+        labels.reverse();
+        let mut tps_value = 0.01;
         for label in labels {
             let total_tps = self.aggregate_tps(label);
             let average_latency = self.aggregate_average_latency(label);
@@ -416,6 +418,7 @@ impl MeasurementsCollection {
                     }
                 }
                 "transaction_committed_latency" => {
+                    tps_value = total_tps as f64;
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                     table.add_row(row![b->"Transaction latency (avg):", format!("{} ms", average_latency.as_millis())]);
                     table.add_row(row![b->"Transaction latency (stdev):", format!("{} ms", stdev_latency.as_millis())]);
@@ -427,13 +430,15 @@ impl MeasurementsCollection {
                     }
                 }
                 "sequenced_transactions_total" => {
+                    tps_value = total_tps as f64;
                     table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
                 }
-                "bytes_sent_total"  => {
+                "bytes_sent_total" | "bytes_received_total" => {
                     let bandwidth = self.aggregate_bandwidth(label);
-                    let avg_bandwidth = bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64 / 1024.0 / 1024.0 ;
+                    let average_bandwidth_bytes = bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64 ;
+                    let avg_bandwidth = average_bandwidth_bytes / 1024.0 / 1024.0 ;
                     table.add_row(row![b->"Bandwidth:", format!("{:.2} MB/s", avg_bandwidth)]);
-                    table.add_row(row![b->"Byte complexity:", format!("{:.2} ", avg_bandwidth/total_tps as f64 / 512.0)]);
+                    table.add_row(row![b->"Byte complexity:", format!("{:.2} ", average_bandwidth_bytes / tps_value / 512.0)]);
                 }
 
                 // "committed_leaders_total" => {
