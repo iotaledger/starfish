@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # Parameters
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}      # Total number of validators (recommend < number of physical cores)
-KILL_VALIDATORS=${KILL_VALIDATORS:-2}     # Number of first validators to kill after CRASH_TIME
-BOOT_VALIDATORS=${BOOT_VALIDATORS:-1}     # Number of last validators to boot after CRASH_TIME
-DESIRED_TPS=${DESIRED_TPS:-20000}        # Target total transactions per second
+NUM_VALIDATORS=${NUM_VALIDATORS:-20}      # Total number of validators (recommend < number of physical cores)
+KILL_VALIDATORS=${KILL_VALIDATORS:-3}     # Number of first validators to kill after CRASH_TIME
+BOOT_VALIDATORS=${BOOT_VALIDATORS:-4}     # Number of last validators to boot after CRASH_TIME
+DESIRED_TPS=${DESIRED_TPS:-10000}        # Target total transactions per second
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
 CRASH_TIME=${CRASH_TIME:-300}             # When to crash first nodes and start the last one
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}        # Whether to remove Grafana/Prometheus volumes (1=yes, 0=no)
-CONSENSUS=${CONSENSUS:-starfish-push}           # Consensus protocol: starfish, starfish, cordial-miners, starfish-push
+CONSENSUS=${CONSENSUS:-starfish}           # Consensus protocol: starfish, starfish, cordial-miners, starfish-push
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}  # Byzantine strategies: timeout-leader, leader-withholding,
                                                                    # equivocating-chains, equivocating-two-chains,
                                                                    # chain-bomb, equivocating-chains-bomb
@@ -23,12 +23,21 @@ YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)
 RESET=$(tput sgr0)
 
-# Cleanup
+#------------------------------------------------------------------------------
+# Cleanup Previous Run
+#------------------------------------------------------------------------------
 tmux kill-server || true
+echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
+
+# Remove old logs and validator directories
+echo -e "${CYAN}Cleaning up previous run data...${RESET}"
 find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
 find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
 
-# Update monitoring configs
+#------------------------------------------------------------------------------
+# Monitoring Setup
+#------------------------------------------------------------------------------
+# Update Prometheus configuration
 PROMETHEUS_CONFIG="monitoring/prometheus.yaml"
 cat <<EOL > $PROMETHEUS_CONFIG
 global:
@@ -42,16 +51,48 @@ scrape_configs:
       - targets:
 EOL
 
+# Add validator endpoints
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-  echo "          - 'host.docker.internal:$((1500 + NUM_VALIDATORS + i))'" >> $PROMETHEUS_CONFIG
+  PORT=$((1500 + NUM_VALIDATORS + i))
+  echo "          - 'host.docker.internal:$PORT'" >> $PROMETHEUS_CONFIG
 done
 
-# Reset and start monitoring
+# Update Grafana dashboard port
+PORT=$((1500 + NUM_VALIDATORS + 2))
+FILE="monitoring/grafana/grafana-dashboard.json"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    sed -i '' -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+else
+    # Linux/Ubuntu
+    sed -i -E "s/(host\.docker\.internal:)[0-9]{4}/\1$PORT/" "$FILE"
+fi
+
+echo -e "${GREEN}Monitoring configuration updated${RESET}"
+
+#------------------------------------------------------------------------------
+# Docker Services
+#------------------------------------------------------------------------------
 (cd monitoring && docker compose down)
+
+
+# Handle volume cleanup if requested
 if [ "$REMOVE_VOLUMES" = 1 ]; then
+    echo "Removing monitoring volumes..."
     docker volume rm monitoring_grafana_data monitoring_prometheus_data 2>/dev/null || true
 fi
-(cd monitoring && docker compose up -d)
+
+# Start monitoring services
+(cd monitoring && docker compose up -d) || {
+    echo "${RED}Failed to start monitoring services${RESET}"
+    exit 1
+}
+
+
+#------------------------------------------------------------------------------
+# Launch Validators
+#------------------------------------------------------------------------------
+echo "${CYAN}Deploying consensus protocol: ${GREEN}$CONSENSUS${RESET}"
 
 # Start initial validators
 export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core=trace
