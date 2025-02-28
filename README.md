@@ -48,12 +48,14 @@ newgrp docker
 
 ```bash
 # Clone and build
-git clone <repo>
-cd <repo>
+git clone https://github.com/iotaledger/starfish.git
+cd ./starfish
 cargo build --release
+```
 
 
-# Run local benchmark and see the basic metrics
+### Run local benchmark and output the basic metrics
+```bash
 cargo run --release --bin starfish -- local-benchmark \
         --committee-size 7 \
         --load 10000 \
@@ -62,14 +64,15 @@ cargo run --release --bin starfish -- local-benchmark \
         --byzantine-strategy chain-bomb \
         --mimic-extra-latency \
         --duration-secs 100
-
-
-# Local dryrun with availability to look at metrics
-cd scripts
-./dryrun.sh
 ```
-Monitor at: http://localhost:3000  
-Credentials: admin/admin
+
+### Local dryrun with availability to look at metrics
+```bash
+./scripts/dryrun.sh
+```
+
+### Orchestrator
+To run test on a geodistributed network, look instructions at `./crates/orchestrator/readme.md`
 
 ## License
 [Apache 2.0](LICENSE)
