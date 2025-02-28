@@ -1,6 +1,6 @@
 #!/bin/bash
-COMMITTEE_SIZE=22
-LOAD=10000
+COMMITTEE_SIZE=10
+LOAD=1000
 DURATION_SECS=120
 
 # Strategy-specific byzantine nodes configuration
@@ -28,7 +28,7 @@ STRATEGIES=(
 CONSENSUS_PROTOCOLS=(
     "cordial-miners"
     "starfish"
-    "starfish-push"
+    "starfish-pull"
     "mysticeti"
 )
 

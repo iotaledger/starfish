@@ -18,7 +18,7 @@ services:
       - prometheus
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=supers3cret
+      - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SECURITY_ADMIN_PASSWORD_FILE=
       - GF_AUTH_GENERIC_OAUTH_PERSISTENT_TOKEN=true
     user: "472"

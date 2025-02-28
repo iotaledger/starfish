@@ -8,7 +8,7 @@ DESIRED_TPS=${DESIRED_TPS:-10000}        # Target total transactions per second
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
 CRASH_TIME=${CRASH_TIME:-300}             # When to crash first nodes and start the last one
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}        # Whether to remove Grafana/Prometheus volumes (1=yes, 0=no)
-CONSENSUS=${CONSENSUS:-starfish}           # Consensus protocol: starfish, starfish, cordial-miners, starfish-push
+CONSENSUS=${CONSENSUS:-starfish}           # Consensus protocol: starfish, starfish-pull, cordial-miners, mysticeti
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}  # Byzantine strategies: timeout-leader, leader-withholding,
                                                                    # equivocating-chains, equivocating-two-chains,
                                                                    # chain-bomb, equivocating-chains-bomb
@@ -116,7 +116,7 @@ done
 #------------------------------------------------------------------------------
 DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-5m&to=now&refresh=5s"
 echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
-echo -e "${CYAN}Credentials: admin/supers3cret${RESET}"
+echo -e "${CYAN}Credentials: admin/admin${RESET}"
 
 # Kill and boot sequence
 sleep "$CRASH_TIME"

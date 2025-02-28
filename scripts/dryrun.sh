@@ -5,7 +5,7 @@
 #------------------------------------------------------------------------------
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
 DESIRED_TPS=${DESIRED_TPS:-1000}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish, cordial-miners, starfish-push
+CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish-pull, cordial-miners, starfish-push
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-chain-bomb} #| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
@@ -135,7 +135,7 @@ done
 #------------------------------------------------------------------------------
 DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-5m&to=now&refresh=5s"
 echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
-echo -e "${CYAN}Credentials: admin/supers3cret${RESET}"
+echo -e "${CYAN}Credentials: admin/admin${RESET}"
 
 
 sleep "$TEST_TIME"
