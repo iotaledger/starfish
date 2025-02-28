@@ -5,12 +5,12 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
+use prometheus::IntCounter;
 use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-use prometheus::IntCounter;
 use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -23,6 +23,8 @@ use tokio::{
     time::Instant,
 };
 
+use crate::data::Data;
+use crate::types::VerifiedStatementBlock;
 use crate::{
     config::NodePublicConfig,
     metrics::{print_network_address_table, Metrics},
@@ -30,8 +32,6 @@ use crate::{
     stat::HistogramSender,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 // Max buffer size controls the max amount of data (in bytes) to be sent/received when sending
@@ -44,16 +44,16 @@ const MAX_BUFFER_SIZE: u32 = 170 * 1024 * 1024;
 #[allow(unused)]
 // AWS regions and their names
 const REGIONS: [&str; 10] = [
-    "us-east-1",    // USE1
-    "us-west-1",    // USW1
-    "ca-central-1", // CAC1
-    "eu-west-1",    // EUW1
-    "eu-south-1",   // EUS2
-    "eu-north-1",   // EUN1
-    "sa-east-1",    // SAE1
-    "ap-south-1",   // APS1
+    "us-east-1",      // USE1
+    "us-west-1",      // USW1
+    "ca-central-1",   // CAC1
+    "eu-west-1",      // EUW1
+    "eu-south-1",     // EUS2
+    "eu-north-1",     // EUN1
+    "sa-east-1",      // SAE1
+    "ap-south-1",     // APS1
     "ap-southeast-1", // APSE2
-    "ap-northeast-1"  // APNE1
+    "ap-northeast-1", // APNE1
 ];
 
 // Latency table from your provided data
@@ -67,7 +67,7 @@ const LATENCY_TABLE: [[u32; 10]; 10] = [
     [112, 175, 122, 176, 215, 220, 1, 299, 309, 254],
     [201, 226, 189, 125, 143, 148, 299, 1, 150, 140],
     [198, 137, 196, 254, 281, 268, 309, 150, 1, 101],
-    [146, 108, 142, 199, 238, 245, 254, 140, 101, 1]
+    [146, 108, 142, 199, 238, 245, 254, 140, 101, 1],
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,9 +138,6 @@ impl Network {
             );
         }
         let latency_table = generate_latency_table(addresses.len(), mimic_latency);
-        if our_id == 0 {
-            write_latency_delays(latency_table.clone()).unwrap();
-        }
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");
@@ -184,9 +181,10 @@ impl Network {
     }
 }
 
-fn write_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
+#[allow(dead_code)]
+fn write_extra_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
     // Open (or create) the file "latency_delays"
-    let mut file = File::create("latency_delays.log")?;
+    let mut file = File::create("extra_latency_delays.log")?;
 
     // Write the header (optional)
     writeln!(file, "Latency Delays")?;
@@ -372,7 +370,7 @@ impl Worker {
             pong_sender,
             metrics.bytes_received_total.clone(),
         )
-            .boxed();
+        .boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
         r
@@ -490,14 +488,13 @@ impl Worker {
                         writer_guard.write_u32(serialized.len() as u32).await?;
 
                         bytes_sent_total_clone.inc_by(serialized.len() as u64 + 4); // u32 and serialized
-                        // Write the serialized data
+                                                                                    // Write the serialized data
                         writer_guard.write_all(&serialized).await
-                    }.await {
+                    }
+                    .await
+                    {
                         tracing::error!("Failed to write message: {e}");
                     }
-
-
-
                 });
 
                 inner_task_handles.push(handle);
@@ -588,8 +585,7 @@ impl Worker {
 /// If `seed == 0`, the table is initialized with all zeros.
 /// expected mean latency for a quorum of nodes should be below within expected thresholds
 fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
-
-    let mut resulting_table = vec![vec![];n];
+    let mut resulting_table = vec![vec![]; n];
     if !mimic_latency {
         for i in 0..n {
             for _j in 0..n {
@@ -597,19 +593,19 @@ fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
             }
         }
     } else {
-
         let valid_sequence = [0, 2, 4, 6, 8, 1, 3, 5, 7, 8];
         for i in 0..n {
             for j in 0..n {
                 let index_i = i % valid_sequence.len();
                 let index_j = j % valid_sequence.len();
-                resulting_table[i].push(LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0)
+                resulting_table[i].push(
+                    LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0,
+                )
             }
         }
     }
     resulting_table
 }
-
 
 fn generate_latency(mean: f64) -> Duration {
     let mut rng = rand::thread_rng();

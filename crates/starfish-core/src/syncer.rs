@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use crate::types::VerifiedStatementBlock;
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -12,7 +12,7 @@ use crate::{
     runtime::timestamp_utc,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::types::VerifiedStatementBlock;
+use std::{collections::HashSet, sync::Arc};
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
@@ -38,12 +38,7 @@ pub trait CommitObserver: Send + Sync {
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
-    pub fn new(
-        core: Core<H>,
-        signals: S,
-        commit_observer: C,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(core: Core<H>, signals: S, commit_observer: C, metrics: Arc<Metrics>) -> Self {
         let committee_size = core.committee().len();
         Self {
             core,
@@ -55,9 +50,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) -> (Vec<BlockReference>, HashSet<BlockReference>) {
+    pub fn add_blocks(
+        &mut self,
+        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+    ) -> (Vec<BlockReference>, HashSet<BlockReference>) {
         // todo: when block is updated we might return false here and it can make committing longer
-        let (success, pending_blocks_with_statements, missing_parents) = self.core.add_blocks(blocks);
+        let (success, pending_blocks_with_statements, missing_parents) =
+            self.core.add_blocks(blocks);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
@@ -70,9 +69,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
             tracing::debug!("Attempt to force new block after timeout");
-            if self.try_new_block() {
-
-            }
+            if self.try_new_block() {}
             true
         } else {
             false
@@ -80,11 +77,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self) -> bool {
-        if self.force_new_block
-            || self
-            .core
-            .ready_new_block(&self.connected_authorities)
-        {
+        if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
             tracing::debug!("Attempt to create new block in syncer after one trigger");
             if self.core.try_new_block().is_some() {
                 self.signals.new_block_ready();
@@ -99,7 +92,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .metrics
             .utilization_timer
             .utilization_timer("Syncer::try_new_commit");
-    // No need to commit after epoch is safe to close
+        // No need to commit after epoch is safe to close
         if self.core.epoch_closed() {
             return;
         };
@@ -126,14 +119,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .commit_observer
             .handle_commit(self.core.block_store(), newly_committed);
 
-
-        self.core.handle_committed_subdag(
-            committed_subdag,
-        );
-
-
+        self.core.handle_committed_subdag(committed_subdag);
     }
-
 
     pub fn commit_observer(&self) -> &C {
         &self.commit_observer
@@ -163,7 +150,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_handler::{TestBlockHandler, RealCommitHandler},
+        block_handler::{RealCommitHandler, TestBlockHandler},
         data::Data,
         simulator::{Scheduler, SimulatorState},
     };
@@ -188,9 +175,10 @@ mod tests {
                 }
                 SyncerEvent::DeliverBlock(data_storage_block) => {
                     // eprintln!("[{:06} {}] Deliver {block}", scheduler.time_ms(), self.core.authority());
-                    let transmission_block = data_storage_block.from_storage_to_transmission(self.core.authority());
+                    let transmission_block =
+                        data_storage_block.from_storage_to_transmission(self.core.authority());
                     let data_transmission_block = Data::new(transmission_block);
-                    self.add_blocks(vec![(data_storage_block,data_transmission_block)]);
+                    self.add_blocks(vec![(data_storage_block, data_transmission_block)]);
                 }
             }
 

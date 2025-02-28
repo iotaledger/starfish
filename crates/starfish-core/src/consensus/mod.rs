@@ -1,12 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
-use crate::{
-    types::{format_authority_round, AuthorityIndex, RoundNumber},
-};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
+use crate::types::{format_authority_round, AuthorityIndex, RoundNumber};
+use std::fmt::Display;
 
 pub mod base_committer;
 pub mod linearizer;

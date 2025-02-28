@@ -129,7 +129,10 @@ impl<C: ServerProviderClient> Testbed<C> {
 
         let instances = match region {
             Some(x) => {
-                try_join_all((0..quantity).map(|_| self.client.create_instance(x.clone(), quantity))).await?
+                try_join_all(
+                    (0..quantity).map(|_| self.client.create_instance(x.clone(), quantity)),
+                )
+                .await?
             }
             None => {
                 try_join_all(self.settings.regions.iter().flat_map(|region| {

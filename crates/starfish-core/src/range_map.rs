@@ -139,7 +139,6 @@ impl<K: Ord + Copy + PartialEq, V: Clone> RangeMap<K, V> {
             }
         }
     }
-
 }
 
 impl<K: fmt::Debug + Ord, V: fmt::Debug> fmt::Debug for RangeMap<K, V> {

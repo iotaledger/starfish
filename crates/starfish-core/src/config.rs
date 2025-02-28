@@ -266,8 +266,7 @@ pub struct ClientParameters {
     pub initial_delay: Duration,
 }
 
-
-impl ClientParameters{
+impl ClientParameters {
     pub fn almost_default(load: usize) -> Self {
         Self {
             load,

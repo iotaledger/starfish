@@ -1,26 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
-use ed25519_consensus::Signature;
-use rand::{rngs::StdRng, SeedableRng};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use zeroize::Zeroize;
+use crate::types::{BaseStatement, Shard, VerifiedStatementBlock};
 use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
-    types::{
-        AuthorityIndex, BlockReference, EpochStatus, RoundNumber,
-        TimestampNs,
-    },
+    types::{AuthorityIndex, BlockReference, EpochStatus, RoundNumber, TimestampNs},
 };
-use rs_merkle::{MerkleProof, MerkleTree};
+use ed25519_consensus::Signature;
+use rand::{rngs::StdRng, SeedableRng};
 use rs_merkle::algorithms::Sha256;
-use crate::types::{BaseStatement, Shard, VerifiedStatementBlock};
+use rs_merkle::{MerkleProof, MerkleTree};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+use zeroize::Zeroize;
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
-
 
 pub const TRANSACTIONS_DIGEST_SIZE: usize = 32;
 
@@ -41,14 +37,16 @@ pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 
 #[cfg(not(test))]
-pub type BlockHasher =  blake3::Hasher;
+pub type BlockHasher = blake3::Hasher;
 
 #[cfg(test)]
 pub type BlockHasher = blake3::Hasher;
 
-
 impl TransactionsCommitment {
-    pub fn new_from_encoded_statements(encoded_statements: &Vec<Shard>, authority_index: usize) -> (TransactionsCommitment, Vec<u8>) {
+    pub fn new_from_encoded_statements(
+        encoded_statements: &Vec<Shard>,
+        authority_index: usize,
+    ) -> (TransactionsCommitment, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
             let mut hasher = crypto::BlockHasher::new();
@@ -63,7 +61,7 @@ impl TransactionsCommitment {
             .unwrap();
         let indices_to_prove = vec![authority_index];
         let merkle_proof = merkle_tree.proof(&indices_to_prove);
-        let merkle_proof_bytes =merkle_proof.to_bytes();
+        let merkle_proof_bytes = merkle_proof.to_bytes();
         (TransactionsCommitment(merkle_root), merkle_proof_bytes)
     }
     pub fn new_from_statements(statements: &Vec<BaseStatement>) -> TransactionsCommitment {
@@ -71,18 +69,21 @@ impl TransactionsCommitment {
         for statement in statements {
             statement.crypto_hash(&mut hasher);
         }
-        let digest =  hasher.finalize().into();
+        let digest = hasher.finalize().into();
         TransactionsCommitment(digest)
     }
 
-    pub fn check_correctness_merkle_root(encoded_statements: &Vec<Shard>, merkle_root: TransactionsCommitment) -> bool {
+    pub fn check_correctness_merkle_root(
+        encoded_statements: &Vec<Shard>,
+        merkle_root: TransactionsCommitment,
+    ) -> bool {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
             let mut hasher = crypto::BlockHasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
-       }
+        }
         let computed_merkle_tree = MerkleTree::<Sha256>::from_leaves(&leaves);
         let computed_merkle_root = computed_merkle_tree
             .root()
@@ -92,17 +93,18 @@ impl TransactionsCommitment {
     }
 
     // The function assumes that encoded_statements[leaf_index] is Some. Otherwise panics
-    pub fn check_correctness_merkle_leaf(shard: Shard, merkle_root: TransactionsCommitment, proof_bytes: Vec<u8>, tree_size: usize, leaf_index: usize) -> bool {
+    pub fn check_correctness_merkle_leaf(
+        shard: Shard,
+        merkle_root: TransactionsCommitment,
+        proof_bytes: Vec<u8>,
+        tree_size: usize,
+        leaf_index: usize,
+    ) -> bool {
         let mut hasher = crypto::BlockHasher::new();
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();
         let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
-        let result = proof.verify(
-            merkle_root.0,
-            &[leaf_index],
-            &[leaf_to_prove],
-            tree_size,
-        );
+        let result = proof.verify(merkle_root.0, &[leaf_index], &[leaf_to_prove], tree_size);
         result
     }
 }
@@ -126,7 +128,7 @@ impl BlockDigest {
             acknowledgement_statements,
             meta_creation_time_ns,
             epoch_marker,
-            merkle_root
+            merkle_root,
         );
         hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
@@ -210,8 +212,6 @@ impl CryptoHash for u64 {
     }
 }
 
-
-
 /*impl CryptoHash for StatementDigest {
     fn crypto_hash(&self, state: &mut BlockHasher) {
         state.update(self.as_ref());
@@ -231,7 +231,10 @@ impl<T: AsBytes> CryptoHash for T {
 }
 
 impl PublicKey {
-    pub fn verify_signature_in_block(&self, block: &VerifiedStatementBlock) -> Result<(), ed25519_consensus::Error> {
+    pub fn verify_signature_in_block(
+        &self,
+        block: &VerifiedStatementBlock,
+    ) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
         let mut hasher = BlockHasher::new();
         BlockDigest::digest_without_signature(

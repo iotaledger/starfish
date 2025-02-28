@@ -1,16 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    net::SocketAddr,
-    ops::AddAssign,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
-use prettytable::{format, row, Table as PrettyTable};
-use prometheus::{register_int_counter_vec_with_registry, register_int_counter_with_registry, register_int_gauge_vec_with_registry, register_int_gauge_with_registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
-use tabled::{Table, Tabled};
-use tokio::time::Instant;
 use crate::{
     committee::Committee,
     data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
@@ -18,6 +8,20 @@ use crate::{
     stat::{histogram, DivUsize, HistogramSender, PreciseHistogram},
     types::{format_authority_index, AuthorityIndex},
 };
+use prettytable::{format, row, Table as PrettyTable};
+use prometheus::{
+    register_int_counter_vec_with_registry, register_int_counter_with_registry,
+    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, Registry,
+};
+use std::{
+    net::SocketAddr,
+    ops::AddAssign,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
+use tabled::{Table, Tabled};
+use tokio::time::Instant;
 
 /// Metrics collected by the benchmark.
 pub const BENCHMARK_DURATION: &str = "benchmark_duration";
@@ -86,12 +90,14 @@ pub struct VecHistogramReporter<T> {
 }
 
 impl Metrics {
-    pub fn new(registry: &Registry, committee: Option<&Committee>) -> (Arc<Self>, Arc<MetricReporter>) {
+    pub fn new(
+        registry: &Registry,
+        committee: Option<&Committee>,
+    ) -> (Arc<Self>, Arc<MetricReporter>) {
         let (transaction_committed_latency_hist, transaction_committed_latency) = histogram();
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
         let (proposed_block_size_bytes_hist, proposed_block_size_bytes) = histogram();
-
 
         let committee_size = committee.map(Committee::len).unwrap_or_default();
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
@@ -107,11 +113,13 @@ impl Metrics {
             })
             .unzip();
         let reporter = MetricReporter {
-            transaction_committed_latency: parking_lot::Mutex::new(HistogramReporter::new_in_registry(
-                transaction_committed_latency_hist,
-                registry,
-                "transaction_committed_latency",
-            )),
+            transaction_committed_latency: parking_lot::Mutex::new(
+                HistogramReporter::new_in_registry(
+                    transaction_committed_latency_hist,
+                    registry,
+                    "transaction_committed_latency",
+                ),
+            ),
 
             block_committed_latency: parking_lot::Mutex::new(HistogramReporter::new_in_registry(
                 block_committed_latency_hist,
@@ -133,17 +141,17 @@ impl Metrics {
             )),
 
             global_in_memory_blocks: register_int_gauge_with_registry!(
-            "global_in_memory_blocks",
-            "Number of blocks loaded in memory",
-            registry,
-        )
-                .unwrap(),
+                "global_in_memory_blocks",
+                "Number of blocks loaded in memory",
+                registry,
+            )
+            .unwrap(),
             global_in_memory_blocks_bytes: register_int_gauge_with_registry!(
-            "global_in_memory_blocks_bytes",
-            "Total size of blocks loaded in memory",
-            registry,
-        )
-                .unwrap(),
+                "global_in_memory_blocks_bytes",
+                "Total size of blocks loaded in memory",
+                registry,
+            )
+            .unwrap(),
         };
         let metrics = Self {
             benchmark_duration: register_int_counter_with_registry!(
@@ -169,12 +177,14 @@ impl Metrics {
                 "bytes_sent_total",
                 "Total number of bytes sent",
                 registry,
-            ).unwrap(),
+            )
+            .unwrap(),
             bytes_received_total: register_int_counter_with_registry!(
                 "bytes_received_total",
                 "Total number of bytes sent",
                 registry,
-            ).unwrap(),
+            )
+            .unwrap(),
             leader_timeout_total: register_int_counter_with_registry!(
                 "leader_timeout_total",
                 "Total number of leader timeouts",
@@ -186,7 +196,7 @@ impl Metrics {
                 "Total number of sequenced transactions",
                 registry,
             )
-                .unwrap(),
+            .unwrap(),
 
             block_store_loaded_blocks: register_int_counter_with_registry!(
                 "block_store_loaded_blocks",
@@ -289,38 +299,56 @@ impl Metrics {
         (Arc::new(metrics), Arc::new(reporter))
     }
 
-    pub fn aggregate_and_display(metrics: Vec<Arc<Metrics>>, reporters: Vec<Arc<MetricReporter>>, duration_secs: u64) {
+    pub fn aggregate_and_display(
+        metrics: Vec<Arc<Metrics>>,
+        reporters: Vec<Arc<MetricReporter>>,
+        duration_secs: u64,
+    ) {
         let mut table = PrettyTable::new();
         table.set_format(default_table_format());
 
         let num_validators = metrics.len() as u64;
 
         // Calculate overall statistics
-        let average_transactions: u64 = metrics.iter()
+        let average_transactions: u64 = metrics
+            .iter()
             .map(|m| m.sequenced_transactions_total.get())
-            .sum::<u64>() / num_validators;
+            .sum::<u64>()
+            / num_validators;
         let average_tps = average_transactions as f64 / duration_secs as f64;
 
-        let average_blocks_submitted = metrics.iter()
+        let average_blocks_submitted = metrics
+            .iter()
             .map(|m| m.block_store_entries.get())
-            .sum::<u64>() / num_validators;
+            .sum::<u64>()
+            / num_validators;
         let average_bps = average_blocks_submitted as f64 / duration_secs as f64;
 
-        let average_bytes_sent: u64 = metrics.iter()
+        let average_bytes_sent: u64 = metrics
+            .iter()
             .map(|m| m.bytes_sent_total.get())
-            .sum::<u64>()  / num_validators;
-        let average_bytes_received: u64 = metrics.iter()
+            .sum::<u64>()
+            / num_validators;
+        let average_bytes_received: u64 = metrics
+            .iter()
             .map(|m| m.bytes_received_total.get())
-            .sum::<u64>() / num_validators;
+            .sum::<u64>()
+            / num_validators;
 
-        let p50_block_committed_latency = reporters.iter()
+        let p50_block_committed_latency = reporters
+            .iter()
             .filter_map(|r| r.block_committed_latency.lock().histogram.pcts([500]))
             .filter_map(|pcts| pcts.first().copied())
-            .sum::<Duration>().as_millis() / num_validators as u128;
-        let p50_transaction_committed_latency = reporters.iter()
+            .sum::<Duration>()
+            .as_millis()
+            / num_validators as u128;
+        let p50_transaction_committed_latency = reporters
+            .iter()
             .filter_map(|r| r.transaction_committed_latency.lock().histogram.pcts([500]))
             .filter_map(|pcts| pcts.first().copied())
-            .sum::<Duration>().as_millis() / num_validators as u128;
+            .sum::<Duration>()
+            .as_millis()
+            / num_validators as u128;
         // Display basic metrics
         table.set_titles(row![bH2->"Metrics Summary Across Honest Validators"]);
         table.add_row(row![b->"Number of honest validators:", num_validators]);
@@ -329,7 +357,9 @@ impl Metrics {
         // Performance metrics
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Performance Metrics"]);
-        table.add_row(row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)]);
+        table.add_row(
+            row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)],
+        );
         table.add_row(row![b->"Average e2e latency:", format!("{:.2} millis", p50_transaction_committed_latency)]);
         table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
@@ -509,7 +539,9 @@ impl MetricReporter {
     }
 
     pub fn clear_receive_all(&self) {
-        self.transaction_committed_latency.lock().clear_receive_all();
+        self.transaction_committed_latency
+            .lock()
+            .clear_receive_all();
         self.block_committed_latency.lock().clear_receive_all();
         self.proposed_block_size_bytes.lock().clear_receive_all();
         self.connection_latency.lock().clear_receive_all();

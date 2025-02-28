@@ -1,12 +1,11 @@
-use std::collections::HashMap;
-use reed_solomon_simd::{ReedSolomonDecoder};
 use crate::committee::Committee;
 use crate::crypto::TransactionsCommitment;
 use crate::encoder::{Encoder, ShardEncoder};
-use crate::types::{AuthorityIndex,  CachedStatementBlock, Shard, VerifiedStatementBlock};
+use crate::types::{AuthorityIndex, CachedStatementBlock, Shard, VerifiedStatementBlock};
+use reed_solomon_simd::ReedSolomonDecoder;
+use std::collections::HashMap;
 
 pub type Decoder = ReedSolomonDecoder;
-
 
 pub trait CachedStatementBlockDecoder {
     fn decode_shards(
@@ -29,18 +28,31 @@ impl CachedStatementBlockDecoder for Decoder {
         let info_length = committee.info_length();
         let total_length = committee.len();
         let parity_length = total_length - info_length;
-        let position =  cached_block.encoded_statements().iter().position(|x| x.is_some());
-        let position = position.expect("Expect a block in cached blocks with a sufficient number of available shards");
-        let shard_size = cached_block.encoded_statements()[position].as_ref().unwrap().len();
-        self.reset(info_length, parity_length, shard_size).expect("decoder reset failed");
+        let position = cached_block
+            .encoded_statements()
+            .iter()
+            .position(|x| x.is_some());
+        let position = position
+            .expect("Expect a block in cached blocks with a sufficient number of available shards");
+        let shard_size = cached_block.encoded_statements()[position]
+            .as_ref()
+            .unwrap()
+            .len();
+        self.reset(info_length, parity_length, shard_size)
+            .expect("decoder reset failed");
         for i in 0..info_length {
             if cached_block.encoded_statements()[i].is_some() {
-                self.add_original_shard(i, cached_block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
+                self.add_original_shard(i, cached_block.encoded_statements()[i].as_ref().unwrap())
+                    .expect("adding shard failed")
             }
         }
         for i in info_length..total_length {
             if cached_block.encoded_statements()[i].is_some() {
-                self.add_recovery_shard(i - info_length, cached_block.encoded_statements()[i].as_ref().unwrap()).expect("adding shard failed")
+                self.add_recovery_shard(
+                    i - info_length,
+                    cached_block.encoded_statements()[i].as_ref().unwrap(),
+                )
+                .expect("adding shard failed")
             }
         }
 
@@ -58,17 +70,23 @@ impl CachedStatementBlockDecoder for Decoder {
         drop(result);
 
         let recovered_statements = encoder.encode_shards(data, info_length, parity_length);
-        let (computed_merkle_root, computed_merkle_proof) = TransactionsCommitment::new_from_encoded_statements(&recovered_statements, own_id as usize);
+        let (computed_merkle_root, computed_merkle_proof) =
+            TransactionsCommitment::new_from_encoded_statements(
+                &recovered_statements,
+                own_id as usize,
+            );
 
         if computed_merkle_root == cached_block.merkle_root() {
             let mut reconstructed_cached_block = cached_block;
             for i in 0..total_length {
                 if reconstructed_cached_block.encoded_statements()[i].is_none() {
-                    reconstructed_cached_block.add_encoded_shard(i, recovered_statements[i].clone());
+                    reconstructed_cached_block
+                        .add_encoded_shard(i, recovered_statements[i].clone());
                 }
             }
-            let storage_block: VerifiedStatementBlock = reconstructed_cached_block.to_verified_block(own_id as usize, computed_merkle_proof, info_length);
-            return Some(storage_block)
+            let storage_block: VerifiedStatementBlock = reconstructed_cached_block
+                .to_verified_block(own_id as usize, computed_merkle_proof, info_length);
+            return Some(storage_block);
         }
         None
     }

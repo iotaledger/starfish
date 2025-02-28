@@ -108,7 +108,7 @@ pub enum Operation {
         /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
         /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
         #[clap(long, action, default_value_t = false, global = true)]
-        use_internal_ip_addresses: bool
+        use_internal_ip_addresses: bool,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -249,10 +249,7 @@ async fn run<C: ServerProviderClient>(
                 Some(path) => {
                     NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
                 }
-                None => {
-
-                        NodeParameters::default_with_latency(mimic_extra_latency)
-                }
+                None => NodeParameters::default_with_latency(mimic_extra_latency),
             };
             let client_parameters = match &settings.client_parameters_path {
                 Some(path) => {

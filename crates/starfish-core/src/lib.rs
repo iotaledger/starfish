@@ -11,6 +11,8 @@ pub mod core;
 mod core_thread;
 mod crypto;
 mod data;
+mod decoder;
+mod encoder;
 mod epoch_close;
 #[cfg(test)]
 #[cfg(feature = "simulator")]
@@ -22,6 +24,7 @@ pub mod net_sync;
 pub mod network;
 pub mod prometheus;
 mod range_map;
+mod rocks_store;
 mod runtime;
 mod serde;
 #[cfg(test)]
@@ -41,6 +44,3 @@ mod threshold_clock;
 mod transactions_generator;
 pub mod types;
 pub mod validator;
-mod encoder;
-mod decoder;
-mod rocks_store;

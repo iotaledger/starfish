@@ -67,10 +67,10 @@ To run with Byzantine validators:
 ```bash
 cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy chain-bomb 
 ```
-In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
+In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is Byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
 `chain-bomb`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `equivocating-two-chains`.
 
-In case of running in a single region AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between nodes. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command. In addition,
+In case of running in a single region AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between validators. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command. In addition,
 since the latencies within one region are very small, one can _mimic_ extra latencies matching some geo-distributed setup using the flag `--mimic-extra-latency`. So, the command could be
 
 ```bash

@@ -6,13 +6,13 @@ use std::{cmp::min, sync::Arc, time::Duration};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::sync::mpsc;
 
+use crate::crypto::AsBytes;
 use crate::{
     config::{ClientParameters, NodePublicConfig},
     metrics::Metrics,
     runtime::{self, timestamp_utc},
     types::{AuthorityIndex, Transaction},
 };
-use crate::crypto::AsBytes;
 
 pub struct TransactionGenerator {
     sender: mpsc::Sender<Vec<Transaction>>,

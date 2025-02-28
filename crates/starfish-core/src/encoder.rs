@@ -1,5 +1,5 @@
-use reed_solomon_simd::ReedSolomonEncoder;
 use crate::types::{BaseStatement, Shard};
+use reed_solomon_simd::ReedSolomonEncoder;
 
 pub type Encoder = ReedSolomonEncoder;
 
@@ -30,14 +30,10 @@ impl ShardEncoder for Encoder {
         self.reset(info_length, parity_length, shard_bytes)
             .expect("Reset failed");
         for shard in data.clone() {
-            self.add_original_shard(shard)
-                .expect("Adding shard failed");
+            self.add_original_shard(shard).expect("Adding shard failed");
         }
         let result = self.encode().expect("Encoding failed");
-        let recovery: Vec<Shard> = result
-            .recovery_iter()
-            .map(|slice| slice.to_vec())
-            .collect();
+        let recovery: Vec<Shard> = result.recovery_iter().map(|slice| slice.to_vec()).collect();
         data.extend(recovery);
         data
     }

@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
@@ -10,8 +12,6 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use rand::Rng;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ImportExport,
@@ -19,18 +19,17 @@ use crate::{
     data::Data,
     range_map::RangeMap,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, Stake,
-        TransactionLocator, TransactionLocatorRange,VerifiedStatementBlock,
+        AuthorityIndex, AuthoritySet, BlockReference, Stake, TransactionLocator,
+        TransactionLocatorRange, VerifiedStatementBlock,
     },
 };
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Committee {
     authorities: Vec<Authority>,
     validity_threshold: Stake, // The minimum stake required for validity
     quorum_threshold: Stake,   // The minimum stake required for quorum
-    info_length: usize, // info length used for encoding
+    info_length: usize,        // info length used for encoding
 }
 
 impl Committee {
@@ -63,13 +62,12 @@ impl Committee {
         let validity_threshold = total_stake / 3;
         let quorum_threshold = 2 * total_stake / 3;
 
-
         let committee_size = authorities.len();
         let f = (committee_size - 1) / 3;
         let info_length = match committee_size % 3 {
-            0 => {f+3},
-            1 => {f+1},
-            _ => {f+2},
+            0 => f + 3,
+            1 => f + 1,
+            _ => f + 2,
         };
 
         Arc::new(Committee {
@@ -112,7 +110,10 @@ impl Committee {
     pub fn genesis_blocks(
         &self,
         for_authority: AuthorityIndex,
-    ) -> (Data<VerifiedStatementBlock>, Vec<Data<VerifiedStatementBlock>>) {
+    ) -> (
+        Data<VerifiedStatementBlock>,
+        Vec<Data<VerifiedStatementBlock>>,
+    ) {
         let other_blocks: Vec<_> = self
             .authorities()
             .filter_map(|a| {
@@ -215,7 +216,7 @@ impl CommitteeThreshold for ValidityThreshold {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug,Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StakeAggregator<TH> {
     pub votes: AuthoritySet,
     stake: Stake,
@@ -371,7 +372,6 @@ pub enum TransactionVoteResult {
 impl<TH: CommitteeThreshold, H: ProcessedTransactionHandler<TransactionLocator>>
     TransactionAggregator<TH, H>
 {
-
 }
 
 impl<TH: CommitteeThreshold> Default for StakeAggregator<TH> {

@@ -3,14 +3,16 @@
 
 use std::cmp::Ordering;
 
+use crate::types::VerifiedStatementBlock;
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     types::{BlockReference, RoundNumber},
 };
-use crate::types::VerifiedStatementBlock;
 
-
-pub fn threshold_clock_valid_verified_block(block: &VerifiedStatementBlock, committee: &Committee) -> bool {
+pub fn threshold_clock_valid_verified_block(
+    block: &VerifiedStatementBlock,
+    committee: &Committee,
+) -> bool {
     // get a committee from the creator of the block
     let round_number = block.reference().round;
     assert!(round_number > 0);

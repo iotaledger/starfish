@@ -48,8 +48,6 @@ pub struct RealBlockHandler {
     max_transactions_per_block: usize, // max number of transaction in block. Depends on the committee size
 }
 
-
-
 impl RealBlockHandler {
     pub fn new(
         metrics: Arc<Metrics>,
@@ -88,7 +86,6 @@ impl BlockHandler for RealBlockHandler {
     fn handle_proposal(&mut self, number_transactions: usize) {
         self.pending_transactions -= number_transactions;
     }
-
 
     fn cleanup(&self) {
         let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
@@ -236,9 +233,7 @@ impl RealCommitHandler {
     }
 }
 
-impl CommitObserver
-    for RealCommitHandler
-{
+impl CommitObserver for RealCommitHandler {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
@@ -254,12 +249,10 @@ impl CommitObserver
                 let block_creation_time = block.meta_creation_time();
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
-                if block_creation_time.is_zero()  ||  block_latency.as_secs() > 60 {
+                if block_creation_time.is_zero() || block_latency.as_secs() > 60 {
                     tracing::debug!("Latency of block {} is too large, skip updating metrics - (latency: {:?}; block creation time: {:?})", block.reference(), block_latency, block_creation_time);
-                    continue
+                    continue;
                 }
-
-
 
                 self.metrics.block_committed_latency.observe(block_latency);
 
@@ -322,7 +315,6 @@ impl CommitObserver
         block_store.update_pending_unavailable(committed[slice_index..].to_vec());
         resulted_committed
     }
-
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());

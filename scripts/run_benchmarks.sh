@@ -6,12 +6,12 @@ DURATION_SECS=120
 # Strategy-specific byzantine nodes configuration
 declare -A BYZANTINE_NODES
 BYZANTINE_NODES["honest"]=0
-BYZANTINE_NODES["random-drop"]=7
-BYZANTINE_NODES["timeout-leader"]=7
-BYZANTINE_NODES["leader-withholding"]=7
-BYZANTINE_NODES["chain-bomb"]=7
-BYZANTINE_NODES["equivocating-two-chains"]=7
-BYZANTINE_NODES["equivocating-chains"]=7
+BYZANTINE_NODES["random-drop"]=3
+BYZANTINE_NODES["timeout-leader"]=3
+BYZANTINE_NODES["leader-withholding"]=3
+BYZANTINE_NODES["chain-bomb"]=3
+BYZANTINE_NODES["equivocating-two-chains"]=3
+BYZANTINE_NODES["equivocating-chains"]=3
 BYZANTINE_NODES["equivocating-chains-bomb"]=1
 
 STRATEGIES=(

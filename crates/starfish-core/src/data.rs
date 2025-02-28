@@ -11,12 +11,12 @@ use std::{
     },
 };
 
+use crate::types::StatementBlock;
 use minibytes::Bytes;
 use serde::{
     de::{DeserializeOwned, Error},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use crate::types::StatementBlock;
 
 /// Data<T> carries both the value and it's serialized bytes.
 /// When Data is created, it's value is serialized into a cache variable.
@@ -43,7 +43,10 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
         let serialized: Bytes = serialized.into();
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(serialized.len(), Ordering::Relaxed);
-        Self(Arc::new(DataInner { t:Arc::new(t), serialized }))
+        Self(Arc::new(DataInner {
+            t: Arc::new(t),
+            serialized,
+        }))
     }
 
     pub fn borrow_arc_t(&self) -> Arc<T> {
@@ -69,7 +72,6 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
 }
 
 impl Into<Arc<StatementBlock>> for Data<StatementBlock> {
-
     fn into(self) -> Arc<StatementBlock> {
         self.0.t.clone()
     }
@@ -111,7 +113,10 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Data<T> {
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(serialized.len(), Ordering::Relaxed);
         let serialized = serialized.into();
-        Ok(Self(Arc::new(DataInner { t: Arc::new(t), serialized })))
+        Ok(Self(Arc::new(DataInner {
+            t: Arc::new(t),
+            serialized,
+        })))
     }
 }
 

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{base_committer::BaseCommitter, LeaderStatus, WAVE_LENGTH};
+use crate::block_store::ConsensusProtocol;
+use crate::metrics::UtilizationTimerVecExt;
 use crate::{
     block_store::BlockStore,
     committee::Committee,
@@ -9,10 +11,8 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::{collections::VecDeque, sync::Arc};
-use crate::block_store::ConsensusProtocol;
-use crate::metrics::UtilizationTimerVecExt;
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
 /// It can be configured to use a combination of different commit strategies, including
@@ -35,7 +35,6 @@ impl UniversalCommitter {
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
 
-
         let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
 
         // Try to decide as many leaders as possible, starting with the highest round.
@@ -52,14 +51,18 @@ impl UniversalCommitter {
                     "Trying to decide {} with {committer}",
                     format_authority_round(leader, round)
                 );
-                let mut voters_for_leaders: HashSet<(BlockReference, BlockReference)> = HashSet::new();
+                let mut voters_for_leaders: HashSet<(BlockReference, BlockReference)> =
+                    HashSet::new();
                 // this logic is only correct for wave of length 3
                 let voting_round = round + 1 as RoundNumber;
                 let potential_voting_blocks = self.block_store.get_blocks_by_round(voting_round);
                 for potential_voting_block in potential_voting_blocks {
                     for reference in potential_voting_block.includes() {
                         if reference.round == round && reference.authority == leader {
-                            voters_for_leaders.insert((reference.clone(), potential_voting_block.reference().clone()));
+                            voters_for_leaders.insert((
+                                reference.clone(),
+                                potential_voting_block.reference().clone(),
+                            ));
                             break;
                         }
                     }
@@ -82,7 +85,12 @@ impl UniversalCommitter {
                     .utilization_timer
                     .utilization_timer("Committer::indirect_decide");
                 if !status.is_decided() {
-                    status = committer.try_indirect_decide(leader, round, leaders.iter(), &voters_for_leaders);
+                    status = committer.try_indirect_decide(
+                        leader,
+                        round,
+                        leaders.iter(),
+                        &voters_for_leaders,
+                    );
                     if !self.committed.contains(&(leader, round)) {
                         self.update_metrics(&status, false);
                     }
@@ -152,24 +160,22 @@ pub struct UniversalCommitterBuilder {
 impl UniversalCommitterBuilder {
     pub fn new(committee: Arc<Committee>, block_store: BlockStore, metrics: Arc<Metrics>) -> Self {
         match block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Mysticeti | ConsensusProtocol::Starfish => {
-                Self {
-                    committee,
-                    block_store,
-                    metrics,
-                    wave_length: WAVE_LENGTH,
-                    pipeline: true,
-                }
-            }
-            ConsensusProtocol::CordialMiners => {
-                    Self {
-                        committee,
-                        block_store,
-                        metrics,
-                        wave_length: WAVE_LENGTH,
-                        pipeline: false,
-                    }
-                }
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::Starfish => Self {
+                committee,
+                block_store,
+                metrics,
+                wave_length: WAVE_LENGTH,
+                pipeline: true,
+            },
+            ConsensusProtocol::CordialMiners => Self {
+                committee,
+                block_store,
+                metrics,
+                wave_length: WAVE_LENGTH,
+                pipeline: false,
+            },
         }
     }
 
@@ -181,9 +187,8 @@ impl UniversalCommitterBuilder {
                 wave_length: self.wave_length,
                 round_offset,
             };
-            let committer =
-                BaseCommitter::new(self.committee.clone(), self.block_store.clone())
-                    .with_options(options);
+            let committer = BaseCommitter::new(self.committee.clone(), self.block_store.clone())
+                .with_options(options);
             committers.push(committer);
         }
 

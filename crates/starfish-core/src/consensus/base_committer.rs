@@ -1,17 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::Arc};
-use std::collections::HashSet;
 use super::{LeaderStatus, WAVE_LENGTH};
+use crate::block_store::ConsensusProtocol;
+use crate::data::Data;
+use crate::types::VerifiedStatementBlock;
 use crate::{
     block_store::BlockStore,
     committee::{Committee, QuorumThreshold, StakeAggregator},
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::block_store::ConsensusProtocol;
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
+use std::collections::HashSet;
+use std::{fmt::Display, sync::Arc};
 
 /// The consensus protocol operates in 'waves'. Each wave is composed of a leader round, at least one
 /// voting round, and one decision round.
@@ -107,7 +107,10 @@ impl BaseCommitter {
                 .get_storage_block(*reference)
                 .expect("We should have the whole sub-dag by now");
 
-            if voters_for_leaders.contains(&(leader_block.reference().clone(), potential_vote.reference().clone())) {
+            if voters_for_leaders.contains(&(
+                leader_block.reference().clone(),
+                potential_vote.reference().clone(),
+            )) {
                 //tracing::trace!("[{self}] {potential_vote:?} is a vote for {leader_block:?}");
                 if votes_stake_aggregator.add(reference.authority, &self.committee) {
                     return true;
@@ -166,7 +169,12 @@ impl BaseCommitter {
         }
     }
 
-    fn decide_skip_starfish(&self, voting_round: RoundNumber, leader: AuthorityIndex, voters_for_leaders: &HashSet<(BlockReference, BlockReference)>) -> bool {
+    fn decide_skip_starfish(
+        &self,
+        voting_round: RoundNumber,
+        leader: AuthorityIndex,
+        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+    ) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for voting_block in &voting_blocks {
@@ -189,8 +197,10 @@ impl BaseCommitter {
             let leader_block_reference = leader_block.reference();
             for voting_block in &voting_blocks {
                 let voter = voting_block.author();
-                if voters_for_leaders.contains(&(leader_block_reference.clone(), voting_block.reference().clone()))
-                {
+                if voters_for_leaders.contains(&(
+                    leader_block_reference.clone(),
+                    voting_block.reference().clone(),
+                )) {
                     //tracing::trace!(
                     //    "[{self}] {voting_block:?} is a blame for leader {}",
                     //    format_authority_round(leader, voting_round - 1)
@@ -247,7 +257,6 @@ impl BaseCommitter {
         // the potential certificates.
         let mut early_stop = true;
         for decision_block in &decision_blocks {
-
             if total_stake_aggregator.add(decision_block.author(), &self.committee) {
                 early_stop = false;
                 break;
@@ -298,7 +307,12 @@ impl BaseCommitter {
             //);
             match anchor {
                 LeaderStatus::Commit(anchor) => {
-                    return self.decide_leader_from_anchor(anchor, leader, leader_round, voters_for_leaders);
+                    return self.decide_leader_from_anchor(
+                        anchor,
+                        leader,
+                        leader_round,
+                        voters_for_leaders,
+                    );
                 }
                 LeaderStatus::Skip(..) => (),
                 LeaderStatus::Undecided(..) => break,
@@ -320,7 +334,7 @@ impl BaseCommitter {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
-        match self.block_store.consensus_protocol  {
+        match self.block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
                     return LeaderStatus::Skip(leader, leader_round);
@@ -344,7 +358,7 @@ impl BaseCommitter {
 
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|l| self.enough_leader_support(decision_round, l,voters_for_leaders))
+            .filter(|l| self.enough_leader_support(decision_round, l, voters_for_leaders))
             .map(LeaderStatus::Commit)
             .collect();
 
@@ -365,10 +379,6 @@ impl BaseCommitter {
 
 impl Display for BaseCommitter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Committer-Round-Offset{}",
-            self.options.round_offset
-        )
+        write!(f, "Committer-Round-Offset{}", self.options.round_offset)
     }
 }

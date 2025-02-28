@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    consensus::{
-        universal_committer::UniversalCommitterBuilder, LeaderStatus, WAVE_LENGTH,
-    },
+    consensus::{universal_committer::UniversalCommitterBuilder, LeaderStatus, WAVE_LENGTH},
     test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
     types::BlockReference,
 };
@@ -73,7 +71,7 @@ fn direct_commit_late_call() {
     let wave_length = WAVE_LENGTH;
 
     let n = 10;
-    let enough_blocks =  n + 2;
+    let enough_blocks = n + 2;
     let mut block_writer = TestBlockWriter::new(&committee);
     build_dag(&committee, &mut block_writer, None, enough_blocks);
 

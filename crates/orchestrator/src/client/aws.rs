@@ -1,11 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Display},
-};
-use std::time::Duration;
 use aws_config::{BehaviorVersion, Region};
 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
 use aws_sdk_ec2::{
@@ -22,6 +17,11 @@ use aws_sdk_ec2::{
 };
 use rand::Rng;
 use serde::Serialize;
+use std::time::Duration;
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+};
 
 use super::{Instance, ServerProviderClient};
 use crate::{

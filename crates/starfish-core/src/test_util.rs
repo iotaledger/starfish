@@ -10,12 +10,14 @@ use futures::future::join_all;
 use prometheus::Registry;
 use rand::{rngs::StdRng, SeedableRng};
 
+use crate::crypto::TransactionsCommitment;
 #[cfg(feature = "simulator")]
 use crate::future_simulator::OverrideNodeContext;
 #[cfg(feature = "simulator")]
 use crate::simulated_network::SimulatedNetwork;
+use crate::types::VerifiedStatementBlock;
 use crate::{
-    block_handler::{BlockHandler, TestBlockHandler, RealCommitHandler},
+    block_handler::{BlockHandler, RealCommitHandler, TestBlockHandler},
     block_store::{BlockStore, BlockWriter, OwnBlockData, WAL_ENTRY_BLOCK},
     committee::Committee,
     config::{self, NodePrivateConfig, NodePublicConfig},
@@ -28,8 +30,6 @@ use crate::{
     types::{format_authority_index, AuthorityIndex, BlockReference, RoundNumber},
     wal::{open_file_for_wal, walf, WalPosition, WalWriter},
 };
-use crate::crypto::TransactionsCommitment;
-use crate::types::{VerifiedStatementBlock};
 
 pub fn test_metrics() -> Arc<Metrics> {
     Metrics::new(&Registry::new(), None).0
@@ -197,11 +197,8 @@ pub fn committee_and_syncers(
         cores
             .into_iter()
             .map(|core| {
-                let commit_handler = RealCommitHandler::new(
-                    committee.clone(),
-                    test_metrics(),
-                );
-                Syncer::new(core,  Default::default(), commit_handler, test_metrics())
+                let commit_handler = RealCommitHandler::new(committee.clone(), test_metrics());
+                Syncer::new(core, Default::default(), commit_handler, test_metrics())
             })
             .collect(),
     )
@@ -258,10 +255,7 @@ pub fn byzantine_simulated_network_syncers_with_epoch_duration(
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = RealCommitHandler::new(
-            committee.clone(),
-            core.metrics.clone(),
-        );
+        let commit_handler = RealCommitHandler::new(committee.clone(), core.metrics.clone());
         let node_context = OverrideNodeContext::enter(Some(core.authority()));
         let network_syncer = NetworkSyncer::start(
             network,
@@ -291,10 +285,7 @@ pub fn honest_simulated_network_syncers_with_epoch_duration(
     let (simulated_network, networks) = SimulatedNetwork::new(&committee);
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = RealCommitHandler::new(
-            committee.clone(),
-            core.metrics.clone(),
-        );
+        let commit_handler = RealCommitHandler::new(committee.clone(), core.metrics.clone());
         let node_context = OverrideNodeContext::enter(Some(core.authority()));
         let network_syncer = NetworkSyncer::start(
             network,
@@ -323,10 +314,7 @@ pub async fn network_syncers_with_epoch_duration(
     let (networks, _) = networks_and_addresses(&metrics).await;
     let mut network_syncers = vec![];
     for (network, core) in networks.into_iter().zip(cores.into_iter()) {
-        let commit_handler = RealCommitHandler::new(
-            committee.clone(),
-            test_metrics(),
-        );
+        let commit_handler = RealCommitHandler::new(committee.clone(), test_metrics());
         let network_syncer = NetworkSyncer::start(
             network,
             core,
@@ -421,7 +409,7 @@ impl TestBlockWriter {
         // Create BlockStore with RocksDB
         let state = BlockStore::open(
             0,
-            temp_dir.path(),  // Use temp directory for RocksDB
+            temp_dir.path(), // Use temp directory for RocksDB
             test_metrics(),
             committee,
             "honest".to_string(),
@@ -430,7 +418,7 @@ impl TestBlockWriter {
         let block_store = state.block_store;
 
         Self {
-            block_store,  // Keep temp_dir alive while TestBlockWriter exists
+            block_store, // Keep temp_dir alive while TestBlockWriter exists
         }
     }
 
@@ -449,10 +437,19 @@ impl TestBlockWriter {
         dag
     }
 
-    pub fn add_block(&mut self, storage_and_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)) -> WalPosition {
+    pub fn add_block(
+        &mut self,
+        storage_and_transmission_blocks: (
+            Data<VerifiedStatementBlock>,
+            Data<VerifiedStatementBlock>,
+        ),
+    ) -> WalPosition {
         let pos = self
             .wal_writer
-            .write(WAL_ENTRY_BLOCK, storage_and_transmission_blocks.0.serialized_bytes())
+            .write(
+                WAL_ENTRY_BLOCK,
+                storage_and_transmission_blocks.0.serialized_bytes(),
+            )
             .unwrap();
         self.block_store.insert_block_bounds(
             storage_and_transmission_blocks,
@@ -463,7 +460,10 @@ impl TestBlockWriter {
         pos
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)>) {
+    pub fn add_blocks(
+        &mut self,
+        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+    ) {
         for block in blocks {
             self.add_block(block);
         }
@@ -479,10 +479,12 @@ impl TestBlockWriter {
 }
 
 impl BlockWriter for TestBlockWriter {
-    fn insert_block(&mut self, blocks: (Data<VerifiedStatementBlock>,Data<VerifiedStatementBlock>)) -> WalPosition {
+    fn insert_block(
+        &mut self,
+        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+    ) -> WalPosition {
         (&mut self.wal_writer, &self.block_store).insert_block(blocks)
     }
-
 
     fn insert_own_block(
         &mut self,
@@ -547,7 +549,10 @@ pub fn build_dag(
                 ));
                 let transmission_block = data_storage_block.from_storage_to_transmission(authority);
                 let data_transmission_block = Data::new(transmission_block);
-                (*data_storage_block.reference(), (data_storage_block, data_transmission_block))
+                (
+                    *data_storage_block.reference(),
+                    (data_storage_block, data_transmission_block),
+                )
             })
             .unzip();
         block_writer.add_blocks(blocks);

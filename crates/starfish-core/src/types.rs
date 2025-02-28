@@ -19,27 +19,31 @@ pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
 pub type Decoder = ReedSolomonDecoder;
 
-
+use eyre::{bail, ensure};
+use minibytes::Bytes;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use std::{
     fmt,
     hash::{Hash, Hasher},
     ops::Range,
     time::Duration,
 };
-use std::sync::atomic::Ordering;
-use eyre::{bail, ensure};
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use serde::{Deserialize, Serialize};
-use minibytes::Bytes;
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::crypto::{TransactionsCommitment};
-use crate::{committee::{Committee}, crypto, crypto::{AsBytes, CryptoHash, SignatureBytes, Signer}, data::Data};
 use crate::block_store::ConsensusProtocol;
+use crate::crypto::TransactionsCommitment;
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 use crate::encoder::ShardEncoder;
 use crate::threshold_clock::threshold_clock_valid_verified_block;
+use crate::{
+    committee::Committee,
+    crypto,
+    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
+    data::Data,
+};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Vote {
@@ -109,12 +113,10 @@ pub struct VerifiedStatementBlock {
     // It could be a pair of encoded shard and position or none
     encoded_shard: Option<(Shard, ShardIndex)>,
     // This is Some only when the above has one some
-    merkle_proof_encoded_shard:  Option<Vec<u8>>,
+    merkle_proof_encoded_shard: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     transactions_commitment: TransactionsCommitment,
-
 }
-
 
 #[derive(Clone, Serialize, Deserialize)]
 // Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
@@ -141,10 +143,9 @@ pub struct CachedStatementBlock {
     // It could be a pair of encoded shard and position or none
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
-    merkle_proof_encoded_shard:  Option<Vec<u8>>,
+    merkle_proof_encoded_shard: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     merkle_root_encoded_statements: TransactionsCommitment,
-
 }
 
 impl CachedStatementBlock {
@@ -154,7 +155,12 @@ impl CachedStatementBlock {
         merkle_proof: Vec<u8>,
         info_length: usize,
     ) -> VerifiedStatementBlock {
-        let encoded_shard: Option<(Shard,usize)> = Some((self.encoded_statements[own_id].clone().expect("Should be shard"), own_id));
+        let encoded_shard: Option<(Shard, usize)> = Some((
+            self.encoded_statements[own_id]
+                .clone()
+                .expect("Should be shard"),
+            own_id,
+        ));
         if self.statements.is_some() {
             VerifiedStatementBlock {
                 reference: self.reference.clone(),
@@ -169,7 +175,8 @@ impl CachedStatementBlock {
                 transactions_commitment: self.merkle_root_encoded_statements.clone(),
             }
         } else {
-            let info_shards: Vec<Vec<u8>> = self.encoded_statements()
+            let info_shards: Vec<Vec<u8>> = self
+                .encoded_statements()
                 .iter()
                 .enumerate()
                 .filter(|(i, _s)| *i < info_length)
@@ -187,21 +194,31 @@ impl CachedStatementBlock {
             }
 
             let bytes_length = u32::from_le_bytes(
-                reconstructed_data[0..4].try_into().expect("Failed to read bytes_length"),
+                reconstructed_data[0..4]
+                    .try_into()
+                    .expect("Failed to read bytes_length"),
             ) as usize;
 
             // Ensure the data length matches the declared length
             if reconstructed_data.len() < 4 + bytes_length {
-
-                panic!("Reconstructed data length does not match the declared bytes_length; {} {}",reconstructed_data.len(), bytes_length);
+                panic!(
+                    "Reconstructed data length does not match the declared bytes_length; {} {}",
+                    reconstructed_data.len(),
+                    bytes_length
+                );
             } else {
-                tracing::debug!("Reconstructed data length {}, bytes_length {}", reconstructed_data.len(), bytes_length);
+                tracing::debug!(
+                    "Reconstructed data length {}, bytes_length {}",
+                    reconstructed_data.len(),
+                    bytes_length
+                );
             }
 
             // Deserialize the rest of the data into `Vec<BaseStatement>`
             let serialized_block = &reconstructed_data[4..4 + bytes_length];
-            let reconstructed_statements: Vec<BaseStatement> = bincode::deserialize(serialized_block)
-                .expect("Deserialization of reconstructed data failed");
+            let reconstructed_statements: Vec<BaseStatement> =
+                bincode::deserialize(serialized_block)
+                    .expect("Deserialization of reconstructed data failed");
             VerifiedStatementBlock {
                 reference: self.reference.clone(),
                 includes: self.includes.clone(),
@@ -214,11 +231,8 @@ impl CachedStatementBlock {
                 merkle_proof_encoded_shard: Some(merkle_proof),
                 transactions_commitment: self.merkle_root_encoded_statements.clone(),
             }
-
         }
     }
-
-
 }
 
 impl CachedStatementBlock {
@@ -230,26 +244,26 @@ impl CachedStatementBlock {
         self.encoded_statements[position] = Some(shard);
     }
 
-    pub fn add_encoded_statements(& mut self, encoded_statements: Vec<Option<Shard>>) {
+    pub fn add_encoded_statements(&mut self, encoded_statements: Vec<Option<Shard>>) {
         self.encoded_statements = encoded_statements;
     }
 
-    pub fn copy_shard(& mut self, block: &VerifiedStatementBlock) {
+    pub fn copy_shard(&mut self, block: &VerifiedStatementBlock) {
         if block.encoded_shard.is_some() {
-            let (shard, shard_index) = block.encoded_shard().as_ref().expect("It should be some because of the above check");
+            let (shard, shard_index) = block
+                .encoded_shard()
+                .as_ref()
+                .expect("It should be some because of the above check");
             self.encoded_statements[*shard_index] = Some(shard.clone());
         }
     }
 
-
     pub fn merkle_root(&self) -> TransactionsCommitment {
         self.merkle_root_encoded_statements.clone()
     }
-
 }
 
 impl VerifiedStatementBlock {
-
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -259,7 +273,7 @@ impl VerifiedStatementBlock {
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
         statements: Vec<BaseStatement>,
-        encoded_shard: Option<(Shard,usize)>,
+        encoded_shard: Option<(Shard, usize)>,
         merkle_proof: Option<Vec<u8>>,
         merkle_root: TransactionsCommitment,
     ) -> Self {
@@ -290,10 +304,7 @@ impl VerifiedStatementBlock {
         }
     }
 
-    pub fn to_cached_block(
-        &self,
-        committee_size: usize,
-    ) -> CachedStatementBlock {
+    pub fn to_cached_block(&self, committee_size: usize) -> CachedStatementBlock {
         let mut encoded_statements: Vec<Option<Shard>> = Vec::new();
         for i in 0..committee_size {
             if let Some((shard, position)) = self.encoded_shard.as_ref() {
@@ -320,8 +331,8 @@ impl VerifiedStatementBlock {
 
     pub fn from_storage_to_transmission(&self, own_id: AuthorityIndex) -> Self {
         if own_id != self.reference.authority {
-            if let Some((_,position)) = self.encoded_shard().as_ref() {
-                if *position != own_id as usize{
+            if let Some((_, position)) = self.encoded_shard().as_ref() {
+                if *position != own_id as usize {
                     return Self {
                         reference: self.reference.clone(),
                         includes: self.includes.clone(),
@@ -333,7 +344,7 @@ impl VerifiedStatementBlock {
                         encoded_shard: None,
                         merkle_proof_encoded_shard: None,
                         transactions_commitment: self.transactions_commitment.clone(),
-                    }
+                    };
                 }
             }
             Self {
@@ -396,26 +407,20 @@ impl VerifiedStatementBlock {
         &self.includes
     }
 
-
-
-    pub fn encoded_shard(&self) -> &Option<(Shard,usize)> {
-        &self
-            .encoded_shard
+    pub fn encoded_shard(&self) -> &Option<(Shard, usize)> {
+        &self.encoded_shard
     }
 
     pub fn statements(&self) -> &Option<Vec<BaseStatement>> {
-        &self
-            .statements
+        &self.statements
     }
 
     pub fn number_transactions(&self) -> usize {
         if self.statements.is_some() {
-            return self.statements().as_ref().clone().unwrap().len()
+            return self.statements().as_ref().clone().unwrap().len();
         }
         return 0;
     }
-
-
 
     pub fn author(&self) -> AuthorityIndex {
         self.reference.authority
@@ -476,7 +481,11 @@ impl VerifiedStatementBlock {
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
-                TransactionsCommitment::new_from_encoded_statements(&encoded_statements.as_ref().unwrap(), authority as usize).0
+                TransactionsCommitment::new_from_encoded_statements(
+                    &encoded_statements.as_ref().unwrap(),
+                    authority as usize,
+                )
+                .0
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 TransactionsCommitment::new_from_statements(&statements)
@@ -491,7 +500,6 @@ impl VerifiedStatementBlock {
             epoch_marker,
             transactions_commitment,
         );
-
 
         Self::new(
             authority,
@@ -508,37 +516,72 @@ impl VerifiedStatementBlock {
         )
     }
 
-    pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder, consensus_protocol: ConsensusProtocol) -> eyre::Result<()> {
+    pub fn verify(
+        &mut self,
+        committee: &Committee,
+        own_id: usize,
+        peer_id: usize,
+        encoder: &mut Encoder,
+        consensus_protocol: ConsensusProtocol,
+    ) -> eyre::Result<()> {
         let round = self.round();
         match consensus_protocol {
             ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 let committee_size = committee.len();
                 let info_length = committee.info_length();
-                let parity_length = committee_size-info_length;
+                let parity_length = committee_size - info_length;
                 if self.statements.is_some() {
-                    let encoded_statements = encoder.encode_statements(self.statements.clone().unwrap(), info_length, parity_length);
-                    let (transactions_commitment, merkle_proof_bytes) = TransactionsCommitment::new_from_encoded_statements(&encoded_statements, own_id);
-                    ensure!(transactions_commitment== self.transactions_commitment, "Incorrect Merkle root");
+                    let encoded_statements = encoder.encode_statements(
+                        self.statements.clone().unwrap(),
+                        info_length,
+                        parity_length,
+                    );
+                    let (transactions_commitment, merkle_proof_bytes) =
+                        TransactionsCommitment::new_from_encoded_statements(
+                            &encoded_statements,
+                            own_id,
+                        );
+                    ensure!(
+                        transactions_commitment == self.transactions_commitment,
+                        "Incorrect Merkle root"
+                    );
                     self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
-                    self.encoded_shard = Some((encoded_statements[own_id as usize].clone(), own_id));
+                    self.encoded_shard =
+                        Some((encoded_statements[own_id as usize].clone(), own_id));
                 } else {
                     if self.encoded_shard.is_some() {
-                        let (encoded_shard, position) = self.encoded_shard.clone().expect("We expect an encoded shard");
+                        let (encoded_shard, position) = self
+                            .encoded_shard
+                            .clone()
+                            .expect("We expect an encoded shard");
                         if position != peer_id {
                             bail!("The peer delivers a wrong encoded chunk");
                         }
                         if self.merkle_proof_encoded_shard.is_none() {
                             bail!("The peer didn't include the proof for the encoded shard");
                         }
-                        ensure!(TransactionsCommitment::check_correctness_merkle_leaf(encoded_shard, self.transactions_commitment, self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(), committee_size, position),
-                    "Merkle proof check failed");
+                        ensure!(
+                            TransactionsCommitment::check_correctness_merkle_leaf(
+                                encoded_shard,
+                                self.transactions_commitment,
+                                self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(),
+                                committee_size,
+                                position
+                            ),
+                            "Merkle proof check failed"
+                        );
                     }
                 }
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 if self.statements.is_some() {
-                    let transactions_commitment = TransactionsCommitment::new_from_statements(&self.statements.as_ref().unwrap());
-                    ensure!(transactions_commitment== self.transactions_commitment, "Incorrect Merkle root");
+                    let transactions_commitment = TransactionsCommitment::new_from_statements(
+                        &self.statements.as_ref().unwrap(),
+                    );
+                    ensure!(
+                        transactions_commitment == self.transactions_commitment,
+                        "Incorrect Merkle root"
+                    );
                 } else {
                     bail!("The peer didn't include statements in block");
                 }
@@ -591,7 +634,6 @@ impl VerifiedStatementBlock {
         );
         Ok(())
     }
-
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -607,7 +649,7 @@ pub struct StatementBlock {
     // Transaction data acknowledgment
     acknowledgement_statements: Vec<BlockReference>,
 
-        // Creation time of the block as reported by creator, currently not enforced
+    // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
 
     epoch_marker: EpochStatus,
@@ -617,13 +659,14 @@ pub struct StatementBlock {
     // It could be either vector of Nones, vector of Somes or a vector with one Some
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above is a vector with 1 Some and all other Nones
-    merkle_proof:  Option<Vec<u8>>,
+    merkle_proof: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     merkle_root: TransactionsCommitment,
-
 }
 
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
+#[derive(
+    Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
+)]
 pub struct AuthoritySet(u128); // todo - support more then 128 authorities
 
 pub type TimestampNs = u128;
@@ -642,7 +685,6 @@ impl Ord for BlockReference {
         (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, other.digest))
     }
 }
-
 
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub struct TransactionLocator {
@@ -672,7 +714,6 @@ impl TransactionLocator {
 }
 
 impl TransactionLocatorRange {
-
     pub fn one(locator: TransactionLocator) -> Self {
         Self {
             block: locator.block,
@@ -799,15 +840,11 @@ pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {
     format!("{}{}", format_authority_index(i), r)
 }
 
-
-
 impl fmt::Debug for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self)
     }
 }
-
-
 
 impl fmt::Display for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -824,7 +861,6 @@ impl fmt::Display for VerifiedStatementBlock {
             } else {
                 write!(f, "header")?;
             }
-
         }
         write!(f, ")")
     }
@@ -864,13 +900,11 @@ impl std::hash::Hash for StatementBlock {
     }
 }
 
-
 impl std::hash::Hash for VerifiedStatementBlock {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.reference.hash(state);
     }
 }
-
 
 impl fmt::Debug for BaseStatement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -989,7 +1023,7 @@ mod test {
     };
 
     use rand::{prelude::SliceRandom, Rng};
-    
+
     use super::*;
 
     pub struct Dag(HashMap<BlockReference, Data<VerifiedStatementBlock>>);
@@ -1024,8 +1058,7 @@ mod test {
                 let includes = includes.split(',');
                 includes.map(Self::parse_name).collect()
             };
-            let acknowledgement_statements = includes
-                .clone();
+            let acknowledgement_statements = includes.clone();
             VerifiedStatementBlock {
                 reference,
                 includes,

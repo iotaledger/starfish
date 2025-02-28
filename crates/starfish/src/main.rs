@@ -1,24 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
-    sync::Arc,
-};
-use std::time::Duration;
 use clap::{command, Parser};
 use eyre::{eyre, Context, Result};
 use prettytable::format;
+use starfish_core::metrics::Metrics;
 use starfish_core::{
     committee::Committee,
     config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
     types::AuthorityIndex,
     validator::Validator,
 };
+use std::time::Duration;
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+    sync::Arc,
+};
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
-use starfish_core::metrics::Metrics;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -133,7 +133,17 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
             consensus: consensus_protocol,
-        } => dryrun(authority, committee_size, load, byzantine_strategy, mimic_latency, consensus_protocol).await?,
+        } => {
+            dryrun(
+                authority,
+                committee_size,
+                load,
+                byzantine_strategy,
+                mimic_latency,
+                consensus_protocol,
+            )
+            .await?
+        }
         Operation::LocalBenchmark {
             committee_size,
             load,
@@ -142,15 +152,18 @@ async fn main() -> Result<()> {
             mimic_extra_latency,
             consensus: consensus_protocol,
             duration_secs,
-        } => local_benchmark(
-            committee_size,
-            load,
-            num_byzantine_nodes,
-            byzantine_strategy,
-            mimic_extra_latency,
-            consensus_protocol,
-            duration_secs,
-        ).await?,
+        } => {
+            local_benchmark(
+                committee_size,
+                load,
+                num_byzantine_nodes,
+                byzantine_strategy,
+                mimic_extra_latency,
+                consensus_protocol,
+                duration_secs,
+            )
+            .await?
+        }
     }
 
     Ok(())
@@ -225,12 +238,14 @@ async fn local_benchmark(
     println!("Committee Size: {}", committee_size);
     println!("Byzantine Nodes: {}", num_byzantine_nodes);
     if num_byzantine_nodes != 0 {
-
         println!("Byzantine Strategy: {}", byzantine_strategy);
     }
     println!("Transaction Load: {} tx/s", load);
     println!("Consensus Protocol: {}", consensus_protocol);
-    println!("Network Latency: {}", if mimic_latency { "Enabled" } else { "Disabled" });
+    println!(
+        "Network Latency: {}",
+        if mimic_latency { "Enabled" } else { "Disabled" }
+    );
     println!("Duration: {} seconds", duration_secs);
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
@@ -265,7 +280,8 @@ async fn local_benchmark(
                 ))
             }
         }
-        let mut private_configs = NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
+        let mut private_configs =
+            NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
         let private_config = private_configs.remove(authority);
         match fs::create_dir_all(&private_config.storage_path) {
             Ok(_) => {}
@@ -281,7 +297,7 @@ async fn local_benchmark(
         } else {
             false
         };
-        let validator =  if is_byzantine {
+        let validator = if is_byzantine {
             Validator::start(
                 authority as AuthorityIndex,
                 committee.clone(),
@@ -290,7 +306,8 @@ async fn local_benchmark(
                 client_parameters.clone(),
                 byzantine_strategy.clone(),
                 consensus_protocol.clone(),
-            ).await?
+            )
+            .await?
         } else {
             Validator::start(
                 authority as AuthorityIndex,
@@ -300,13 +317,13 @@ async fn local_benchmark(
                 client_parameters.clone(),
                 "honest".to_string(),
                 consensus_protocol.clone(),
-            ).await?
+            )
+            .await?
         };
         if !is_byzantine {
             metrics_of_honest_validators.push(validator.metrics());
             reporters_of_honest_validators.push(validator.reporter())
         }
-
 
         // Use the same pattern as the run method
         let handle = tokio::spawn(async move {
@@ -460,7 +477,6 @@ async fn dryrun(
 
     Ok(())
 }
-
 
 pub fn default_table_format() -> format::TableFormat {
     format::FormatBuilder::new()

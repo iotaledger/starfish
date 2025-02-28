@@ -8,13 +8,13 @@ use std::{
     path::PathBuf,
 };
 
+use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
+use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
+use serde::{Deserialize, Serialize};
 use starfish_core::{
     config::{self, ClientParameters, NodeParameters},
     types::AuthorityIndex,
 };
-use serde::{Deserialize, Serialize};
-use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
-use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
@@ -36,7 +36,7 @@ impl Deref for StarfishNodeParameters {
 
 impl Debug for StarfishNodeParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-       write!(f, "c")
+        write!(f, "c")
     }
 }
 
@@ -160,12 +160,13 @@ impl ProtocolCommands for StarfishProtocol {
                 let client_parameters_path = self.working_dir.join("client-parameters.yaml");
                 let byzantine_nodes = parameters.byzantine_nodes;
                 let mut byzantine_strategy = "honest".to_string();
-                if i % 3 == 0 && i/3 < byzantine_nodes {
+                if i % 3 == 0 && i / 3 < byzantine_nodes {
                     byzantine_strategy = parameters.byzantine_strategy.clone();
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();
 
-                let mut run = [&format!("./{BINARY_PATH}/starfish"),
+                let mut run = [
+                    &format!("./{BINARY_PATH}/starfish"),
                     "run",
                     &format!("--authority {authority}"),
                     &format!("--consensus {consensus_protocol}"),

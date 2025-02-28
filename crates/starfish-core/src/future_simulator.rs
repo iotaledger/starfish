@@ -303,8 +303,7 @@ impl Wake for Waker {
     }
 }
 
-pub enum
-Sleep {
+pub enum Sleep {
     Created(Duration),
     WaitingUntil(Duration),
 }

@@ -1,17 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, fmt};
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use crate::{
-    block_store::BlockStore,
-    types::{BlockReference},
-};
 use crate::block_store::ConsensusProtocol;
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
+use crate::{block_store::BlockStore, types::BlockReference};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::{collections::HashSet, fmt};
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -47,7 +44,7 @@ pub struct Linearizer {
 impl Linearizer {
     pub fn new(committee: Committee) -> Self {
         Self {
-            committed:  HashSet::new(),
+            committed: HashSet::new(),
             traversed_blocks: HashSet::new(),
             votes: HashMap::new(),
             committee,
@@ -58,7 +55,7 @@ impl Linearizer {
     fn collect_subdag_mysticeti(
         &mut self,
         block_store: &BlockStore,
-        leader_block: Data<VerifiedStatementBlock>
+        leader_block: Data<VerifiedStatementBlock>,
     ) -> CommittedSubDag {
         let mut to_commit = Vec::new();
 
@@ -67,7 +64,10 @@ impl Linearizer {
         assert!(self.committed.insert(leader_block_ref));
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
-            let s = self.votes.entry(x.reference().clone()).or_insert_with(StakeAggregator::new);
+            let s = self
+                .votes
+                .entry(x.reference().clone())
+                .or_insert_with(StakeAggregator::new);
             s.add(leader_block_ref.authority, &self.committee);
             for reference in x.includes() {
                 // The block manager may have cleaned up blocks passed the latest committed rounds.
@@ -101,7 +101,10 @@ impl Linearizer {
             for acknowledgement_statement in x.acknowledgement_statements() {
                 // Todo the authority creating the block might automatically acknowledge for its block
 
-                let s = self.votes.entry(*acknowledgement_statement).or_insert_with(StakeAggregator::new);
+                let s = self
+                    .votes
+                    .entry(*acknowledgement_statement)
+                    .or_insert_with(StakeAggregator::new);
                 if !s.is_quorum(&self.committee) {
                     if s.add(who_votes, &self.committee) {
                         blocks_transaction_data_quorum.push(*acknowledgement_statement);
@@ -111,7 +114,7 @@ impl Linearizer {
             self.traversed_blocks.insert(*x.reference());
             for reference in x.includes() {
                 // Skip the block if it is too far back
-                if  self.traversed_blocks.contains(reference){
+                if self.traversed_blocks.contains(reference) {
                     continue;
                 }
                 let block = block_store
@@ -163,7 +166,6 @@ impl Linearizer {
             })
             .collect();
 
-
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
@@ -176,22 +178,26 @@ impl Linearizer {
         let mut committed = vec![];
         for leader_block in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-           let mut sub_dag = match consensus_protocol
-           {
-               ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
-                   self.collect_subdag_starfish(block_store, leader_block)
-               }
-               ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                   self.collect_subdag_mysticeti(block_store, leader_block)
-               }
-           };
+            let mut sub_dag = match consensus_protocol {
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
+                    self.collect_subdag_starfish(block_store, leader_block)
+                }
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                    self.collect_subdag_mysticeti(block_store, leader_block)
+                }
+            };
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
-            let acknowledgement_authorities: Vec<_> =
-                    sub_dag.blocks
-                        .iter()
-                        .map(|x|self.votes.get(x.reference()).expect("After commiting expect a quorum in starfish").clone())
-                        .collect();
+            let acknowledgement_authorities: Vec<_> = sub_dag
+                .blocks
+                .iter()
+                .map(|x| {
+                    self.votes
+                        .get(x.reference())
+                        .expect("After commiting expect a quorum in starfish")
+                        .clone()
+                })
+                .collect();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);
             committed.push((sub_dag, acknowledgement_authorities));
         }

@@ -435,8 +435,9 @@ impl MeasurementsCollection {
                 }
                 "bytes_sent_total" | "bytes_received_total" => {
                     let bandwidth = self.aggregate_bandwidth(label);
-                    let average_bandwidth_bytes = bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64 ;
-                    let avg_bandwidth = average_bandwidth_bytes / 1024.0 / 1024.0 ;
+                    let average_bandwidth_bytes =
+                        bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64;
+                    let avg_bandwidth = average_bandwidth_bytes / 1024.0 / 1024.0;
                     table.add_row(row![b->"Bandwidth:", format!("{:.2} MB/s", avg_bandwidth)]);
                     table.add_row(row![b->"Byte complexity:", format!("{:.2} ", average_bandwidth_bytes / tps_value / 512.0)]);
                 }

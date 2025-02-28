@@ -1,17 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use std::cmp::max;
 use futures::future::join_all;
-use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
 use rand::prelude::StdRng;
+use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
+use std::cmp::max;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 
 use crate::block_store::{ByzantineStrategy, ConsensusProtocol};
 use crate::consensus::universal_committer::UniversalCommitter;
+use crate::metrics::UtilizationTimerVecExt;
+use crate::types::format_authority_index;
 use crate::{
     block_handler::BlockHandler,
     metrics::Metrics,
@@ -21,8 +23,6 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use crate::metrics::UtilizationTimerVecExt;
-use crate::types::format_authority_index;
 
 #[derive(Clone)]
 pub struct SynchronizerParameters {
@@ -37,22 +37,19 @@ pub struct SynchronizerParameters {
 impl SynchronizerParameters {
     pub fn new(committee_size: usize, consensus_protocol: ConsensusProtocol) -> Self {
         match consensus_protocol {
-            ConsensusProtocol::Mysticeti  => {
-                Self {
-                    batch_own_block_size: committee_size,
-                    batch_other_block_size: 3 * committee_size,
-                    sample_precision: Duration::from_millis(600),
-                }
-            }
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
-                Self {
-                    batch_own_block_size: committee_size,
-                    batch_other_block_size: committee_size * committee_size,
-                    sample_precision: Duration::from_millis(600),
-                }
-            }
+            ConsensusProtocol::Mysticeti => Self {
+                batch_own_block_size: committee_size,
+                batch_other_block_size: 3 * committee_size,
+                sample_precision: Duration::from_millis(600),
+            },
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::CordialMiners => Self {
+                batch_own_block_size: committee_size,
+                batch_other_block_size: committee_size * committee_size,
+                sample_precision: Duration::from_millis(600),
+            },
         }
-
     }
 }
 
@@ -141,20 +138,27 @@ where
         self.data_requestor = Some(handle);
     }
 
-    async fn request_missing_data_blocks(peer_id: AuthorityIndex, to: Sender<NetworkMessage>, inner: Arc<NetworkSyncerInner<H, C>>, parameters: SynchronizerParameters) -> Option<()>
-    {
+    async fn request_missing_data_blocks(
+        peer_id: AuthorityIndex,
+        to: Sender<NetworkMessage>,
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        parameters: SynchronizerParameters,
+    ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
         let leader_timeout = Duration::from_secs(1);
         let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
-            let committed_dags= inner.block_store.read_pending_unavailable();
+            let committed_dags = inner.block_store.read_pending_unavailable();
             let mut to_request = Vec::new();
             'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
                         let mut aggregator = commit.1[i].clone();
-                        if aggregator.votes.insert(own_id) && !aggregator.votes.insert(peer_id) && !inner.block_store.is_data_available(block.reference()) {
+                        if aggregator.votes.insert(own_id)
+                            && !aggregator.votes.insert(peer_id)
+                            && !inner.block_store.is_data_available(block.reference())
+                        {
                             tracing::debug!("Data in block {block:?} is missing");
                             to_request.push(block.reference().clone());
                         }
@@ -166,7 +170,9 @@ where
             }
             if to_request.len() > 0 {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
-                to.send(NetworkMessage::MissingTxDataRequest(to_request)).await.ok()?;
+                to.send(NetworkMessage::MissingTxDataRequest(to_request))
+                    .await
+                    .ok()?;
             }
             let _sleep = sleep(leader_timeout).await;
         }
@@ -210,7 +216,7 @@ where
             handle.abort();
             waiters.push(handle);
         }
-        if let Some(handle) = self.response_push_blocks.take(){
+        if let Some(handle) = self.response_push_blocks.take() {
             handle.abort();
             waiters.push(handle);
         }
@@ -221,10 +227,7 @@ where
         join_all(waiters).await;
     }
 
-    pub async fn push_block_history_with_shards(
-        &mut self,
-        block_reference: BlockReference,
-    ) {
+    pub async fn push_block_history_with_shards(&mut self, block_reference: BlockReference) {
         if let Some(existing) = self.response_push_blocks.take() {
             existing.abort();
             existing.await.ok();
@@ -240,21 +243,21 @@ where
         self.response_push_blocks = Some(handle);
     }
 
-
     pub async fn send_transmission_blocks(
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
-    ) -> Option<()>{
+    ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
-        let batch_other_block_size =  self.parameters.batch_other_block_size;
+        let batch_other_block_size = self.parameters.batch_other_block_size;
         let mut blocks = Vec::new();
         let mut own_block_counter = 0;
         let mut other_block_counter = 0;
         for block_reference in block_references {
-            let block = self.inner
+            let block = self
+                .inner
                 .block_store
                 .get_transmission_block(block_reference);
             if block.is_some() {
@@ -264,7 +267,9 @@ where
                 } else {
                     other_block_counter += 1;
                 }
-                if own_block_counter >= batch_own_block_size && other_block_counter >= batch_other_block_size {
+                if own_block_counter >= batch_own_block_size
+                    && other_block_counter >= batch_other_block_size
+                {
                     break;
                 }
                 if own_block_counter >= batch_own_block_size {
@@ -276,7 +281,9 @@ where
                 blocks.push(block);
             }
         }
-        tracing::debug!("Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}");
+        tracing::debug!(
+            "Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}"
+        );
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         Some(())
     }
@@ -285,7 +292,7 @@ where
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
-    ) -> Option<()>{
+    ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
@@ -294,9 +301,7 @@ where
         let unknown_blocks_by_peer = self.inner.block_store.get_unknown_by_authority(peer_id);
         for block_reference in block_references {
             if unknown_blocks_by_peer.contains(&block_reference) {
-                let block = self.inner
-                    .block_store
-                    .get_storage_block(block_reference);
+                let block = self.inner.block_store.get_storage_block(block_reference);
                 if block.is_some() {
                     let block = block.expect("Should be some");
                     block_counter += 1;
@@ -306,7 +311,7 @@ where
                     }
                 }
             }
-            if block_counter >= batch_block_size{
+            if block_counter >= batch_block_size {
                 break;
             }
         }
@@ -315,7 +320,9 @@ where
                 .block_store
                 .update_known_by_authority(block.reference().clone(), peer_id);
         }
-        tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
+        tracing::debug!(
+            "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
+        );
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         Some(())
     }
@@ -325,7 +332,7 @@ where
         &mut self,
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
-    ) -> Option<()>{
+    ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.block_store.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
@@ -333,14 +340,13 @@ where
         let mut block_counter = 0;
         let unknown_blocks_by_peer = self.inner.block_store.get_unknown_by_authority(peer_id);
         for block_reference in block_references {
-            let block = self.inner
-                .block_store
-                .get_storage_block(block_reference);
+            let block = self.inner.block_store.get_storage_block(block_reference);
             if block.is_some() {
                 let block = block.expect("Should be some");
                 for parent_reference in block.includes() {
                     if unknown_blocks_by_peer.contains(parent_reference) {
-                        let parent = self.inner
+                        let parent = self
+                            .inner
                             .block_store
                             .get_storage_block(parent_reference.clone());
                         if parent.is_some() {
@@ -353,7 +359,7 @@ where
                     }
                 }
             }
-            if block_counter >= batch_block_size{
+            if block_counter >= batch_block_size {
                 break;
             }
         }
@@ -362,7 +368,9 @@ where
                 .block_store
                 .update_known_by_authority(block.reference().clone(), peer_id);
         }
-        tracing::debug!("Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}");
+        tracing::debug!(
+            "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
+        );
         self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
         Some(())
     }
@@ -407,15 +415,18 @@ where
         to: Sender<NetworkMessage>,
         peer_id: AuthorityIndex,
         synchronizer_parameters: SynchronizerParameters,
-    ) -> Option<()>{
+    ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let leader_timeout = Duration::from_millis(600);
         loop {
             let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-            let blocks = inner
-                .block_store
-                .get_unknown_past_cone(peer_id, block_reference, batch_own_block_size, batch_other_block_size);
+            let blocks = inner.block_store.get_unknown_past_cone(
+                peer_id,
+                block_reference,
+                batch_own_block_size,
+                batch_other_block_size,
+            );
             for block in &blocks {
                 inner
                     .block_store
@@ -491,7 +502,8 @@ where
                                 to_whom_authority_index,
                                 &mut round,
                                 batch_byzantine_own_block_size,
-                            ).await?;
+                            )
+                            .await?;
                         }
                     }
                     notified.await;
@@ -509,7 +521,8 @@ where
                                 to_whom_authority_index,
                                 &mut round,
                                 batch_byzantine_own_block_size,
-                            ).await?;
+                            )
+                            .await?;
                         }
                     }
                     notified.await;
@@ -525,7 +538,8 @@ where
                             to_whom_authority_index,
                             &mut round,
                             batch_byzantine_own_block_size,
-                        ).await?;
+                        )
+                        .await?;
                     }
                     notified.await;
                 }
@@ -539,7 +553,7 @@ where
                         &mut round,
                         batch_byzantine_own_block_size,
                     )
-                        .await?;
+                    .await?;
 
                     notified.await;
                 }
@@ -581,13 +595,11 @@ where
                         &mut round,
                         batch_own_block_size,
                     )
-                        .await?;
+                    .await?;
                     select! {
                          _sleep =  sleep(leader_timeout) =>  {}
                         _created_block = notified => {}
                     }
-
-
                 }
             }
             current_round = inner
@@ -597,10 +609,6 @@ where
                 .round();
         }
     }
-
-
-
-
 
     async fn disseminate_own_blocks_and_encoded_past_blocks(
         to_whom_authority_index: AuthorityIndex,
@@ -655,10 +663,11 @@ where
     H: 'static + BlockHandler,
 {
     let peer = format_authority_index(to_whom_authority_index);
-    let blocks =
-        inner
-            .block_store
-            .get_own_transmission_blocks(to_whom_authority_index, round.clone(), batch_size);
+    let blocks = inner.block_store.get_own_transmission_blocks(
+        to_whom_authority_index,
+        round.clone(),
+        batch_size,
+    );
     for block in blocks.iter() {
         inner
             .block_store
@@ -669,7 +678,6 @@ where
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
-
 
 #[allow(unused)]
 async fn sending_batch_all_blocks<H, C>(
@@ -686,9 +694,11 @@ where
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
     let own_index = inner.block_store.get_own_authority_index();
-    let blocks = inner
-        .block_store
-        .get_unknown_causal_history(to_whom_authority_index, batch_own_block_size, batch_other_block_size);
+    let blocks = inner.block_store.get_unknown_causal_history(
+        to_whom_authority_index,
+        batch_own_block_size,
+        batch_other_block_size,
+    );
     for block in &blocks {
         inner
             .block_store
@@ -698,8 +708,6 @@ where
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
-
-
 
 #[allow(unused)]
 async fn sending_past_cone_block<H, C>(
@@ -715,21 +723,30 @@ where
 {
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-    tracing::debug!("Unknown by {to_whom_authority_index}={:?}", inner.block_store.get_unknown_by_authority(to_whom_authority_index));
+    tracing::debug!(
+        "Unknown by {to_whom_authority_index}={:?}",
+        inner
+            .block_store
+            .get_unknown_by_authority(to_whom_authority_index)
+    );
     let own_index = inner.block_store.get_own_authority_index();
-    let blocks = inner
-        .block_store
-        .get_unknown_past_cone(to_whom_authority_index, block_reference, batch_own_block_size, batch_other_block_size);
+    let blocks = inner.block_store.get_unknown_past_cone(
+        to_whom_authority_index,
+        block_reference,
+        batch_own_block_size,
+        batch_other_block_size,
+    );
     for block in &blocks {
         inner
             .block_store
             .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
     }
-    tracing::debug!("Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}");
+    tracing::debug!(
+        "Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}"
+    );
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
     Some(())
 }
-
 
 enum BlockFetcherMessage {
     RegisterAuthority(AuthorityIndex, mpsc::Sender<NetworkMessage>),
@@ -858,7 +875,6 @@ where
                 }
                 to_request[authority].push(reference);
                 self.missing.remove(&reference); // todo - ensure we receive the block
-
             }
         }
         // TODO: If we are missing many blocks from the same authority

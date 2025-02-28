@@ -1,11 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, net::Ipv4Addr};
 use rand::Rng;
 use reqwest::{Client as NetworkClient, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::{fmt::Display, net::Ipv4Addr};
 
 use super::{Instance, ServerProviderClient};
 use crate::{

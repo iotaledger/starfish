@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use futures::future::join_all;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{
     collections::HashMap,
     sync::{
@@ -9,14 +11,20 @@ use std::{
     },
     time::Duration,
 };
-use futures::future::join_all;
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     select,
     sync::{mpsc, oneshot, Notify},
 };
 
+use crate::block_store::ConsensusProtocol;
 use crate::consensus::universal_committer::UniversalCommitter;
+use crate::data::Data;
+use crate::decoder::CachedStatementBlockDecoder;
+use crate::metrics::UtilizationTimerVecExt;
+use crate::rocks_store::RocksStore;
+use crate::runtime::sleep;
+use crate::synchronizer::DataRequestor;
+use crate::types::{BlockReference, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -31,14 +39,6 @@ use crate::{
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
 };
-use crate::block_store::ConsensusProtocol;
-use crate::data::Data;
-use crate::decoder::CachedStatementBlockDecoder;
-use crate::metrics::UtilizationTimerVecExt;
-use crate::rocks_store::RocksStore;
-use crate::runtime::sleep;
-use crate::synchronizer::DataRequestor;
-use crate::types::{BlockReference, VerifiedStatementBlock};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
@@ -61,7 +61,6 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub epoch_closing_time: Arc<AtomicU64>,
 }
 
-
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
     pub fn start(
         network: Network,
@@ -81,12 +80,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let rocks_store = core.rocks_store();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
-        let mut syncer = Syncer::new(
-            core,
-            notify.clone(),
-            commit_observer,
-            metrics.clone(),
-        );
+        let mut syncer = Syncer::new(core, notify.clone(), commit_observer, metrics.clone());
         syncer.force_new_block(0);
         let syncer = CoreThreadDispatcher::start(syncer);
         let (stop_sender, stop_receiver) = mpsc::channel(1);
@@ -117,7 +111,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
         ));
-        let syncer_task = AsyncRocksDBSyncer::start(stop_sender.clone(), epoch_sender, rocks_store.clone());
+        let syncer_task =
+            AsyncRocksDBSyncer::start(stop_sender.clone(), epoch_sender, rocks_store.clone());
         let flusher_task = AsyncRocksDBFlusher::start(stop_sender, rocks_store);
         Self {
             inner,
@@ -201,10 +196,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
-
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
-        let synchronizer_parameters = SynchronizerParameters::new(committee_size, consensus_protocol.clone());
+        let synchronizer_parameters =
+            SynchronizerParameters::new(committee_size, consensus_protocol.clone());
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -232,12 +227,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             data_requestor.start().await;
         }
 
-        let mut encoder = ReedSolomonEncoder::new(2,
-                                                  4,
-                                                  64).expect("Encoder should be created");
-        let mut decoder = ReedSolomonDecoder::new(2,
-                                              4,
-                                              64).expect("Decoder should be created");
+        let mut encoder = ReedSolomonEncoder::new(2, 4, 64).expect("Encoder should be created");
+        let mut decoder = ReedSolomonDecoder::new(2, 4, 64).expect("Decoder should be created");
 
         let peer_id = connection.peer_id as AuthorityIndex;
         inner.syncer.authority_connection(peer_id, true).await;
@@ -245,7 +236,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
 
-        tracing::debug!("Connection from {:?} to {:?} is established", own_id, peer_id);
+        tracing::debug!(
+            "Connection from {:?} to {:?} is established",
+            own_id,
+            peer_id
+        );
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
             match message {
                 NetworkMessage::SubscribeBroadcastRequest(round) => {
@@ -266,7 +261,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
                 NetworkMessage::Batch(blocks) => {
-                    let timer = metrics.utilization_timer.utilization_timer("Network: verify blocks");
+                    let timer = metrics
+                        .utilization_timer
+                        .utilization_timer("Network: verify blocks");
                     let mut blocks_with_statements = Vec::new();
                     let mut blocks_without_statements = Vec::new();
                     for block in blocks {
@@ -277,18 +274,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                     // First process blocks without statements which could be in the causal history
-                    if consensus_protocol == ConsensusProtocol::StarfishPull || consensus_protocol == ConsensusProtocol::Starfish {
-
-
+                    if consensus_protocol == ConsensusProtocol::StarfishPull
+                        || consensus_protocol == ConsensusProtocol::Starfish
+                    {
                         let mut verified_data_blocks = Vec::new();
                         for data_block in blocks_without_statements {
                             let mut block: VerifiedStatementBlock = (*data_block).clone();
                             tracing::debug!("Received {} from {}", block, peer);
-                            let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                            let contains_new_shard_or_header =
+                                inner.block_store.contains_new_shard_or_header(&block);
                             if !contains_new_shard_or_header {
                                 continue;
                             }
-                            if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
+                            if let Err(e) = block.verify(
+                                &inner.committee,
+                                own_id as usize,
+                                peer_id as usize,
+                                &mut encoder,
+                                consensus_protocol,
+                            ) {
                                 tracing::warn!(
                                     "Rejected incorrect block {} from {}: {:?}",
                                     block.reference(),
@@ -298,11 +302,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 // todo: Terminate connection upon receiving incorrect block.
                                 break;
                             }
-                            let (ready_to_reconstruct, cached_block) = inner.block_store.ready_to_reconstruct(&block);
+                            let (ready_to_reconstruct, cached_block) =
+                                inner.block_store.ready_to_reconstruct(&block);
                             if ready_to_reconstruct {
                                 let mut cached_block = cached_block.expect("Should be Some");
                                 cached_block.copy_shard(&block);
-                                let reconstructed_block = decoder.decode_shards(&inner.committee, &mut encoder, cached_block, own_id);
+                                let reconstructed_block = decoder.decode_shards(
+                                    &inner.committee,
+                                    &mut encoder,
+                                    cached_block,
+                                    own_id,
+                                );
                                 if reconstructed_block.is_some() {
                                     block = reconstructed_block.expect("Should be Some");
                                     tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
@@ -311,14 +321,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
                             }
                             let storage_block = block;
-                            let transmission_block = storage_block.from_storage_to_transmission(own_id);
-                            let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                            let transmission_block =
+                                storage_block.from_storage_to_transmission(own_id);
+                            let contains_new_shard_or_header = inner
+                                .block_store
+                                .contains_new_shard_or_header(&storage_block);
                             if !contains_new_shard_or_header {
                                 continue;
                             }
                             let data_storage_block = Data::new(storage_block);
                             let data_transmission_block = Data::new(transmission_block);
-                            verified_data_blocks.push((data_storage_block, data_transmission_block));
+                            verified_data_blocks
+                                .push((data_storage_block, data_transmission_block));
                         }
 
                         tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
@@ -332,11 +346,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     for data_block in blocks_with_statements {
                         let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&block);
+                        let contains_new_shard_or_header =
+                            inner.block_store.contains_new_shard_or_header(&block);
                         if !contains_new_shard_or_header {
                             continue;
                         }
-                        if let Err(e) = block.verify(&inner.committee, own_id as usize, peer_id as usize, &mut encoder, consensus_protocol) {
+                        if let Err(e) = block.verify(
+                            &inner.committee,
+                            own_id as usize,
+                            peer_id as usize,
+                            &mut encoder,
+                            consensus_protocol,
+                        ) {
                             tracing::warn!(
                                 "Rejected incorrect block {} from {}: {:?}",
                                 block.reference(),
@@ -347,16 +368,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             break;
                         }
                         let storage_block = block;
-                        let transmission_block =
-                            match consensus_protocol {
-                                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                                    storage_block.clone()
-                                }
-                                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
-                                    storage_block.from_storage_to_transmission(own_id)
-                                }
-                            };
-                        let contains_new_shard_or_header = inner.block_store.contains_new_shard_or_header(&storage_block);
+                        let transmission_block = match consensus_protocol {
+                            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                                storage_block.clone()
+                            }
+                            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
+                                storage_block.from_storage_to_transmission(own_id)
+                            }
+                        };
+                        let contains_new_shard_or_header = inner
+                            .block_store
+                            .contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
                             continue;
                         }
@@ -367,56 +389,80 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
-                        let (pending_block_references, missing_parents) = inner.syncer.add_blocks(verified_data_blocks).await;
+                        let (pending_block_references, missing_parents) =
+                            inner.syncer.add_blocks(verified_data_blocks).await;
                         match consensus_protocol {
                             ConsensusProtocol::StarfishPull => {
                                 let mut max_round_pending_block_reference = None;
                                 for block_reference in pending_block_references {
                                     if max_round_pending_block_reference.is_none() {
-                                        max_round_pending_block_reference = Some(block_reference.clone());
+                                        max_round_pending_block_reference =
+                                            Some(block_reference.clone());
                                     } else {
-                                        if block_reference.round() > max_round_pending_block_reference.clone().unwrap().round() {
-                                            max_round_pending_block_reference = Some(block_reference.clone());
+                                        if block_reference.round()
+                                            > max_round_pending_block_reference
+                                                .clone()
+                                                .unwrap()
+                                                .round()
+                                        {
+                                            max_round_pending_block_reference =
+                                                Some(block_reference.clone());
                                         }
                                     }
                                 }
                                 if max_round_pending_block_reference.is_some() {
-                                    tracing::debug!("Make request missing history of block {:?} from peer {:?}", max_round_pending_block_reference.unwrap(), peer);
-                                    Self::request_missing_history_block(max_round_pending_block_reference.unwrap(), &connection.sender);
+                                    tracing::debug!(
+                                        "Make request missing history of block {:?} from peer {:?}",
+                                        max_round_pending_block_reference.unwrap(),
+                                        peer
+                                    );
+                                    Self::request_missing_history_block(
+                                        max_round_pending_block_reference.unwrap(),
+                                        &connection.sender,
+                                    );
                                 }
                             }
-                            ConsensusProtocol::Mysticeti=> {
+                            ConsensusProtocol::Mysticeti => {
                                 if !missing_parents.is_empty() {
                                     let missing_parents = missing_parents
                                         .iter()
-                                        .map(|r|r.clone())
+                                        .map(|r| r.clone())
                                         .collect::<Vec<_>>();
                                     tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", missing_parents, peer);
-                                    Self::request_parents_blocks(missing_parents, &connection.sender);
+                                    Self::request_parents_blocks(
+                                        missing_parents,
+                                        &connection.sender,
+                                    );
                                 }
                             }
-                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
-
-                            }
+                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {}
                         }
                     }
-
-
 
                     drop(timer);
                 }
 
                 NetworkMessage::MissingHistoryRequest(block_reference) => {
                     if consensus_protocol == ConsensusProtocol::StarfishPull {
-                        tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
+                        tracing::debug!(
+                            "Received request missing history for block {:?} from peer {:?}",
+                            block_reference,
+                            peer
+                        );
                         if inner.block_store.byzantine_strategy.is_none() {
-                            disseminator.push_block_history_with_shards(block_reference).await;
+                            disseminator
+                                .push_block_history_with_shards(block_reference)
+                                .await;
                         }
                     }
                 }
                 NetworkMessage::MissingParentsRequest(block_references) => {
                     if consensus_protocol == ConsensusProtocol::Mysticeti {
-                        tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                        tracing::debug!(
+                            "Received request missing data {:?} from peer {:?}",
+                            block_references,
+                            peer
+                        );
                         if inner.block_store.byzantine_strategy.is_none() {
                             let authority = connection.peer_id as AuthorityIndex;
                             if disseminator
@@ -431,7 +477,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::MissingTxDataRequest(block_references) => {
                     if consensus_protocol == ConsensusProtocol::StarfishPull {
-                        tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
+                        tracing::debug!(
+                            "Received request missing data {:?} from peer {:?}",
+                            block_references,
+                            peer
+                        );
                         if inner.block_store.byzantine_strategy.is_none() {
                             let authority = connection.peer_id as AuthorityIndex;
                             if disseminator
@@ -443,7 +493,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                     }
-
                 }
             }
         }
@@ -455,19 +504,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         None
     }
 
-    fn request_missing_history_block(
-        block: BlockReference,
-        sender: &mpsc::Sender<NetworkMessage>,
-    ) {
-            if let Ok(permit) = sender.try_reserve() {
-                permit.send(NetworkMessage::MissingHistoryRequest(block));
-            }
+    fn request_missing_history_block(block: BlockReference, sender: &mpsc::Sender<NetworkMessage>) {
+        if let Ok(permit) = sender.try_reserve() {
+            permit.send(NetworkMessage::MissingHistoryRequest(block));
+        }
     }
 
-    fn request_parents_blocks(
-        blocks: Vec<BlockReference>,
-        sender: &mpsc::Sender<NetworkMessage>,
-    ) {
+    fn request_parents_blocks(blocks: Vec<BlockReference>, sender: &mpsc::Sender<NetworkMessage>) {
         if let Ok(permit) = sender.try_reserve() {
             permit.send(NetworkMessage::MissingParentsRequest(blocks));
         }
@@ -654,7 +697,9 @@ impl AsyncRocksDBSyncer {
             if runtime.block_on(self.wait_next()) {
                 return;
             }
-            self.rocks_store.sync().expect("Failed to sync rocksdb store");
+            self.rocks_store
+                .sync()
+                .expect("Failed to sync rocksdb store");
         }
     }
 
@@ -675,10 +720,7 @@ impl AsyncRocksDBSyncer {
 }
 
 impl AsyncRocksDBFlusher {
-    pub fn start(
-        stop: mpsc::Sender<()>,
-        rocks_store: Arc<RocksStore>,
-    ) -> oneshot::Receiver<()> {
+    pub fn start(stop: mpsc::Sender<()>, rocks_store: Arc<RocksStore>) -> oneshot::Receiver<()> {
         let (_sender, receiver) = oneshot::channel();
         let this = Self {
             stop,
@@ -698,7 +740,9 @@ impl AsyncRocksDBFlusher {
             if runtime.block_on(self.wait_next()) {
                 return;
             }
-            self.rocks_store.flush_pending_batches().expect("Failed to flush rocksdb store");
+            self.rocks_store
+                .flush_pending_batches()
+                .expect("Failed to flush rocksdb store");
         }
     }
 
@@ -716,9 +760,9 @@ impl AsyncRocksDBFlusher {
 }
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use crate::runtime::sleep;
     use crate::test_util::{check_commits, network_syncers};
+    use std::time::Duration;
 
     #[tokio::test]
     #[ignore]
@@ -748,9 +792,10 @@ mod sim_tests {
     use tokio::sync::Notify;
 
     use super::NetworkSyncer;
+    use crate::runtime::sleep;
     use crate::test_util::byzantine_simulated_network_syncers_with_epoch_duration;
     use crate::{
-        block_handler::{TestBlockHandler, RealCommitHandler},
+        block_handler::{RealCommitHandler, TestBlockHandler},
         config,
         future_simulator::SimulatedExecutorState,
         runtime,
@@ -761,7 +806,6 @@ mod sim_tests {
             rng_at_seed, simulated_network_syncers,
         },
     };
-    use crate::runtime::sleep;
 
     async fn wait_for_epoch_to_close(
         network_syncers: Vec<NetworkSyncer<TestBlockHandler, RealCommitHandler>>,
@@ -834,8 +878,6 @@ mod sim_tests {
         }
         print_stats(&syncers, &mut reporters);
     }
-
-
 
     #[test]
     fn test_network_sync_sim_all_up() {

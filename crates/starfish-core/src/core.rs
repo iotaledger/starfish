@@ -1,17 +1,23 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::{HashSet}, mem, sync::{atomic::AtomicU64, Arc}};
-use reed_solomon_simd::ReedSolomonEncoder;
 use reed_solomon_simd::ReedSolomonDecoder;
+use reed_solomon_simd::ReedSolomonEncoder;
+use std::{
+    collections::HashSet,
+    mem,
+    sync::{atomic::AtomicU64, Arc},
+};
 
+use crate::block_store::ConsensusProtocol;
+use crate::decoder::CachedStatementBlockDecoder;
+use crate::encoder::ShardEncoder;
+use crate::rocks_store::RocksStore;
+use crate::types::{Decoder, Encoder, Shard, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
-    block_store::{
-        BlockStore, CommitData, OwnBlockData,
-        ByzantineStrategy,
-    },
+    block_store::{BlockStore, ByzantineStrategy, CommitData, OwnBlockData},
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
@@ -27,11 +33,6 @@ use crate::{
     threshold_clock::ThresholdClockAggregator,
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
 };
-use crate::block_store::{ConsensusProtocol};
-use crate::decoder::CachedStatementBlockDecoder;
-use crate::encoder::ShardEncoder;
-use crate::rocks_store::RocksStore;
-use crate::types::{Encoder, Decoder, VerifiedStatementBlock, Shard};
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -53,7 +54,7 @@ pub struct Core<H: BlockHandler> {
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
-    pub(crate) encoder : Encoder,
+    pub(crate) encoder: Encoder,
     decoder: Decoder,
 }
 
@@ -66,7 +67,6 @@ pub enum MetaStatement {
     Include(BlockReference),
     Payload(Vec<BaseStatement>),
 }
-
 
 impl<H: BlockHandler> Core<H> {
     #[allow(clippy::too_many_arguments)]
@@ -100,7 +100,11 @@ impl<H: BlockHandler> Core<H> {
         for block in other_genesis_blocks {
             let reference = *block.reference();
             threshold_clock.add_block(reference, &committee);
-            block_store.insert_block_bounds((block.clone(), block.clone()), 0, committee.len() as AuthorityIndex);
+            block_store.insert_block_bounds(
+                (block.clone(), block.clone()),
+                0,
+                committee.len() as AuthorityIndex,
+            );
             pending.push(MetaStatement::Include(*block.reference()));
         }
 
@@ -114,7 +118,6 @@ impl<H: BlockHandler> Core<H> {
 
         let block_manager = BlockManager::new(block_store.clone(), &committee);
 
-
         let epoch_manager = EpochManager::new();
 
         let committer =
@@ -127,7 +130,7 @@ impl<H: BlockHandler> Core<H> {
             block_manager,
             rocks_store,
             pending,
-            last_own_block: vec![OwnBlockData{
+            last_own_block: vec![OwnBlockData {
                 storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
                 authority_index_start: 0 as AuthorityIndex,
                 authority_index_end: committee.len() as AuthorityIndex,
@@ -159,7 +162,9 @@ impl<H: BlockHandler> Core<H> {
         this
     }
 
-    pub fn get_signer(&self) -> &Signer { &self.signer}
+    pub fn get_signer(&self) -> &Signer {
+        &self.signer
+    }
 
     pub fn get_universal_committer(&self) -> UniversalCommitter {
         self.committer.clone()
@@ -174,27 +179,29 @@ impl<H: BlockHandler> Core<H> {
     // It return true if any update was made successfully
     // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
     // For such blocks we need to send a missing history request
-    pub fn add_blocks(&mut self, blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>) -> (bool, Vec<BlockReference>, HashSet<BlockReference>)  {
+    pub fn add_blocks(
+        &mut self,
+        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+    ) -> (bool, Vec<BlockReference>, HashSet<BlockReference>) {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
         let block_references_with_statements: Vec<_> = blocks
             .iter()
-            .filter(|(b,_)|b.statements().is_some())
-            .map(|(b,_)| b.reference().clone())
+            .filter(|(b, _)| b.statements().is_some())
+            .map(|(b, _)| b.reference().clone())
             .collect();
         let block_manager_timer = self
             .metrics
             .utilization_timer
             .utilization_timer("BlockManager::add_blocks");
-        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) = self
-            .block_manager
-            .add_blocks(blocks);
+        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) =
+            self.block_manager.add_blocks(blocks);
         drop(block_manager_timer);
         let processed_references: Vec<_> = processed
             .iter()
-            .filter(|b|b.statements().is_some())
+            .filter(|b| b.statements().is_some())
             .map(|b| b.reference().clone())
             .collect();
         let not_processed_blocks: Vec<_> = block_references_with_statements
@@ -203,18 +210,22 @@ impl<H: BlockHandler> Core<H> {
             .map(|block_reference| block_reference.clone())
             .collect();
 
-        let success: bool = if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
-            true
-        } else {
-            false
-        };
-        tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
+        let success: bool =
+            if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
+                true
+            } else {
+                false
+            };
+        tracing::debug!(
+            "Processed {:?}; to be reconstructed {:?}",
+            processed,
+            new_blocks_to_reconstruct
+        );
         match self.block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
             }
-            _ => {
-            }
+            _ => {}
         };
 
         let mut result = Vec::with_capacity(processed.len());
@@ -235,13 +246,10 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::run_block_handler");
-        let statements = self
-            .block_handler
-            .handle_blocks(!self.epoch_changing());
+        let statements = self.block_handler.handle_blocks(!self.epoch_changing());
         let _serialized_statements =
             bincode::serialize(&statements).expect("Payload serialization failed");
-        self.pending
-            .push(MetaStatement::Payload(statements));
+        self.pending.push(MetaStatement::Payload(statements));
     }
 
     fn sort_includes_in_pending(&mut self) {
@@ -268,10 +276,9 @@ impl<H: BlockHandler> Core<H> {
                 let i_pos = include_positions[i];
                 let j_pos = include_positions[j];
 
-                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) = (
-                    &self.pending[i_pos],
-                    &self.pending[j_pos],
-                ) {
+                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) =
+                    (&self.pending[i_pos], &self.pending[j_pos])
+                {
                     if j_meta.round() < i_meta.round() {
                         // Swap the positions and the entries directly
                         self.pending.swap(i_pos, j_pos);
@@ -282,65 +289,98 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-
     pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
         for block_reference in new_blocks_to_reconstruct {
             let block = self.block_store.get_cached_block(&block_reference);
-            let storage_block = self.decoder.decode_shards(&self.committee, &mut self.encoder, block, self.authority);
+            let storage_block = self.decoder.decode_shards(
+                &self.committee,
+                &mut self.encoder,
+                block,
+                self.authority,
+            );
             if storage_block.is_some() {
-                tracing::debug!("Reconstruction of block {:?} within core thread task is successful", block_reference);
-                let storage_block: VerifiedStatementBlock = storage_block.expect("Block is verified to be reconstructed");
+                tracing::debug!(
+                    "Reconstruction of block {:?} within core thread task is successful",
+                    block_reference
+                );
+                let storage_block: VerifiedStatementBlock =
+                    storage_block.expect("Block is verified to be reconstructed");
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);
-                self.block_store().insert_general_block((data_storage_block, data_transmission_block));
+                self.block_store()
+                    .insert_general_block((data_storage_block, data_transmission_block));
                 self.block_store.updated_unknown_by_others(block_reference);
-            }
-            else {
+            } else {
                 tracing::debug!("Block {block_reference} is not correctly reconstructed");
             }
         }
     }
 
-
     pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
-        let _block_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::try_new_block");
+        let _block_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::try_new_block");
 
         // Check if we're ready for a new block
         let clock_round = self.threshold_clock.get_round();
-        tracing::debug!("Attemp to construct block in round {}. Current pending: {:?}", clock_round, self.pending);
+        tracing::debug!(
+            "Attemp to construct block in round {}. Current pending: {:?}",
+            clock_round,
+            self.pending
+        );
         if clock_round <= self.last_proposed() {
             return None;
         }
 
         // Get relevant pending statements for this round
-        let _pending_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::get_pending_statements");
+        let _pending_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::get_pending_statements");
         let pending_statements = self.get_pending_statements(clock_round);
         drop(_pending_timer);
 
         // Collect statements and references
-        let _collect_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::collect_statements_and_references");
-        let (mut statements, block_references) = self.collect_statements_and_references(&pending_statements);
+        let _collect_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::collect_statements_and_references");
+        let (mut statements, block_references) =
+            self.collect_statements_and_references(&pending_statements);
         drop(_collect_timer);
 
         // Create blocks based on byzantine strategy
-        let _prepare_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_last_blocks");
+        let _prepare_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::prepare_last_blocks");
         self.prepare_last_blocks();
         drop(_prepare_timer);
 
         // Prepare encoded statements if needed
-        let _encode_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::prepare_encoded_statements");
+        let _encode_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::prepare_encoded_statements");
         let mut encoded_statements = self.prepare_encoded_statements(&statements);
         drop(_encode_timer);
 
         // Get pending acknowledgments
-        let _ack_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::get_pending_acknowledgment");
+        let _ack_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::get_pending_acknowledgment");
         let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
         drop(_ack_timer);
 
         // Calculate authority bounds
         let number_of_blocks_to_create = self.last_own_block.len();
-        let _bounds_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::calculate_authority_bounds");
+        let _bounds_timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::new_block::calculate_authority_bounds");
         let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
         drop(_bounds_timer);
 
@@ -353,7 +393,10 @@ impl<H: BlockHandler> Core<H> {
                 statements = vec![];
                 encoded_statements = self.prepare_encoded_statements(&statements);
             }
-            let _build_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::build_block");
+            let _build_timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::new_block::build_block");
             let block_data = self.build_block(
                 &block_references,
                 &statements,
@@ -366,7 +409,10 @@ impl<H: BlockHandler> Core<H> {
 
             tracing::debug!("Created block {:?}", block_data.0);
 
-            let _store_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::store_block");
+            let _store_timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::new_block::store_block");
             self.store_block(block_data.clone(), &authority_bounds, block_id);
             drop(_store_timer);
 
@@ -375,11 +421,17 @@ impl<H: BlockHandler> Core<H> {
 
         // Sync if needed
         if self.options.fsync {
-            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::sync_with_disk");
+            let _sync_timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::new_block::sync_with_disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
             drop(_sync_timer);
         } else {
-            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::new_block::flush_to_buffer");
+            let _sync_timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::new_block::flush_to_buffer");
             self.rocks_store.flush().expect("RocksDB sync failed");
             drop(_sync_timer);
         }
@@ -390,7 +442,8 @@ impl<H: BlockHandler> Core<H> {
     fn get_pending_statements(&mut self, clock_round: RoundNumber) -> Vec<MetaStatement> {
         self.sort_includes_in_pending();
 
-        let split_point = self.pending
+        let split_point = self
+            .pending
             .iter()
             .position(|statement| match statement {
                 MetaStatement::Include(block_ref) => block_ref.round >= clock_round,
@@ -403,7 +456,10 @@ impl<H: BlockHandler> Core<H> {
         taken
     }
 
-    fn collect_statements_and_references(&self, pending: &[MetaStatement]) -> (Vec<BaseStatement>, Vec<BlockReference>) {
+    fn collect_statements_and_references(
+        &self,
+        pending: &[MetaStatement],
+    ) -> (Vec<BaseStatement>, Vec<BlockReference>) {
         let mut statements = Vec::new();
         for meta_statement in pending {
             if let MetaStatement::Payload(payload) = meta_statement {
@@ -416,18 +472,18 @@ impl<H: BlockHandler> Core<H> {
         (statements, block_references)
     }
 
-    fn prepare_encoded_statements(&mut self, statements: &Vec<BaseStatement>) -> Option<Vec<Shard>> {
+    fn prepare_encoded_statements(
+        &mut self,
+        statements: &Vec<BaseStatement>,
+    ) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
-                Some(self.encoder.encode_statements(
-                    statements.clone(),
-                    info_length,
-                    parity_length,
-                ))
-            }
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => Some(
+                self.encoder
+                    .encode_statements(statements.clone(), info_length, parity_length),
+            ),
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }
     }
@@ -442,7 +498,11 @@ impl<H: BlockHandler> Core<H> {
         block_id_in_round: usize,
     ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
-        let mut block_references = vec![self.last_own_block[block_id_in_round].storage_transmission_blocks.0.reference().clone()];
+        let mut block_references = vec![self.last_own_block[block_id_in_round]
+            .storage_transmission_blocks
+            .0
+            .reference()
+            .clone()];
         block_references.extend(block_references_without_own.iter().cloned());
         let block = VerifiedStatementBlock::new_with_signer(
             self.authority,
@@ -461,8 +521,7 @@ impl<H: BlockHandler> Core<H> {
         (data_block.clone(), data_block)
     }
 
-    fn prepare_last_blocks(&mut self)  {
-
+    fn prepare_last_blocks(&mut self) {
         if let Some(ref strategy) = self.block_store.byzantine_strategy {
             match strategy {
                 ByzantineStrategy::EquivocatingChains => {
@@ -535,8 +594,10 @@ impl<H: BlockHandler> Core<H> {
         authority_bounds: &[usize],
         block_id: usize,
     ) {
-        self.threshold_clock.add_block(*block_data.0.reference(), &self.committee);
-        self.block_handler.handle_proposal(block_data.0.number_transactions());
+        self.threshold_clock
+            .add_block(*block_data.0.reference(), &self.committee);
+        self.block_handler
+            .handle_proposal(block_data.0.number_transactions());
         self.proposed_block_stats(&block_data.0);
 
         let own_block = OwnBlockData {
@@ -547,8 +608,6 @@ impl<H: BlockHandler> Core<H> {
         self.last_own_block[block_id] = own_block.clone();
         self.block_store.insert_own_block(own_block);
     }
-
-
 
     fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
         self.metrics
@@ -592,10 +651,7 @@ impl<H: BlockHandler> Core<H> {
     /// try_new_block might still return None if threshold clock is not ready
     ///
     /// The algorithm to calling is roughly: if timeout || commit_ready_new_block then try_new_block(..)
-    pub fn ready_new_block(
-        &self,
-        connected_authorities: &HashSet<AuthorityIndex>,
-    ) -> bool {
+    pub fn ready_new_block(&self, connected_authorities: &HashSet<AuthorityIndex>) -> bool {
         let quorum_round = self.threshold_clock.get_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
         // Leader round we check if we have a leader block
@@ -603,7 +659,10 @@ impl<H: BlockHandler> Core<H> {
             let leader_round = quorum_round - 1;
             let mut leaders = self.committer.get_leaders(leader_round);
             leaders.retain(|leader| connected_authorities.contains(leader));
-            tracing::debug!("Attempt ready new block, quorum round {}, Before exist at authority round", quorum_round);
+            tracing::debug!(
+                "Attempt ready new block, quorum round {}, Before exist at authority round",
+                quorum_round
+            );
             self.block_store
                 .all_blocks_exists_at_authority_round(&leaders, leader_round)
         } else {
@@ -611,10 +670,7 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    pub fn handle_committed_subdag(
-        &mut self,
-        committed: Vec<CommittedSubDag>,
-    ) {
+    pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
         let mut commit_data = vec![];
         for commit in &committed {
             for block in &commit.blocks {
@@ -623,21 +679,28 @@ impl<H: BlockHandler> Core<H> {
             }
             commit_data.push(CommitData::from(commit));
         }
-        self.rocks_store.store_commits(commit_data).expect("Store commits should not fail");
+        self.rocks_store
+            .store_commits(commit_data)
+            .expect("Store commits should not fail");
         // Sync if needed
         if self.options.fsync && committed.len() > 0 {
-            let timer = self.metrics.utilization_timer.utilization_timer("Core::commit::sync with disk");
+            let timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::commit::sync with disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
             drop(timer);
         } else if committed.len() > 0 {
-            let _sync_timer = self.metrics.utilization_timer.utilization_timer("Core::commit::flush_to_buffer");
+            let _sync_timer = self
+                .metrics
+                .utilization_timer
+                .utilization_timer("Core::commit::flush_to_buffer");
             self.rocks_store.flush().expect("RocksDB sync failed");
             drop(_sync_timer);
         }
     }
 
-    pub fn write_commits(&mut self, _commits: &[CommitData]) {
-    }
+    pub fn write_commits(&mut self, _commits: &[CommitData]) {}
 
     pub fn take_recovered_committed_blocks(&mut self) -> HashSet<BlockReference> {
         self.recovered_committed_blocks
@@ -710,5 +773,3 @@ impl CoreOptions {
         Self { fsync: true }
     }
 }
-
-

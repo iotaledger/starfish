@@ -1,24 +1,13 @@
-use std::{
-    path::Path,
-    io,
-    sync::Arc,
-    collections::HashMap,
-};
-use std::collections::VecDeque;
-use rocksdb::{
-    DB, Options, ColumnFamilyDescriptor, WriteOptions,
-    ReadOptions,
-};
-use bincode::{serialize, deserialize};
+use crate::block_store::CommitData;
+use crate::data::Data;
+use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
+use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
+use rocksdb::{ColumnFamilyDescriptor, Options, ReadOptions, WriteOptions, DB};
+use std::collections::VecDeque;
+use std::{collections::HashMap, io, path::Path, sync::Arc};
 use tokio::sync::watch;
 use tokio::time::Instant;
-use crate::block_store::CommitData;
-use crate::types::{
-    BlockReference,
-    RoundNumber, VerifiedStatementBlock,
-};
-use crate::data::Data;
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";
@@ -85,14 +74,14 @@ impl RocksStore {
         opts.set_bytes_per_sync(32 * 1048576);
 
         // Add these settings for sync optimization
-        opts.set_use_fsync(false);  // Use fdatasync instead of fsync
-        opts.set_writable_file_max_buffer_size(64 * 1048576);  // 64MB buffer
-        opts.set_use_direct_io_for_flush_and_compaction(true);  // Use direct I/O for background ops
+        opts.set_use_fsync(false); // Use fdatasync instead of fsync
+        opts.set_writable_file_max_buffer_size(64 * 1048576); // 64MB buffer
+        opts.set_use_direct_io_for_flush_and_compaction(true); // Use direct I/O for background ops
         opts.set_level_compaction_dynamic_level_bytes(true); // Dynamically change the level of compaction
-        // Additional optimizations for high write throughput
+                                                             // Additional optimizations for high write throughput
         opts.set_min_level_to_compress(2);
         opts.set_compression_type(rocksdb::DBCompressionType::Zlib);
-        opts.set_max_subcompactions(4);                   // Allow parallel compactions
+        opts.set_max_subcompactions(4); // Allow parallel compactions
         opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
 
         // Additional performance optimizations
@@ -130,7 +119,6 @@ impl RocksStore {
     }
 
     pub fn flush(&self) -> io::Result<()> {
-
         self.flush_pending_batches()?;
 
         // Then do regular flush of current batch
@@ -150,33 +138,36 @@ impl RocksStore {
             let mut batch_ops = self.batch.write();
             (
                 std::mem::take(&mut batch_ops.blocks),
-                std::mem::take(&mut batch_ops.commits)
+                std::mem::take(&mut batch_ops.commits),
             )
             // Lock is dropped here
         };
 
-        let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+        let cf_blocks = self
+            .db
+            .cf_handle(CF_BLOCKS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
-        let cf_commits = self.db.cf_handle(CF_COMMITS)
+        let cf_commits = self
+            .db
+            .cf_handle(CF_COMMITS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
         // Process without holding locks
         for (reference, block) in blocks_to_write {
-            let key = serialize(&reference)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let key = serialize(&reference).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
         }
 
         for (anchor, commit_data) in commits_to_write {
-            let key = serialize(&anchor)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-            let value = serialize(&commit_data)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let key = serialize(&anchor).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let value =
+                serialize(&commit_data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             batch.put_cf(&cf_commits, key, value);
         }
 
         // Single write operation
-        self.db.write_opt(batch, &self.write_opts)
+        self.db
+            .write_opt(batch, &self.write_opts)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // Update timestamp with minimal lock duration
@@ -185,11 +176,7 @@ impl RocksStore {
         Ok(())
     }
 
-
-    pub fn store_block(
-        &self,
-        block: Data<VerifiedStatementBlock>,
-    ) -> io::Result<()> {
+    pub fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
         let reference = block.reference();
         let size = block.serialized_bytes().len();
         let mut batch = self.batch.write();
@@ -218,46 +205,52 @@ impl RocksStore {
 
             let mut batch = rocksdb::WriteBatch::default();
 
-            let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+            let cf_blocks = self
+                .db
+                .cf_handle(CF_BLOCKS)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
-            let cf_commits = self.db.cf_handle(CF_COMMITS)
+            let cf_commits = self
+                .db
+                .cf_handle(CF_COMMITS)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
             // Process without holding locks
             for (reference, block) in ops.blocks {
-                let key = serialize(&reference)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let key =
+                    serialize(&reference).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
             }
 
             for (anchor, commit_data) in ops.commits {
-                let key = serialize(&anchor)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                let value = serialize(&commit_data)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let key =
+                    serialize(&anchor).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let value =
+                    serialize(&commit_data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 batch.put_cf(&cf_commits, key, value);
             }
 
             // Single write operation
-            self.db.write_opt(batch, &self.write_opts)
+            self.db
+                .write_opt(batch, &self.write_opts)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         }
         Ok(())
     }
 
-    pub fn store_commits(
-        &self,
-        committed_sub_dags: Vec<CommitData>,
-    ) -> io::Result<()> {
+    pub fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
         let mut batch = self.batch.write();
         for committed_sub_dag in committed_sub_dags {
-            batch.commits.insert(committed_sub_dag.leader.clone(), committed_sub_dag);
+            batch
+                .commits
+                .insert(committed_sub_dag.leader.clone(), committed_sub_dag);
         }
         Ok(())
     }
 
-
-    pub fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
+    pub fn get_block(
+        &self,
+        reference: &BlockReference,
+    ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
         // Check in-memory batch first
         // Check current batch first
         let batch = self.batch.read();
@@ -276,14 +269,18 @@ impl RocksStore {
         drop(pending);
 
         // If not in batch, check DB
-        let key = serialize(reference)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let key = serialize(reference).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+        let cf_blocks = self
+            .db
+            .cf_handle(CF_BLOCKS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
-        match self.db.get_cf_opt(&cf_blocks, key, &Self::get_read_opts())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))? {
+        match self
+            .db
+            .get_cf_opt(&cf_blocks, key, &Self::get_read_opts())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        {
             Some(value) => Data::from_bytes(value.into())
                 .map(Some)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
@@ -291,7 +288,10 @@ impl RocksStore {
         }
     }
 
-    pub fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
+    pub fn get_blocks_by_round(
+        &self,
+        round: RoundNumber,
+    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
         let mut blocks = Vec::new();
 
         // Check in-memory batch first
@@ -305,22 +305,30 @@ impl RocksStore {
         }
 
         // Then check DB
-        let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+        let cf_blocks = self
+            .db
+            .cf_handle(CF_BLOCKS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
         // Collect all matching blocks from DB
         {
-            let mut iter = self.db.raw_iterator_cf_opt(&cf_blocks, Self::get_read_opts());
+            let mut iter = self
+                .db
+                .raw_iterator_cf_opt(&cf_blocks, Self::get_read_opts());
             iter.seek_to_first();
 
             while iter.valid() {
-                let key_bytes = iter.key()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid key"))?.to_vec();
-                let value = iter.value()
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid value"))?.to_vec();
+                let key_bytes = iter
+                    .key()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid key"))?
+                    .to_vec();
+                let value = iter
+                    .value()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Invalid value"))?
+                    .to_vec();
 
-                let reference: BlockReference = deserialize(&key_bytes)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let reference: BlockReference =
+                    deserialize(&key_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 if reference.round == round {
                     let block = Data::from_bytes(value.into())
@@ -337,8 +345,6 @@ impl RocksStore {
         Ok(blocks)
     }
 
-
-
     pub fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
         // Check in-memory batch first
         let batch = self.batch.read();
@@ -348,19 +354,23 @@ impl RocksStore {
         drop(batch);
 
         // If not in batch, check DB
-        let key = serialize(reference)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let key = serialize(reference).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        let cf_commits = self.db.cf_handle(CF_COMMITS)
+        let cf_commits = self
+            .db
+            .cf_handle(CF_COMMITS)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
-        match self.db.get_cf_opt(&cf_commits, key, &Self::get_read_opts())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))? {
+        match self
+            .db
+            .get_cf_opt(&cf_commits, key, &Self::get_read_opts())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        {
             Some(value) => {
-                let commit_data: CommitData = deserialize(&value)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let commit_data: CommitData =
+                    deserialize(&value).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 Ok(Some(commit_data.clone()))
-            },
+            }
             None => Ok(None),
         }
     }
@@ -385,36 +395,41 @@ impl RocksStore {
             let mut batch_ops = self.batch.write();
             (
                 std::mem::take(&mut batch_ops.blocks),
-                std::mem::take(&mut batch_ops.commits)
+                std::mem::take(&mut batch_ops.commits),
             )
         };
 
         // Only process if we have data
         if !blocks_to_write.is_empty() || !commits_to_write.is_empty() {
-            let cf_blocks = self.db.cf_handle(CF_BLOCKS)
+            let cf_blocks = self
+                .db
+                .cf_handle(CF_BLOCKS)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
-            let cf_commits = self.db.cf_handle(CF_COMMITS)
+            let cf_commits = self
+                .db
+                .cf_handle(CF_COMMITS)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Column family not found"))?;
 
             // Process blocks without holding any locks
             for (reference, block) in blocks_to_write {
-                let key = serialize(&reference)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let key =
+                    serialize(&reference).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 batch.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
             }
 
             // Process commits without holding any locks
             for (anchor, commit_data) in commits_to_write {
-                let key = serialize(&anchor)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                let value = serialize(&commit_data)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let key =
+                    serialize(&anchor).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let value =
+                    serialize(&commit_data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 batch.put_cf(&cf_commits, key, value);
             }
         }
 
         // Single write operation with sync
-        self.db.write_opt(batch, &sync_opts)
+        self.db
+            .write_opt(batch, &sync_opts)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         tracing::debug!("Data is synced with disk");

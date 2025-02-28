@@ -1,14 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    consensus::{
-        universal_committer::UniversalCommitterBuilder, LeaderStatus, WAVE_LENGTH,
-    },
-    test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
-    types::{BlockReference},
-};
 use crate::types::VerifiedStatementBlock;
+use crate::{
+    consensus::{universal_committer::UniversalCommitterBuilder, LeaderStatus, WAVE_LENGTH},
+    test_util::{build_dag, build_dag_layer, committee, test_metrics, TestBlockWriter},
+    types::BlockReference,
+};
 
 /// Commit one leader.
 #[test]
