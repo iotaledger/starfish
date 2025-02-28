@@ -4,16 +4,17 @@
 [![license](https://img.shields.io/badge/license-Apache-blue.svg?style=flat-square)](LICENSE)
 
 The code in this repository is a prototype of Starfish. Two versions are available:
-- `starfish-push`: Theory-aligned version
+- `starfish`: Theory-aligned version
   - Higher bandwidth usage (up to 4x)
   - Better latency guarantees with Byzantine nodes
-- `starfish`: Production-optimized version
+- `starfish-pull`: More scalable version
   - Lower bandwidth usage in happy case
+  - Handling of higher throughput
   - Latency increased up to 3 times with Byzantine nodes
 
-Also supports other BFT protocols based on uncertified DAGs:
-- [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf)
-- [Cordial Miners](https://arxiv.org/pdf/2205.09174)
+The repository supports other partially synchronous uncertified DAG-based BFT protocols:
+- `mysticeti`: [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf)
+- `cordial-miners`: [Cordial Miners](https://arxiv.org/pdf/2205.09174)
 
 The goal of Starfish is to mitigate Byzantine behavior, ensure consensus liveness, and provide linear communication complexity with validator number.
 
@@ -51,20 +52,24 @@ git clone <repo>
 cd <repo>
 cargo build --release
 
-# Run test with default settings
+
+# Run local benchmark and see the basic metrics
+cargo run --release --bin starfish -- local-benchmark \
+        --committee-size 7 \
+        --load 10000 \
+        --consensus starfish \
+        --num-byzantine-nodes 0 \
+        --byzantine-strategy chain-bomb \
+        --mimic-extra-latency \
+        --duration-secs 100
+
+
+# Local dryrun with availability to look at metrics
 cd scripts
 ./dryrun.sh
 ```
-
-### Available Parameters
-- `NUM_VALIDATORS`: Validator count (default: 5)
-- `DESIRED_TPS`: Target transactions/sec (default: 15000)
-- `CONSENSUS`: Protocol (mysticeti, starfish, cordial-miners, starfish-push)
-- `NUM_BYZANTINE_NODES`: Byzantine nodes (default: 0)
-- `BYZANTINE_STRATEGY`: Attack strategy
-
 Monitor at: http://localhost:3000  
-Credentials: admin/supers3cret
+Credentials: admin/admin
 
 ## License
 [Apache 2.0](LICENSE)

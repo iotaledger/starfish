@@ -12,12 +12,9 @@ use starfish_core::{
     validator::Validator,
 };
 use std::time::Duration;
-use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc, thread};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::time::Instant;
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
 
 #[derive(Parser)]
@@ -263,6 +260,17 @@ async fn local_benchmark(
     let mut abort_handles = Vec::with_capacity(committee_size);
     let mut metrics_of_honest_validators = Vec::new();
     let mut reporters_of_honest_validators = Vec::new();
+
+
+    // Create a flag to signal when the benchmark is complete
+    let running = Arc::new(AtomicBool::new(true));
+    // Create a counter for elapsed seconds
+    let elapsed_seconds = Arc::new(AtomicU64::new(0));
+
+    // Start the progress display in a separate thread
+    run_with_progress(running.clone(), elapsed_seconds.clone());
+
+
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
@@ -333,6 +341,8 @@ async fn local_benchmark(
     // Run for specified duration
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {
+            // Signal the progress display to stop
+            running.store(false, Ordering::SeqCst);
             println!("Benchmark completed after {} seconds", duration_secs);
             // Display metrics before exiting
             Metrics::aggregate_and_display(metrics_of_honest_validators,reporters_of_honest_validators, duration_secs);
@@ -473,6 +483,26 @@ async fn dryrun(
 
     Ok(())
 }
+
+fn run_with_progress(running: Arc<AtomicBool>, elapsed_seconds: Arc<AtomicU64>) -> thread::JoinHandle<()> {
+    // Spawn a separate thread for the timer display
+    thread::spawn(move || {
+        let start = Instant::now();
+
+        while running.load(Ordering::SeqCst) {
+            let elapsed = start.elapsed().as_secs();
+            elapsed_seconds.store(elapsed, Ordering::SeqCst);
+
+            print!("\r{} seconds elapsed", elapsed);
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        println!("\nProgress tracking completed");
+    })
+}
+
 
 pub fn default_table_format() -> format::TableFormat {
     format::FormatBuilder::new()
