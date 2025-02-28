@@ -152,7 +152,7 @@ pub struct UniversalCommitterBuilder {
 impl UniversalCommitterBuilder {
     pub fn new(committee: Arc<Committee>, block_store: BlockStore, metrics: Arc<Metrics>) -> Self {
         match block_store.consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Mysticeti | ConsensusProtocol::Starfish => {
                 Self {
                     committee,
                     block_store,

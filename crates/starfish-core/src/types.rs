@@ -475,7 +475,7 @@ impl VerifiedStatementBlock {
         consensus_protocol: ConsensusProtocol,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
-            ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
                 TransactionsCommitment::new_from_encoded_statements(&encoded_statements.as_ref().unwrap(), authority as usize).0
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
@@ -511,7 +511,7 @@ impl VerifiedStatementBlock {
     pub fn verify(&mut self, committee: &Committee, own_id: usize, peer_id: usize, encoder: &mut Encoder, consensus_protocol: ConsensusProtocol) -> eyre::Result<()> {
         let round = self.round();
         match consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 let committee_size = committee.len();
                 let info_length = committee.info_length();
                 let parity_length = committee_size-info_length;

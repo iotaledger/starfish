@@ -228,7 +228,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             synchronizer_parameters.clone(),
         );
-        if consensus_protocol == ConsensusProtocol::Starfish {
+        if consensus_protocol == ConsensusProtocol::StarfishPull {
             data_requestor.start().await;
         }
 
@@ -256,10 +256,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         // For Mysticeti and Starfish disseminate
                         // own blocks only. For Starfish push and Cordial Miners, push all blocks
                         match consensus_protocol {
-                            ConsensusProtocol::Mysticeti | ConsensusProtocol::Starfish => {
+                            ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
                                 disseminator.disseminate_own_blocks(round).await;
                             }
-                            ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
+                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
                                 disseminator.disseminate_all_blocks_push().await;
                             }
                         }
@@ -277,7 +277,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                     // First process blocks without statements which could be in the causal history
-                    if consensus_protocol == ConsensusProtocol::Starfish || consensus_protocol == ConsensusProtocol::StarfishPush {
+                    if consensus_protocol == ConsensusProtocol::StarfishPull || consensus_protocol == ConsensusProtocol::Starfish {
 
 
                         let mut verified_data_blocks = Vec::new();
@@ -352,7 +352,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                                     storage_block.clone()
                                 }
-                                ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+                                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
                                     storage_block.from_storage_to_transmission(own_id)
                                 }
                             };
@@ -369,7 +369,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     if !verified_data_blocks.is_empty() {
                         let (pending_block_references, missing_parents) = inner.syncer.add_blocks(verified_data_blocks).await;
                         match consensus_protocol {
-                            ConsensusProtocol::Starfish  => {
+                            ConsensusProtocol::StarfishPull => {
                                 let mut max_round_pending_block_reference = None;
                                 for block_reference in pending_block_references {
                                     if max_round_pending_block_reference.is_none() {
@@ -395,7 +395,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     Self::request_parents_blocks(missing_parents, &connection.sender);
                                 }
                             }
-                            ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
+                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
 
                             }
                         }
@@ -407,7 +407,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
 
                 NetworkMessage::MissingHistoryRequest(block_reference) => {
-                    if consensus_protocol == ConsensusProtocol::Starfish {
+                    if consensus_protocol == ConsensusProtocol::StarfishPull {
                         tracing::debug!("Received request missing history for block {:?} from peer {:?}", block_reference, peer);
                         if inner.block_store.byzantine_strategy.is_none() {
                             disseminator.push_block_history_with_shards(block_reference).await;
@@ -430,7 +430,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
                 NetworkMessage::MissingTxDataRequest(block_references) => {
-                    if consensus_protocol == ConsensusProtocol::Starfish {
+                    if consensus_protocol == ConsensusProtocol::StarfishPull {
                         tracing::debug!("Received request missing data {:?} from peer {:?}", block_references, peer);
                         if inner.block_store.byzantine_strategy.is_none() {
                             let authority = connection.peer_id as AuthorityIndex;

@@ -210,7 +210,7 @@ impl<H: BlockHandler> Core<H> {
         };
         tracing::debug!("Processed {:?}; to be reconstructed {:?}", processed, new_blocks_to_reconstruct);
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
             }
             _ => {
@@ -421,7 +421,7 @@ impl<H: BlockHandler> Core<H> {
         let parity_length = self.committee.len() - info_length;
 
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 Some(self.encoder.encode_statements(
                     statements.clone(),
                     info_length,

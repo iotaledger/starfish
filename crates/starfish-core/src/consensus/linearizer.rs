@@ -178,7 +178,7 @@ impl Linearizer {
             // Collect the sub-dag generated using each of these leaders as anchor.
            let mut sub_dag = match consensus_protocol
            {
-               ConsensusProtocol::StarfishPush | ConsensusProtocol::Starfish => {
+               ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
                    self.collect_subdag_starfish(block_store, leader_block)
                }
                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {

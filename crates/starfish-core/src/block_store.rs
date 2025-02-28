@@ -26,9 +26,9 @@ use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ConsensusProtocol {
     Mysticeti,
-    Starfish,
+    StarfishPull,
     CordialMiners,
-    StarfishPush,
+    Starfish,
 }
 
 
@@ -36,10 +36,10 @@ impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
         match s {
             "mysticeti" => ConsensusProtocol::Mysticeti,
-            "starfish" => ConsensusProtocol::Starfish,
+            "starfish-pull" => ConsensusProtocol::StarfishPull,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
-            "starfish-push" => ConsensusProtocol::StarfishPush,
-            _ => ConsensusProtocol::Starfish, // Default to Starfish
+            "starfish" => ConsensusProtocol::Starfish,
+            _ => ConsensusProtocol::StarfishPull, // Default to Starfish
         }
     }
 }
@@ -167,8 +167,8 @@ impl BlockStore {
 
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
-            ConsensusProtocol::Starfish => tracing::info!("Starting Starfish mixed push-pull protocol"),
-            ConsensusProtocol::StarfishPush => tracing::info!("Starting Starfish push protocol"),
+            ConsensusProtocol::StarfishPull => tracing::info!("Starting Starfish mixed push-pull protocol"),
+            ConsensusProtocol::Starfish => tracing::info!("Starting Starfish push protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let block_store = Self {

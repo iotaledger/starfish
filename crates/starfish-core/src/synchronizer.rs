@@ -44,7 +44,7 @@ impl SynchronizerParameters {
                     sample_precision: Duration::from_millis(600),
                 }
             }
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
                 Self {
                     batch_own_block_size: committee_size,
                     batch_other_block_size: committee_size * committee_size,

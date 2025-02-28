@@ -321,7 +321,7 @@ impl BaseCommitter {
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
         match self.block_store.consensus_protocol  {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPush => {
+            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
                 if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
                     return LeaderStatus::Skip(leader, leader_round);
                 }

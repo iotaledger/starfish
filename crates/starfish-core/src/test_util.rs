@@ -172,7 +172,6 @@ pub fn committee_and_cores_persisted_epoch_duration(
                 public_config,
                 metrics,
                 recovered,
-                wal_writer,
                 CoreOptions::test(),
             );
             (core, reporter)
