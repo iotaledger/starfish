@@ -8,14 +8,6 @@ This guide provides a step-by-step explanation of how to run geo-distributed ben
 
 To enable programmatic access to your cloud provider account from your local machine, you need to set up your cloud provider credentials. These credentials authorize your machine to create, delete, and edit instances programmatically on your account.
 
-### Setting up Vultr credentials
-
-1. Find your ['Vultr token'](https://www.vultr.com/docs/).
-2. Create a file `~/.vultr` and add your access token as the file's content:
-
-```text
-YOUR_ACCESS_TOKEN
-```
 
 ### Setting up AWS credentials
 
@@ -50,6 +42,8 @@ The `orchestrator` binary provides various functionalities for creating, startin
 cargo run --bin orchestrator -- testbed deploy --instances 2
 ```
 
+Note that one instance is used for collecting metrics and representing them in Grafana. This means that for a committee of 10 validators one needs to run 11 instances. 
+
 To check the current status of the testbed instances, use the following command:
 
 ```bash
@@ -60,25 +54,27 @@ Instances listed with a green number are available and ready for use, while inst
 
 ## Step 4. Running benchmarks
 
-Running benchmarks involves installing the specified version of the codebase on the remote machines and running one validator and one load generator per instance. For example, the following command benchmarks a committee of 10 validators under a constant load of 200 tx/s:
+Running benchmarks involves installing the specified version of the codebase on the remote machines and running one validator per instance. One dedicated instance will take care of processing incoming metrics, so make sure that `committee_size`<`number_instances`. For example, the following command benchmarks a committee of `10` validators running `Starfish-Pull` consensus protocol under a constant load of 1000 tx/s:
 
 ```bash
-cargo run --bin orchestrator -- benchmark --committee 10 --loads 200
+cargo run --bin orchestrator -- benchmark --consensus starfish-pull --committee 10 --loads 1000
 ```
 
-In a network of 10 validators, each with a corresponding load generator, each load generator submits a fixed load of 20 tx/s. Performance measurements are collected by regularly scraping the Prometheus metrics exposed by the load generators. The `orchestrator` binary provides additional commands to run a specific number of load generators on separate machines.
+In a network of 10 validators, each with a corresponding load generator, each load generator submits a fixed load of 100 tx/s or more precisely 10 tx every 100ms. Performance measurements are collected by regularly scraping the Prometheus metrics exposed by the load generators.
+There are 4 options for consensus protocols: `starfish`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
 
 To run with Byzantine validators:
 ```bash
-cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy [equivocate|delayed|timeout] 
+cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy chain-bomb 
 ```
-In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows one of the Byzantine strategies [equivocate|delayed|timeout]
+In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
+`chain-bomb`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `equivocating-two-chains`.
 
-In case of running in a single AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between nodes. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command, for example:
+In case of running in a single region AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between nodes. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command. In addition,
+since the latencies within one region are very small, one can _mimic_ extra latencies matching some geo-distributed setup using the flag `--mimic-extra-latency`. So, the command could be
 
 ```bash
-cargo run --bin orchestrator -- benchmark --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy equivocate --use-internal-ip-addresses 
-
+cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb --mimic-extra-latency --use-internal-ip-addresses 
 ```
 
 
