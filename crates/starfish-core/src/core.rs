@@ -470,7 +470,7 @@ impl<H: BlockHandler> Core<H> {
 
     fn prepare_encoded_statements(
         &mut self,
-        statements: &Vec<BaseStatement>,
+        statements: &[BaseStatement],
     ) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
@@ -478,7 +478,7 @@ impl<H: BlockHandler> Core<H> {
         match self.block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => Some(
                 self.encoder
-                    .encode_statements(statements.clone(), info_length, parity_length),
+                    .encode_statements(statements.to_owned(), info_length, parity_length),
             ),
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }

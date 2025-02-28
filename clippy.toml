@@ -1,0 +1,7 @@
+# Increase threshold for too-many-arguments warning
+too-many-arguments-threshold = 12
+
+# Configure the third-party section to disable specific lints
+[third-party]
+# This is where you disable specific lints
+clippy = { needless_range_loop = { level = "allow" }, comparison_chain = { level = "allow" } }

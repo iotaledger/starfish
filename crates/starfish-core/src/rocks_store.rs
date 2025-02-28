@@ -6,6 +6,7 @@ use parking_lot::RwLock;
 use rocksdb::{ColumnFamilyDescriptor, Options, ReadOptions, WriteOptions, DB};
 use std::collections::VecDeque;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
+use std::cmp::Ordering;
 use tokio::sync::watch;
 use tokio::time::Instant;
 // Column families for different types of data
@@ -330,12 +331,14 @@ impl RocksStore {
                 let reference: BlockReference =
                     deserialize(&key_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-                if reference.round == round {
-                    let block = Data::from_bytes(value.into())
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                    blocks.push(block);
-                } else if reference.round > round {
-                    break;
+                match reference.round.cmp(&round) {
+                    Ordering::Equal => {
+                        let block = Data::from_bytes(value.into())
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                        blocks.push(block);
+                    },
+                    Ordering::Greater => break,
+                    Ordering::Less => {},
                 }
 
                 iter.next();

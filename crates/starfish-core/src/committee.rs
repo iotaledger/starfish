@@ -153,6 +153,10 @@ impl Committee {
         self.authorities.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn new_for_benchmarks(committee_size: usize) -> Arc<Self> {
         Self::new(
             Signer::new_for_test(committee_size)

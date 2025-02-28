@@ -393,13 +393,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             inner.syncer.add_blocks(verified_data_blocks).await;
                         match consensus_protocol {
                             ConsensusProtocol::StarfishPull => {
-                                let mut max_round_pending_block_reference = None;
+                                let mut max_round_pending_block_reference: Option<BlockReference> = None;
                                 for block_reference in pending_block_references {
-                                    if max_round_pending_block_reference.is_none() {
-                                        max_round_pending_block_reference = Some(block_reference);
-                                    } else if block_reference.round()
-                                        > max_round_pending_block_reference.unwrap().round()
-                                    {
+                                    if max_round_pending_block_reference.is_none() ||
+                                        block_reference.round() > max_round_pending_block_reference.unwrap().round() {
                                         max_round_pending_block_reference = Some(block_reference);
                                     }
                                 }

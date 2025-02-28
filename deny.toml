@@ -87,5 +87,4 @@ allow-git = [
 ]
 
 [sources.allow-org]
-# github.com organizations to allow git sources for
-github = ["MystenLabs"]
+

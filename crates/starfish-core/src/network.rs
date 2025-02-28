@@ -587,18 +587,18 @@ impl Worker {
 fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![]; n];
     if !mimic_latency {
-        for i in 0..n {
+        for item in resulting_table.iter_mut().take(n){
             for _j in 0..n {
-                resulting_table[i].push(0.0)
+                item.push(0.0)
             }
         }
     } else {
         let valid_sequence = [0, 2, 4, 6, 8, 1, 3, 5, 7, 8];
-        for i in 0..n {
+        for (i, item) in resulting_table.iter_mut().enumerate().take(n)  {
             for j in 0..n {
                 let index_i = i % valid_sequence.len();
                 let index_j = j % valid_sequence.len();
-                resulting_table[i].push(
+                item.push(
                     LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0,
                 )
             }

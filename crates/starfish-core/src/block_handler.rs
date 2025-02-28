@@ -250,7 +250,7 @@ impl CommitObserver for RealCommitHandler {
         let committed = pending;
         let mut slice_index = 0;
         let mut resulted_committed = Vec::new();
-        for (_i, commit) in committed.iter().enumerate() {
+        for commit in committed.iter() {
             let mut check_availability = true;
             for block in &commit.0.blocks {
                 if block.round() > 0 && !block_store.is_data_available(block.reference()) {
