@@ -72,6 +72,7 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
 
 impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N, C> {
     /// Make a new benchmark parameters.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_from_loads(
         settings: Settings,
         node_parameters: N,

@@ -201,7 +201,7 @@ impl BlockStore {
             .iter()
             .map(|(block_reference, refs_and_indices)| {
                 (
-                    block_reference.clone(),
+                    *block_reference,
                     refs_and_indices.0.clone(),
                     refs_and_indices.1.clone(),
                 )
@@ -471,8 +471,8 @@ impl BlockStore {
             .inner
             .read()
             .get_unknown_own_blocks(to_whom_authority_index, batch_own_block_size);
-        let data_transmission_blocks = self.read_index_transmission_vec(entries);
-        data_transmission_blocks
+
+        self.read_index_transmission_vec(entries)
     }
 
     pub fn get_unknown_other_blocks(
@@ -486,8 +486,8 @@ impl BlockStore {
             batch_other_block_size,
             max_round_own_blocks,
         );
-        let data_transmission_blocks = self.read_index_transmission_vec(entries);
-        data_transmission_blocks
+
+        self.read_index_transmission_vec(entries)
     }
 
     pub fn get_unknown_causal_history(
@@ -501,8 +501,8 @@ impl BlockStore {
             batch_own_block_size,
             batch_other_block_size,
         );
-        let data_transmission_blocks = self.read_index_transmission_vec(entries);
-        data_transmission_blocks
+
+        self.read_index_transmission_vec(entries)
     }
 
     pub fn get_unknown_past_cone(
@@ -518,8 +518,8 @@ impl BlockStore {
             batch_own_block_size,
             batch_other_block_size,
         );
-        let data_transmission_blocks = self.read_index_transmission_vec(entries);
-        data_transmission_blocks
+
+        self.read_index_transmission_vec(entries)
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -615,9 +615,7 @@ impl BlockStoreInner {
         if self.data_availability.contains(block_reference) {
             return self.committee_size;
         }
-        self.cached_blocks
-            .get(block_reference)
-            .map_or(0, |x| x.1.clone())
+        self.cached_blocks.get(block_reference).map_or(0, |x| x.1)
     }
 
     pub fn read_pending_unavailable(
@@ -656,7 +654,7 @@ impl BlockStoreInner {
             .expect("It should be some because of the above check");
         let cached_block = &self
             .cached_blocks
-            .get(&block_reference)
+            .get(block_reference)
             .expect("Cached block missing")
             .0;
         if cached_block.encoded_statements()[*shard_index].is_none() {
@@ -692,7 +690,7 @@ impl BlockStoreInner {
                 return (true, Some(cached_block.clone()));
             }
         }
-        return (false, None);
+        (false, None)
     }
 
     pub fn update_with_new_shard(&mut self, block: &VerifiedStatementBlock) {
@@ -727,7 +725,7 @@ impl BlockStoreInner {
 
     pub fn get_cached_block(&self, block_reference: &BlockReference) -> CachedStatementBlock {
         self.cached_blocks
-            .get(&block_reference)
+            .get(block_reference)
             .expect("Cached block missing")
             .0
             .clone()
@@ -807,15 +805,12 @@ impl BlockStoreInner {
         self.highest_round = max(self.highest_round, reference.round());
 
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(
-            reference.author_digest(),
-            IndexEntry::Unloaded(reference.clone()),
-        );
+        map.insert(reference.author_digest(), IndexEntry::Unloaded(*reference));
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
         self.update_dag(
-            reference.clone(),
+            *reference,
             data_storage_transmission_blocks.0.includes().clone(),
         );
         self.update_data_availability_and_cached_blocks(&data_storage_transmission_blocks.0);
@@ -849,7 +844,7 @@ impl BlockStoreInner {
         );
 
         self.update_dag(
-            reference.clone(),
+            *reference,
             storage_and_transmission_blocks.0.includes().clone(),
         );
         self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);
@@ -899,8 +894,7 @@ impl BlockStoreInner {
         let authority = block_reference.authority;
         let mut buffer = vec![block_reference];
 
-        while !buffer.is_empty() {
-            let block_reference = buffer.pop().unwrap();
+        while let Some(block_reference) = buffer.pop() {
             let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
             for parent in parents {
                 if parent.round == 0 {
@@ -924,20 +918,18 @@ impl BlockStoreInner {
 
         if block.statements().is_some() {
             if !self.data_availability.contains(block.reference()) {
-                self.data_availability.insert(block.reference().clone());
-                self.pending_acknowledgment.push(block.reference().clone());
+                self.data_availability.insert(*block.reference());
+                self.pending_acknowledgment.push(*block.reference());
             }
             tracing::debug!("Remove cached block {:?}", block.reference());
             self.cached_blocks.remove(block.reference());
+        } else if !self.data_availability.contains(block.reference()) {
+            let cached_block = block.to_cached_block(self.committee_size);
+            self.cached_blocks
+                .insert(*block.reference(), (cached_block, count));
+            tracing::debug!("Insert cached block {:?}", block.reference());
         } else {
-            if !self.data_availability.contains(&block.reference()) {
-                let cached_block = block.to_cached_block(self.committee_size);
-                self.cached_blocks
-                    .insert(block.reference().clone(), (cached_block, count));
-                tracing::debug!("Insert cached block {:?}", block.reference());
-            } else {
-                tracing::debug!("Block is already available {:?}", block.reference());
-            }
+            tracing::debug!("Block is already available {:?}", block.reference());
         }
     }
 
@@ -1027,7 +1019,7 @@ impl BlockStoreInner {
             })
             .collect();
 
-        own_blocks.sort_by_key(|x| x.1 as u64);
+        own_blocks.sort_by_key(|x| x.1);
         own_blocks.iter().map(|x| x.0.clone()).collect()
     }
 
@@ -1054,7 +1046,7 @@ impl BlockStoreInner {
                 }
             })
             .collect();
-        other_blocks.sort_by_key(|x| x.1 as u64);
+        other_blocks.sort_by_key(|x| x.1);
         other_blocks.iter().map(|x| x.0.clone()).collect()
     }
 
@@ -1098,7 +1090,7 @@ impl BlockStoreInner {
 
         let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
             own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1 as u64);
+        blocks_to_send.sort_by_key(|x| x.1);
         blocks_to_send.iter().map(|x| x.0.clone()).collect()
     }
 
@@ -1143,7 +1135,7 @@ impl BlockStoreInner {
 
         let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
             own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1 as u64);
+        blocks_to_send.sort_by_key(|x| x.1);
         blocks_to_send.iter().map(|x| x.0.clone()).collect()
     }
 

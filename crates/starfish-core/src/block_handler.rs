@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use crate::data::Data;
@@ -12,21 +11,18 @@ use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
-    committee::{Committee, QuorumThreshold, TransactionAggregator},
+    committee::{Committee},
     consensus::linearizer::{CommittedSubDag, Linearizer},
-    metrics::{Metrics, UtilizationTimerExt},
+    metrics::{Metrics},
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, Transaction, TransactionLocator},
+    types::{AuthorityIndex, BlockReference, Transaction},
 };
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 pub trait BlockHandler: Send + Sync {
     fn handle_proposal(&mut self, number_transactions: usize);
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement>;
-
-    fn cleanup(&self) {}
 }
 
 const REAL_BLOCK_HANDLER_TXN_SIZE: usize = 512;
@@ -41,8 +37,6 @@ const fn assert_constants() {
 }
 
 pub struct RealBlockHandler {
-    pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
-    metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Vec<Transaction>>,
     pending_transactions: usize,
     max_transactions_per_block: usize, // max number of transaction in block. Depends on the committee size
@@ -50,7 +44,6 @@ pub struct RealBlockHandler {
 
 impl RealBlockHandler {
     pub fn new(
-        metrics: Arc<Metrics>,
         committee: &Committee,
     ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
@@ -58,11 +51,8 @@ impl RealBlockHandler {
         // transactions per block to ensure fast processing
         let max_transactions_per_block = 150 * 1024 / committee.len();
         let this = Self {
-            transaction_time: Default::default(),
             max_transactions_per_block,
-            metrics,
             receiver,
-
             pending_transactions: 0, // todo - need to initialize correctly when loaded from disk
         };
         (this, sender)
@@ -87,13 +77,6 @@ impl BlockHandler for RealBlockHandler {
         self.pending_transactions -= number_transactions;
     }
 
-    fn cleanup(&self) {
-        let _timer = self.metrics.block_handler_cleanup_util.utilization_timer();
-        // todo - all of this should go away and we should measure tx latency differently
-        let mut l = self.transaction_time.lock();
-        l.retain(|_k, v| v.elapsed() < Duration::from_secs(10));
-    }
-
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
         let mut response = vec![];
         if require_response {
@@ -115,8 +98,6 @@ pub const SOFT_MAX_PROPOSED_PER_BLOCK: usize = 4 * 1000;
 pub struct TestBlockHandler {
     last_transaction: u64,
     pending_transactions: usize,
-    transaction_votes: TransactionAggregator<QuorumThreshold>,
-    pub transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
     committee: Arc<Committee>,
     authority: AuthorityIndex,
     receiver: mpsc::Receiver<Vec<Transaction>>,
@@ -133,8 +114,6 @@ impl TestBlockHandler {
         let (sender, receiver) = mpsc::channel(1024);
         let this = Self {
             last_transaction,
-            transaction_votes: Default::default(),
-            transaction_time: Default::default(),
             committee,
             authority,
             metrics,
@@ -151,10 +130,6 @@ impl TestBlockHandler {
         let received = self.receiver.try_recv().ok()?;
         self.pending_transactions += received.len();
         Some(received)
-    }
-
-    pub fn is_certified(&self, locator: &TransactionLocator) -> bool {
-        self.transaction_votes.is_processed(locator)
     }
 
     pub fn make_transaction(i: u64) -> Transaction {
@@ -208,18 +183,16 @@ impl RealCommitHandler {
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.statements().as_ref() {
             for statement in vec {
-                if let BaseStatement::Share(transaction) = statement {
-                    let tx_submission_timestamp =
-                        TransactionGenerator::extract_timestamp(transaction);
-                    let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
+                let BaseStatement::Share(transaction) = statement;
+                let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
+                let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
-                    self.metrics.transaction_committed_latency.observe(latency);
-                    self.metrics
-                        .transaction_committed_latency_squared_micros
-                        .inc_by(latency.as_micros().pow(2) as u64);
+                self.metrics.transaction_committed_latency.observe(latency);
+                self.metrics
+                    .transaction_committed_latency_squared_micros
+                    .inc_by(latency.as_micros().pow(2) as u64);
 
-                    self.metrics.sequenced_transactions_total.inc();
-                }
+                self.metrics.sequenced_transactions_total.inc();
             }
         } else {
             tracing::debug!(
@@ -280,12 +253,10 @@ impl CommitObserver for RealCommitHandler {
         for (_i, commit) in committed.iter().enumerate() {
             let mut check_availability = true;
             for block in &commit.0.blocks {
-                if block.round() > 0 {
-                    if !block_store.is_data_available(block.reference()) {
-                        tracing::debug!("Block {} is not available", block.reference());
-                        check_availability = false;
-                        break;
-                    }
+                if block.round() > 0 && !block_store.is_data_available(block.reference()) {
+                    tracing::debug!("Block {} is not available", block.reference());
+                    check_availability = false;
+                    break;
                 }
             }
             if check_availability {

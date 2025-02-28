@@ -104,8 +104,8 @@ impl TransactionsCommitment {
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();
         let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
-        let result = proof.verify(merkle_root.0, &[leaf_index], &[leaf_to_prove], tree_size);
-        result
+
+        proof.verify(merkle_root.0, &[leaf_index], &[leaf_to_prove], tree_size)
     }
 }
 impl BlockDigest {

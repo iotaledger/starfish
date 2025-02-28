@@ -64,10 +64,7 @@ impl Linearizer {
         assert!(self.committed.insert(leader_block_ref));
         while let Some(x) = buffer.pop() {
             to_commit.push(x.clone());
-            let s = self
-                .votes
-                .entry(x.reference().clone())
-                .or_insert_with(StakeAggregator::new);
+            let s = self.votes.entry(*x.reference()).or_default();
             s.add(leader_block_ref.authority, &self.committee);
             for reference in x.includes() {
                 // The block manager may have cleaned up blocks passed the latest committed rounds.
@@ -101,14 +98,9 @@ impl Linearizer {
             for acknowledgement_statement in x.acknowledgement_statements() {
                 // Todo the authority creating the block might automatically acknowledge for its block
 
-                let s = self
-                    .votes
-                    .entry(*acknowledgement_statement)
-                    .or_insert_with(StakeAggregator::new);
-                if !s.is_quorum(&self.committee) {
-                    if s.add(who_votes, &self.committee) {
-                        blocks_transaction_data_quorum.push(*acknowledgement_statement);
-                    }
+                let s = self.votes.entry(*acknowledgement_statement).or_default();
+                if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
+                    blocks_transaction_data_quorum.push(*acknowledgement_statement);
                 }
             }
             self.traversed_blocks.insert(*x.reference());
@@ -158,7 +150,7 @@ impl Linearizer {
             .into_iter()
             .filter_map(|(round, author, _, block)| {
                 // Keep only the first occurrence of each (round, author) pair
-                if seen_round_author.insert((round, author.clone())) {
+                if seen_round_author.insert((round, author)) {
                     Some(block)
                 } else {
                     None

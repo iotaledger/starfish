@@ -69,7 +69,7 @@ impl BlockManager {
                             .push(storage_and_transmission_blocks.0.clone());
                         updated_statements = true;
                         self.block_store.updated_unknown_by_others(
-                            storage_and_transmission_blocks.0.reference().clone(),
+                            *storage_and_transmission_blocks.0.reference(),
                         );
                         recoverable_blocks.remove(storage_and_transmission_blocks.0.reference());
                     } else {
@@ -80,7 +80,7 @@ impl BlockManager {
                             .is_sufficient_shards(storage_and_transmission_blocks.0.reference())
                         {
                             recoverable_blocks
-                                .insert(storage_and_transmission_blocks.0.reference().clone());
+                                .insert(*storage_and_transmission_blocks.0.reference());
                             tracing::debug!(
                                 "Block {:?} to reconstruct in core thread",
                                 block_reference

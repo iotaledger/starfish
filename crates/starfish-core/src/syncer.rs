@@ -69,7 +69,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
             tracing::debug!("Attempt to force new block after timeout");
-            if self.try_new_block() {}
+            self.try_new_block();
             true
         } else {
             false
@@ -85,7 +85,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 return true;
             }
         }
-        return false;
+        false
     }
     pub fn try_new_commit(&mut self) {
         let _timer = self

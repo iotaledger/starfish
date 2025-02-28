@@ -107,10 +107,9 @@ impl BaseCommitter {
                 .get_storage_block(*reference)
                 .expect("We should have the whole sub-dag by now");
 
-            if voters_for_leaders.contains(&(
-                leader_block.reference().clone(),
-                potential_vote.reference().clone(),
-            )) {
+            if voters_for_leaders
+                .contains(&(*leader_block.reference(), *potential_vote.reference()))
+            {
                 //tracing::trace!("[{self}] {potential_vote:?} is a vote for {leader_block:?}");
                 if votes_stake_aggregator.add(reference.authority, &self.committee) {
                     return true;
@@ -197,10 +196,9 @@ impl BaseCommitter {
             let leader_block_reference = leader_block.reference();
             for voting_block in &voting_blocks {
                 let voter = voting_block.author();
-                if voters_for_leaders.contains(&(
-                    leader_block_reference.clone(),
-                    voting_block.reference().clone(),
-                )) {
+                if voters_for_leaders
+                    .contains(&(*leader_block_reference, *voting_block.reference()))
+                {
                     //tracing::trace!(
                     //    "[{self}] {voting_block:?} is a blame for leader {}",
                     //    format_authority_round(leader, voting_round - 1)

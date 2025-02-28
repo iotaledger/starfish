@@ -23,7 +23,6 @@ pub mod metrics;
 pub mod net_sync;
 pub mod network;
 pub mod prometheus;
-mod range_map;
 mod rocks_store;
 mod runtime;
 mod serde;

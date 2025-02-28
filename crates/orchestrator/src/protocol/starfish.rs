@@ -161,7 +161,7 @@ impl ProtocolCommands for StarfishProtocol {
                 let byzantine_nodes = parameters.byzantine_nodes;
                 let mut byzantine_strategy = "honest".to_string();
                 if i % 3 == 0 && i / 3 < byzantine_nodes {
-                    byzantine_strategy = parameters.byzantine_strategy.clone();
+                    byzantine_strategy.clone_from(&parameters.byzantine_strategy);
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();
 

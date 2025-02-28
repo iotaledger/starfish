@@ -190,7 +190,7 @@ impl<H: BlockHandler> Core<H> {
         let block_references_with_statements: Vec<_> = blocks
             .iter()
             .filter(|(b, _)| b.statements().is_some())
-            .map(|(b, _)| b.reference().clone())
+            .map(|(b, _)| *b.reference())
             .collect();
         let block_manager_timer = self
             .metrics
@@ -202,20 +202,16 @@ impl<H: BlockHandler> Core<H> {
         let processed_references: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
-            .map(|b| b.reference().clone())
+            .map(|b| *b.reference())
             .collect();
         let not_processed_blocks: Vec<_> = block_references_with_statements
             .iter()
             .filter(|block_reference| !processed_references.contains(block_reference))
-            .map(|block_reference| block_reference.clone())
+            .copied()
             .collect();
 
         let success: bool =
-            if processed.len() > 0 || new_blocks_to_reconstruct.len() > 0 || updated_statements {
-                true
-            } else {
-                false
-            };
+            !processed.is_empty() || !new_blocks_to_reconstruct.is_empty() || updated_statements;
         tracing::debug!(
             "Processed {:?}; to be reconstructed {:?}",
             processed,
@@ -498,11 +494,10 @@ impl<H: BlockHandler> Core<H> {
         block_id_in_round: usize,
     ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
-        let mut block_references = vec![self.last_own_block[block_id_in_round]
+        let mut block_references = vec![*self.last_own_block[block_id_in_round]
             .storage_transmission_blocks
             .0
-            .reference()
-            .clone()];
+            .reference()];
         block_references.extend(block_references_without_own.iter().cloned());
         let block = VerifiedStatementBlock::new_with_signer(
             self.authority,
@@ -643,8 +638,6 @@ impl<H: BlockHandler> Core<H> {
                 .round()
                 .saturating_sub(RETAIN_BELOW_COMMIT_ROUNDS),
         );
-
-        self.block_handler.cleanup();
     }
 
     /// This only checks readiness in terms of helping liveness for commit rule,
@@ -683,14 +676,14 @@ impl<H: BlockHandler> Core<H> {
             .store_commits(commit_data)
             .expect("Store commits should not fail");
         // Sync if needed
-        if self.options.fsync && committed.len() > 0 {
+        if self.options.fsync && !committed.is_empty() {
             let timer = self
                 .metrics
                 .utilization_timer
                 .utilization_timer("Core::commit::sync with disk");
             self.rocks_store.sync().expect("RocksDB sync failed");
             drop(timer);
-        } else if committed.len() > 0 {
+        } else if !committed.is_empty() {
             let _sync_timer = self
                 .metrics
                 .utilization_timer

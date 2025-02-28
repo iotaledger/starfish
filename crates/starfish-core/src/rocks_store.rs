@@ -180,11 +180,11 @@ impl RocksStore {
         let reference = block.reference();
         let size = block.serialized_bytes().len();
         let mut batch = self.batch.write();
-        batch.blocks.insert(reference.clone(), block);
+        batch.blocks.insert(*reference, block);
         batch.total_size += size;
         // If batch is large enough, move it to pending queue
         if batch.total_size >= BATCH_SIZE_THRESHOLD {
-            let ops = std::mem::replace(&mut *batch, BatchedOperations::default());
+            let ops = std::mem::take(&mut *batch);
             drop(batch);
             let mut pending = self.pending_batches.lock();
             pending.push_back(ops);
@@ -242,7 +242,7 @@ impl RocksStore {
         for committed_sub_dag in committed_sub_dags {
             batch
                 .commits
-                .insert(committed_sub_dag.leader.clone(), committed_sub_dag);
+                .insert(committed_sub_dag.leader, committed_sub_dag);
         }
         Ok(())
     }

@@ -76,7 +76,7 @@ impl Validator {
         );
 
         // Rest of the function remains the same
-        let (block_handler, block_sender) = RealBlockHandler::new(metrics.clone(), &committee);
+        let (block_handler, block_sender) = RealBlockHandler::new(&committee);
 
         TransactionGenerator::start(
             block_sender,

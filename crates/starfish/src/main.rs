@@ -250,7 +250,7 @@ async fn local_benchmark(
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
-    load = load / committee.len();
+    load /= committee.len();
     let client_parameters = ClientParameters::almost_default(load);
     let node_parameters = NodeParameters::default_with_latency(mimic_latency);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
@@ -292,11 +292,7 @@ async fn local_benchmark(
                 ))
             }
         }
-        let is_byzantine = if authority % 3 == 0 && authority / 3 < num_byzantine_nodes {
-            true
-        } else {
-            false
-        };
+        let is_byzantine = authority % 3 == 0 && authority / 3 < num_byzantine_nodes;
         let validator = if is_byzantine {
             Validator::start(
                 authority as AuthorityIndex,

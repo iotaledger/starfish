@@ -160,7 +160,7 @@ where
                             && !inner.block_store.is_data_available(block.reference())
                         {
                             tracing::debug!("Data in block {block:?} is missing");
-                            to_request.push(block.reference().clone());
+                            to_request.push(*block.reference());
                         }
                     }
                 }
@@ -168,7 +168,7 @@ where
                     break 'commit_loop;
                 }
             }
-            if to_request.len() > 0 {
+            if !to_request.is_empty() {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
                 to.send(NetworkMessage::MissingTxDataRequest(to_request))
                     .await
@@ -318,7 +318,7 @@ where
         for block in blocks.iter() {
             self.inner
                 .block_store
-                .update_known_by_authority(block.reference().clone(), peer_id);
+                .update_known_by_authority(*block.reference(), peer_id);
         }
         tracing::debug!(
             "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
@@ -345,10 +345,7 @@ where
                 let block = block.expect("Should be some");
                 for parent_reference in block.includes() {
                     if unknown_blocks_by_peer.contains(parent_reference) {
-                        let parent = self
-                            .inner
-                            .block_store
-                            .get_storage_block(parent_reference.clone());
+                        let parent = self.inner.block_store.get_storage_block(*parent_reference);
                         if parent.is_some() {
                             block_counter += 1;
                             if block_counter >= batch_block_size {
@@ -366,7 +363,7 @@ where
         for block in blocks.iter() {
             self.inner
                 .block_store
-                .update_known_by_authority(block.reference().clone(), peer_id);
+                .update_known_by_authority(*block.reference(), peer_id);
         }
         tracing::debug!(
             "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
@@ -430,10 +427,10 @@ where
             for block in &blocks {
                 inner
                     .block_store
-                    .update_known_by_authority(block.reference().clone(), peer_id);
+                    .update_known_by_authority(*block.reference(), peer_id);
             }
             tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-            if blocks.len() > 0 {
+            if !blocks.is_empty() {
                 to.send(NetworkMessage::Batch(blocks)).await.ok()?;
             } else {
                 break;
@@ -455,7 +452,7 @@ where
         let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let batch_byzantine_own_block_size = 50 * batch_own_block_size;
-        let byzantine_strategy = inner.block_store.byzantine_strategy.clone();
+        let byzantine_strategy = inner.block_store.byzantine_strategy;
         let own_authority_index = inner.block_store.get_own_authority_index();
         let mut current_round = inner
             .block_store
@@ -663,15 +660,14 @@ where
     H: 'static + BlockHandler,
 {
     let peer = format_authority_index(to_whom_authority_index);
-    let blocks = inner.block_store.get_own_transmission_blocks(
-        to_whom_authority_index,
-        round.clone(),
-        batch_size,
-    );
+    let blocks =
+        inner
+            .block_store
+            .get_own_transmission_blocks(to_whom_authority_index, *round, batch_size);
     for block in blocks.iter() {
         inner
             .block_store
-            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+            .update_known_by_authority(*block.reference(), to_whom_authority_index);
         *round = max(*round, block.round());
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
@@ -702,7 +698,7 @@ where
     for block in &blocks {
         inner
             .block_store
-            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+            .update_known_by_authority(*block.reference(), to_whom_authority_index);
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
@@ -739,7 +735,7 @@ where
     for block in &blocks {
         inner
             .block_store
-            .update_known_by_authority(block.reference().clone(), to_whom_authority_index);
+            .update_known_by_authority(*block.reference(), to_whom_authority_index);
     }
     tracing::debug!(
         "Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}"
@@ -881,8 +877,8 @@ where
         // (`missing.len() > self.parameters.new_stream_threshold`), it is likely that
         // we have a network partition. We should try to find an other peer from which
         // to (temporarily) sync the blocks from that authority.
-        for authority in 0..to_request.len() {
-            for chunks in to_request[authority].chunks(net_sync::MAXIMUM_BLOCK_REQUEST) {
+        for (authority, item) in to_request.iter().enumerate() {
+            for chunks in item.chunks(net_sync::MAXIMUM_BLOCK_REQUEST) {
                 //let Some((peer, permit)) = self.sample_peer(&[self.id]) else {
                 //break;
                 //};

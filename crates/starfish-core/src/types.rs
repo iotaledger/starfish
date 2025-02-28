@@ -27,7 +27,6 @@ use std::sync::atomic::Ordering;
 use std::{
     fmt,
     hash::{Hash, Hasher},
-    ops::Range,
     time::Duration,
 };
 #[cfg(test)]
@@ -44,12 +43,6 @@ use crate::{
     crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
     data::Data,
 };
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub enum Vote {
-    Accept,
-    Reject(Option<TransactionLocator>),
-}
 
 pub type EpochStatus = bool;
 
@@ -74,10 +67,6 @@ pub struct BlockReference {
 pub enum BaseStatement {
     /// Authority Shares a transactions, without accepting it or not.
     Share(Transaction),
-    /// Authority votes to accept or reject a transaction.
-    Vote(TransactionLocator, Vote),
-    // For now only accept votes are batched
-    VoteRange(TransactionLocatorRange),
 }
 
 impl Hash for BlockReference {
@@ -163,16 +152,16 @@ impl CachedStatementBlock {
         ));
         if self.statements.is_some() {
             VerifiedStatementBlock {
-                reference: self.reference.clone(),
+                reference: self.reference,
                 includes: self.includes.clone(),
                 acknowledgement_statements: self.acknowledgement_statements.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker.clone(),
-                signature: self.signature.clone(),
+                epoch_marker: self.epoch_marker,
+                signature: self.signature,
                 statements: self.statements.clone(),
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
-                transactions_commitment: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.merkle_root_encoded_statements,
             }
         } else {
             let info_shards: Vec<Vec<u8>> = self
@@ -220,16 +209,16 @@ impl CachedStatementBlock {
                 bincode::deserialize(serialized_block)
                     .expect("Deserialization of reconstructed data failed");
             VerifiedStatementBlock {
-                reference: self.reference.clone(),
+                reference: self.reference,
                 includes: self.includes.clone(),
                 acknowledgement_statements: self.acknowledgement_statements.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker.clone(),
-                signature: self.signature.clone(),
+                epoch_marker: self.epoch_marker,
+                signature: self.signature,
                 statements: Some(reconstructed_statements),
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
-                transactions_commitment: self.merkle_root_encoded_statements.clone(),
+                transactions_commitment: self.merkle_root_encoded_statements,
             }
         }
     }
@@ -259,7 +248,7 @@ impl CachedStatementBlock {
     }
 
     pub fn merkle_root(&self) -> TransactionsCommitment {
-        self.merkle_root_encoded_statements.clone()
+        self.merkle_root_encoded_statements
     }
 }
 
@@ -316,16 +305,16 @@ impl VerifiedStatementBlock {
             encoded_statements.push(None);
         }
         CachedStatementBlock {
-            reference: self.reference.clone(),
+            reference: self.reference,
             includes: self.includes.clone(),
             acknowledgement_statements: self.acknowledgement_statements.clone(),
             meta_creation_time_ns: self.meta_creation_time_ns,
-            epoch_marker: self.epoch_marker.clone(),
-            signature: self.signature.clone(),
+            epoch_marker: self.epoch_marker,
+            signature: self.signature,
             statements: self.statements.clone(),
             encoded_statements, // Replace `0` with the actual position logic
             merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
-            merkle_root_encoded_statements: self.transactions_commitment.clone(),
+            merkle_root_encoded_statements: self.transactions_commitment,
         }
     }
 
@@ -334,43 +323,43 @@ impl VerifiedStatementBlock {
             if let Some((_, position)) = self.encoded_shard().as_ref() {
                 if *position != own_id as usize {
                     return Self {
-                        reference: self.reference.clone(),
+                        reference: self.reference,
                         includes: self.includes.clone(),
                         acknowledgement_statements: self.acknowledgement_statements.clone(),
                         meta_creation_time_ns: self.meta_creation_time_ns,
-                        epoch_marker: self.epoch_marker.clone(),
-                        signature: self.signature.clone(),
+                        epoch_marker: self.epoch_marker,
+                        signature: self.signature,
                         statements: None,
                         encoded_shard: None,
                         merkle_proof_encoded_shard: None,
-                        transactions_commitment: self.transactions_commitment.clone(),
+                        transactions_commitment: self.transactions_commitment,
                     };
                 }
             }
             Self {
-                reference: self.reference.clone(),
+                reference: self.reference,
                 includes: self.includes.clone(),
                 acknowledgement_statements: self.acknowledgement_statements.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker.clone(),
-                signature: self.signature.clone(),
+                epoch_marker: self.epoch_marker,
+                signature: self.signature,
                 statements: None,
                 encoded_shard: self.encoded_shard.clone(),
                 merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
-                transactions_commitment: self.transactions_commitment.clone(),
+                transactions_commitment: self.transactions_commitment,
             }
         } else {
             Self {
-                reference: self.reference.clone(),
+                reference: self.reference,
                 includes: self.includes.clone(),
                 acknowledgement_statements: self.acknowledgement_statements.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker.clone(),
-                signature: self.signature.clone(),
+                epoch_marker: self.epoch_marker,
+                signature: self.signature,
                 statements: self.statements.clone(),
                 encoded_shard: None,
                 merkle_proof_encoded_shard: None,
-                transactions_commitment: self.transactions_commitment.clone(),
+                transactions_commitment: self.transactions_commitment,
             }
         }
     }
@@ -392,7 +381,7 @@ impl VerifiedStatementBlock {
     }
 
     pub fn merkle_root(&self) -> TransactionsCommitment {
-        self.transactions_commitment.clone()
+        self.transactions_commitment
     }
 
     pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
@@ -417,9 +406,9 @@ impl VerifiedStatementBlock {
 
     pub fn number_transactions(&self) -> usize {
         if self.statements.is_some() {
-            return self.statements().as_ref().clone().unwrap().len();
+            return self.statements().as_ref().unwrap().len();
         }
-        return 0;
+        0
     }
 
     pub fn author(&self) -> AuthorityIndex {
@@ -467,6 +456,7 @@ impl VerifiedStatementBlock {
     pub fn set_merkle_proof(&mut self, merkle_proof: Vec<u8>) {
         self.merkle_proof_encoded_shard = Some(merkle_proof);
     }
+
     pub fn new_with_signer(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -482,7 +472,7 @@ impl VerifiedStatementBlock {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
                 TransactionsCommitment::new_from_encoded_statements(
-                    &encoded_statements.as_ref().unwrap(),
+                    encoded_statements.as_ref().unwrap(),
                     authority as usize,
                 )
                 .0
@@ -546,37 +536,34 @@ impl VerifiedStatementBlock {
                         "Incorrect Merkle root"
                     );
                     self.merkle_proof_encoded_shard = Some(merkle_proof_bytes);
-                    self.encoded_shard =
-                        Some((encoded_statements[own_id as usize].clone(), own_id));
-                } else {
-                    if self.encoded_shard.is_some() {
-                        let (encoded_shard, position) = self
-                            .encoded_shard
-                            .clone()
-                            .expect("We expect an encoded shard");
-                        if position != peer_id {
-                            bail!("The peer delivers a wrong encoded chunk");
-                        }
-                        if self.merkle_proof_encoded_shard.is_none() {
-                            bail!("The peer didn't include the proof for the encoded shard");
-                        }
-                        ensure!(
-                            TransactionsCommitment::check_correctness_merkle_leaf(
-                                encoded_shard,
-                                self.transactions_commitment,
-                                self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(),
-                                committee_size,
-                                position
-                            ),
-                            "Merkle proof check failed"
-                        );
+                    self.encoded_shard = Some((encoded_statements[own_id].clone(), own_id));
+                } else if self.encoded_shard.is_some() {
+                    let (encoded_shard, position) = self
+                        .encoded_shard
+                        .clone()
+                        .expect("We expect an encoded shard");
+                    if position != peer_id {
+                        bail!("The peer delivers a wrong encoded chunk");
                     }
+                    if self.merkle_proof_encoded_shard.is_none() {
+                        bail!("The peer didn't include the proof for the encoded shard");
+                    }
+                    ensure!(
+                        TransactionsCommitment::check_correctness_merkle_leaf(
+                            encoded_shard,
+                            self.transactions_commitment,
+                            self.merkle_proof_encoded_shard.as_ref().cloned().unwrap(),
+                            committee_size,
+                            position
+                        ),
+                        "Merkle proof check failed"
+                    );
                 }
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 if self.statements.is_some() {
                     let transactions_commitment = TransactionsCommitment::new_from_statements(
-                        &self.statements.as_ref().unwrap(),
+                        self.statements.as_ref().unwrap(),
                     );
                     ensure!(
                         transactions_commitment == self.transactions_commitment,
@@ -692,76 +679,6 @@ pub struct TransactionLocator {
     offset: u64,
 }
 
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
-pub struct TransactionLocatorRange {
-    block: BlockReference,
-    offset_start_inclusive: u64,
-    offset_end_exclusive: u64,
-}
-
-impl TransactionLocator {
-    pub(crate) fn new(block: BlockReference, offset: u64) -> Self {
-        Self { block, offset }
-    }
-
-    pub fn block(&self) -> &BlockReference {
-        &self.block
-    }
-
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-}
-
-impl TransactionLocatorRange {
-    pub fn one(locator: TransactionLocator) -> Self {
-        Self {
-            block: locator.block,
-            offset_start_inclusive: locator.offset,
-            offset_end_exclusive: locator.offset + 1,
-        }
-    }
-
-    pub fn locators(&self) -> impl Iterator<Item = TransactionLocator> + '_ {
-        self.range()
-            .map(|offset| TransactionLocator::new(self.block, offset))
-    }
-
-    pub fn len(&self) -> usize {
-        (self.offset_end_exclusive - self.offset_start_inclusive) as usize
-    }
-
-    pub fn verify(&self) -> eyre::Result<()> {
-        ensure!(
-            self.offset_end_exclusive >= self.offset_start_inclusive,
-            "offset_end_exclusive must be greater or equal offset_start_inclusive: {}, {}",
-            self.offset_end_exclusive,
-            self.offset_start_inclusive,
-        );
-        // todo - should have constant for max transactions per block and use it here
-        const MAX_LEN: u64 = 1024 * 1024;
-        let len = self.len() as u64;
-        ensure!(
-            len < MAX_LEN,
-            "Include is too large when uncompressed: {len}"
-        );
-        ensure!(
-            self.offset_end_exclusive < MAX_LEN,
-            "offset_end_exclusive is too large when uncompressed: {}",
-            self.offset_end_exclusive
-        );
-        Ok(())
-    }
-
-    pub fn range(&self) -> Range<u64> {
-        self.offset_start_inclusive..self.offset_end_exclusive
-    }
-
-    pub fn block(&self) -> &BlockReference {
-        &self.block
-    }
-}
-
 impl BlockReference {
     #[cfg(test)]
     pub fn new_test(authority: AuthorityIndex, round: RoundNumber) -> Self {
@@ -855,29 +772,14 @@ impl fmt::Display for VerifiedStatementBlock {
         write!(f, "](")?;
         if self.statements.is_some() {
             write!(f, "ledger")?;
+        } else if self.encoded_shard.is_some() {
+            write!(f, "shard")?;
         } else {
-            if self.encoded_shard.is_some() {
-                write!(f, "shard")?;
-            } else {
-                write!(f, "header")?;
-            }
+            write!(f, "header")?;
         }
         write!(f, ")")
     }
 }
-
-impl fmt::Debug for TransactionLocator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl fmt::Display for TransactionLocator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.block, self.offset)
-    }
-}
-
 impl PartialEq for StatementBlock {
     fn eq(&self, other: &Self) -> bool {
         self.reference == other.reference
@@ -920,27 +822,11 @@ impl CryptoHash for BlockReference {
     }
 }
 
-impl CryptoHash for TransactionLocator {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
-        self.block.crypto_hash(state);
-        self.offset.crypto_hash(state);
-    }
-}
-
 impl CryptoHash for Shard {
     fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         state.update(self);
     }
 }
-
-impl CryptoHash for TransactionLocatorRange {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
-        self.block.crypto_hash(state);
-        self.offset_start_inclusive.crypto_hash(state);
-        self.offset_end_exclusive.crypto_hash(state);
-    }
-}
-
 impl CryptoHash for EpochStatus {
     fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
         match self {
@@ -957,23 +843,6 @@ impl CryptoHash for BaseStatement {
                 [0].crypto_hash(state);
                 tx.crypto_hash(state);
             }
-            BaseStatement::Vote(id, Vote::Accept) => {
-                [1].crypto_hash(state);
-                id.crypto_hash(state);
-            }
-            BaseStatement::Vote(id, Vote::Reject(None)) => {
-                [2].crypto_hash(state);
-                id.crypto_hash(state);
-            }
-            BaseStatement::Vote(id, Vote::Reject(Some(other))) => {
-                [3].crypto_hash(state);
-                id.crypto_hash(state);
-                other.crypto_hash(state);
-            }
-            BaseStatement::VoteRange(range) => {
-                [4].crypto_hash(state);
-                range.crypto_hash(state);
-            }
         }
     }
 }
@@ -982,13 +851,6 @@ impl fmt::Display for BaseStatement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BaseStatement::Share(_tx) => write!(f, "tx"),
-            BaseStatement::Vote(id, Vote::Accept) => write!(f, "+{id:08}"),
-            BaseStatement::Vote(id, Vote::Reject(_)) => write!(f, "-{id:08}"),
-            BaseStatement::VoteRange(range) => write!(
-                f,
-                "+{}:{}:{}",
-                range.block, range.offset_start_inclusive, range.offset_end_exclusive
-            ),
         }
     }
 }

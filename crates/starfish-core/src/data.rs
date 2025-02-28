@@ -71,9 +71,9 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
     }
 }
 
-impl Into<Arc<StatementBlock>> for Data<StatementBlock> {
-    fn into(self) -> Arc<StatementBlock> {
-        self.0.t.clone()
+impl From<Data<StatementBlock>> for Arc<StatementBlock> {
+    fn from(val: Data<StatementBlock>) -> Self {
+        val.0.t.clone()
     }
 }
 

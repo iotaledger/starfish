@@ -181,7 +181,7 @@ pub mod test_client {
         async fn create_instance<S>(
             &self,
             region: S,
-            quantity: usize,
+            _quantity: usize,
         ) -> CloudProviderResult<Instance>
         where
             S: Into<String> + Serialize + Send,

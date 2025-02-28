@@ -93,7 +93,7 @@ impl Measurement {
                             _ => panic!("Unexpected scraped value: '{x}'"),
                         }
                     }
-                    bucket_id if bucket_id.starts_with("p") => match sample.value {
+                    bucket_id if bucket_id.starts_with('p') => match sample.value {
                         prometheus_parse::Value::Gauge(value) => {
                             let bucket_delay = Duration::from_micros(value as u64);
                             measurement
@@ -125,7 +125,7 @@ impl Measurement {
                             _ => panic!("Unexpected scraped value: '{x}'"),
                         }
                     }
-                    bucket_id if bucket_id.starts_with("p") => match sample.value {
+                    bucket_id if bucket_id.starts_with('p') => match sample.value {
                         prometheus_parse::Value::Gauge(value) => {
                             let bucket_delay = Duration::from_micros(value as u64);
                             measurement
@@ -256,7 +256,7 @@ impl MeasurementsCollection {
                 let keys: Vec<&ScraperId> = data.keys().sorted().collect();
                 let mut result = Vec::with_capacity(keys.len());
                 for key in keys {
-                    result.push(data[&key].clone());
+                    result.push(data[key].clone());
                 }
                 result
             })

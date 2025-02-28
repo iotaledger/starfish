@@ -199,7 +199,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
         let synchronizer_parameters =
-            SynchronizerParameters::new(committee_size, consensus_protocol.clone());
+            SynchronizerParameters::new(committee_size, consensus_protocol);
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -396,18 +396,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 let mut max_round_pending_block_reference = None;
                                 for block_reference in pending_block_references {
                                     if max_round_pending_block_reference.is_none() {
-                                        max_round_pending_block_reference =
-                                            Some(block_reference.clone());
-                                    } else {
-                                        if block_reference.round()
-                                            > max_round_pending_block_reference
-                                                .clone()
-                                                .unwrap()
-                                                .round()
-                                        {
-                                            max_round_pending_block_reference =
-                                                Some(block_reference.clone());
-                                        }
+                                        max_round_pending_block_reference = Some(block_reference);
+                                    } else if block_reference.round()
+                                        > max_round_pending_block_reference.unwrap().round()
+                                    {
+                                        max_round_pending_block_reference = Some(block_reference);
                                     }
                                 }
                                 if max_round_pending_block_reference.is_some() {
@@ -424,10 +417,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                             ConsensusProtocol::Mysticeti => {
                                 if !missing_parents.is_empty() {
-                                    let missing_parents = missing_parents
-                                        .iter()
-                                        .map(|r| r.clone())
-                                        .collect::<Vec<_>>();
+                                    let missing_parents =
+                                        missing_parents.iter().copied().collect::<Vec<_>>();
                                     tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", missing_parents, peer);
                                     Self::request_parents_blocks(
                                         missing_parents,
