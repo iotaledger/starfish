@@ -343,6 +343,7 @@ async fn local_benchmark(
         _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {
             // Signal the progress display to stop
             running.store(false, Ordering::SeqCst);
+            println!();
             println!("Benchmark completed after {} seconds", duration_secs);
             // Display metrics before exiting
             Metrics::aggregate_and_display(metrics_of_honest_validators,reporters_of_honest_validators, duration_secs);
@@ -498,8 +499,6 @@ fn run_with_progress(running: Arc<AtomicBool>, elapsed_seconds: Arc<AtomicU64>) 
 
             thread::sleep(Duration::from_millis(100));
         }
-
-        println!("\nProgress tracking completed");
     })
 }
 

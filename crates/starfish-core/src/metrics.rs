@@ -369,7 +369,7 @@ impl Metrics {
         table.add_row(row![bH2->"Network Metrics"]);
         table.add_row(row![b->"Average bandwidth out:", format!("{:.2} MB/s", average_bytes_sent as f64 / duration_secs as f64 / 1024.0 / 1024.0)]);
         table.add_row(row![b->"Average bandwidth in:", format!("{:.2} MB/s", average_bytes_received as f64 / duration_secs as f64/ 1024.0 / 1024.0)]);
-        table.add_row(row![b->"Byte complexity for tx:", format!("{:.2}", average_bytes_sent as f64 / average_transactions as f64 / 512.0)]);
+        table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", average_bytes_sent as f64 / average_transactions as f64 / 512.0)]);
         println!("\n");
         table.printstd();
         println!("\n");
