@@ -166,39 +166,43 @@ impl ProtocolCommands for StarfishProtocol {
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();
 
-                let mut run = [
-                    &format!("./{BINARY_PATH}/starfish"),
-                    "run",
-                    &format!("--authority {authority}"),
-                    &format!("--consensus {consensus_protocol}"),
-                    &format!("--committee-path {}", committee_path.display()),
-                    &format!("--public-config-path {}", public_config_path.display()),
-                    &format!("--private-config-path {}", private_config_path.display()),
-                    &format!(
+                // Build base command
+                let mut command_parts = vec![
+                    format!("./{BINARY_PATH}/starfish"),
+                    "run".to_string(),
+                    format!("--authority {authority}"),
+                    format!("--consensus {consensus_protocol}"),
+                    format!("--committee-path {}", committee_path.display()),
+                    format!("--public-config-path {}", public_config_path.display()),
+                    format!("--private-config-path {}", private_config_path.display()),
+                    format!(
                         "--client-parameters-path {}",
                         client_parameters_path.display()
                     ),
-                ]
-                .join(" ");
+                ];
 
+                // Add byzantine strategy if needed
                 if byzantine_strategy != "honest" {
-                    run = [
-                        &format!("./{BINARY_PATH}/starfish"),
-                        "run",
-                        &format!("--authority {authority}"),
-                        &format!("--consensus {consensus_protocol}"),
-                        &format!("--committee-path {}", committee_path.display()),
-                        &format!("--public-config-path {}", public_config_path.display()),
-                        &format!("--private-config-path {}", private_config_path.display()),
-                        &format!(
-                            "--client-parameters-path {}",
-                            client_parameters_path.display()
-                        ),
-                        &format!("--byzantine-strategy {}", byzantine_strategy),
-                    ]
-                    .join(" ");
+                    command_parts.push(format!("--byzantine-strategy {}", byzantine_strategy));
                 }
 
+                // Add tracing if enabled
+                if parameters.enable_tracing {
+                    // Add environment variables for tracing
+                    let env_vars =
+                        "RUST_BACKTRACE=1 RUST_LOG=warn,starfish_core::block_manager=trace,\
+                    starfish_core::block_handler=trace,starfish_core::consensus=trace,\
+                    starfish_core::net_sync=DEBUG,starfish_core::core=DEBUG,\
+                    starfish_core::synchronizer=DEBUG,starfish_core::transactions_generator=DEBUG,\
+                    starfish_core::validator=trace,starfish_core::network=trace,\
+                    starfish_core::block_store=trace,starfish_core::threshold_core=trace,\
+                    starfish_core::syncer=trace";
+
+                    let run = command_parts.join(" ");
+                    command_parts = vec![env_vars.to_string(), run];
+                }
+
+                let run = command_parts.join(" ");
                 let command = ["source $HOME/.cargo/env", &run].join(" && ");
                 (instance, command)
             })

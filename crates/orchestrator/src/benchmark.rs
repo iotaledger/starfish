@@ -35,13 +35,15 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub byzantine_nodes: usize,
     /// Byzantine strategy
     pub byzantine_strategy: String,
+    /// Enable tracing
+    pub enable_tracing: bool,
 }
 
 impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}-{:?}-{:?}-{}-{}-{}-{}-{}-{}",
+            "{:?}-{:?}-{:?}-{}-{}-{}-{}-{}-{}-{}",
             self.node_parameters,
             self.client_parameters,
             self.settings.faults,
@@ -50,7 +52,8 @@ impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
             self.byzantine_nodes,
             self.byzantine_strategy,
             self.load,
-            self.use_internal_ip_address
+            self.use_internal_ip_address,
+            self.enable_tracing,
         )
     }
 }
@@ -59,14 +62,15 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Consensus choice: {}. Settings:{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {})",
+            "Consensus choice: {}. Settings:{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {}); enable tracing: {}",
             self.consensus_protocol,
             self.nodes,
             self.byzantine_nodes,
             self.byzantine_strategy,
             self.settings.faults,
             self.load,
-            self.use_internal_ip_address
+            self.use_internal_ip_address,
+            self.enable_tracing,
         )
     }
 }
@@ -84,6 +88,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         consensus_protocol: String,
         byzantine_nodes: usize,
         byzantine_strategy: String,
+        enable_tracing: bool,
     ) -> Vec<Self> {
         loads
             .into_iter()
@@ -97,6 +102,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                 consensus_protocol: consensus_protocol.clone(),
                 byzantine_nodes,
                 byzantine_strategy: byzantine_strategy.clone(),
+                enable_tracing,
             })
             .collect()
     }

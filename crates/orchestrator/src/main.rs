@@ -110,6 +110,10 @@ pub enum Operation {
         /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
         #[clap(long, action, default_value_t = false, global = true)]
         use_internal_ip_addresses: bool,
+
+        /// Flag indicating whether nodes use log traces or not, this is useful for debugging
+        #[clap(long, action, default_value_t = false, global = true)]
+        enable_tracing: bool,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -230,6 +234,7 @@ async fn run<C: ServerProviderClient>(
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
+            enable_tracing,
         } => {
             // Create a new orchestrator to instruct the testbed.
             let username = testbed.username();
@@ -269,6 +274,7 @@ async fn run<C: ServerProviderClient>(
                 consensus_protocol,
                 byzantine_nodes,
                 byzantine_strategy,
+                enable_tracing,
             );
 
             Orchestrator::new(

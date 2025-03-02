@@ -5,7 +5,7 @@ token_file: "/Users/${USER}/.aws/credentials"
 ssh_private_key_file: "/Users/${USER}/.ssh/aws"
 regions:
   - us-west-1
-specs: m5d.8xlarge
+specs: m5d.4xlarge
 repository:
-  url: https://github.com/asonnino/mysticeti.git
+  url: https://github.com/iotaledger/starfish.git
   commit: main
