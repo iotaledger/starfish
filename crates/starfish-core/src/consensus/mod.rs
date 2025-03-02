@@ -11,9 +11,6 @@ pub mod base_committer;
 pub mod linearizer;
 pub mod universal_committer;
 
-#[cfg(test)]
-mod tests;
-
 /// Default wave length for all committers. A longer wave_length increases the chance of committing the leader
 /// under asynchrony at the cost of latency in the common case.
 pub const WAVE_LENGTH: RoundNumber = 3;

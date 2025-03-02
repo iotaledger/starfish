@@ -95,13 +95,6 @@ pub struct Connection {
 }
 
 impl Network {
-    #[cfg(feature = "simulator")]
-    pub(crate) fn new_from_raw(connection_receiver: mpsc::Receiver<Connection>) -> Self {
-        Self {
-            connection_receiver,
-        }
-    }
-
     pub async fn load(
         parameters: &NodePublicConfig,
         our_id: AuthorityIndex,
@@ -588,14 +581,14 @@ impl Worker {
 fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![]; n];
     if !mimic_latency {
-        for item in resulting_table.iter_mut().take(n){
+        for item in resulting_table.iter_mut().take(n) {
             for _j in 0..n {
                 item.push(0.0)
             }
         }
     } else {
         let valid_sequence = [0, 2, 4, 6, 8, 1, 3, 5, 7, 8];
-        for (i, item) in resulting_table.iter_mut().enumerate().take(n)  {
+        for (i, item) in resulting_table.iter_mut().enumerate().take(n) {
             for j in 0..n {
                 let index_i = i % valid_sequence.len();
                 let index_j = j % valid_sequence.len();
@@ -639,35 +632,4 @@ fn decode_ping(message: &[u8]) -> i64 {
     let mut m = [0u8; 8];
     m.copy_from_slice(message); // asserts message.len() == 8
     i64::from_le_bytes(m)
-}
-
-#[cfg(test)]
-mod test {
-    use std::collections::HashSet;
-
-    use prometheus::Registry;
-
-    use crate::{committee::Committee, metrics::Metrics, test_util::networks_and_addresses};
-
-    #[tokio::test]
-    async fn network_connect_test() {
-        let committee = Committee::new_test(vec![1, 1, 1]);
-        let metrics: Vec<_> = committee
-            .authorities()
-            .map(|_| Metrics::new(&Registry::default(), Some(&committee)).0)
-            .collect();
-        let (networks, addresses) = networks_and_addresses(&metrics).await;
-        for (mut network, address) in networks.into_iter().zip(addresses.iter()) {
-            let mut waiting_peers: HashSet<_> = HashSet::from_iter(addresses.iter().copied());
-            waiting_peers.remove(address);
-            while let Some(connection) = network.connection_receiver.recv().await {
-                let peer = &addresses[connection.peer_id];
-                eprintln!("{address} connected to {peer}");
-                waiting_peers.remove(peer);
-                if waiting_peers.len() == 0 {
-                    break;
-                }
-            }
-        }
-    }
 }

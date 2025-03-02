@@ -25,7 +25,8 @@ pub struct TransactionGenerator {
 
 impl TransactionGenerator {
     const BATCHES_IN_SECOND: usize = 20;
-    const TARGET_BLOCK_INTERVAL: Duration = Duration::from_millis((1000 / Self::BATCHES_IN_SECOND) as u64);
+    const TARGET_BLOCK_INTERVAL: Duration =
+        Duration::from_millis((1000 / Self::BATCHES_IN_SECOND) as u64);
 
     pub fn start(
         sender: mpsc::Sender<Vec<Transaction>>,
@@ -50,11 +51,17 @@ impl TransactionGenerator {
     pub async fn run(mut self) {
         let load = self.client_parameters.load;
 
-        let transactions_per_block_interval = (load + Self::BATCHES_IN_SECOND-1) / Self::BATCHES_IN_SECOND;
-        let initial_delay_plus_random_delay = self.client_parameters.initial_delay + Duration::from_millis((self.node_public_config.identifiers.len() as f64 / 100.0 * 2000.0) as u64)  ;
+        let transactions_per_block_interval =
+            (load + Self::BATCHES_IN_SECOND - 1) / Self::BATCHES_IN_SECOND;
+        // For every 10 validators, add 2 seconds to the initial default delay
+        // used for establishing connections between validators
+        let initial_delay_plus_extra_delay = self.client_parameters.initial_delay
+            + Duration::from_millis(
+                (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
+            );
         tracing::info!(
             "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions per {} ms",
-            initial_delay_plus_random_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
+            initial_delay_plus_extra_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
@@ -65,7 +72,7 @@ impl TransactionGenerator {
         let zeros = vec![0u8; self.client_parameters.transaction_size - 8 - 8]; // 8 bytes timestamp + 8 bytes random
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
-        runtime::sleep(self.client_parameters.initial_delay).await;
+        runtime::sleep(initial_delay_plus_extra_delay).await;
 
         loop {
             interval.tick().await;

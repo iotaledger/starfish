@@ -57,7 +57,7 @@ impl CachedStatementBlockDecoder for Decoder {
         }
 
         let mut data: Vec<Shard> = vec![vec![]; info_length];
-        for (i, item) in data.iter_mut().enumerate().take(info_length)  {
+        for (i, item) in data.iter_mut().enumerate().take(info_length) {
             if cached_block.encoded_statements()[i].is_some() {
                 *item = cached_block.encoded_statements()[i].clone().unwrap();
             }
@@ -78,10 +78,9 @@ impl CachedStatementBlockDecoder for Decoder {
 
         if computed_merkle_root == cached_block.merkle_root() {
             let mut reconstructed_cached_block = cached_block;
-            for (i, item) in recovered_statements.iter().enumerate().take(total_length)  {
+            for (i, item) in recovered_statements.iter().enumerate().take(total_length) {
                 if reconstructed_cached_block.encoded_statements()[i].is_none() {
-                    reconstructed_cached_block
-                        .add_encoded_shard(i, item.clone());
+                    reconstructed_cached_block.add_encoded_shard(i, item.clone());
                 }
             }
             let storage_block: VerifiedStatementBlock = reconstructed_cached_block

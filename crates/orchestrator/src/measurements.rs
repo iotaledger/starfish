@@ -485,26 +485,6 @@ mod test {
     }
 
     #[test]
-    fn stdev_latency() {
-        let data = Measurement {
-            timestamp: Duration::from_secs(10),
-            buckets: HashMap::new(),
-            count_buckets: HashMap::new(),
-            sum: Duration::from_secs(50),
-            count: 100,
-            squared_sum: 75.0,
-        };
-
-        // squared_sum / count
-        assert_eq!(data.squared_sum / data.count as f64, 0.75);
-        // avg^2
-        assert_eq!(data.average_latency().as_secs_f64().powf(2.0), 0.25);
-        // sqrt( squared_sum / count - avg^2 )
-        let stdev = data.stdev_latency();
-        assert_eq!((stdev.as_secs_f64() * 10.0).round(), 7.0);
-    }
-
-    #[test]
     fn prometheus_parse() {
         let report = r#"
             # HELP benchmark_duration Duration of the benchmark

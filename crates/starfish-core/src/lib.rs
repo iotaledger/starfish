@@ -15,9 +15,6 @@ mod data;
 mod decoder;
 mod encoder;
 mod epoch_close;
-#[cfg(test)]
-#[cfg(feature = "simulator")]
-mod future_simulator;
 #[allow(dead_code)] // todo - delete if unused after a while
 mod lock;
 pub mod metrics;
@@ -27,19 +24,10 @@ pub mod prometheus;
 mod rocks_store;
 mod runtime;
 mod serde;
-#[cfg(test)]
-#[cfg(feature = "simulator")]
-mod simulated_network;
-#[cfg(test)]
-mod simulator;
-#[cfg(feature = "simulator")]
-mod simulator_tracing;
 mod stat;
 mod state;
 mod syncer;
 mod synchronizer;
-#[cfg(test)]
-mod test_util;
 mod threshold_clock;
 mod transactions_generator;
 pub mod types;

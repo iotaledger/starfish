@@ -1,5 +1,6 @@
 [package]
 name = "starfish-core"
+authors = ["IOTA Foundation <info@iota.org>"]
 version = "0.1.0"
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -44,5 +45,3 @@ seahash = "4.1.0"
 tempdir = "0.3.7"
 tracing-test = "0.2.4"
 
-[features]
-simulator = []

@@ -2,6 +2,11 @@
 // Modifications Copyright (c) 2024 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use minibytes::Bytes;
+use serde::{
+    de::{DeserializeOwned, Error},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -10,13 +15,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-};
-
-use crate::types::StatementBlock;
-use minibytes::Bytes;
-use serde::{
-    de::{DeserializeOwned, Error},
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 
 /// Data<T> carries both the value and it's serialized bytes.
@@ -69,12 +67,6 @@ impl<T: Serialize + DeserializeOwned> Data<T> {
 
     pub fn serialized_bytes(&self) -> &Bytes {
         &self.0.serialized
-    }
-}
-
-impl From<Data<StatementBlock>> for Arc<StatementBlock> {
-    fn from(val: Data<StatementBlock>) -> Self {
-        val.0.t.clone()
     }
 }
 

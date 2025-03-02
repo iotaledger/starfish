@@ -12,9 +12,15 @@ use starfish_core::{
     types::AuthorityIndex,
     validator::Validator,
 };
-use std::time::Duration;
-use std::{fs, net::{IpAddr, Ipv4Addr}, path::PathBuf, sync::Arc, thread};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+    sync::Arc,
+    thread,
+};
 use tokio::time::Instant;
 use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
 
@@ -262,7 +268,6 @@ async fn local_benchmark(
     let mut metrics_of_honest_validators = Vec::new();
     let mut reporters_of_honest_validators = Vec::new();
 
-
     // Create a flag to signal when the benchmark is complete
     let running = Arc::new(AtomicBool::new(true));
     // Create a counter for elapsed seconds
@@ -270,7 +275,6 @@ async fn local_benchmark(
 
     // Start the progress display in a separate thread
     run_with_progress(running.clone(), elapsed_seconds.clone());
-
 
     // Start all validators
     for authority in 0..committee_size {
@@ -486,7 +490,10 @@ async fn dryrun(
     Ok(())
 }
 
-fn run_with_progress(running: Arc<AtomicBool>, elapsed_seconds: Arc<AtomicU64>) -> thread::JoinHandle<()> {
+fn run_with_progress(
+    running: Arc<AtomicBool>,
+    elapsed_seconds: Arc<AtomicU64>,
+) -> thread::JoinHandle<()> {
     // Spawn a separate thread for the timer display
     thread::spawn(move || {
         let start = Instant::now();
@@ -502,7 +509,6 @@ fn run_with_progress(running: Arc<AtomicBool>, elapsed_seconds: Arc<AtomicU64>) 
         }
     })
 }
-
 
 pub fn default_table_format() -> format::TableFormat {
     format::FormatBuilder::new()

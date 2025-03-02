@@ -2,19 +2,16 @@
 // Modifications Copyright (c) 2024 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use crate::data::Data;
 use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
-    committee::{Committee},
+    committee::Committee,
     consensus::linearizer::{CommittedSubDag, Linearizer},
-    metrics::{Metrics},
+    metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, Transaction},
@@ -44,9 +41,7 @@ pub struct RealBlockHandler {
 }
 
 impl RealBlockHandler {
-    pub fn new(
-        committee: &Committee,
-    ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
+    pub fn new(committee: &Committee) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
         // Assuming max TPS to be 600.000 and 4 blocks per second (for this TPS), we limit the max number of
         // transactions per block to ensure fast processing

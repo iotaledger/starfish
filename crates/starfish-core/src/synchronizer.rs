@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
-
+use tokio::task::JoinHandle;
 use crate::block_store::{ByzantineStrategy, ConsensusProtocol};
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::metrics::UtilizationTimerVecExt;
@@ -20,7 +20,7 @@ use crate::{
     metrics::Metrics,
     net_sync::{self, NetworkSyncerInner},
     network::NetworkMessage,
-    runtime::{sleep, Handle, JoinHandle},
+    runtime::{sleep, Handle},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };

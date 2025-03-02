@@ -623,35 +623,6 @@ impl VerifiedStatementBlock {
         Ok(())
     }
 }
-
-#[derive(Clone, Serialize, Deserialize)]
-// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
-pub struct StatementBlock {
-    reference: BlockReference,
-
-    //  A list of block references to other blocks that this block includes
-    //  Note that the order matters: if a reference to two blocks from the same round and same authority
-    //  are included, then the first reference is the one that this block conceptually votes for.
-    includes: Vec<BlockReference>,
-
-    // Transaction data acknowledgment
-    acknowledgement_statements: Vec<BlockReference>,
-
-    // Creation time of the block as reported by creator, currently not enforced
-    meta_creation_time_ns: TimestampNs,
-
-    epoch_marker: EpochStatus,
-
-    // Signature by the block author
-    signature: SignatureBytes,
-    // It could be either vector of Nones, vector of Somes or a vector with one Some
-    encoded_statements: Vec<Option<Shard>>,
-    // This is Some only when the above is a vector with 1 Some and all other Nones
-    merkle_proof: Option<Vec<u8>>,
-    // merkle root is computed for encoded_statements
-    merkle_root: TransactionsCommitment,
-}
-
 #[derive(
     Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
 )]
@@ -781,27 +752,12 @@ impl fmt::Display for VerifiedStatementBlock {
         write!(f, ")")
     }
 }
-impl PartialEq for StatementBlock {
-    fn eq(&self, other: &Self) -> bool {
-        self.reference == other.reference
-    }
-}
-
 impl PartialEq for VerifiedStatementBlock {
     fn eq(&self, other: &Self) -> bool {
         self.reference == other.reference
     }
 }
-
-impl Eq for StatementBlock {}
-
 impl Eq for VerifiedStatementBlock {}
-
-impl std::hash::Hash for StatementBlock {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.reference.hash(state);
-    }
-}
 
 impl std::hash::Hash for VerifiedStatementBlock {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1039,25 +995,5 @@ mod test {
             a.insert(*x);
         }
         assert_eq!(present, a.present().collect::<Vec<_>>());
-    }
-
-    /// Function to generate a random Vec<BaseStatement> with only Share(Transaction)
-    pub fn generate_random_shares(count: usize) -> Vec<BaseStatement> {
-        let mut rng = rand::thread_rng();
-        let mut statements = Vec::new();
-
-        for _ in 0..count {
-            // Generate random Transaction
-            let transaction = Transaction {
-                data: (0..rng.gen_range(1..100)) // Random length of data
-                    .map(|_| rng.gen()) // Random bytes
-                    .collect(),
-            };
-
-            // Add Share variant to the list
-            statements.push(BaseStatement::Share(transaction));
-        }
-
-        statements
     }
 }

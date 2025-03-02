@@ -60,7 +60,6 @@ ignore = true
 multiple-versions = "deny"
 skip = [{ name = "itertools", version = "<=12.1" }]
 skip-tree = [
-  # Mysten's libraries pull in several conflicting repo versions.
   { name = "fastcrypto", depth = 4 },
   { name = "typed-store", depth = 6 },
   { name = "test-cluster", depth = 6 },

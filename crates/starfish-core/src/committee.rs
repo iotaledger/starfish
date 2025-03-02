@@ -4,21 +4,13 @@
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{
-    borrow::Borrow,
-    collections::{HashSet},
-    marker::PhantomData,
-    ops::Range,
-    sync::Arc,
-};
+use std::{borrow::Borrow, collections::HashSet, marker::PhantomData, ops::Range, sync::Arc};
 
 use crate::{
     config::ImportExport,
     crypto::{dummy_public_key, PublicKey, Signer},
     data::Data,
-    types::{
-        AuthorityIndex, AuthoritySet, Stake, VerifiedStatementBlock,
-    },
+    types::{AuthorityIndex, AuthoritySet, Stake, VerifiedStatementBlock},
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -266,4 +258,3 @@ pub enum TransactionVoteResult {
     Processed,
     VoteAccepted,
 }
-

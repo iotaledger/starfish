@@ -469,10 +469,7 @@ impl<H: BlockHandler> Core<H> {
         (statements, block_references)
     }
 
-    fn prepare_encoded_statements(
-        &mut self,
-        statements: &[BaseStatement],
-    ) -> Option<Vec<Shard>> {
+    fn prepare_encoded_statements(&mut self, statements: &[BaseStatement]) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 

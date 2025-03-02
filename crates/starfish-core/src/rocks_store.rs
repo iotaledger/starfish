@@ -4,9 +4,9 @@ use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
 use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamilyDescriptor, Options, ReadOptions, WriteOptions, DB};
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
-use std::cmp::Ordering;
 use tokio::sync::watch;
 use tokio::time::Instant;
 // Column families for different types of data
@@ -336,9 +336,9 @@ impl RocksStore {
                         let block = Data::from_bytes(value.into())
                             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                         blocks.push(block);
-                    },
+                    }
                     Ordering::Greater => break,
-                    Ordering::Less => {},
+                    Ordering::Less => {}
                 }
 
                 iter.next();

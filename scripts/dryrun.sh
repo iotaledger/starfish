@@ -3,7 +3,7 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores)
+NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Default: 5 validators (recommend < number of physical cores). The hard limit is 128
 DESIRED_TPS=${DESIRED_TPS:-1000}       # Target transactions per second
 CONSENSUS=${CONSENSUS:-starfish-pull}         # Options: starfish, starfish-pull, cordial-miners, starfish-push
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
@@ -28,8 +28,6 @@ RESET=$(tput sgr0)
 # Cleanup Previous Run
 #------------------------------------------------------------------------------
 tmux kill-server || true
-echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-
 # Remove old logs and validator directories
 echo -e "${CYAN}Cleaning up previous run data...${RESET}"
 find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
@@ -91,7 +89,9 @@ fi
 #------------------------------------------------------------------------------
 # Launch Validators
 #------------------------------------------------------------------------------
-echo "${CYAN}Deploying consensus protocol: ${GREEN}$CONSENSUS${RESET}"
+echo -e "${GREEN}Run dryrun for: ${YELLOW}$TEST_TIME${RESET} seconds"
+echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
+echo "${CYAN}Deploying consensus protocol: ${YELLOW}$CONSENSUS${RESET}"
 
 # Environment variables for logging
 export RUST_BACKTRACE=1
