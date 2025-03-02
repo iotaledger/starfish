@@ -65,7 +65,7 @@ There are 4 options for consensus protocols: `starfish`, `starfish-pull`, `mysti
 
 To run with Byzantine validators:
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --mimic-extra-latency --byzantine-nodes 1 --byzantine-strategy chain-bomb 
+cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy chain-bomb 
 ```
 In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is Byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
 `chain-bomb`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `equivocating-two-chains`.

@@ -127,7 +127,7 @@ impl<C: ServerProviderClient> Testbed<C> {
     /// number of instances created is thus the specified amount x the number of regions.
     pub async fn deploy(&mut self, quantity: usize, region: Option<String>) -> TestbedResult<()> {
         display::action(format!("Deploying instances ({quantity} per region)"));
-
+        println!();
         let instances = match region {
             Some(x) => {
                 try_join_all(
