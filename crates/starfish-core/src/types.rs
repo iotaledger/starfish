@@ -772,7 +772,7 @@ impl fmt::Debug for BaseStatement {
 }
 
 impl CryptoHash for BlockReference {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+    fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         self.authority.crypto_hash(state);
         self.round.crypto_hash(state);
         self.digest.crypto_hash(state);
@@ -780,12 +780,12 @@ impl CryptoHash for BlockReference {
 }
 
 impl CryptoHash for Shard {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+    fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         state.update(self);
     }
 }
 impl CryptoHash for EpochStatus {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+    fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         match self {
             false => [0].crypto_hash(state),
             true => [1].crypto_hash(state),
@@ -794,7 +794,7 @@ impl CryptoHash for EpochStatus {
 }
 
 impl CryptoHash for BaseStatement {
-    fn crypto_hash(&self, state: &mut crypto::BlockHasher) {
+    fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         match self {
             BaseStatement::Share(tx) => {
                 [0].crypto_hash(state);

@@ -2,15 +2,6 @@
 // Modifications Copyright (c) 2024 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::future::join_all;
-use rand::prelude::StdRng;
-use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
-use std::cmp::max;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::select;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
 use crate::block_store::{ByzantineStrategy, ConsensusProtocol};
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::metrics::UtilizationTimerVecExt;
@@ -24,6 +15,15 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use futures::future::join_all;
+use rand::prelude::StdRng;
+use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
+use std::cmp::max;
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::select;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+use tokio::task::JoinHandle;
 
 #[derive(Clone)]
 pub struct SynchronizerParameters {

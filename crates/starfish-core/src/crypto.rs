@@ -10,7 +10,7 @@ use crate::{
 };
 use ed25519_consensus::Signature;
 use rand::{rngs::StdRng, SeedableRng};
-use rs_merkle::algorithms::Sha256;
+use rs_merkle::Hasher;
 use rs_merkle::{MerkleProof, MerkleTree};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -36,12 +36,20 @@ pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 // Box ensures value is not copied in memory when Signer itself is moved around for better security
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
+pub type Blake3Hasher = blake3::Hasher;
 
-#[cfg(not(test))]
-pub type BlockHasher = blake3::Hasher;
+#[derive(Clone)]
+pub struct Blake3;
 
-#[cfg(test)]
-pub type BlockHasher = blake3::Hasher;
+impl Hasher for Blake3 {
+    type Hash = [u8; 32];
+
+    fn hash(data: &[u8]) -> [u8; 32] {
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(data);
+        hasher.finalize().into()
+    }
+}
 
 impl TransactionsCommitment {
     pub fn new_from_encoded_statements(
@@ -50,12 +58,12 @@ impl TransactionsCommitment {
     ) -> (TransactionsCommitment, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
-            let mut hasher = crypto::BlockHasher::new();
+            let mut hasher = crypto::Blake3Hasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
         }
-        let merkle_tree = MerkleTree::<Sha256>::from_leaves(&leaves);
+        let merkle_tree = MerkleTree::<Blake3>::from_leaves(&leaves);
         let merkle_root = merkle_tree
             .root()
             .ok_or("couldn't get the merkle root")
@@ -66,7 +74,7 @@ impl TransactionsCommitment {
         (TransactionsCommitment(merkle_root), merkle_proof_bytes)
     }
     pub fn new_from_statements(statements: &Vec<BaseStatement>) -> TransactionsCommitment {
-        let mut hasher = crypto::BlockHasher::new();
+        let mut hasher = crypto::Blake3Hasher::new();
         for statement in statements {
             statement.crypto_hash(&mut hasher);
         }
@@ -80,12 +88,12 @@ impl TransactionsCommitment {
     ) -> bool {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
         for shard in encoded_statements {
-            let mut hasher = crypto::BlockHasher::new();
+            let mut hasher = Blake3Hasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
             leaves.push(leaf);
         }
-        let computed_merkle_tree = MerkleTree::<Sha256>::from_leaves(&leaves);
+        let computed_merkle_tree = MerkleTree::<Blake3>::from_leaves(&leaves);
         let computed_merkle_root = computed_merkle_tree
             .root()
             .ok_or("couldn't get the merkle root")
@@ -101,10 +109,10 @@ impl TransactionsCommitment {
         tree_size: usize,
         leaf_index: usize,
     ) -> bool {
-        let mut hasher = crypto::BlockHasher::new();
+        let mut hasher = crypto::Blake3Hasher::new();
         shard.crypto_hash(&mut hasher);
         let leaf_to_prove: [u8; 32] = hasher.finalize().into();
-        let proof = MerkleProof::<Sha256>::try_from(proof_bytes).unwrap();
+        let proof = MerkleProof::<Blake3>::try_from(proof_bytes).unwrap();
 
         proof.verify(merkle_root.0, &[leaf_index], &[leaf_to_prove], tree_size)
     }
@@ -120,7 +128,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         merkle_root: TransactionsCommitment,
     ) -> Self {
-        let mut hasher = BlockHasher::new();
+        let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
             &mut hasher,
             authority,
@@ -145,7 +153,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         transactions_commitment: TransactionsCommitment,
     ) -> Self {
-        let mut hasher = BlockHasher::new();
+        let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
             &mut hasher,
             authority,
@@ -161,7 +169,7 @@ impl BlockDigest {
     }
 
     fn digest_without_signature(
-        hasher: &mut BlockHasher,
+        hasher: &mut Blake3Hasher,
         authority: AuthorityIndex,
         round: RoundNumber,
         includes: &[BlockReference],
@@ -204,11 +212,11 @@ impl<const N: usize> AsBytes for [u8; N] {
 }
 
 pub trait CryptoHash {
-    fn crypto_hash(&self, state: &mut BlockHasher);
+    fn crypto_hash(&self, state: &mut Blake3Hasher);
 }
 
 impl CryptoHash for u64 {
-    fn crypto_hash(&self, state: &mut BlockHasher) {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());
     }
 }
@@ -220,13 +228,13 @@ impl CryptoHash for u64 {
 }*/
 
 impl CryptoHash for u128 {
-    fn crypto_hash(&self, state: &mut BlockHasher) {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());
     }
 }
 
 impl<T: AsBytes> CryptoHash for T {
-    fn crypto_hash(&self, state: &mut BlockHasher) {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(self.as_bytes());
     }
 }
@@ -237,7 +245,7 @@ impl PublicKey {
         block: &VerifiedStatementBlock,
     ) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(block.signature().0);
-        let mut hasher = BlockHasher::new();
+        let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
             block.author(),
@@ -271,7 +279,7 @@ impl Signer {
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
     ) -> SignatureBytes {
-        let mut hasher = BlockHasher::new();
+        let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
             authority,
