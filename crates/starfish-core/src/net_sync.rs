@@ -224,7 +224,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             synchronizer_parameters.clone(),
         );
-        if consensus_protocol == ConsensusProtocol::StarfishPull {
+        // Data requestor is needed in theory only for StarfishPull. However, we enable it for
+        // Starfish as well because of the practical way we update the DAG known by other validators
+        if consensus_protocol == ConsensusProtocol::StarfishPull || consensus_protocol == ConsensusProtocol::Starfish {
             data_requestor.start().await;
         }
 
@@ -468,7 +470,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
                 NetworkMessage::MissingTxDataRequest(block_references) => {
-                    if consensus_protocol == ConsensusProtocol::StarfishPull {
+                    if consensus_protocol == ConsensusProtocol::StarfishPull || consensus_protocol == ConsensusProtocol::Starfish{
                         tracing::debug!(
                             "Received request missing data {:?} from peer {:?}",
                             block_references,
