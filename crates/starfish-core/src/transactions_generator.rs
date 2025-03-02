@@ -24,7 +24,8 @@ pub struct TransactionGenerator {
 }
 
 impl TransactionGenerator {
-    const TARGET_BLOCK_INTERVAL: Duration = Duration::from_millis(100);
+    const BATCHES_IN_SECOND: usize = 20;
+    const TARGET_BLOCK_INTERVAL: Duration = Duration::from_millis((1000 / Self::BATCHES_IN_SECOND) as u64);
 
     pub fn start(
         sender: mpsc::Sender<Vec<Transaction>>,
@@ -34,11 +35,6 @@ impl TransactionGenerator {
         metrics: Arc<Metrics>,
     ) {
         assert!(client_parameters.transaction_size > 8 + 8); // 8 bytes timestamp + 8 bytes random
-        tracing::info!(
-            "Starting generator with {} transactions per second, initial delay {:?}",
-            client_parameters.load,
-            client_parameters.initial_delay
-        );
         runtime::Handle::current().spawn(
             Self {
                 sender,
@@ -53,10 +49,12 @@ impl TransactionGenerator {
 
     pub async fn run(mut self) {
         let load = self.client_parameters.load;
-        let transactions_per_block_interval = (load + 9) / 10;
+
+        let transactions_per_block_interval = (load + Self::BATCHES_IN_SECOND-1) / Self::BATCHES_IN_SECOND;
+        let initial_delay_plus_random_delay = self.client_parameters.initial_delay + Duration::from_millis((self.node_public_config.identifiers.len() as f64 / 100.0 * 2000.0) as u64)  ;
         tracing::info!(
-            "Generating {transactions_per_block_interval} transactions per {} ms",
-            Self::TARGET_BLOCK_INTERVAL.as_millis()
+            "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions per {} ms",
+            initial_delay_plus_random_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
@@ -68,6 +66,7 @@ impl TransactionGenerator {
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
         runtime::sleep(self.client_parameters.initial_delay).await;
+
         loop {
             interval.tick().await;
             let timestamp = (timestamp_utc().as_millis() as u64).to_le_bytes();
@@ -95,7 +94,6 @@ impl TransactionGenerator {
                     block_size = 0;
                 }
             }
-
             tracing::debug!("Generator send {} transactions", block.len());
             if !block.is_empty() && self.sender.send(block).await.is_err() {
                 return;
