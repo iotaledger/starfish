@@ -25,6 +25,18 @@ The repository also supports other partially synchronous uncertified DAG-based c
 - It provides a linear amortized communication complexity for a large enough transaction load
 - It achieves high throughput (~200-300K tx/sec for 10-100 validators) and subsecond end-to-end latency for up to 150K tx/sec 
 
+## Byzantine strategies
+
+The testbed implements several Byzantine behaviors to evaluate consensus robustness. The number of Byzantine nodes can be set using `--num-byzantine-nodes`
+and has to be less than 1/3 of the total number of validators. The Byzantine strategies include:
+
+ - `timeout-leader`: Byzantine validators time out when elected as leader to slow down consensus
+ - `leader-withholding`: Byzantine leaders withhold block proposals and send it to only a few other validators to delay the commit rule
+ - `chain-bomb`: Attackers attempt to disrupt the network by flooding some validators with their generated chains of blocks
+ - `equivocating-two-chains`: Byzantine validators create two equivocating blocks and disseminate them to half of network, not allowing to directly skip their proposals
+ - `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
+ - `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks and send the chain just before the respected validator is elected as a leader. Recommend to use 1 Byzantine validator as they are not coordinated
+
 ## Implementation Details
 
 Starfish is implemented in Rust, building upon the [Mysticeti testbed](https://github.com/asonnino/mysticeti/tree/paper). The implementation includes:
@@ -52,7 +64,6 @@ Starfish requires the following core dependencies:
 - **Build essentials**: build-essential, libssl-dev, pkg-config
 - **Clang tools**: clang, libclang-dev (for compiling RocksDB and other native dependencies)
 
-Note: RocksDB and its dependencies will be automatically compiled during the build process.
 
 ### Mac
 ```bash

@@ -2,13 +2,13 @@
 
 # Parameters
 NUM_VALIDATORS=${NUM_VALIDATORS:-20}      # Total number of validators (recommend < number of physical cores)
-KILL_VALIDATORS=${KILL_VALIDATORS:-3}     # Number of first validators to kill after CRASH_TIME
-BOOT_VALIDATORS=${BOOT_VALIDATORS:-4}     # Number of last validators to boot after CRASH_TIME
-DESIRED_TPS=${DESIRED_TPS:-10000}        # Target total transactions per second
-TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
-CRASH_TIME=${CRASH_TIME:-300}             # When to crash first nodes and start the last one
+KILL_VALIDATORS=${KILL_VALIDATORS:-2}     # Number of first validators to kill after CRASH_TIME
+BOOT_VALIDATORS=${BOOT_VALIDATORS:-1}     # Number of last validators to boot after CRASH_TIME
+DESIRED_TPS=${DESIRED_TPS:-2000}        # Target total transactions per second
+TEST_TIME=${TEST_TIME:-300}               # Total test duration in seconds
+CRASH_TIME=${CRASH_TIME:-60}             # When to crash first nodes and start the last one
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}        # Whether to remove Grafana/Prometheus volumes (1=yes, 0=no)
-CONSENSUS=${CONSENSUS:-starfish}           # Consensus protocol: starfish, starfish-pull, cordial-miners, mysticeti
+CONSENSUS=${CONSENSUS:-starfish-pull}           # Consensus protocol: starfish, starfish-pull, cordial-miners, mysticeti
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}  # Byzantine strategies: timeout-leader, leader-withholding,
                                                                    # equivocating-chains, equivocating-two-chains,
                                                                    # chain-bomb, equivocating-chains-bomb
@@ -94,8 +94,17 @@ fi
 #------------------------------------------------------------------------------
 echo "${CYAN}Deploying consensus protocol: ${GREEN}$CONSENSUS${RESET}"
 
+
+# Environment variables for logging
+export RUST_BACKTRACE=1
+export RUST_LOG=warn,starfish_core::block_manager=trace,starfish_core::block_handler=trace,\
+starfish_core::consensus=trace,starfish_core::net_sync=DEBUG,starfish_core::core=DEBUG,\
+starfish_core::synchronizer=DEBUG,starfish_core::transactions_generator=DEBUG,\
+starfish_core::validator=trace,starfish_core::network=trace,starfish_core::block_store=trace,\
+starfish_core::threshold_core=trace,starfish_core::syncer=trace,
+
+
 # Start initial validators
-export RUST_BACKTRACE=1 RUST_LOG=warn,mysticeti_core=trace
 for ((i=0; i<NUM_VALIDATORS - BOOT_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
   LOG_FILE="validator_${i}.log.ansi"

@@ -390,7 +390,7 @@ where
         self.own_blocks = Some(handle);
     }
 
-    #[allow(unused)]
+
     pub async fn disseminate_all_blocks_push(&mut self) {
         if let Some(existing) = self.push_blocks.take() {
             existing.abort();
@@ -415,7 +415,7 @@ where
         synchronizer_parameters: SynchronizerParameters,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
-        let leader_timeout = Duration::from_millis(600);
+        let between_push_timeout = Duration::from_millis(100);
         loop {
             let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
@@ -436,7 +436,7 @@ where
             } else {
                 break;
             }
-            let _sleep = sleep(leader_timeout).await;
+            let _sleep = sleep(between_push_timeout).await;
         }
         Some(())
     }

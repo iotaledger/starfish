@@ -60,7 +60,7 @@ impl TransactionGenerator {
                 (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
             );
         tracing::info!(
-            "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions per {} ms",
+            "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions every {} ms",
             initial_delay_plus_extra_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
