@@ -184,6 +184,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc",
             "source $HOME/.cargo/env",
             "rustup default stable",
+            "rustup toolchain install 1.78",
             // Create the working directory.
             &format!("mkdir -p {working_dir}"),
             // Clone the repo.
