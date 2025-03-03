@@ -172,9 +172,9 @@ impl BlockStore {
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::StarfishPull => {
-                tracing::info!("Starting Starfish mixed push-pull protocol")
+                tracing::info!("Starting Starfish-Pull protocol")
             }
-            ConsensusProtocol::Starfish => tracing::info!("Starting Starfish push protocol"),
+            ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let block_store = Self {

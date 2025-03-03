@@ -253,8 +253,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let round = 0;
                         disseminator.disseminate_own_blocks(round).await;
                     } else {
-                        // For Mysticeti and Starfish disseminate
-                        // own blocks only. For Starfish push and Cordial Miners, push all blocks
+                        // For Mysticeti and Starfish-Pull disseminate
+                        // own blocks only. For Starfish and Cordial Miners, push all blocks
                         match consensus_protocol {
                             ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
                                 disseminator.disseminate_own_blocks(round).await;
