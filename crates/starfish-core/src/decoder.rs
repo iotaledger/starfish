@@ -1,3 +1,6 @@
+// Copyright (c) 2025 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::committee::Committee;
 use crate::crypto::TransactionsCommitment;
 use crate::encoder::{Encoder, ShardEncoder};

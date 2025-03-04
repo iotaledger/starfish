@@ -1,3 +1,6 @@
+// Copyright (c) 2025 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::types::{BaseStatement, Shard};
 use reed_solomon_simd::ReedSolomonEncoder;
 

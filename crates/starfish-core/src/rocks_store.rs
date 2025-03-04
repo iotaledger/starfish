@@ -1,3 +1,6 @@
+// Copyright (c) 2025 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::block_store::CommitData;
 use crate::data::Data;
 use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
