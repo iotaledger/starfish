@@ -2,7 +2,7 @@
 
 The Orchestrator crate provides facilities for quickly deploying and benchmarking this codebase in a geo-distributed environment. Please note that it is not intended for production deployments or as an indicator of production engineering best practices. Its purpose is to facilitate research projects by allowing benchmarking of (variants of) the codebase and analyzing performance.
 
-This guide provides a step-by-step explanation of how to run geo-distributed benchmarks on either [Vultr](http://vultr.com) or [Amazon Web Services (AWS)](http://aws.amazon.com).
+This guide provides a step-by-step explanation of how to run geo-distributed benchmarks on [Amazon Web Services (AWS)](http://aws.amazon.com).
 
 ## Step 1. Set up cloud provider credentials
 
@@ -25,11 +25,11 @@ Do not specify any AWS region in that file, as the scripts need to handle multip
 
 Create a file called `settings.yml` that contains all the configuration parameters for the testbed deployment. You can find an example file at `./assets/settings-template.yml`.
 
-The documentation of the `Settings` struct in `./src/settings.rs` provides detailed information about each field and indicates which ones are optional. If you're working with a private GitHub repository, you can include a [private access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) in the repository URL. For example, if your access token is `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`, the repository URL should be formatted as follows:
+The documentation of the `Settings` struct in `./src/settings.rs` provides detailed information about each field and indicates which ones are optional. If you're working with a private GitHub repository, you can include a [private access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) in the repository URL. The repository URL should be formatted as follows:
 
 ```yml
 repository:
-  - url: http://YOUR_ACCESS_TOKEN@github.com/asonino/-mysticeti.git
+  - url: http://YOUR_ACCESS_TOKEN@github.com/iotaledger/starfish.git
   - commit: main
 ```
 
