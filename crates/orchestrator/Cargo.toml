@@ -2,9 +2,9 @@
 name = "orchestrator"
 version = "0.0.1"
 authors = ["IOTA Foundation <info@iota.org>"]
+edition = "2021"
 license = "Apache-2.0"
 publish = false
-edition = "2021"
 
 [dependencies]
 aws-config = "1.5.1"
@@ -15,7 +15,7 @@ color-eyre = { workspace = true }
 crossterm = "0.27.0"
 eyre = { workspace = true }
 futures = { workspace = true }
-starfish-core = { path = "../starfish-core" }
+itertools = "0.10.5"
 prettytable-rs = "0.10"
 prometheus-parse = { git = "https://github.com/asonnino/prometheus-parser.git", rev = "75334db" }
 rand = "0.8.5"
@@ -24,10 +24,10 @@ serde = { workspace = true }
 serde_json = "1.0.88"
 serde_with = "3.8.1"
 serde_yaml = "0.9.33"
-ssh2 = "0.9.4"                                                                                    # TODO: remove this dependency
+ssh2 = "0.9.4" # TODO: remove this dependency
+starfish-core = { path = "../starfish-core" }
 thiserror = "1.0.38"
 tokio = { workspace = true }
-itertools = "0.10.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }

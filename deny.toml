@@ -86,4 +86,3 @@ allow-git = [
 ]
 
 [sources.allow-org]
-

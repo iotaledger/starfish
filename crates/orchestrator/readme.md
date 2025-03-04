@@ -8,7 +8,6 @@ This guide provides a step-by-step explanation of how to run geo-distributed ben
 
 To enable programmatic access to your cloud provider account from your local machine, you need to set up your cloud provider credentials. These credentials authorize your machine to create, delete, and edit instances programmatically on your account.
 
-
 ### Setting up AWS credentials
 
 1. Find your ['access key id' and 'secret access key'](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html#cli-configure-quickstart-creds).
@@ -42,7 +41,7 @@ The `orchestrator` binary provides various functionalities for creating, startin
 cargo run --bin orchestrator -- testbed deploy --instances 2
 ```
 
-Note that one instance is used for collecting metrics and representing them in Grafana. This means that for a committee of 10 validators one needs to run 11 instances. 
+Note that one instance is used for collecting metrics and representing them in Grafana. This means that for a committee of 10 validators one needs to run 11 instances.
 
 To check the current status of the testbed instances, use the following command:
 
@@ -64,9 +63,11 @@ In a network of 10 validators, each with a corresponding load generator, each lo
 There are 4 options for consensus protocols: `starfish`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
 
 To run with Byzantine validators:
+
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy chain-bomb 
+cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy chain-bomb
 ```
+
 In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is Byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
 `chain-bomb`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `equivocating-two-chains`.
 
@@ -74,9 +75,8 @@ In case of running in a single region AWS VPC, it's possible to use internal IP 
 since the latencies within one region are very small, one can _mimic_ extra latencies matching some geo-distributed setup using the flag `--mimic-extra-latency`. So, the command could be
 
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb --mimic-extra-latency --use-internal-ip-addresses 
+cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb --mimic-extra-latency --use-internal-ip-addresses
 ```
-
 
 ## Step 5. Monitoring
 
