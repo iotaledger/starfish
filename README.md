@@ -17,8 +17,9 @@ The code in this repository is a prototype of Starfish, a partially synchronous 
 
 The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
 
-- **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf)
-- **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174)
+- **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf). Validators use a bandwidth efficient pull-based block dissemination strategy:
+they push their own blocks and request the peers about missing ancestors only. A scalable BFT protocol.
+- **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174). Validators use a push-based block dissemination strategy, pushing all unknown history of blocks to their peers. Due to the push strategy, Cordial Miners can tolerate Byzantine attacks, but it is overall a less scalable solution.
 
 ## Key Features of Starfish
 

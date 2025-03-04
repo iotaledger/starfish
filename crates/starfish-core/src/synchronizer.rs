@@ -9,7 +9,7 @@ use crate::types::format_authority_index;
 use crate::{
     block_handler::BlockHandler,
     metrics::Metrics,
-    net_sync::{self, NetworkSyncerInner},
+    net_sync::NetworkSyncerInner,
     network::NetworkMessage,
     runtime::{sleep, Handle},
     syncer::CommitObserver,
@@ -17,7 +17,7 @@ use crate::{
 };
 use futures::future::join_all;
 use rand::prelude::StdRng;
-use rand::{seq::SliceRandom, thread_rng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
 use std::cmp::max;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
@@ -609,7 +609,7 @@ where
 
     async fn disseminate_own_blocks_and_encoded_past_blocks(
         to_whom_authority_index: AuthorityIndex,
-        to: mpsc::Sender<NetworkMessage>,
+        to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         synchronizer_parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
@@ -745,28 +745,19 @@ where
 }
 
 enum BlockFetcherMessage {
-    RegisterAuthority(AuthorityIndex, mpsc::Sender<NetworkMessage>),
+    RegisterAuthority(AuthorityIndex, Sender<NetworkMessage>),
     RemoveAuthority(AuthorityIndex),
 }
 
 pub struct BlockFetcher {
-    sender: mpsc::Sender<BlockFetcherMessage>,
+    sender: Sender<BlockFetcherMessage>,
     handle: JoinHandle<Option<()>>,
 }
 
 impl BlockFetcher {
-    pub fn start<B, C>(
-        id: AuthorityIndex,
-        inner: Arc<NetworkSyncerInner<B, C>>,
-        metrics: Arc<Metrics>,
-        enable: bool,
-    ) -> Self
-    where
-        B: BlockHandler + 'static,
-        C: CommitObserver + 'static,
-    {
+    pub fn start() -> Self {
         let (sender, receiver) = mpsc::channel(100);
-        let worker = BlockFetcherWorker::new(id, inner, receiver, metrics, enable);
+        let worker = BlockFetcherWorker::new(receiver);
         let handle = Handle::current().spawn(worker.run());
         Self { sender, handle }
     }
@@ -774,7 +765,7 @@ impl BlockFetcher {
     pub async fn register_authority(
         &self,
         authority: AuthorityIndex,
-        sender: mpsc::Sender<NetworkMessage>,
+        sender: Sender<NetworkMessage>,
     ) {
         self.sender
             .send(BlockFetcherMessage::RegisterAuthority(authority, sender))
@@ -795,46 +786,25 @@ impl BlockFetcher {
     }
 }
 
-struct BlockFetcherWorker<B: BlockHandler, C: CommitObserver> {
-    id: AuthorityIndex,
-    inner: Arc<NetworkSyncerInner<B, C>>,
+struct BlockFetcherWorker {
     receiver: mpsc::Receiver<BlockFetcherMessage>,
     senders: HashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>,
     parameters: SynchronizerParameters,
-    metrics: Arc<Metrics>,
-    /// Hold a timestamp of when blocks were first considered missing.
-    missing: HashMap<BlockReference, Duration>,
-    enable: bool,
 }
 
-impl<B, C> BlockFetcherWorker<B, C>
-where
-    B: BlockHandler + 'static,
-    C: CommitObserver + 'static,
-{
-    pub fn new(
-        id: AuthorityIndex,
-        inner: Arc<NetworkSyncerInner<B, C>>,
-        receiver: mpsc::Receiver<BlockFetcherMessage>,
-        metrics: Arc<Metrics>,
-        enable: bool,
-    ) -> Self {
+impl BlockFetcherWorker {
+    pub fn new(receiver: mpsc::Receiver<BlockFetcherMessage>) -> Self {
         Self {
-            id,
-            inner,
             receiver,
             senders: Default::default(),
             parameters: Default::default(),
-            metrics,
-            missing: Default::default(),
-            enable,
         }
     }
 
     async fn run(mut self) -> Option<()> {
         loop {
-            tokio::select! {
-                _ = sleep(self.parameters.sample_precision) => {},//self.sync_strategy().await,
+            select! {
+                _ = sleep(self.parameters.sample_precision) => {},
                 message = self.receiver.recv() => {
                     match message {
                         Some(BlockFetcherMessage::RegisterAuthority(authority, sender)) => {
@@ -844,76 +814,6 @@ where
                             self.senders.remove(&authority);
                         },
                         None => return None,
-                    }
-                }
-            }
-        }
-    }
-
-    /// A simple and naive strategy that requests missing blocks from random peers.
-    #[allow(unused)]
-    async fn sync_strategy(&mut self) {
-        if self.enable {
-            return;
-        }
-        let mut to_request = vec![];
-
-        let missing_blocks = self.inner.syncer.get_missing_blocks().await;
-        for (authority, missing) in missing_blocks.into_iter().enumerate() {
-            self.metrics
-                .missing_blocks
-                .with_label_values(&[&authority.to_string()])
-                .set(missing.len() as i64);
-
-            for reference in missing {
-                if authority >= to_request.len() {
-                    to_request.resize(authority + 1, vec![]);
-                }
-                to_request[authority].push(reference);
-                self.missing.remove(&reference); // todo - ensure we receive the block
-            }
-        }
-        // TODO: If we are missing many blocks from the same authority
-        // (`missing.len() > self.parameters.new_stream_threshold`), it is likely that
-        // we have a network partition. We should try to find an other peer from which
-        // to (temporarily) sync the blocks from that authority.
-        for (authority, item) in to_request.iter().enumerate() {
-            for chunks in item.chunks(net_sync::MAXIMUM_BLOCK_REQUEST) {
-                //let Some((peer, permit)) = self.sample_peer(&[self.id]) else {
-                //break;
-                //};
-                //we request the missing block one time from the authority and the second time from a random authority
-                let except = [authority as AuthorityIndex, self.id];
-                let mut senders = self
-                    .senders
-                    .iter()
-                    .filter(|&(index, _)| !except.contains(index))
-                    .collect::<Vec<_>>();
-
-                senders.shuffle(&mut thread_rng());
-                let mut up = 1;
-                let authority_index = authority as AuthorityIndex;
-                if let Some(x) = self.senders.get(&(authority as AuthorityIndex)) {
-                    senders.push((&authority_index, x));
-                    up += 1;
-                    senders.reverse();
-                }
-                for (peer, sender) in senders {
-                    //eprintln!("peer={}", peer);
-                    //eprintln!("self.sender = {:?}", self.senders);
-                    let Ok(permit) = sender.try_reserve() else {
-                        continue;
-                    };
-                    // Broken logic below
-                    let message = NetworkMessage::MissingHistoryRequest(chunks.to_vec()[0]);
-                    permit.send(message);
-                    self.metrics
-                        .block_sync_requests_sent
-                        .with_label_values(&[&peer.to_string()])
-                        .inc();
-                    up -= 1;
-                    if up == 0 {
-                        break;
                     }
                 }
             }

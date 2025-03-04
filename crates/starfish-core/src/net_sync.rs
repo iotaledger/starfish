@@ -30,7 +30,6 @@ use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
     committee::Committee,
-    config::NodePublicConfig,
     core::Core,
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
@@ -69,9 +68,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut commit_observer: C,
         shutdown_grace_period: Duration,
         metrics: Arc<Metrics>,
-        public_config: &NodePublicConfig,
     ) -> Self {
-        let authority_index = core.authority();
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
         let committed = core.take_recovered_committed_blocks();
@@ -97,12 +94,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             epoch_close_signal: epoch_sender.clone(),
             epoch_closing_time,
         });
-        let block_fetcher = Arc::new(BlockFetcher::start(
-            authority_index,
-            inner.clone(),
-            metrics.clone(),
-            public_config.parameters.enable_synchronizer,
-        ));
+        let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(
             network,
             universal_committer,
