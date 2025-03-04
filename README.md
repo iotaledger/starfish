@@ -6,6 +6,7 @@
 ## Overview
 
 The code in this repository is a prototype of Starfish, a partially synchronous BFT protocol in which validators employ an uncertified DAG. Two versions are available:
+
 - **`starfish`**: Theory-aligned version
   - Higher bandwidth usage (up to 4x)
   - Better latency guarantees with Byzantine nodes under low load
@@ -15,27 +16,28 @@ The code in this repository is a prototype of Starfish, a partially synchronous 
   - Better handling of higher throughput and larger number of validators
 
 The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
+
 - **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf)
 - **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174)
 
 ## Key Features of Starfish
 
-- Starfish is a Byzantine Fault Tolerant protocol capable of tolerating up to 1/3 of Byzantine nodes in a partially syncrhonous network.
-- It uses push-based dissemination strategy that incorporates Reed-Solomon coding for the transction data to amortize communication costs
+- Starfish is a Byzantine Fault Tolerant protocol capable of tolerating up to 1/3 of Byzantine nodes in a partially synchronous network.
+- It uses push-based dissemination strategy that incorporates Reed-Solomon coding for the transaction data to amortize communication costs
 - It provides a linear amortized communication complexity for a large enough transaction load
-- It achieves high throughput (~200-300K tx/sec for 10-100 validators) and subsecond end-to-end latency for up to 150K tx/sec 
+- It achieves high throughput (~200-300K tx/sec for 10-100 validators) and subsecond end-to-end latency for up to 150K tx/sec
 
 ## Byzantine strategies
 
 The testbed implements several Byzantine behaviors to evaluate consensus robustness. The number of Byzantine nodes can be set using `--num-byzantine-nodes`
 and has to be less than 1/3 of the total number of validators. The Byzantine strategies include:
 
- - `timeout-leader`: Byzantine validators time out when elected as leader to slow down consensus
- - `leader-withholding`: Byzantine leaders withhold block proposals and send it to only a few other validators to delay the commit rule
- - `chain-bomb`: Attackers attempt to disrupt the network by flooding some validators with their generated chains of blocks
- - `equivocating-two-chains`: Byzantine validators create two equivocating blocks and disseminate them to half of network, not allowing to directly skip their proposals
- - `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
- - `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks and send the chain just before the respected validator is elected as a leader. Recommend to use 1 Byzantine validator as they are not coordinated
+- `timeout-leader`: Byzantine validators time out when elected as leader to slow down consensus
+- `leader-withholding`: Byzantine leaders withhold block proposals and send it to only a few other validators to delay the commit rule
+- `chain-bomb`: Attackers attempt to disrupt the network by flooding some validators with their generated chains of blocks
+- `equivocating-two-chains`: Byzantine validators create two equivocating blocks and disseminate them to half of network, not allowing to directly skip their proposals
+- `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
+- `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks and send the chain just before the respected validator is elected as a leader. Recommend to use 1 Byzantine validator as they are not coordinated
 
 ## Implementation Details
 
@@ -54,6 +56,7 @@ Starfish is implemented in Rust, building upon the [Mysticeti testbed](https://g
   - SIMD instruction optimization for larger shards
 
 Like other consensus testbed, our prototype focuses solely on consensus performance measurement without execution or ledger storage components.
+
 ## Requirements
 
 ### Dependencies
@@ -61,11 +64,11 @@ Like other consensus testbed, our prototype focuses solely on consensus performa
 Starfish requires the following core dependencies:
 
 - **Rust 1.78+**: For building and running the project
-- **Build essentials**: build-essential, libssl-dev, pkg-config
-- **Clang tools**: clang, libclang-dev (for compiling RocksDB and other native dependencies)
-
+- **Build essentials**: `build-essential`, `libssl-dev`, `pkg-config`
+- **Clang tools**: `clang`, `libclang-dev` (for compiling RocksDB and other native dependencies)
 
 ### Mac
+
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -79,6 +82,7 @@ brew install \
 ```
 
 ### Ubuntu
+
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -97,6 +101,7 @@ sudo apt-get install -y \
 ```
 
 For more advanced usage scenarios (distributed testing, metrics visualization, etc.), additional tools may be required.
+
 ## Quick Start
 
 ```bash
@@ -107,6 +112,7 @@ cargo build --release
 ```
 
 ### Run local benchmark and output the basic metrics
+
 ```bash
 cargo run --release --bin starfish -- local-benchmark \
         --committee-size 7 \
@@ -117,14 +123,17 @@ cargo run --release --bin starfish -- local-benchmark \
         --mimic-extra-latency \
         --duration-secs 100
 ```
+
 ### Local dryrun with availability to look at metrics
+
 ```bash
 ./scripts/dryrun.sh
 ```
+
 ### Distributed Testing using Orchestrator
 
-To run tests on a geo-distributed network, look at instructions in `./crates/orchestrator/readme.md`
-
+To run tests on a geo-distributed network, look at instructions in [crates/orchestrator/readme.md](`./crates/orchestrator/readme.md`).
 
 ## License
+
 [Apache 2.0](LICENSE)
