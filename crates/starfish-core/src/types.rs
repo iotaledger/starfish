@@ -100,7 +100,7 @@ pub struct VerifiedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be a pair of encoded shard and position or none
+    // It could be a pair of encoded shard and position or None
     encoded_shard: Option<(Shard, ShardIndex)>,
     // This is Some only when the above has one some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
@@ -130,7 +130,7 @@ pub struct CachedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be a pair of encoded shard and position or none
+    // It could be a pair of encoded shard and position or None -- it is incorrect
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
@@ -295,15 +295,10 @@ impl VerifiedStatementBlock {
     }
 
     pub fn to_cached_block(&self, committee_size: usize) -> CachedStatementBlock {
-        let mut encoded_statements: Vec<Option<Shard>> = Vec::new();
-        for i in 0..committee_size {
-            if let Some((shard, position)) = self.encoded_shard.as_ref() {
-                if i == *position {
-                    let new_shard: Shard = shard.clone();
-                    encoded_statements.push(Some(new_shard));
-                }
-            }
-            encoded_statements.push(None);
+        let mut encoded_statements: Vec<Option<Shard>> = vec![None; committee_size];
+        if let Some((shard, position)) = self.encoded_shard.as_ref() {
+            let new_shard: Shard = shard.clone();
+            encoded_statements[*position] = Some(new_shard);
         }
         CachedStatementBlock {
             reference: self.reference,
@@ -321,22 +316,6 @@ impl VerifiedStatementBlock {
 
     pub fn from_storage_to_transmission(&self, own_id: AuthorityIndex) -> Self {
         if own_id != self.reference.authority {
-            if let Some((_, position)) = self.encoded_shard().as_ref() {
-                if *position != own_id as usize {
-                    return Self {
-                        reference: self.reference,
-                        includes: self.includes.clone(),
-                        acknowledgement_statements: self.acknowledgement_statements.clone(),
-                        meta_creation_time_ns: self.meta_creation_time_ns,
-                        epoch_marker: self.epoch_marker,
-                        signature: self.signature,
-                        statements: None,
-                        encoded_shard: None,
-                        merkle_proof_encoded_shard: None,
-                        transactions_commitment: self.transactions_commitment,
-                    };
-                }
-            }
             Self {
                 reference: self.reference,
                 includes: self.includes.clone(),
