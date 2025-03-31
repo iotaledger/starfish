@@ -130,7 +130,7 @@ pub struct CachedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be a pair of encoded shard and position or None -- it is incorrect
+    // Contains Some(Shard) if the shard is available, or None if the shard is not available.
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
