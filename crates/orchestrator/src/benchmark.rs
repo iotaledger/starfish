@@ -119,6 +119,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             byzantine_nodes: 0,
             byzantine_strategy: "honest".to_string(),
             load: 500,
+            enable_tracing: true,
         }
     }
 }
