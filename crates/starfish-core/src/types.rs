@@ -102,7 +102,7 @@ pub struct VerifiedStatementBlock {
     statements: Option<Vec<BaseStatement>>,
     // It could be a pair of encoded shard and position or none
     encoded_shard: Option<(Shard, ShardIndex)>,
-    // This is Some only when the above has one some
+    // This is Some only when the above is Some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     transactions_commitment: TransactionsCommitment,

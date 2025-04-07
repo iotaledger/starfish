@@ -32,8 +32,6 @@ enum CoreThreadCommand {
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
-    /// Request missing blocks that need to be synched.
-    GetMissing(oneshot::Sender<Vec<HashSet<BlockReference>>>),
     /// Indicate that a connection to an authority was established.
     ConnectionEstablished(AuthorityIndex, oneshot::Sender<()>),
     /// Indicate that a connection to an authority was dropped.
@@ -92,12 +90,6 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         receiver.await.expect("core thread is not expected to stop");
     }
 
-    pub async fn get_missing_blocks(&self) -> Vec<HashSet<BlockReference>> {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::GetMissing(sender)).await;
-        receiver.await.expect("core thread is not expected to stop")
-    }
-
     /// Update the syncer with the connection status of an authority. This function must be called
     /// whenever a connection to an authority is established or dropped.
     pub async fn authority_connection(&self, authority: AuthorityIndex, connected: bool) {
@@ -145,10 +137,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                 CoreThreadCommand::Cleanup(sender) => {
                     self.syncer.core().cleanup();
                     sender.send(()).ok();
-                }
-                CoreThreadCommand::GetMissing(sender) => {
-                    let missing = self.syncer.core().block_manager().missing_blocks();
-                    sender.send(missing.to_vec()).ok();
                 }
                 CoreThreadCommand::ConnectionEstablished(authority, sender) => {
                     self.syncer.connected_authorities.insert(authority);

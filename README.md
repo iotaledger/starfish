@@ -7,7 +7,7 @@
 
 The code in this repository is a prototype of Starfish, a partially synchronous BFT protocol in which validators employ an uncertified DAG. The theoretical description of Starfish is available at https://eprint.iacr.org/2025/567.
 
-Two versions os Starfish are available in this repository:
+Two versions of Starfish are available in this repository:
 
 - **`starfish`**: Theory-aligned version
   - Higher bandwidth usage (up to 4x)
