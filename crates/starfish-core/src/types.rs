@@ -100,7 +100,7 @@ pub struct VerifiedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be a pair of encoded shard and position or none
+    // It could be a pair of encoded shard and position or None
     encoded_shard: Option<(Shard, ShardIndex)>,
     // This is Some only when the above is Some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
@@ -130,7 +130,7 @@ pub struct CachedStatementBlock {
     signature: SignatureBytes,
     // It could be either a vector of BaseStatement or None
     statements: Option<Vec<BaseStatement>>,
-    // It could be a pair of encoded shard and position or none
+    // Contains Some(Shard) if the shard is available, or None if the shard is not available.
     encoded_statements: Vec<Option<Shard>>,
     // This is Some only when the above has one some
     merkle_proof_encoded_shard: Option<Vec<u8>>,
@@ -295,15 +295,10 @@ impl VerifiedStatementBlock {
     }
 
     pub fn to_cached_block(&self, committee_size: usize) -> CachedStatementBlock {
-        let mut encoded_statements: Vec<Option<Shard>> = Vec::new();
-        for i in 0..committee_size {
-            if let Some((shard, position)) = self.encoded_shard.as_ref() {
-                if i == *position {
-                    let new_shard: Shard = shard.clone();
-                    encoded_statements.push(Some(new_shard));
-                }
-            }
-            encoded_statements.push(None);
+        let mut encoded_statements: Vec<Option<Shard>> = vec![None; committee_size];
+        if let Some((shard, position)) = self.encoded_shard.as_ref() {
+            let new_shard: Shard = shard.clone();
+            encoded_statements[*position] = Some(new_shard);
         }
         CachedStatementBlock {
             reference: self.reference,
