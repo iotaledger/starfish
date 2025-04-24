@@ -316,6 +316,22 @@ impl VerifiedStatementBlock {
 
     pub fn from_storage_to_transmission(&self, own_id: AuthorityIndex) -> Self {
         if own_id != self.reference.authority {
+            if let Some((_, position)) = self.encoded_shard().as_ref() {
+                if *position != own_id as usize {
+                    return Self {
+                        reference: self.reference,
+                        includes: self.includes.clone(),
+                        acknowledgement_statements: self.acknowledgement_statements.clone(),
+                        meta_creation_time_ns: self.meta_creation_time_ns,
+                        epoch_marker: self.epoch_marker,
+                        signature: self.signature,
+                        statements: None,
+                        encoded_shard: None,
+                        merkle_proof_encoded_shard: None,
+                        transactions_commitment: self.transactions_commitment,
+                    };
+                }
+            }
             Self {
                 reference: self.reference,
                 includes: self.includes.clone(),
