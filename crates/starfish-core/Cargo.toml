@@ -37,6 +37,7 @@ tracing = { workspace = true }
 tracing-core = "0.1.31"
 tracing-subscriber = "0.3.17"
 zeroize = "1.6.0"
+dashmap = "7.0.0-rc2"
 
 [dev-dependencies]
 reqwest = { workspace = true }

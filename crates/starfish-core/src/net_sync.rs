@@ -2,21 +2,6 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::future::join_all;
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-use tokio::{
-    select,
-    sync::{mpsc, oneshot, Notify},
-};
-
 use crate::block_store::ConsensusProtocol;
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::data::Data;
@@ -25,7 +10,7 @@ use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
 use crate::synchronizer::DataRequestor;
-use crate::types::{BlockReference, VerifiedStatementBlock};
+use crate::types::{BlockDigest, BlockReference, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -39,9 +24,157 @@ use crate::{
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
 };
+use futures::future::join_all;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::sync::{RwLock};
+use tokio::{
+    select,
+    sync::{mpsc, oneshot, Notify},
+};
 
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
+
+const MAX_FILTER_SIZE: usize = 10000;
+
+struct FilterForBlocks {
+    info_length: usize,
+    digests: RwLock<HashMap<BlockDigest, HashSet<usize>>>,
+    queue: RwLock<VecDeque<BlockDigest>>,
+}
+enum Status {
+    Full,
+    Shard,
+    Header,
+}
+
+impl FilterForBlocks {
+    fn new(info_length: usize) -> Self {
+        Self {
+            info_length,
+            digests: RwLock::new(HashMap::new()),
+            queue: RwLock::new(VecDeque::new()),
+        }
+    }
+
+    /// Add a batch of digests with their status and peer.
+    /// Returns digests considered already inserted (quorum met or header exists).
+    async fn add_batch(
+        &self,
+        new_digests: Vec<(BlockDigest, Status)>,
+        authority_index: AuthorityIndex,
+    ) -> Vec<BlockDigest> {
+        let peer = authority_index as usize;
+
+        let mut already_inserted = Vec::new();
+
+        // Acquire write lock to digests and queue.
+        let mut digests = self.digests.write().await;
+        let mut queue = self.queue.write().await;
+
+        for (digest, status) in &new_digests {
+            match status {
+                Status::Full => {
+                    // For Full, insert peer into hashset (or create)
+                    if let Some(peers) = digests.get_mut(digest) {
+                        // If sufficient number is processed, mark as already inserted
+                        if peers.len() >= self.info_length {
+                            already_inserted.push(*digest);
+                            continue;
+                        }
+                        peers.extend(1..=self.info_length);
+                    } else {
+                        // New full block - add peer
+                        let mut peers = HashSet::new();
+                        peers.extend(1..=self.info_length);
+                        digests.insert(*digest, peers);
+                        queue.push_back(*digest);
+                    }
+                }
+                Status::Shard => {
+                    // If digest exists, check if quorum reached
+                    if let Some(peers) = digests.get_mut(digest) {
+                        if peers.len() >= self.info_length || peers.contains(&peer) {
+                            // sufficient number of shards already processed
+                            already_inserted.push(*digest);
+                        } else {
+                            peers.insert(peer);
+                        }
+                    } else {
+                        // New shard - add peer
+                        let mut peers = HashSet::new();
+                        peers.insert(peer);
+                        digests.insert(*digest, peers);
+                        queue.push_back(*digest);
+                    }
+                }
+                Status::Header => {
+                    // If hashset exists for header, mark as already inserted
+                    if digests.contains_key(digest) {
+                        already_inserted.push(*digest);
+                    } else {
+                        // Otherwise add empty peers set or skip depending on logic
+                        digests.insert(*digest, HashSet::new());
+                        queue.push_back(*digest);
+                    }
+                }
+            }
+        }
+
+        drop(digests);
+
+        // Maintain max filter size
+        while queue.len() > MAX_FILTER_SIZE {
+            if let Some(removed) = queue.pop_front() {
+                let mut digests = self.digests.write().await;
+                digests.remove(&removed);
+            }
+        }
+
+        already_inserted
+    }
+
+    ///  Checks whether the block is needed based on its digest and status.
+    async fn is_needed(
+        &self,
+        digest: &BlockDigest,
+        status: Status,
+        authority_index: AuthorityIndex,
+    ) -> bool {
+        let peer = authority_index as usize;
+        match status {
+            Status::Header => {
+                // Header is needed if not already in the filter
+                !self.digests.read().await.contains_key(digest)
+            }
+            Status::Shard => {
+                // Shard is needed if not already in the filter or if the number of shards is not sufficient
+                let digests = self.digests.read().await;
+                match digests.get(digest) {
+                    Some(peers) => peers.len() < self.info_length && !peers.contains(&peer),
+                    None => true,
+                }
+            }
+            Status::Full => {
+                // Full block is needed if not already in the filter or if the number of peers is not sufficient
+                let digests = self.digests.read().await;
+                match digests.get(digest) {
+                    Some(peers) => peers.len() < self.info_length,
+                    None => true,
+                }
+            }
+        }
+    }
+}
 
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
@@ -150,6 +283,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shutdown_grace_period,
         ));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
+        let committee = inner.committee.clone();
+        let info_length = committee.info_length();
+        let filter = Arc::new(FilterForBlocks::new(info_length));
+
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
             let peer_id = connection.peer_id;
             if let Some(task) = connections.remove(&peer_id) {
@@ -167,6 +304,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 inner.clone(),
                 block_fetcher.clone(),
                 metrics.clone(),
+                filter.clone(),
             ));
             connections.insert(peer_id, task);
         }
@@ -188,6 +326,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
+        filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
@@ -279,7 +418,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             let mut block: VerifiedStatementBlock = (*data_block).clone();
                             tracing::debug!("Received {} from {}", block, peer);
                             let contains_new_shard_or_header =
-                                inner.block_store.contains_new_shard_or_header(&block);
+                                if data_block.encoded_shard().is_some() {
+                                    filter_for_blocks
+                                        .is_needed(&block.digest(), Status::Shard, peer_id)
+                                        .await
+                                } else {
+                                    filter_for_blocks
+                                        .is_needed(&block.digest(), Status::Header, peer_id)
+                                        .await
+                                };
                             if !contains_new_shard_or_header {
                                 continue;
                             }
@@ -317,15 +464,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
                                 }
                             }
+                            let to_be_filtered = if data_block.statements().is_some() {
+                                filter_for_blocks
+                                    .add_batch(vec![(block.digest(), Status::Full)], peer_id)
+                                    .await
+                            } else if data_block.encoded_shard().is_some() {
+                                filter_for_blocks
+                                    .add_batch(vec![(block.digest(), Status::Shard)], peer_id)
+                                    .await
+                            } else {
+                                filter_for_blocks
+                                    .add_batch(vec![(block.digest(), Status::Header)], peer_id)
+                                    .await
+                            };
+                            if !to_be_filtered.is_empty() {
+                                continue;
+                            }
                             let storage_block = block;
                             let transmission_block =
                                 storage_block.from_storage_to_transmission(own_id);
-                            let contains_new_shard_or_header = inner
-                                .block_store
-                                .contains_new_shard_or_header(&storage_block);
-                            if !contains_new_shard_or_header {
-                                continue;
-                            }
                             let data_storage_block = Data::new(storage_block);
                             let data_transmission_block = Data::new(transmission_block);
                             verified_data_blocks
@@ -343,8 +500,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     for data_block in blocks_with_statements {
                         let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
-                        let contains_new_shard_or_header =
-                            inner.block_store.contains_new_shard_or_header(&block);
+                        let contains_new_shard_or_header = filter_for_blocks
+                            .is_needed(&block.digest(), Status::Full, peer_id)
+                            .await;
                         if !contains_new_shard_or_header {
                             continue;
                         }
@@ -373,10 +531,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 storage_block.from_storage_to_transmission(own_id)
                             }
                         };
-                        let contains_new_shard_or_header = inner
-                            .block_store
-                            .contains_new_shard_or_header(&storage_block);
-                        if !contains_new_shard_or_header {
+                        let to_be_filtered = filter_for_blocks
+                            .add_batch(vec![(storage_block.digest(), Status::Full)], peer_id)
+                            .await;
+                        if !to_be_filtered.is_empty() {
                             continue;
                         }
                         let data_storage_block = Data::new(storage_block);

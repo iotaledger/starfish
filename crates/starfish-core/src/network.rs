@@ -57,7 +57,7 @@ const REGIONS: [&str; 10] = [
     "ap-northeast-1", // APNE1
 ];
 
-// Latency table from your provided data
+// RTT table for 10 AWS regions, in milliseconds.
 const LATENCY_TABLE: [[u32; 10]; 10] = [
     [1, 65, 14, 68, 104, 110, 112, 201, 198, 146],
     [65, 1, 78, 127, 163, 172, 175, 226, 137, 108],
