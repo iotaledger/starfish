@@ -41,9 +41,6 @@ use tokio::{
     sync::{mpsc, oneshot, Notify},
 };
 
-/// The maximum number of blocks that can be requested in a single message.
-pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
-
 const MAX_FILTER_SIZE: usize = 10000;
 
 struct FilterForBlocks {
