@@ -368,7 +368,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
-
+        
+        
         tracing::debug!(
             "Connection from {:?} to {:?} is established",
             own_id,
@@ -425,7 +426,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         .await
                                 };
                             if !contains_new_shard_or_header {
-                                tracing::debug!("Block {} is filtered", block);
+                                if data_block.encoded_shard().is_some() {
+                                    metrics
+                                        .filtered_blocks_total
+                                        .with_label_values(&["shard"])
+                                        .inc();
+                                } else {
+                                    metrics
+                                        .filtered_blocks_total
+                                        .with_label_values(&["header"])
+                                        .inc();
+                                }
+
                                 continue;
                             }
                             if let Err(e) = block.verify(
@@ -456,6 +468,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     own_id,
                                 );
                                 if reconstructed_block.is_some() {
+                                    metrics
+                                        .reconstructed_blocks_total
+                                        .with_label_values(&["connection_task"])
+                                        .inc();
                                     block = reconstructed_block.expect("Should be Some");
                                     tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
                                 } else {
@@ -476,7 +492,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     .await
                             };
                             if !to_be_filtered.is_empty() {
-                                tracing::debug!("Processed block {} is filtered", block);
+                                    metrics
+                                        .processed_after_filtering_total
+                                        .inc_by(to_be_filtered.len() as u64);
                                 continue;
                             }
                             let storage_block = block;
@@ -490,6 +508,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                         tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                         if !verified_data_blocks.is_empty() {
+                            metrics
+                                .used_additional_blocks_total
+                                .inc_by(verified_data_blocks.len() as u64);
                             inner.syncer.add_blocks(verified_data_blocks).await;
                         }
                     }
@@ -525,7 +546,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             .add_batch(vec![(block.digest(), Status::Full)], peer_id)
                             .await;
                         if !to_be_filtered.is_empty() {
-                            tracing::debug!("Processed block {} is filtered", block);
+                            metrics
+                                .filtered_blocks_total
+                                .with_label_values(&["full"])
+                                .inc();
                             continue;
                         }
                         let storage_block = block;

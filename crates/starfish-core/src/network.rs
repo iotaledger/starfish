@@ -6,6 +6,7 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
+use zstd::stream::{encode_all, decode_all};
 use prometheus::IntCounter;
 use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,21 @@ const LATENCY_TABLE: [[u32; 10]; 10] = [
     [198, 137, 196, 254, 281, 268, 309, 150, 1, 101],
     [146, 108, 142, 199, 238, 245, 254, 140, 101, 1],
 ];
+
+async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
+    // Serialize
+    let serialized = bincode::serialize(msg).expect("Serialization failed");
+    // Compress
+    encode_all(&serialized[..], 5).expect("Compression failed")
+}
+
+async fn decompress_and_deserialize(buf: &[u8]) -> Option<NetworkMessage> {
+    // Decompress
+    let decompressed = decode_all(buf).ok()?;
+
+    // Deserialize
+    bincode::deserialize(&decompressed).ok()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
@@ -466,14 +482,7 @@ impl Worker {
 
                 // Spawn an inner task and collect its handle
                 let handle = tokio::spawn(async move {
-                    let serialized = match bincode::serialize(&message) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            tracing::error!("Serialization failed: {e}");
-                            return;
-                        }
-                    };
-
+                    let serialized = serialize_and_compress(&message).await;
                     tokio::time::sleep(latency).await;
 
                     if let Err(e) = async {
@@ -540,15 +549,15 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match bincode::deserialize::<NetworkMessage>(buf) {
-                Ok(message) => {
+            match decompress_and_deserialize(buf).await {
+                Some(message) => {
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
                         return Ok(());
                     }
                 }
-                Err(err) => {
-                    tracing::warn!("Failed to deserialize: {}", err);
+                None => {
+                    tracing::warn!("Failed to decompress and/or deserialize");
                     return Ok(());
                 }
             }

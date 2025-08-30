@@ -17,7 +17,7 @@ hyper = "0.14.26"
 libc = "0.2.146"
 memmap2 = "0.7.0"
 prettytable-rs = "0.10"
-rocksdb = { version = "0.21.0", features = ["snappy", "lz4", "zstd", "zlib", "multi-threaded-cf"] }
+rocksdb = { version = "0.22.0", features = ["snappy", "lz4", "zlib", "multi-threaded-cf"] }
 rs_merkle = "1.4.2"
 
 minibytes = { path = "../third-party/minibytes", default_features = false, features = ["frommmap"] }
@@ -26,7 +26,7 @@ prometheus = "0.13.3"
 
 blake3 = "1.5.5"
 bytes = "1.4.0"
-rand = "0.8.5"
+rand = { version = "0.8.5", features = ["small_rng"] }
 reed-solomon-simd = { version = "2.2.2" }
 serde = { workspace = true }
 serde_yaml = "0.9.21"
@@ -34,13 +34,13 @@ tabled = "0.12.2"
 tempfile = { workspace = true } # todo - move to dev-dep
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-core = "0.1.31"
-tracing-subscriber = "0.3.17"
 zeroize = "1.6.0"
-dashmap = "7.0.0-rc2"
+zstd = { version = "0.13.3", default-features = false }
 
 [dev-dependencies]
 reqwest = { workspace = true }
 seahash = "4.1.0"
 tempdir = "0.3.7"
-tracing-test = "0.2.4"
+
+[build-dependencies]
+bindgen = { workspace = true }
