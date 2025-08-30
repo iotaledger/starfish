@@ -462,11 +462,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
                                 }
                             }
-                            let to_be_filtered = if data_block.statements().is_some() {
+                            let to_be_filtered = if block.statements().is_some() {
                                 filter_for_blocks
                                     .add_batch(vec![(block.digest(), Status::Full)], peer_id)
                                     .await
-                            } else if data_block.encoded_shard().is_some() {
+                            } else if block.encoded_shard().is_some() {
                                 filter_for_blocks
                                     .add_batch(vec![(block.digest(), Status::Shard)], peer_id)
                                     .await
