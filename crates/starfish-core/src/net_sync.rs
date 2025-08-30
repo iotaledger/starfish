@@ -41,7 +41,7 @@ use tokio::{
     sync::{mpsc, oneshot, Notify},
 };
 
-const MAX_FILTER_SIZE: usize = 10000;
+const MAX_FILTER_SIZE: usize = 100000;
 
 struct FilterForBlocks {
     info_length: usize,
@@ -425,6 +425,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         .await
                                 };
                             if !contains_new_shard_or_header {
+                                tracing::debug!("Block {} is filtered", block);
                                 continue;
                             }
                             if let Err(e) = block.verify(
@@ -475,6 +476,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     .await
                             };
                             if !to_be_filtered.is_empty() {
+                                tracing::debug!("Processed block {} is filtered", block);
                                 continue;
                             }
                             let storage_block = block;
@@ -519,6 +521,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // todo: Terminate connection upon receiving incorrect block.
                             break;
                         }
+                        let to_be_filtered = filter_for_blocks
+                            .add_batch(vec![(block.digest(), Status::Full)], peer_id)
+                            .await;
+                        if !to_be_filtered.is_empty() {
+                            tracing::debug!("Processed block {} is filtered", block);
+                            continue;
+                        }
                         let storage_block = block;
                         let transmission_block = match consensus_protocol {
                             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
@@ -528,12 +537,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 storage_block.from_storage_to_transmission(own_id)
                             }
                         };
-                        let to_be_filtered = filter_for_blocks
-                            .add_batch(vec![(storage_block.digest(), Status::Full)], peer_id)
-                            .await;
-                        if !to_be_filtered.is_empty() {
-                            continue;
-                        }
+
                         let data_storage_block = Data::new(storage_block);
                         let data_transmission_block = Data::new(transmission_block);
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
