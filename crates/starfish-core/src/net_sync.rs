@@ -638,6 +638,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .await
                                 .is_none()
                             {
+                                tracing::debug!("Failed to send transmission blocks to peer {:?}", peer);
                                 break;
                             }
                         }
