@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{cmp::min, sync::Arc, time::Duration};
-
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngCore;
+use rand::SeedableRng;
 use tokio::sync::mpsc;
 
 use crate::crypto::AsBytes;
@@ -12,12 +12,11 @@ use crate::{
     config::{ClientParameters, NodePublicConfig},
     metrics::Metrics,
     runtime::{self, timestamp_utc},
-    types::{AuthorityIndex, Transaction},
+    types::{Transaction},
 };
 
 pub struct TransactionGenerator {
     sender: mpsc::Sender<Vec<Transaction>>,
-    rng: StdRng,
     client_parameters: ClientParameters,
     node_public_config: NodePublicConfig,
     metrics: Arc<Metrics>,
@@ -30,7 +29,6 @@ impl TransactionGenerator {
 
     pub fn start(
         sender: mpsc::Sender<Vec<Transaction>>,
-        seed: AuthorityIndex,
         client_parameters: ClientParameters,
         node_public_config: NodePublicConfig,
         metrics: Arc<Metrics>,
@@ -39,7 +37,6 @@ impl TransactionGenerator {
         runtime::Handle::current().spawn(
             Self {
                 sender,
-                rng: StdRng::seed_from_u64(seed),
                 client_parameters,
                 node_public_config,
                 metrics,
@@ -48,7 +45,7 @@ impl TransactionGenerator {
         );
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         let load = self.client_parameters.load;
 
         let transactions_per_block_interval =
@@ -68,11 +65,10 @@ impl TransactionGenerator {
 
         let mut counter = 0;
         let mut tx_to_report = 0;
-        let mut random: u64 = self.rng.gen(); // 8 bytes
-        let zeros = vec![0u8; self.client_parameters.transaction_size - 8 - 8]; // 8 bytes timestamp + 8 bytes random
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
         runtime::sleep(initial_delay_plus_extra_delay).await;
+        let mut rng = rand::rngs::SmallRng::from_entropy(); // faster than thread_rng
 
         loop {
             interval.tick().await;
@@ -81,12 +77,12 @@ impl TransactionGenerator {
             let mut block = Vec::with_capacity(target_block_size);
             let mut block_size = 0;
             for _ in 0..transactions_per_block_interval {
-                random += counter;
+                let mut payload = vec![0u8; self.client_parameters.transaction_size - 8];
+                rng.fill_bytes(&mut payload);
 
                 let mut transaction = Vec::with_capacity(self.client_parameters.transaction_size);
                 transaction.extend_from_slice(&timestamp); // 8 bytes
-                transaction.extend_from_slice(&random.to_le_bytes()); // 8 bytes
-                transaction.extend_from_slice(&zeros[..]);
+                transaction.extend_from_slice(&payload);
 
                 block.push(Transaction::new(transaction));
                 block_size += self.client_parameters.transaction_size;
