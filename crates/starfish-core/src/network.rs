@@ -77,7 +77,7 @@ async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
     // Serialize
     let serialized = bincode::serialize(msg).expect("Serialization failed");
     // Compress
-    encode_all(&serialized[..], 5).expect("Compression failed")
+    encode_all(&serialized[..], 1).expect("Compression failed")
 }
 
 async fn decompress_and_deserialize(buf: &[u8]) -> Option<NetworkMessage> {

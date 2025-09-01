@@ -90,6 +90,9 @@ struct BlockStoreInner {
     dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
+    // tracks from which authority we received which block request to enhance the cordial dissemination
+    // of blocks
+    last_pull_request: Vec<Vec<Instant>>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +102,8 @@ enum IndexEntry {
     // Block is currently in memory
     Loaded((Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)),
 }
+
+const MAX_PULL_REQUEST_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl BlockStore {
     pub fn open(
@@ -112,10 +117,13 @@ impl BlockStore {
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
+        let now = Instant::now() ;
+        let last_pull_request = vec![vec![now; committee.len()]; committee.len()];
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
             not_known_by_authority,
+            last_pull_request,
             info_length: committee.info_length(),
             committee_size: committee.len(),
             ..Default::default()
@@ -186,6 +194,11 @@ impl BlockStore {
             committee_size: committee.len(),
         };
         builder.build(rocks_store, block_store)
+    }
+    
+    pub fn update_last_additional_blocks_requested_or_processed(&self, from_whom: AuthorityIndex, block_references: Vec<BlockReference>){
+        let mut inner = self.inner.write();
+        inner.update_last_additional_blocks_requested_or_processed(from_whom, block_references);        
     }
 
     pub fn get_dag(
@@ -601,6 +614,12 @@ impl BlockStore {
 }
 
 impl BlockStoreInner {
+    pub fn update_last_additional_blocks_requested_or_processed(&mut self, from_whom: AuthorityIndex, block_references: Vec<BlockReference>) {
+        let now = Instant::now();
+        for block_reference in block_references {
+            self.last_pull_request[from_whom as usize][block_reference.authority as usize] = now;
+        }
+    }
     pub fn block_exists(&self, reference: BlockReference) -> bool {
         let Some(blocks) = self.index.get(&reference.round) else {
             return false;
@@ -1072,11 +1091,20 @@ impl BlockStoreInner {
             .collect();
         let max_round_own_blocks = own_blocks.iter().map(|own_block| own_block.1).max();
         let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
+        let now = Instant::now();
+        let authorities_not_to_be_sent: HashSet<AuthorityIndex> = self.last_pull_request[to_whom as usize]
+            .iter()
+            .enumerate()
+            .filter(|(auth, ts)| {
+                *auth == self.authority as usize || now.duration_since(**ts) > MAX_PULL_REQUEST_AGE
+            })
+            .map(|(auth, _)| auth as AuthorityIndex)
+            .collect();
         let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
             [to_whom as usize]
             .iter()
             .filter(|block_reference| {
-                (block_reference.authority != self.authority)
+                (!authorities_not_to_be_sent.contains(&block_reference.authority))
                     && (block_reference.round < max_round_own_blocks)
             })
             .take(batch_other_block_size)

@@ -200,14 +200,14 @@ impl<H: BlockHandler> Core<H> {
         let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) =
             self.block_manager.add_blocks(blocks);
         drop(block_manager_timer);
-        let processed_references: Vec<_> = processed
+        let processed_references_with_statements: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
             .map(|b| *b.reference())
             .collect();
-        let not_processed_blocks: Vec<_> = block_references_with_statements
+        let not_processed_block_references_with_statements: Vec<_> = block_references_with_statements
             .iter()
-            .filter(|block_reference| !processed_references.contains(block_reference))
+            .filter(|block_reference| !processed_references_with_statements.contains(block_reference))
             .copied()
             .collect();
 
@@ -219,8 +219,18 @@ impl<H: BlockHandler> Core<H> {
             new_blocks_to_reconstruct
         );
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
+            ConsensusProtocol::StarfishPull  => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+            }
+            ConsensusProtocol::Starfish => {
+                self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+                if self.block_store.byzantine_strategy.is_none() {
+                    if let Some(block_reference_with_statement) = block_references_with_statements.first()
+                    {
+                        let processed_block_references: Vec<_> = processed.iter().map(|b| *b.reference()).collect();
+                        self.block_store.update_last_additional_blocks_requested_or_processed(block_reference_with_statement.authority, processed_block_references);
+                    }
+                }
             }
             _ => {}
         };
@@ -235,7 +245,7 @@ impl<H: BlockHandler> Core<H> {
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
-        (success, not_processed_blocks, missing_references)
+        (success, not_processed_block_references_with_statements, missing_references)
     }
 
     fn run_block_handler(&mut self) {
