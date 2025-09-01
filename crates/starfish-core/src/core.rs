@@ -296,6 +296,10 @@ impl<H: BlockHandler> Core<H> {
                 self.authority,
             );
             if storage_block.is_some() {
+                self.metrics
+                    .reconstructed_blocks_total
+                    .with_label_values(&["core_task"])
+                    .inc();
                 tracing::debug!(
                     "Reconstruction of block {:?} within core thread task is successful",
                     block_reference

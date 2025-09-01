@@ -36,6 +36,11 @@ pub struct Metrics {
     pub committed_leaders_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
     pub sequenced_transactions_total: IntCounter,
+    
+    pub filtered_blocks_total: IntCounterVec,
+    pub processed_after_filtering_total: IntCounter,
+    pub reconstructed_blocks_total: IntCounterVec,
+    pub used_additional_blocks_total: IntCounter,
 
     pub block_store_unloaded_blocks: IntCounter,
     pub block_store_loaded_blocks: IntCounter,
@@ -52,6 +57,7 @@ pub struct Metrics {
 
     pub missing_blocks: IntGaugeVec,
     pub block_sync_requests_sent: IntCounterVec,
+    pub committed_blocks: IntCounterVec,
 
     pub block_committed_latency: HistogramSender<Duration>,
     pub block_committed_latency_squared_micros: IntCounter,
@@ -168,6 +174,32 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            filtered_blocks_total: register_int_counter_vec_with_registry!(
+                "filtered_blocks_total",
+                "Total number of filtered blocks per authority",
+                &["block_type"],
+                registry,
+            )
+            .unwrap(),
+            processed_after_filtering_total: register_int_counter_with_registry!(
+                "processed_after_filtering_total",
+                "Total number of blocks processed after filtering",
+                registry,
+            )
+            .unwrap(),
+            reconstructed_blocks_total: register_int_counter_vec_with_registry!(
+                "reconstructed_blocks_total",
+                "Total number of reconstructed blocks per authority",
+                &["reconstruction_place"],
+                registry,
+            )
+            .unwrap(),
+            used_additional_blocks_total: register_int_counter_with_registry!(
+                "used_additional_blocks_total",
+                "Total number of times additional blocks that were used in batches",
+                registry,
+            )
+            .unwrap(),
             submitted_transactions: register_int_counter_with_registry!(
                 "submitted_transactions",
                 "Total number of submitted transactions",
@@ -269,7 +301,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-
+            committed_blocks: register_int_counter_vec_with_registry!(
+                "committed_blocks",
+                "Total number of committed blocks proposed by authorities",
+                &["authority"],
+                registry,
+            )
+                .unwrap(),
             utilization_timer: register_int_counter_vec_with_registry!(
                 "utilization_timer",
                 "Utilization timer",

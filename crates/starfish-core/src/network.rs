@@ -6,6 +6,7 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
+use zstd::stream::{encode_all, decode_all};
 use prometheus::IntCounter;
 use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
@@ -57,19 +58,35 @@ const REGIONS: [&str; 10] = [
     "ap-northeast-1", // APNE1
 ];
 
-// Latency table from your provided data
-const LATENCY_TABLE: [[u32; 10]; 10] = [
-    [1, 65, 14, 68, 104, 110, 112, 201, 198, 146],
-    [65, 1, 78, 127, 163, 172, 175, 226, 137, 108],
-    [14, 78, 1, 67, 106, 103, 122, 189, 196, 142],
-    [68, 127, 67, 1, 29, 38, 176, 125, 254, 199],
-    [104, 163, 106, 29, 1, 50, 215, 143, 281, 238],
-    [110, 172, 103, 38, 50, 1, 220, 148, 268, 245],
-    [112, 175, 122, 176, 215, 220, 1, 299, 309, 254],
-    [201, 226, 189, 125, 143, 148, 299, 1, 150, 140],
-    [198, 137, 196, 254, 281, 268, 309, 150, 1, 101],
-    [146, 108, 142, 199, 238, 245, 254, 140, 101, 1],
+// RTT table for 10 AWS regions, in milliseconds.
+const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
+    [1, 14, 104, 112, 198, 65, 68, 110, 201, 146],
+    [14, 1, 106, 122, 196, 78, 67, 103, 189, 142],
+    [104, 106, 1, 215, 281, 163, 29, 50, 143, 238],
+    [112, 122, 215, 1, 309, 175, 176, 220, 299, 254],
+    [198, 196, 281, 309, 1, 137, 254, 268, 150, 101],
+    [65, 78, 163, 175, 137, 1, 127, 172, 226, 108],
+    [68, 67, 29, 176, 254, 127, 1, 38, 125, 199],
+    [110, 103, 50, 220, 268, 172, 38, 1, 148, 245],
+    [201, 189, 143, 299, 150, 226, 125, 148, 1, 140],
+    [146, 142, 238, 254, 101, 108, 199, 245, 140, 1],
 ];
+
+
+async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
+    // Serialize
+    let serialized = bincode::serialize(msg).expect("Serialization failed");
+    // Compress
+    encode_all(&serialized[..], 5).expect("Compression failed")
+}
+
+async fn decompress_and_deserialize(buf: &[u8]) -> Option<NetworkMessage> {
+    // Decompress
+    let decompressed = decode_all(buf).ok()?;
+
+    // Deserialize
+    bincode::deserialize(&decompressed).ok()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
@@ -466,14 +483,7 @@ impl Worker {
 
                 // Spawn an inner task and collect its handle
                 let handle = tokio::spawn(async move {
-                    let serialized = match bincode::serialize(&message) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            tracing::error!("Serialization failed: {e}");
-                            return;
-                        }
-                    };
-
+                    let serialized = serialize_and_compress(&message).await;
                     tokio::time::sleep(latency).await;
 
                     if let Err(e) = async {
@@ -540,15 +550,15 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match bincode::deserialize::<NetworkMessage>(buf) {
-                Ok(message) => {
+            match decompress_and_deserialize(buf).await {
+                Some(message) => {
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
                         return Ok(());
                     }
                 }
-                Err(err) => {
-                    tracing::warn!("Failed to deserialize: {}", err);
+                None => {
+                    tracing::warn!("Failed to decompress and/or deserialize");
                     return Ok(());
                 }
             }
@@ -587,13 +597,12 @@ fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
             }
         }
     } else {
-        let valid_sequence = [0, 2, 4, 6, 8, 1, 3, 5, 7, 8];
         for (i, item) in resulting_table.iter_mut().enumerate().take(n) {
             for j in 0..n {
-                let index_i = i % valid_sequence.len();
-                let index_j = j % valid_sequence.len();
+                let index_i = i % RTT_LATENCY_TABLE.len();
+                let index_j = j % RTT_LATENCY_TABLE.len();
                 item.push(
-                    LATENCY_TABLE[valid_sequence[index_i]][valid_sequence[index_j]] as f64 / 2.0,
+                    RTT_LATENCY_TABLE[index_i][index_j] as f64 / 2.0,
                 )
             }
         }
