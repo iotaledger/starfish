@@ -224,13 +224,6 @@ impl<H: BlockHandler> Core<H> {
             }
             ConsensusProtocol::Starfish => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-                if self.block_store.byzantine_strategy.is_none() {
-                    if let Some(block_reference_with_statement) = block_references_with_statements.first()
-                    {
-                        let processed_block_references: Vec<_> = processed.iter().map(|b| *b.reference()).collect();
-                        self.block_store.update_last_additional_blocks_requested_or_processed(block_reference_with_statement.authority, processed_block_references);
-                    }
-                }
             }
             _ => {}
         };

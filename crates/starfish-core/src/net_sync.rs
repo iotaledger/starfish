@@ -604,9 +604,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             if consensus_protocol == ConsensusProtocol::Starfish && !missing_parents.is_empty() {
                                 let missing_parents =
                                     missing_parents.iter().copied().collect::<Vec<_>>();
-                                tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", missing_parents, peer);
+                                let useful_blocks = verified_data_blocks.iter().map(|(s,_)|s.reference().clone()).collect::<Vec<_>>();
+                                let mut all_additional_blocks = missing_parents;
+                                all_additional_blocks.extend(useful_blocks);
+                                tracing::debug!("Make request useful blocks {:?} to peer {:?}", all_additional_blocks, peer);
                                 Self::request_parents_blocks(
-                                    missing_parents,
+                                    all_additional_blocks,
                                     &connection.sender,
                                 );
                             }
