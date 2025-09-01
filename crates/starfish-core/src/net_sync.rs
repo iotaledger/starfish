@@ -231,6 +231,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner.syncer.authority_connection(peer_id, true).await;
 
         let peer = format_authority_index(peer_id);
+        let peer_name = peer_id.to_string();
         let own_id = inner.block_store.get_own_authority_index();
 
         tracing::debug!(
@@ -281,6 +282,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             let contains_new_shard_or_header =
                                 inner.block_store.contains_new_shard_or_header(&block);
                             if !contains_new_shard_or_header {
+                                metrics
+                                    .filtered_blocks_total
+                                    .with_label_values(&[peer_name.as_str()])
+                                    .inc();
                                 continue;
                             }
                             if let Err(e) = block.verify(
@@ -311,6 +316,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     own_id,
                                 );
                                 if reconstructed_block.is_some() {
+                                    metrics
+                                        .reconstructed_blocks_total
+                                        .with_label_values(&["connection_task"])
+                                        .inc();
                                     block = reconstructed_block.expect("Should be Some");
                                     tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
                                 } else {
@@ -324,6 +333,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .block_store
                                 .contains_new_shard_or_header(&storage_block);
                             if !contains_new_shard_or_header {
+                                metrics.processed_after_filtering_total.inc();
                                 continue;
                             }
                             let data_storage_block = Data::new(storage_block);
@@ -334,6 +344,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                         tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                         if !verified_data_blocks.is_empty() {
+                            metrics
+                                .used_additional_blocks_total
+                                .inc_by(verified_data_blocks.len() as u64);
                             inner.syncer.add_blocks(verified_data_blocks).await;
                         }
                     }
@@ -346,6 +359,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let contains_new_shard_or_header =
                             inner.block_store.contains_new_shard_or_header(&block);
                         if !contains_new_shard_or_header {
+                            metrics
+                                .filtered_blocks_total
+                                .with_label_values(&[peer_name.as_str()])
+                                .inc();
                             continue;
                         }
                         if let Err(e) = block.verify(
@@ -377,6 +394,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             .block_store
                             .contains_new_shard_or_header(&storage_block);
                         if !contains_new_shard_or_header {
+                            metrics.processed_after_filtering_total.inc();
                             continue;
                         }
                         let data_storage_block = Data::new(storage_block);

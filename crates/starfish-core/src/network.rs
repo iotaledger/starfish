@@ -6,7 +6,6 @@ use futures::{
     future::{select, select_all, Either},
     FutureExt,
 };
-use zstd::stream::{encode_all, decode_all};
 use prometheus::IntCounter;
 use rand::{prelude::ThreadRng, Rng};
 use serde::{Deserialize, Serialize};
@@ -24,6 +23,7 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
+use zstd::stream::{decode_all, encode_all};
 
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
@@ -71,7 +71,6 @@ const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
     [201, 189, 143, 299, 150, 226, 125, 148, 1, 140],
     [146, 142, 238, 254, 101, 108, 199, 245, 140, 1],
 ];
-
 
 async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
     // Serialize
@@ -601,9 +600,7 @@ fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
             for j in 0..n {
                 let index_i = i % RTT_LATENCY_TABLE.len();
                 let index_j = j % RTT_LATENCY_TABLE.len();
-                item.push(
-                    RTT_LATENCY_TABLE[index_i][index_j] as f64 / 2.0,
-                )
+                item.push(RTT_LATENCY_TABLE[index_i][index_j] as f64 / 2.0)
             }
         }
     }

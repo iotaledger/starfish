@@ -229,7 +229,6 @@ impl CommitObserver for RealCommitHandler {
                     .with_label_values(&[&block.author().to_string()])
                     .inc();
 
-
                 self.metrics
                     .block_committed_latency_squared_micros
                     .inc_by(block_latency.as_micros().pow(2) as u64);

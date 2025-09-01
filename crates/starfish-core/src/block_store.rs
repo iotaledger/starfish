@@ -117,7 +117,7 @@ impl BlockStore {
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
-        let now = Instant::now() ;
+        let now = Instant::now();
         let last_pull_request = vec![vec![now; committee.len()]; committee.len()];
         let mut inner = BlockStoreInner {
             authority,
@@ -195,10 +195,14 @@ impl BlockStore {
         };
         builder.build(rocks_store, block_store)
     }
-    
-    pub fn update_last_additional_blocks_requested_or_processed(&self, from_whom: AuthorityIndex, block_references: Vec<BlockReference>){
+
+    pub fn update_last_additional_blocks_requested_or_processed(
+        &self,
+        from_whom: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    ) {
         let mut inner = self.inner.write();
-        inner.update_last_additional_blocks_requested_or_processed(from_whom, block_references);        
+        inner.update_last_additional_blocks_requested_or_processed(from_whom, block_references);
     }
 
     pub fn get_dag(
@@ -614,7 +618,11 @@ impl BlockStore {
 }
 
 impl BlockStoreInner {
-    pub fn update_last_additional_blocks_requested_or_processed(&mut self, from_whom: AuthorityIndex, block_references: Vec<BlockReference>) {
+    pub fn update_last_additional_blocks_requested_or_processed(
+        &mut self,
+        from_whom: AuthorityIndex,
+        block_references: Vec<BlockReference>,
+    ) {
         let now = Instant::now();
         for block_reference in block_references {
             self.last_pull_request[from_whom as usize][block_reference.authority as usize] = now;
@@ -1092,7 +1100,8 @@ impl BlockStoreInner {
         let max_round_own_blocks = own_blocks.iter().map(|own_block| own_block.1).max();
         let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
         let now = Instant::now();
-        let authorities_not_to_be_sent: HashSet<AuthorityIndex> = self.last_pull_request[to_whom as usize]
+        let authorities_not_to_be_sent: HashSet<AuthorityIndex> = self.last_pull_request
+            [to_whom as usize]
             .iter()
             .enumerate()
             .filter(|(auth, ts)| {

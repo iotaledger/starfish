@@ -205,11 +205,14 @@ impl<H: BlockHandler> Core<H> {
             .filter(|b| b.statements().is_some())
             .map(|b| *b.reference())
             .collect();
-        let not_processed_block_references_with_statements: Vec<_> = block_references_with_statements
-            .iter()
-            .filter(|block_reference| !processed_references_with_statements.contains(block_reference))
-            .copied()
-            .collect();
+        let not_processed_block_references_with_statements: Vec<_> =
+            block_references_with_statements
+                .iter()
+                .filter(|block_reference| {
+                    !processed_references_with_statements.contains(block_reference)
+                })
+                .copied()
+                .collect();
 
         let success: bool =
             !processed.is_empty() || !new_blocks_to_reconstruct.is_empty() || updated_statements;
@@ -219,7 +222,7 @@ impl<H: BlockHandler> Core<H> {
             new_blocks_to_reconstruct
         );
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull  => {
+            ConsensusProtocol::StarfishPull => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
             }
             ConsensusProtocol::Starfish => {
@@ -238,7 +241,11 @@ impl<H: BlockHandler> Core<H> {
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
-        (success, not_processed_block_references_with_statements, missing_references)
+        (
+            success,
+            not_processed_block_references_with_statements,
+            missing_references,
+        )
     }
 
     fn run_block_handler(&mut self) {

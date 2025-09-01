@@ -2,9 +2,9 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cmp::min, sync::Arc, time::Duration};
 use rand::RngCore;
 use rand::SeedableRng;
+use std::{cmp::min, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 use crate::crypto::AsBytes;
@@ -12,7 +12,7 @@ use crate::{
     config::{ClientParameters, NodePublicConfig},
     metrics::Metrics,
     runtime::{self, timestamp_utc},
-    types::{Transaction},
+    types::Transaction,
 };
 
 pub struct TransactionGenerator {
