@@ -5,12 +5,12 @@
 #------------------------------------------------------------------------------
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Recommend < number of physical cores. The hard limit is 128
 DESIRED_TPS=${DESIRED_TPS:-0}       # Target transactions per second. For dry run, recommend NUM_VALIDATORS*DESIRED_TPS < 400K
-CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish-pull, cordial-miners, starfish-push
+CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish-pull, cordial-miners, mysticeti
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #Options:| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
-REMOVE_VOLUMES=1                       # Set to 1 to clear Grafana/Prometheus volumes
+REMOVE_VOLUMES=1                      # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
