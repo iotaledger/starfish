@@ -23,7 +23,6 @@ use tokio::{
     sync::mpsc,
     time::Instant,
 };
-use zstd::stream::{decode_all, encode_all};
 
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
@@ -71,22 +70,6 @@ const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
     [201, 189, 143, 299, 150, 226, 125, 148, 1, 140],
     [146, 142, 238, 254, 101, 108, 199, 245, 140, 1],
 ];
-
-async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
-    // Serialize
-    let serialized = bincode::serialize(msg).expect("Serialization failed");
-    // Compress
-    //encode_all(&serialized[..], 1).expect("Compression failed")
-    serialized
-}
-
-async fn decompress_and_deserialize(buf: &[u8]) -> Option<NetworkMessage> {
-    // Decompress
-    // let decompressed = decode_all(buf).ok()?;
-
-    // Deserialize
-    bincode::deserialize(&buf).ok()
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
@@ -485,7 +468,7 @@ impl Worker {
 
                 // Spawn an inner task and collect its handle
                 let handle = tokio::spawn(async move {
-                    let serialized = serialize_and_compress(&message).await;
+                    let serialized = bincode::serialize(&message).expect("Serialization failed");
                     tokio::time::sleep(latency).await;
 
                     if let Err(e) = async {
@@ -552,7 +535,7 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match decompress_and_deserialize(buf).await {
+            match bincode::deserialize(&buf).ok() {
                 Some(message) => {
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
