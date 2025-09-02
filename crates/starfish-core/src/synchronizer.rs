@@ -46,7 +46,7 @@ impl SynchronizerParameters {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: 3 * committee_size,
                 sample_timeout: Duration::from_millis(600),
-                max_missing_blocks_age: Duration::from_secs(2),
+                max_missing_blocks_age: Duration::from_secs(1),
             },
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
@@ -54,7 +54,7 @@ impl SynchronizerParameters {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
                 sample_timeout: Duration::from_millis(600),
-                max_missing_blocks_age: Duration::from_secs(2),
+                max_missing_blocks_age: Duration::from_secs(1),
             },
         }
     }
@@ -66,7 +66,7 @@ impl Default for SynchronizerParameters {
             batch_own_block_size: 8,
             batch_other_block_size: 128,
             sample_timeout: Duration::from_millis(600),
-            max_missing_blocks_age: Duration::from_millis(2000),
+            max_missing_blocks_age: Duration::from_millis(1000),
         }
     }
 }

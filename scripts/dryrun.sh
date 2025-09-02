@@ -3,7 +3,7 @@
 #------------------------------------------------------------------------------
 # Configuration Parameters
 #------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Recommend < number of physical cores. The hard limit is 128
+NUM_VALIDATORS=${NUM_VALIDATORS:-20}     # Recommend < number of physical cores. The hard limit is 128
 DESIRED_TPS=${DESIRED_TPS:-10000}       # Target transactions per second. For dry run, recommend NUM_VALIDATORS*DESIRED_TPS < 400K
 CONSENSUS=${CONSENSUS:-starfish}         # Options: starfish, starfish-pull, cordial-miners, mysticeti
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3

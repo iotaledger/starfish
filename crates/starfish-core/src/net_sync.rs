@@ -10,7 +10,7 @@ use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
 use crate::synchronizer::{DataRequestor, UpdaterMissingAuthorities};
-use crate::types::{BlockReference, VerifiedStatementBlock};
+use crate::types::{BlockDigest, BlockReference, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -26,7 +26,7 @@ use crate::{
 };
 use futures::future::join_all;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::{
     collections::HashMap,
     sync::{
@@ -42,8 +42,146 @@ use tokio::{
     sync::{mpsc, oneshot, Notify},
 };
 
-/// The maximum number of blocks that can be requested in a single message.
-pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
+const MAX_FILTER_SIZE: usize = 10000;
+
+struct FilterForBlocks {
+    info_length: usize,
+    digests: parking_lot::RwLock<HashMap<BlockDigest, StatusFilter>>,
+    queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
+}
+enum Status {
+    Full,
+    Shard(usize),
+    Header,
+}
+impl Status {
+    fn get_status(block: &VerifiedStatementBlock, peer: usize) -> Self{
+        if block.statements().is_some() {
+            Status::Full
+        } else if block.encoded_shard().is_some() {
+            Status::Shard(peer)
+        } else {
+            Status::Header
+        }
+    }
+}
+enum StatusFilter {
+    Full,
+    Shards{count: usize, bitmap: u128},
+    Header,
+}
+
+impl FilterForBlocks {
+    fn new(info_length: usize) -> Self {
+        Self {
+            info_length,
+            digests: parking_lot::RwLock::new(HashMap::new()),
+            queue: parking_lot::RwLock::new(VecDeque::new()),
+        }
+    }
+
+    fn add_batch(
+        &self,
+        new_digests: Vec<(BlockDigest, Status)>,
+    ) -> Vec<BlockDigest> {
+        let mut already_inserted = Vec::new();
+        let mut queue_updates = Vec::new();
+
+        {
+            let mut digests = self.digests.write();
+
+            for (digest, status) in new_digests {
+                match (status, digests.get_mut(&digest)) {
+                    (_, Some(StatusFilter::Full)) => {
+                        already_inserted.push(digest);
+                    }
+                    (Status::Full, Some(_)) => {
+                        digests.insert(digest, StatusFilter::Full);
+                    }
+                    (Status::Full, None) => {
+                        digests.insert(digest, StatusFilter::Full);
+                        queue_updates.push(digest);
+                    }
+                    (Status::Shard(peer), Some(StatusFilter::Shards { count, bitmap })) => {
+                        let mask = 1u128 << peer;
+                        if *bitmap & mask != 0 {
+                            already_inserted.push(digest);
+                        } else {
+                            *bitmap |= mask;
+                            *count += 1;
+                            if *count >= self.info_length {
+                                digests.insert(digest, StatusFilter::Full);
+                            }
+                        }
+                    }
+                    (Status::Shard(peer), Some(StatusFilter::Header)) => {
+                        digests.insert(digest, StatusFilter::Shards { count: 1, bitmap: 1u128 << peer });
+                    }
+                    (Status::Shard(peer), None) => {
+                        digests.insert(digest, StatusFilter::Shards { count: 1, bitmap: 1u128 << peer });
+                        queue_updates.push(digest);
+                    }
+
+                    (Status::Header, Some(_)) => {
+                        already_inserted.push(digest);
+                    }
+                    (Status::Header, None) => {
+                        digests.insert(digest, StatusFilter::Header);
+                        queue_updates.push(digest);
+                    }
+                }
+            }
+        }
+
+        {
+            let mut queue = self.queue.write();
+            for digest in queue_updates {
+                queue.push_back(digest);
+            }
+
+            while queue.len() > MAX_FILTER_SIZE {
+                if let Some(removed) = queue.pop_front() {
+                    self.digests.write().remove(&removed);
+                }
+            }
+        }
+
+        already_inserted
+    }
+
+    ///  Checks whether the block is needed based on its digest and status.
+    fn is_needed(
+        &self,
+        digest: &BlockDigest,
+        status: Status,
+    ) -> bool {
+        match status {
+            Status::Header => {
+                // Header is needed if not already in the filter
+                !self.digests.read().contains_key(digest)
+            }
+            Status::Shard(peer) => {
+                // Shard is needed if not already in the filter or if the number of shards is not sufficient
+                let digests = self.digests.read();
+                match digests.get(digest) {
+                    Some(StatusFilter::Full) => false,
+                    Some(StatusFilter::Header) => true,
+                    Some(StatusFilter::Shards{count:_, bitmap}) => {
+                        let mask = 1u128 << peer;
+                        (*bitmap & mask) == 0
+                    }
+                    None => true,
+                }
+            }
+            Status::Full => {
+                let digests = self.digests.read();
+                !matches!(digests.get(digest), Some(StatusFilter::Full))
+            }
+        }
+    }
+
+
+}
 
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
@@ -152,6 +290,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shutdown_grace_period,
         ));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
+        let filter_for_blocks = Arc::new(FilterForBlocks::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
             let peer_id = connection.peer_id;
             if let Some(task) = connections.remove(&peer_id) {
@@ -169,6 +308,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 inner.clone(),
                 block_fetcher.clone(),
                 metrics.clone(),
+                filter_for_blocks.clone(),
             ));
             connections.insert(peer_id, task);
         }
@@ -190,6 +330,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
+        filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
@@ -246,10 +387,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut decoder = ReedSolomonDecoder::new(2, 4, 64).expect("Decoder should be created");
 
         let peer_id = connection.peer_id as AuthorityIndex;
+        let peer_usize = peer_id as usize;
         inner.syncer.authority_connection(peer_id, true).await;
 
         let peer = format_authority_index(peer_id);
-        let peer_name = peer_id.to_string();
         let own_id = inner.block_store.get_own_authority_index();
 
         tracing::debug!(
@@ -299,8 +440,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         for data_block in blocks_without_statements {
                             let mut block: VerifiedStatementBlock = (*data_block).clone();
                             tracing::debug!("Received {} from {}", block, peer);
-                            let contains_new_shard_or_header =
-                                inner.block_store.contains_new_shard_or_header(&block);
+                            let block_status = Status::get_status(&block, peer_usize);
+                            let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
                             if !contains_new_shard_or_header {
                                 metrics
                                     .filtered_blocks_total
@@ -345,12 +486,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
                                 }
                             }
+                            let block_status = Status::get_status(&block, peer_usize);
+                            let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
                             let storage_block = block;
                             let transmission_block =
                                 storage_block.from_storage_to_transmission(own_id);
-                            let contains_new_shard_or_header = inner
-                                .block_store
-                                .contains_new_shard_or_header(&storage_block);
                             if !contains_new_shard_or_header {
                                 metrics.processed_after_filtering_total.inc();
                                 continue;
@@ -363,6 +503,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                         tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                         if !verified_data_blocks.is_empty() {
+                            let mut batch_with_status = Vec::new();
+                            for block in &verified_data_blocks {
+                                batch_with_status.push((block.0.digest(), Status::get_status(&block.0, peer_usize)))
+                            }
+                            filter_for_blocks.add_batch(batch_with_status);
                             let (_, _, processed_additional_blocks_without_statements) =
                                 inner.syncer.add_blocks(verified_data_blocks).await;
                             metrics
@@ -379,8 +524,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     for data_block in blocks_with_statements {
                         let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
-                        let contains_new_shard_or_header =
-                            inner.block_store.contains_new_shard_or_header(&block);
+                        let block_status = Status::get_status(&block, peer_usize);
+                        let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
                         if !contains_new_shard_or_header {
                             metrics
                                 .filtered_blocks_total
@@ -412,13 +557,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 storage_block.from_storage_to_transmission(own_id)
                             }
                         };
-                        let contains_new_shard_or_header = inner
-                            .block_store
-                            .contains_new_shard_or_header(&storage_block);
-                        if !contains_new_shard_or_header {
-                            metrics.processed_after_filtering_total.inc();
-                            continue;
-                        }
+                        filter_for_blocks.add_batch(vec![(storage_block.digest(), Status::Full)]);
                         let data_storage_block = Data::new(storage_block);
                         let data_transmission_block = Data::new(transmission_block);
                         verified_data_blocks.push((data_storage_block, data_transmission_block));
@@ -518,8 +657,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     );
                     let mut authorities_with_missing_blocks_by_peer_from_me =
                         authorities_with_missing_blocks_by_peer_from_me
-                            .write()
-                            .await;
+                            .write().await;
                     for authority in authorities {
                         authorities_with_missing_blocks_by_peer_from_me[authority as usize] = now;
                     }
