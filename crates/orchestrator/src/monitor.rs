@@ -178,6 +178,9 @@ pub struct Grafana;
 impl Grafana {
     /// The path to the datasources directory.
     const DATASOURCES_PATH: &'static str = "/etc/grafana/provisioning/datasources";
+    /// The path to the dashboards directory.
+    const DASHBOARDS_PATH: &'static str = "/etc/grafana/provisioning/dashboards";
+
     /// The default grafana port.
     pub const DEFAULT_PORT: u16 = 3000;
 
@@ -207,6 +210,19 @@ impl Grafana {
                 Self::datasource(),
                 Self::DATASOURCES_PATH
             ),
+            // setup dashboards
+            &format!("(rm -r {} || true)", Self::DASHBOARDS_PATH),
+            &format!("mkdir -p {}", Self::DASHBOARDS_PATH),
+            &format!(
+                "echo \"{}\" | sudo tee {}/provider.yml",
+                Self::dashboard_provider(),
+                Self::DASHBOARDS_PATH
+            ),
+            // copy your default dashboard yaml/json
+            &format!(
+                "sudo cp crates/orchestrator/assets/grafana-dashboard.json {}",
+                Self::DASHBOARDS_PATH
+            ),
             "sudo service grafana-server restart",
         ]
         .join(" && ")
@@ -228,6 +244,23 @@ impl Grafana {
             &format!("    url: http://localhost:{}", Prometheus::DEFAULT_PORT),
             "    editable: true",
             "    uid: Fixed-UID-testbed",
+        ]
+        .join("\n")
+    }
+
+    /// Generate the dashboard provider definition.
+    fn dashboard_provider() -> String {
+        [
+            "apiVersion: 1",
+            "providers:",
+            "  - name: 'default'",
+            "    orgId: 1",
+            "    folder: ''",
+            "    type: file",
+            "    disableDeletion: false",
+            "    updateIntervalSeconds: 5",
+            "    options:",
+            &format!("      path: {}", Self::DASHBOARDS_PATH),
         ]
         .join("\n")
     }

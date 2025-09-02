@@ -55,7 +55,7 @@ enum Status {
     Header,
 }
 impl Status {
-    fn get_status(block: &VerifiedStatementBlock, peer: usize) -> Self{
+    fn get_status(block: &VerifiedStatementBlock, peer: usize) -> Self {
         if block.statements().is_some() {
             Status::Full
         } else if block.encoded_shard().is_some() {
@@ -67,7 +67,7 @@ impl Status {
 }
 enum StatusFilter {
     Full,
-    Shards{count: usize, bitmap: u128},
+    Shards { count: usize, bitmap: u128 },
     Header,
 }
 
@@ -80,10 +80,7 @@ impl FilterForBlocks {
         }
     }
 
-    fn add_batch(
-        &self,
-        new_digests: Vec<(BlockDigest, Status)>,
-    ) -> Vec<BlockDigest> {
+    fn add_batch(&self, new_digests: Vec<(BlockDigest, Status)>) -> Vec<BlockDigest> {
         let mut already_inserted = Vec::new();
         let mut queue_updates = Vec::new();
 
@@ -115,10 +112,22 @@ impl FilterForBlocks {
                         }
                     }
                     (Status::Shard(peer), Some(StatusFilter::Header)) => {
-                        digests.insert(digest, StatusFilter::Shards { count: 1, bitmap: 1u128 << peer });
+                        digests.insert(
+                            digest,
+                            StatusFilter::Shards {
+                                count: 1,
+                                bitmap: 1u128 << peer,
+                            },
+                        );
                     }
                     (Status::Shard(peer), None) => {
-                        digests.insert(digest, StatusFilter::Shards { count: 1, bitmap: 1u128 << peer });
+                        digests.insert(
+                            digest,
+                            StatusFilter::Shards {
+                                count: 1,
+                                bitmap: 1u128 << peer,
+                            },
+                        );
                         queue_updates.push(digest);
                     }
 
@@ -150,11 +159,7 @@ impl FilterForBlocks {
     }
 
     ///  Checks whether the block is needed based on its digest and status.
-    fn is_needed(
-        &self,
-        digest: &BlockDigest,
-        status: Status,
-    ) -> bool {
+    fn is_needed(&self, digest: &BlockDigest, status: Status) -> bool {
         match status {
             Status::Header => {
                 // Header is needed if not already in the filter
@@ -166,7 +171,7 @@ impl FilterForBlocks {
                 match digests.get(digest) {
                     Some(StatusFilter::Full) => false,
                     Some(StatusFilter::Header) => true,
-                    Some(StatusFilter::Shards{count:_, bitmap}) => {
+                    Some(StatusFilter::Shards { count: _, bitmap }) => {
                         let mask = 1u128 << peer;
                         (*bitmap & mask) == 0
                     }
@@ -179,8 +184,6 @@ impl FilterForBlocks {
             }
         }
     }
-
-
 }
 
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
@@ -441,11 +444,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             let mut block: VerifiedStatementBlock = (*data_block).clone();
                             tracing::debug!("Received {} from {}", block, peer);
                             let block_status = Status::get_status(&block, peer_usize);
-                            let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
+                            let contains_new_shard_or_header =
+                                filter_for_blocks.is_needed(&block.digest(), block_status);
                             if !contains_new_shard_or_header {
-                                metrics
-                                    .filtered_blocks_total
-                                    .inc();
+                                metrics.filtered_blocks_total.inc();
                                 continue;
                             }
                             if let Err(e) = block.verify(
@@ -487,7 +489,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
                             }
                             let block_status = Status::get_status(&block, peer_usize);
-                            let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
+                            let contains_new_shard_or_header =
+                                filter_for_blocks.is_needed(&block.digest(), block_status);
                             let storage_block = block;
                             let transmission_block =
                                 storage_block.from_storage_to_transmission(own_id);
@@ -505,7 +508,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         if !verified_data_blocks.is_empty() {
                             let mut batch_with_status = Vec::new();
                             for block in &verified_data_blocks {
-                                batch_with_status.push((block.0.digest(), Status::get_status(&block.0, peer_usize)))
+                                batch_with_status.push((
+                                    block.0.digest(),
+                                    Status::get_status(&block.0, peer_usize),
+                                ))
                             }
                             filter_for_blocks.add_batch(batch_with_status);
                             let (_, _, processed_additional_blocks_without_statements) =
@@ -513,9 +519,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             metrics
                                 .used_additional_blocks_total
                                 .inc_by(processed_additional_blocks_without_statements.len() as u64);
-                            authorities_to_be_updated
-                                .extend(processed_additional_blocks_without_statements.iter().map(|b| b.authority));
-                            tracing::debug!("Processed additional blocks from peer {:?}: {:?}", peer, processed_additional_blocks_without_statements);
+                            authorities_to_be_updated.extend(
+                                processed_additional_blocks_without_statements
+                                    .iter()
+                                    .map(|b| b.authority),
+                            );
+                            tracing::debug!(
+                                "Processed additional blocks from peer {:?}: {:?}",
+                                peer,
+                                processed_additional_blocks_without_statements
+                            );
                         }
                     }
 
@@ -525,11 +538,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let mut block: VerifiedStatementBlock = (*data_block).clone();
                         tracing::debug!("Received {} from {}", block, peer);
                         let block_status = Status::get_status(&block, peer_usize);
-                        let contains_new_shard_or_header = filter_for_blocks.is_needed(&block.digest(),block_status);
+                        let contains_new_shard_or_header =
+                            filter_for_blocks.is_needed(&block.digest(), block_status);
                         if !contains_new_shard_or_header {
-                            metrics
-                                .filtered_blocks_total
-                                .inc();
+                            metrics.filtered_blocks_total.inc();
                             continue;
                         }
                         if let Err(e) = block.verify(
@@ -573,7 +585,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         if !missing_parents.is_empty() {
                             authorities_to_be_updated
                                 .extend(missing_parents.iter().map(|b| b.authority));
-                            tracing::debug!("Missing parents when processing block from peer {:?}: {:?}", peer, missing_parents);
+                            tracing::debug!(
+                                "Missing parents when processing block from peer {:?}: {:?}",
+                                peer,
+                                missing_parents
+                            );
                         }
                         match consensus_protocol {
                             ConsensusProtocol::StarfishPull => {
@@ -617,7 +633,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         authorities_with_missing_blocks_by_myself_from_peer
                                             .write()
                                             .await;
-                                    tracing::debug!("Authorities updates for peer {:?} are {:?}", peer, authorities_to_be_updated);
+                                    tracing::debug!(
+                                        "Authorities updates for peer {:?} are {:?}",
+                                        peer,
+                                        authorities_to_be_updated
+                                    );
                                     for authority in authorities_to_be_updated {
                                         authorities_with_missing_blocks[authority as usize] = now;
                                     }
@@ -657,7 +677,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     );
                     let mut authorities_with_missing_blocks_by_peer_from_me =
                         authorities_with_missing_blocks_by_peer_from_me
-                            .write().await;
+                            .write()
+                            .await;
                     for authority in authorities {
                         authorities_with_missing_blocks_by_peer_from_me[authority as usize] = now;
                     }

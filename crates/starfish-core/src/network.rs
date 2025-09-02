@@ -535,7 +535,7 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match bincode::deserialize(&buf).ok() {
+            match bincode::deserialize(buf).ok() {
                 Some(message) => {
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop

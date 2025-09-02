@@ -44,7 +44,7 @@ impl TransactionGenerator {
                 node_public_config,
                 metrics,
             }
-                .run(),
+            .run(),
         );
     }
 
@@ -57,8 +57,8 @@ impl TransactionGenerator {
         // used for establishing connections between validators
         let initial_delay_plus_extra_delay = self.client_parameters.initial_delay
             + Duration::from_millis(
-            (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
-        );
+                (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
+            );
         tracing::info!(
             "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions every {} ms",
             initial_delay_plus_extra_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
