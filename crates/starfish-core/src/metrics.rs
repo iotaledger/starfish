@@ -37,7 +37,7 @@ pub struct Metrics {
     pub leader_timeout_total: IntCounter,
     pub sequenced_transactions_total: IntCounter,
 
-    pub filtered_blocks_total: IntCounterVec,
+    pub filtered_blocks_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
     pub reconstructed_blocks_total: IntCounterVec,
     pub used_additional_blocks_total: IntCounter,
@@ -174,10 +174,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            filtered_blocks_total: register_int_counter_vec_with_registry!(
+            filtered_blocks_total: register_int_counter_with_registry!(
                 "filtered_blocks_total",
                 "Total number of filtered blocks per authority",
-                &["block_type"],
                 registry,
             )
             .unwrap(),

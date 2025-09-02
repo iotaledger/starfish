@@ -304,7 +304,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             if !contains_new_shard_or_header {
                                 metrics
                                     .filtered_blocks_total
-                                    .with_label_values(&[peer_name.as_str()])
                                     .inc();
                                 continue;
                             }
@@ -386,7 +385,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         if !contains_new_shard_or_header {
                             metrics
                                 .filtered_blocks_total
-                                .with_label_values(&[peer_name.as_str()])
                                 .inc();
                             continue;
                         }
