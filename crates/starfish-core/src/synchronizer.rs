@@ -19,11 +19,13 @@ use futures::future::join_all;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::cmp::max;
+use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 #[derive(Clone)]
 pub struct SynchronizerParameters {
@@ -32,7 +34,9 @@ pub struct SynchronizerParameters {
     /// The number of other blocks to send in a single batch.
     pub batch_other_block_size: usize,
     /// The sampling precision with which to re-evaluate the sync strategy.
-    pub sample_precision: Duration,
+    pub sample_timeout: Duration,
+    /// The maximum age of missing blocks to push the respected block to peers
+    pub max_missing_blocks_age: Duration,
 }
 
 impl SynchronizerParameters {
@@ -41,14 +45,16 @@ impl SynchronizerParameters {
             ConsensusProtocol::Mysticeti => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: 3 * committee_size,
-                sample_precision: Duration::from_millis(600),
+                sample_timeout: Duration::from_millis(600),
+                max_missing_blocks_age: Duration::from_secs(2),
             },
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::CordialMiners => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
-                sample_precision: Duration::from_millis(600),
+                sample_timeout: Duration::from_millis(600),
+                max_missing_blocks_age: Duration::from_secs(2),
             },
         }
     }
@@ -59,7 +65,8 @@ impl Default for SynchronizerParameters {
         Self {
             batch_own_block_size: 8,
             batch_other_block_size: 128,
-            sample_precision: Duration::from_millis(600),
+            sample_timeout: Duration::from_millis(600),
+            max_missing_blocks_age: Duration::from_millis(2000),
         }
     }
 }
@@ -84,6 +91,89 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     parameters: SynchronizerParameters,
     /// Metrics.
     metrics: Arc<Metrics>,
+    /// List of authorities that have missing blocks when receiving blocks from me,
+    authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
+}
+
+pub struct UpdaterMissingAuthorities {
+    to_whom_authority_index: AuthorityIndex,
+    /// The sender to the network.
+    sender: Sender<NetworkMessage>,
+    /// The handle of the task disseminating our own blocks.
+    updater_handle: Option<JoinHandle<Option<()>>>,
+    parameters: SynchronizerParameters,
+    authorities_with_missing_blocks: Arc<RwLock<Vec<Instant>>>,
+}
+
+impl UpdaterMissingAuthorities {
+    pub fn new(
+        to_whom_authority_index: AuthorityIndex,
+        sender: Sender<NetworkMessage>,
+        parameters: SynchronizerParameters,
+        authorities_with_missing_blocks: Arc<RwLock<Vec<Instant>>>,
+    ) -> Self {
+        Self {
+            to_whom_authority_index,
+            sender,
+            updater_handle: None,
+            parameters,
+            authorities_with_missing_blocks,
+        }
+    }
+
+    pub async fn shutdown(mut self) {
+        let mut waiters = Vec::with_capacity(1);
+        if let Some(handle) = self.updater_handle.take() {
+            handle.abort();
+            waiters.push(handle);
+        }
+        join_all(waiters).await;
+    }
+
+    pub async fn start(&mut self) {
+        if let Some(existing) = self.updater_handle.take() {
+            existing.abort();
+            existing.await.ok();
+        }
+        let handle = Handle::current().spawn(Self::update_missing_authorities(
+            self.to_whom_authority_index,
+            self.sender.clone(),
+            self.parameters.clone(),
+            self.authorities_with_missing_blocks.clone(),
+        ));
+        self.updater_handle = Some(handle);
+    }
+
+    async fn update_missing_authorities(
+        peer_id: AuthorityIndex,
+        to: Sender<NetworkMessage>,
+        parameters: SynchronizerParameters,
+        authorities_with_missing_blocks: Arc<RwLock<Vec<Instant>>>,
+    ) -> Option<()> {
+        let peer = format_authority_index(peer_id);
+        let sample_timeout = parameters.sample_timeout;
+        loop {
+            let now = Instant::now();
+            let authorities_with_missing_blocks = authorities_with_missing_blocks.read().await;
+            let mut authorities_to_send = Vec::new();
+            for (idx, time) in authorities_with_missing_blocks.iter().enumerate() {
+                if now.duration_since(*time) > sample_timeout {
+                    authorities_to_send.push(idx as AuthorityIndex);
+                }
+            }
+            if !authorities_to_send.is_empty() {
+                tracing::debug!(
+                    "Authorities with missing block {authorities_to_send:?} are sent to {peer}"
+                );
+                to.send(NetworkMessage::AuthoritiesWithMissingBlocks(
+                    authorities_to_send,
+                ))
+                .await
+                .ok()?;
+            }
+            let _sleep = sleep(sample_timeout).await;
+        }
+    }
 }
 
 pub struct DataRequestor<H: BlockHandler, C: CommitObserver> {
@@ -147,7 +237,7 @@ where
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_id = inner.block_store.get_own_authority_index();
-        let leader_timeout = Duration::from_secs(1);
+        let sample_timeout = parameters.sample_timeout;
         let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
             let committed_dags = inner.block_store.read_pending_unavailable();
@@ -175,7 +265,7 @@ where
                     .await
                     .ok()?;
             }
-            let _sleep = sleep(leader_timeout).await;
+            let _sleep = sleep(sample_timeout).await;
         }
     }
 }
@@ -192,6 +282,7 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
+        authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
     ) -> Self {
         Self {
             to_whom_authority_index,
@@ -204,6 +295,7 @@ where
             other_blocks: Vec::new(),
             parameters,
             metrics,
+            authorities_with_missing_blocks_by_peer_from_me,
         }
     }
 
@@ -402,6 +494,7 @@ where
             self.inner.clone(),
             self.parameters.clone(),
             self.metrics.clone(),
+            self.authorities_with_missing_blocks_by_peer_from_me.clone(),
         ));
         self.push_blocks = Some(handle);
     }
@@ -459,7 +552,7 @@ where
             .last_own_block_ref()
             .unwrap_or_default()
             .round();
-        let leader_timeout = Duration::from_secs(1);
+        let sample_timeout = synchronizer_parameters.sample_timeout;
         let withholding_timeout = Duration::from_millis(450);
         loop {
             let notified = inner.notify.notified();
@@ -468,7 +561,7 @@ where
                 Some(ByzantineStrategy::TimeoutLeader) => {
                     let leaders_current_round = universal_committer.get_leaders(current_round);
                     if leaders_current_round.contains(&own_authority_index) {
-                        let _sleep = sleep(leader_timeout).await;
+                        let _sleep = sleep(sample_timeout).await;
                     }
                     sending_batch_own_blocks(
                         inner.clone(),
@@ -594,7 +687,7 @@ where
                     )
                     .await?;
                     select! {
-                         _sleep =  sleep(leader_timeout) =>  {}
+                         _sleep =  sleep(sample_timeout) =>  {}
                         _created_block = notified => {}
                     }
                 }
@@ -613,13 +706,14 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         synchronizer_parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
+        authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
     ) -> Option<()> {
-        let leader_timeout = Duration::from_millis(600);
+        let sample_timeout = synchronizer_parameters.sample_timeout;
 
         loop {
             let notified = inner.notify.notified();
             select! {
-                _sleep =  sleep(leader_timeout) => {
+                _sleep =  sleep(sample_timeout) => {
                      let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
                     tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
                     sending_batch_all_blocks(
@@ -627,6 +721,7 @@ where
                 to.clone(),
                 to_whom_authority_index,
                 synchronizer_parameters.clone(),
+                        authorities_with_missing_blocks_by_peer_from_me.clone(),
             )
             .await?;
                     drop(timer);
@@ -639,6 +734,7 @@ where
                 to.clone(),
                 to_whom_authority_index,
                 synchronizer_parameters.clone(),
+                        authorities_with_missing_blocks_by_peer_from_me.clone(),
             )
             .await?;
                     drop(timer);
@@ -681,11 +777,34 @@ async fn sending_batch_all_blocks<H, C>(
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
     synchronizer_parameters: SynchronizerParameters,
+    authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
+    let protocol = inner.block_store.consensus_protocol;
+    let committee_size = inner.committee.len();
+    let own_index = inner.block_store.get_own_authority_index();
+    let max_missing_blocks_age = synchronizer_parameters.max_missing_blocks_age;
+    let mut authorities_with_missing_blocks = HashSet::new();
+    if protocol == ConsensusProtocol::Starfish {
+        let mut authorities_with_missing_blocks_by_peer_from_me =
+            authorities_with_missing_blocks_by_peer_from_me.read().await;
+        let now = Instant::now();
+        for (idx, instant) in authorities_with_missing_blocks_by_peer_from_me
+            .iter()
+            .enumerate()
+        {
+            if now.duration_since(*instant) < max_missing_blocks_age {
+                authorities_with_missing_blocks.insert(idx as AuthorityIndex);
+            }
+        }
+    }
+    if protocol == ConsensusProtocol::CordialMiners {
+        authorities_with_missing_blocks.extend(0..committee_size as AuthorityIndex);
+    }
+    authorities_with_missing_blocks.remove(&own_index);
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
@@ -694,6 +813,7 @@ where
         to_whom_authority_index,
         batch_own_block_size,
         batch_other_block_size,
+        authorities_with_missing_blocks,
     );
     for block in &blocks {
         inner
@@ -804,7 +924,7 @@ impl BlockFetcherWorker {
     async fn run(mut self) -> Option<()> {
         loop {
             select! {
-                _ = sleep(self.parameters.sample_precision) => {},
+                _ = sleep(self.parameters.sample_timeout) => {},
                 message = self.receiver.recv() => {
                     match message {
                         Some(BlockFetcherMessage::RegisterAuthority(authority, sender)) => {

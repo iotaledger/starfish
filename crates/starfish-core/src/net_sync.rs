@@ -2,21 +2,6 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use futures::future::join_all;
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-use tokio::{
-    select,
-    sync::{mpsc, oneshot, Notify},
-};
-
 use crate::block_store::ConsensusProtocol;
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::data::Data;
@@ -24,7 +9,7 @@ use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
-use crate::synchronizer::DataRequestor;
+use crate::synchronizer::{DataRequestor, UpdaterMissingAuthorities};
 use crate::types::{BlockReference, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
@@ -38,6 +23,23 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
+};
+use futures::future::join_all;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use std::collections::HashSet;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::sync::RwLock;
+use tokio::time::Instant;
+use tokio::{
+    select,
+    sync::{mpsc, oneshot, Notify},
 };
 
 /// The maximum number of blocks that can be requested in a single message.
@@ -191,6 +193,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     ) -> Option<()> {
         let consensus_protocol = inner.block_store.consensus_protocol;
         let committee_size = inner.block_store.committee_size;
+        let now = Instant::now();
+        let authorities_with_missing_blocks_by_myself_from_peer =
+            Arc::new(RwLock::new(vec![now; committee_size]));
+        let authorities_with_missing_blocks_by_peer_from_me =
+            Arc::new(RwLock::new(vec![now; committee_size]));
         let synchronizer_parameters =
             SynchronizerParameters::new(committee_size, consensus_protocol);
         let last_seen = inner
@@ -209,6 +216,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             synchronizer_parameters.clone(),
             metrics.clone(),
+            authorities_with_missing_blocks_by_peer_from_me.clone(),
         );
         let mut data_requestor = DataRequestor::new(
             connection.peer_id as AuthorityIndex,
@@ -216,12 +224,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             synchronizer_parameters.clone(),
         );
+        let mut updater_missing_authorities = UpdaterMissingAuthorities::new(
+            connection.peer_id as AuthorityIndex,
+            connection.sender.clone(),
+            synchronizer_parameters.clone(),
+            authorities_with_missing_blocks_by_myself_from_peer.clone(),
+        );
         // Data requestor is needed in theory only for StarfishPull. However, we enable it for
         // Starfish as well because of the practical way we update the DAG known by other validators
         if consensus_protocol == ConsensusProtocol::StarfishPull
             || consensus_protocol == ConsensusProtocol::Starfish
         {
             data_requestor.start().await;
+        }
+        // To save some bandwidth, we start the updater about authorities with missing blocks for Starfish
+        if consensus_protocol == ConsensusProtocol::Starfish {
+            updater_missing_authorities.start().await;
         }
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 64).expect("Encoder should be created");
@@ -271,6 +289,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             blocks_without_statements.push(block);
                         }
                     }
+                    let mut authorities_to_be_updated: HashSet<AuthorityIndex> = HashSet::new();
+                    let now = Instant::now();
                     // First process blocks without statements which could be in the causal history
                     if consensus_protocol == ConsensusProtocol::StarfishPull
                         || consensus_protocol == ConsensusProtocol::Starfish
@@ -347,7 +367,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             metrics
                                 .used_additional_blocks_total
                                 .inc_by(verified_data_blocks.len() as u64);
-                            inner.syncer.add_blocks(verified_data_blocks).await;
+                            let (missing_parents, _, processed_additional_blocks) =
+                                inner.syncer.add_blocks(verified_data_blocks).await;
+                            authorities_to_be_updated
+                                .extend(processed_additional_blocks.iter().map(|b| b.authority));
+                            authorities_to_be_updated
+                                .extend(missing_parents.iter().map(|b| b.authority));
                         }
                     }
 
@@ -404,8 +429,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                     tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                     if !verified_data_blocks.is_empty() {
-                        let (pending_block_references, missing_parents) =
-                            inner.syncer.add_blocks(verified_data_blocks).await;
+                        let (
+                            pending_block_references,
+                            missing_parents,
+                            processed_additional_blocks,
+                        ) = inner.syncer.add_blocks(verified_data_blocks).await;
+                        authorities_to_be_updated
+                            .extend(processed_additional_blocks.iter().map(|b| b.authority));
+                        authorities_to_be_updated
+                            .extend(missing_parents.iter().map(|b| b.authority));
                         match consensus_protocol {
                             ConsensusProtocol::StarfishPull => {
                                 let mut max_round_pending_block_reference: Option<BlockReference> =
@@ -441,7 +473,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     );
                                 }
                             }
-                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {}
+                            ConsensusProtocol::CordialMiners => {}
+                            ConsensusProtocol::Starfish => {
+                                if !authorities_to_be_updated.is_empty() {
+                                    let mut authorities_with_missing_blocks =
+                                        authorities_with_missing_blocks_by_myself_from_peer
+                                            .write()
+                                            .await;
+                                    for authority in authorities_to_be_updated {
+                                        authorities_with_missing_blocks[authority as usize] = now;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -460,6 +503,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .push_block_history_with_shards(block_reference)
                                 .await;
                         }
+                    }
+                }
+                NetworkMessage::AuthoritiesWithMissingBlocks(authorities) => {
+                    let now = Instant::now();
+                    let mut authorities_with_missing_blocks_by_peer_from_me =
+                        authorities_with_missing_blocks_by_peer_from_me
+                            .write()
+                            .await;
+                    for authority in authorities {
+                        authorities_with_missing_blocks_by_peer_from_me[authority as usize] = now;
                     }
                 }
                 NetworkMessage::MissingParentsRequest(block_references) => {
@@ -508,6 +561,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner.syncer.authority_connection(peer_id, false).await;
         disseminator.shutdown().await;
         data_requestor.shutdown().await;
+        updater_missing_authorities.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
         None
     }

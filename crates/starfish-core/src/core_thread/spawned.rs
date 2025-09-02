@@ -27,7 +27,11 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 enum CoreThreadCommand {
     AddBlocks(
         Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-        oneshot::Sender<(Vec<BlockReference>, HashSet<BlockReference>)>,
+        oneshot::Sender<(
+            Vec<BlockReference>,
+            HashSet<BlockReference>,
+            Vec<BlockReference>,
+        )>,
     ),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
@@ -64,7 +68,11 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub async fn add_blocks(
         &self,
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-    ) -> (Vec<BlockReference>, HashSet<BlockReference>) {
+    ) -> (
+        Vec<BlockReference>,
+        HashSet<BlockReference>,
+        Vec<BlockReference>,
+    ) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
             .await;
@@ -120,10 +128,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
             metrics.core_lock_dequeued.inc();
             match command {
                 CoreThreadCommand::AddBlocks(blocks, sender) => {
-                    let (pending_blocks_with_statements, missing_references) =
-                        self.syncer.add_blocks(blocks);
+                    let (
+                        pending_blocks_with_statements,
+                        missing_references,
+                        used_additional_references,
+                    ) = self.syncer.add_blocks(blocks);
                     sender
-                        .send((pending_blocks_with_statements, missing_references))
+                        .send((
+                            pending_blocks_with_statements,
+                            missing_references,
+                            used_additional_references,
+                        ))
                         .ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {

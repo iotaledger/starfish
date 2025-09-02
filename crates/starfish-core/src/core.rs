@@ -177,13 +177,20 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // This function attempts to add blocks to the local DAG (and in addition update with shards)
-    // It return true if any update was made successfully
-    // It also return a vector of references for blocks with statements that are not added to the local DAG and remain pending
+    // It returns four values. First is bool which is true if any update was made successfully.
+    // Second, it returns a vector of references for blocks with statements that are not added to the local DAG and remain pending
     // For such blocks we need to send a missing history request
+    // Third, it returns a set of parents that are still missing and need to be requested
+    // Fourth, it returns a vector of references for blocks without statements that are added to the local DAG
     pub fn add_blocks(
         &mut self,
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-    ) -> (bool, Vec<BlockReference>, HashSet<BlockReference>) {
+    ) -> (
+        bool,
+        Vec<BlockReference>,
+        HashSet<BlockReference>,
+        Vec<BlockReference>,
+    ) {
         let _timer = self
             .metrics
             .utilization_timer
@@ -203,6 +210,11 @@ impl<H: BlockHandler> Core<H> {
         let processed_references_with_statements: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
+            .map(|b| *b.reference())
+            .collect();
+        let processed_references_without_statements: Vec<_> = processed
+            .iter()
+            .filter(|b| b.statements().is_none())
             .map(|b| *b.reference())
             .collect();
         let not_processed_block_references_with_statements: Vec<_> =
@@ -245,6 +257,7 @@ impl<H: BlockHandler> Core<H> {
             success,
             not_processed_block_references_with_statements,
             missing_references,
+            processed_references_without_statements,
         )
     }
 
