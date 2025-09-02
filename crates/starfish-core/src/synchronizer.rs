@@ -157,10 +157,11 @@ impl UpdaterMissingAuthorities {
             let authorities_with_missing_blocks = authorities_with_missing_blocks.read().await;
             let mut authorities_to_send = Vec::new();
             for (idx, time) in authorities_with_missing_blocks.iter().enumerate() {
-                if now.duration_since(*time) > sample_timeout {
+                if now.duration_since(*time) < sample_timeout {
                     authorities_to_send.push(idx as AuthorityIndex);
                 }
             }
+            drop(authorities_with_missing_blocks);
             if !authorities_to_send.is_empty() {
                 tracing::debug!(
                     "Authorities with missing block {authorities_to_send:?} are sent to {peer}"

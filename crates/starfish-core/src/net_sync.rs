@@ -363,15 +363,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                         tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
                         if !verified_data_blocks.is_empty() {
+                            let (_, _, processed_additional_blocks_without_statements) =
+                                inner.syncer.add_blocks(verified_data_blocks).await;
                             metrics
                                 .used_additional_blocks_total
-                                .inc_by(verified_data_blocks.len() as u64);
-                            let (missing_parents, _, processed_additional_blocks) =
-                                inner.syncer.add_blocks(verified_data_blocks).await;
+                                .inc_by(processed_additional_blocks_without_statements.len() as u64);
                             authorities_to_be_updated
-                                .extend(processed_additional_blocks.iter().map(|b| b.authority));
-                            authorities_to_be_updated
-                                .extend(missing_parents.iter().map(|b| b.authority));
+                                .extend(processed_additional_blocks_without_statements.iter().map(|b| b.authority));
+                            tracing::debug!("Processed additional blocks from peer {:?}: {:?}", peer, processed_additional_blocks_without_statements);
                         }
                     }
 
@@ -430,12 +429,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         let (
                             pending_block_references,
                             missing_parents,
-                            processed_additional_blocks,
+                            _processed_additional_blocks,
                         ) = inner.syncer.add_blocks(verified_data_blocks).await;
-                        authorities_to_be_updated
-                            .extend(processed_additional_blocks.iter().map(|b| b.authority));
-                        authorities_to_be_updated
-                            .extend(missing_parents.iter().map(|b| b.authority));
+                        if !missing_parents.is_empty() {
+                            authorities_to_be_updated
+                                .extend(missing_parents.iter().map(|b| b.authority));
+                            tracing::debug!("Missing parents when processing block from peer {:?}: {:?}", peer, missing_parents);
+                        }
                         match consensus_protocol {
                             ConsensusProtocol::StarfishPull => {
                                 let mut max_round_pending_block_reference: Option<BlockReference> =
@@ -478,9 +478,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         authorities_with_missing_blocks_by_myself_from_peer
                                             .write()
                                             .await;
+                                    tracing::debug!("Authorities updates for peer {:?} are {:?}", peer, authorities_to_be_updated);
                                     for authority in authorities_to_be_updated {
                                         authorities_with_missing_blocks[authority as usize] = now;
                                     }
+
+                                    drop(authorities_with_missing_blocks);
                                 }
                             }
                         }
@@ -505,6 +508,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
                 NetworkMessage::AuthoritiesWithMissingBlocks(authorities) => {
                     let now = Instant::now();
+                    tracing::debug!(
+                        "Received authorities with missing blocks {:?} from peer {:?}",
+                        authorities
+                            .iter()
+                            .map(|a| format_authority_index(*a))
+                            .collect::<Vec<_>>(),
+                        peer
+                    );
                     let mut authorities_with_missing_blocks_by_peer_from_me =
                         authorities_with_missing_blocks_by_peer_from_me
                             .write()
