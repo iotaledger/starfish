@@ -81,6 +81,7 @@ impl Validator {
 
         TransactionGenerator::start(
             block_sender,
+            authority,
             client_parameters,
             public_config.clone(),
             metrics.clone(),

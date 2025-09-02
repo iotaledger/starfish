@@ -76,15 +76,16 @@ async fn serialize_and_compress(msg: &NetworkMessage) -> Vec<u8> {
     // Serialize
     let serialized = bincode::serialize(msg).expect("Serialization failed");
     // Compress
-    encode_all(&serialized[..], 1).expect("Compression failed")
+    //encode_all(&serialized[..], 1).expect("Compression failed")
+    serialized
 }
 
 async fn decompress_and_deserialize(buf: &[u8]) -> Option<NetworkMessage> {
     // Decompress
-    let decompressed = decode_all(buf).ok()?;
+    // let decompressed = decode_all(buf).ok()?;
 
     // Deserialize
-    bincode::deserialize(&decompressed).ok()
+    bincode::deserialize(&buf).ok()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
