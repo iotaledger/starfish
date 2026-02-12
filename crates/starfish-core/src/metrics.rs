@@ -11,9 +11,10 @@ use crate::{
 };
 use prettytable::{format, row, Table as PrettyTable};
 use prometheus::{
-    register_int_counter_vec_with_registry, register_int_counter_with_registry,
-    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, IntCounter,
-    IntCounterVec, IntGauge, IntGaugeVec, Registry,
+    register_histogram_with_registry, register_int_counter_vec_with_registry,
+    register_int_counter_with_registry, register_int_gauge_vec_with_registry,
+    register_int_gauge_with_registry, Histogram, HistogramOpts, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Registry,
 };
 use std::{
     net::SocketAddr,
@@ -66,6 +67,7 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
+    pub previous_round_refs: Histogram,
 
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
@@ -330,6 +332,23 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
+            previous_round_refs: {
+                let mut buckets: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+                let mut v = 200.0;
+                while v <= 10000.0 {
+                    buckets.push(v);
+                    v *= 2.0;
+                }
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "previous_round_refs",
+                        "Number of references from the previous round in proposed blocks",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
 
             connection_latency_sender,
         };
@@ -342,9 +361,6 @@ impl Metrics {
         reporters: Vec<Arc<MetricReporter>>,
         duration_secs: u64,
     ) {
-        let mut table = PrettyTable::new();
-        table.set_format(default_table_format());
-
         let num_validators = metrics.len() as u64;
 
         // Calculate overall statistics
@@ -378,15 +394,19 @@ impl Metrics {
             .filter_map(|r| r.block_committed_latency.lock().histogram.pcts([500]))
             .filter_map(|pcts| pcts.first().copied())
             .sum::<Duration>()
-            .as_millis()
-            / num_validators as u128;
+            .as_millis() as f64
+            / num_validators as f64;
         let p50_transaction_committed_latency = reporters
             .iter()
             .filter_map(|r| r.transaction_committed_latency.lock().histogram.pcts([500]))
             .filter_map(|pcts| pcts.first().copied())
             .sum::<Duration>()
-            .as_millis()
-            / num_validators as u128;
+            .as_millis() as f64
+            / num_validators as f64;
+
+        let mut table = PrettyTable::new();
+        table.set_format(default_table_format());
+
         // Display basic metrics
         table.set_titles(row![bH2->"Metrics Summary Across Honest Validators"]);
         table.add_row(row![b->"Number of honest validators:", num_validators]);
@@ -407,7 +427,13 @@ impl Metrics {
         table.add_row(row![bH2->"Network Metrics"]);
         table.add_row(row![b->"Average bandwidth out:", format!("{:.2} MB/s", average_bytes_sent as f64 / duration_secs as f64 / 1024.0 / 1024.0)]);
         table.add_row(row![b->"Average bandwidth in:", format!("{:.2} MB/s", average_bytes_received as f64 / duration_secs as f64/ 1024.0 / 1024.0)]);
-        table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", average_bytes_sent as f64 / average_transactions as f64 / 512.0)]);
+        let total_average_transactions = (average_tps * duration_secs as f64) as u64;
+        let bandwidth_efficiency = if total_average_transactions > 0 {
+            average_bytes_sent as f64 / total_average_transactions as f64 / 512.0
+        } else {
+            0.0
+        };
+        table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", bandwidth_efficiency)]);
         println!("\n");
         table.printstd();
         println!("\n");
@@ -599,7 +625,7 @@ pub fn print_network_address_table(addresses: &[SocketAddr]) {
 }
 
 pub trait UtilizationTimerExt {
-    fn utilization_timer(&self) -> UtilizationTimer;
+    fn utilization_timer(&self) -> UtilizationTimer<'_>;
     fn owned_utilization_timer(&self) -> OwnedUtilizationTimer;
 }
 
@@ -608,7 +634,7 @@ pub trait UtilizationTimerVecExt {
 }
 
 impl UtilizationTimerExt for IntCounter {
-    fn utilization_timer(&self) -> UtilizationTimer {
+    fn utilization_timer(&self) -> UtilizationTimer<'_> {
         UtilizationTimer {
             metric: self,
             start: Instant::now(),

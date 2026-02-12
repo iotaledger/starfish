@@ -105,13 +105,12 @@ impl Network {
     ) -> Self {
         let addresses = parameters.all_network_addresses().collect::<Vec<_>>();
         print_network_address_table(&addresses);
-        let mimic_latency = parameters.parameters.mimic_latency;
         Self::from_socket_addresses(
             &addresses,
             our_id as usize,
             local_addr,
             metrics,
-            mimic_latency,
+            &parameters.parameters,
         )
         .await
     }
@@ -125,7 +124,7 @@ impl Network {
         our_id: usize,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
-        mimic_latency: bool,
+        node_parameters: &crate::config::NodeParameters,
     ) -> Self {
         if our_id >= addresses.len() {
             panic!(
@@ -133,7 +132,7 @@ impl Network {
                 addresses.len()
             );
         }
-        let latency_table = generate_latency_table(addresses.len(), mimic_latency);
+        let latency_table = generate_latency_table(addresses.len(), node_parameters);
         let server = TcpListener::bind(local_addr)
             .await
             .expect("Failed to bind to local socket");
@@ -148,8 +147,7 @@ impl Network {
             let (sender, receiver) = mpsc::unbounded_channel();
             assert!(
                 worker_senders.insert(*address, sender).is_none(),
-                "Duplicated address {} in list",
-                address
+                "Duplicated address {address} in list"
             );
             handle.spawn(
                 Worker {
@@ -192,7 +190,7 @@ fn write_extra_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
             .map(|x| x.to_string()) // Convert each f64 to a string
             .collect::<Vec<String>>()
             .join(", "); // Join them with a comma and space
-        writeln!(file, "{}", row_string)?; // Write the row to the file
+        writeln!(file, "{row_string}")?; // Write the row to the file
     }
 
     Ok(())
@@ -573,15 +571,26 @@ impl Worker {
 /// `seed` is a global seed used for deterministic generation.
 /// If `seed == 0`, the table is initialized with all zeros.
 /// expected mean latency for a quorum of nodes should be below within expected thresholds
-fn generate_latency_table(n: usize, mimic_latency: bool) -> Vec<Vec<f64>> {
+fn generate_latency_table(n: usize, node_params: &crate::config::NodeParameters) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![]; n];
-    if !mimic_latency {
+
+    // Priority: uniform_latency_ms > mimic_latency > zero
+    if let Some(uniform_latency) = node_params.uniform_latency_ms {
+        // NEW: Use uniform latency
+        for item in resulting_table.iter_mut().take(n) {
+            for _j in 0..n {
+                item.push(uniform_latency)
+            }
+        }
+    } else if !node_params.mimic_latency {
+        // Existing: zero latency
         for item in resulting_table.iter_mut().take(n) {
             for _j in 0..n {
                 item.push(0.0)
             }
         }
     } else {
+        // Existing: AWS RTT table
         for (i, item) in resulting_table.iter_mut().enumerate().take(n) {
             for j in 0..n {
                 let index_i = i % RTT_LATENCY_TABLE.len();

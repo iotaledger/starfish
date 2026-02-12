@@ -1609,6 +1609,88 @@
       ],
       "title": "Network receive (Mbps)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "scheme",
+            "schemeName": "Oranges"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 18,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64
+        },
+        "exemplars": {
+          "color": "rgba(255,0,255,0.7)"
+        },
+        "filterValues": {
+          "le": 1e-9
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisLabel": "refs count",
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "short"
+        }
+      },
+      "pluginVersion": "12.1.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(previous_round_refs_bucket[1m])) by (le)",
+          "format": "heatmap",
+          "instant": false,
+          "legendFormat": "{{le}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Previous round references per block",
+      "type": "heatmap"
     }
   ],
   "preload": false,

@@ -477,12 +477,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     cached_block,
                                     own_id,
                                 );
-                                if reconstructed_block.is_some() {
+                                if let Some(reconstructed) = reconstructed_block {
                                     metrics
                                         .reconstructed_blocks_total
                                         .with_label_values(&["connection_task"])
                                         .inc();
-                                    block = reconstructed_block.expect("Should be Some");
+                                    block = reconstructed;
                                     tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
                                 } else {
                                     tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
@@ -603,14 +603,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         max_round_pending_block_reference = Some(block_reference);
                                     }
                                 }
-                                if max_round_pending_block_reference.is_some() {
+                                if let Some(block_ref) = max_round_pending_block_reference {
                                     tracing::debug!(
                                         "Make request missing history of block {:?} from peer {:?}",
-                                        max_round_pending_block_reference.unwrap(),
+                                        block_ref,
                                         peer
                                     );
                                     Self::request_missing_history_block(
-                                        max_round_pending_block_reference.unwrap(),
+                                        block_ref,
                                         &connection.sender,
                                     );
                                 }

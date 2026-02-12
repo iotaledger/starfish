@@ -19,8 +19,7 @@ use crate::{
 pub trait ImportExport: Serialize + DeserializeOwned {
     fn load<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
         let content = fs::read_to_string(&path)?;
-        let object =
-            serde_yaml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let object = serde_yaml::from_str(&content).map_err(io::Error::other)?;
         Ok(object)
     }
 
@@ -47,6 +46,8 @@ pub struct NodeParameters {
     pub enable_synchronizer: bool,
     #[serde(default = "node_defaults::default_mimic_latency")]
     pub mimic_latency: bool,
+    #[serde(default = "node_defaults::default_uniform_latency_ms")]
+    pub uniform_latency_ms: Option<f64>,
 }
 
 pub mod node_defaults {
@@ -75,6 +76,10 @@ pub mod node_defaults {
     pub fn default_mimic_latency() -> bool {
         true
     }
+
+    pub fn default_uniform_latency_ms() -> Option<f64> {
+        None
+    }
 }
 
 impl Default for NodeParameters {
@@ -87,6 +92,7 @@ impl Default for NodeParameters {
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
             mimic_latency: node_defaults::default_mimic_latency(),
+            uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
         }
     }
 }
@@ -101,6 +107,7 @@ impl NodeParameters {
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
             enable_synchronizer: node_defaults::default_enable_synchronizer(),
             mimic_latency,
+            uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
         }
     }
 }

@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::{command, Parser};
+use clap::Parser;
 use eyre::{eyre, Context, Result};
 use prettytable::format;
 use starfish_core::metrics::Metrics;
@@ -72,6 +72,8 @@ enum Operation {
         byzantine_strategy: String,
         #[clap(long, default_value_t = false)]
         mimic_extra_latency: bool,
+        #[clap(long, value_name = "FLOAT")]
+        uniform_latency_ms: Option<f64>,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
     },
@@ -87,6 +89,8 @@ enum Operation {
         byzantine_strategy: String,
         #[clap(long, default_value_t = true)]
         mimic_extra_latency: bool,
+        #[clap(long, value_name = "FLOAT")]
+        uniform_latency_ms: Option<f64>,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         #[clap(long, value_name = "INT", default_value_t = 600)]
@@ -136,6 +140,7 @@ async fn main() -> Result<()> {
             load,
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
+            uniform_latency_ms,
             consensus: consensus_protocol,
         } => {
             dryrun(
@@ -144,6 +149,7 @@ async fn main() -> Result<()> {
                 load,
                 byzantine_strategy,
                 mimic_latency,
+                uniform_latency_ms,
                 consensus_protocol,
             )
             .await?
@@ -154,19 +160,24 @@ async fn main() -> Result<()> {
             num_byzantine_nodes,
             byzantine_strategy,
             mimic_extra_latency,
+            uniform_latency_ms,
             consensus: consensus_protocol,
             duration_secs,
         } => {
+            let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
+            if let Some(latency) = uniform_latency_ms {
+                node_parameters.uniform_latency_ms = Some(latency);
+            }
             local_benchmark(
                 committee_size,
                 load,
                 num_byzantine_nodes,
                 byzantine_strategy,
-                mimic_extra_latency,
+                node_parameters,
                 consensus_protocol,
                 duration_secs,
             )
-            .await?
+            .await?;
         }
     }
 
@@ -234,30 +245,37 @@ async fn local_benchmark(
     mut load: usize,
     num_byzantine_nodes: usize,
     byzantine_strategy: String,
-    mimic_latency: bool,
+    node_parameters: NodeParameters,
     consensus_protocol: String,
     duration_secs: u64,
 ) -> Result<()> {
     println!("\n=== Benchmark Configuration ===");
-    println!("Committee Size: {}", committee_size);
-    println!("Byzantine Nodes: {}", num_byzantine_nodes);
+    println!("Committee Size: {committee_size}");
+    println!("Byzantine Nodes: {num_byzantine_nodes}");
     if num_byzantine_nodes != 0 {
-        println!("Byzantine Strategy: {}", byzantine_strategy);
+        println!("Byzantine Strategy: {byzantine_strategy}");
     }
-    println!("Transaction Load: {} tx/s", load);
-    println!("Consensus Protocol: {}", consensus_protocol);
-    println!(
-        "Network Latency: {}",
-        if mimic_latency { "Enabled" } else { "Disabled" }
-    );
-    println!("Duration: {} seconds", duration_secs);
+    println!("Transaction Load: {load} tx/s");
+    println!("Consensus Protocol: {consensus_protocol}");
+    if let Some(latency) = node_parameters.uniform_latency_ms {
+        println!("Network Latency: {latency} ms (uniform)");
+    } else {
+        println!(
+            "Network Latency: {}",
+            if node_parameters.mimic_latency {
+                "AWS RTT Table"
+            } else {
+                "Disabled"
+            }
+        );
+    }
+    println!("Duration: {duration_secs} seconds");
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     load /= committee.len();
     let client_parameters = ClientParameters::almost_default(load);
-    let node_parameters = NodeParameters::default_with_latency(mimic_latency);
-    let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
+    let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
 
     // Create temporary directories for each validator
     let base_dir = PathBuf::from("local-benchmark");
@@ -281,7 +299,7 @@ async fn local_benchmark(
         tracing::warn!(
         "Starting validator {authority} in local benchmark mode (committee size: {committee_size})"
     );
-        let working_dir = base_dir.join(format!("validator-{}", authority));
+        let working_dir = base_dir.join(format!("validator-{authority}"));
         fs::create_dir_all(&working_dir)?;
         match fs::remove_dir_all(&working_dir) {
             Ok(_) => {}
@@ -305,7 +323,7 @@ async fn local_benchmark(
                 ))
             }
         }
-        let is_byzantine = authority % 3 == 0 && authority / 3 < num_byzantine_nodes;
+        let is_byzantine = authority.is_multiple_of(3) && authority / 3 < num_byzantine_nodes;
         let validator = if is_byzantine {
             Validator::start(
                 authority as AuthorityIndex,
@@ -349,9 +367,9 @@ async fn local_benchmark(
             // Signal the progress display to stop
             running.store(false, Ordering::SeqCst);
             println!();
-            println!("Benchmark completed after {} seconds", duration_secs);
-            // Display metrics before exiting
-            Metrics::aggregate_and_display(metrics_of_honest_validators,reporters_of_honest_validators, duration_secs);
+            println!("Benchmark completed after {duration_secs} seconds");
+            // Display metrics
+            Metrics::aggregate_and_display(metrics_of_honest_validators, reporters_of_honest_validators, duration_secs);
 
             // Abort all tasks
             for abort_handle in abort_handles {
@@ -439,6 +457,7 @@ async fn dryrun(
     load: usize,
     byzantine_strategy: String,
     mimic_latency: bool,
+    uniform_latency_ms: Option<f64>,
     consensus_protocol: String,
 ) -> Result<()> {
     tracing::warn!(
@@ -447,7 +466,10 @@ async fn dryrun(
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     let client_parameters = ClientParameters::almost_default(load);
-    let node_parameters = NodeParameters::default_with_latency(mimic_latency);
+    let mut node_parameters = NodeParameters::default_with_latency(mimic_latency);
+    if let Some(latency) = uniform_latency_ms {
+        node_parameters.uniform_latency_ms = Some(latency);
+    }
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
     let working_dir = PathBuf::from(format!("dryrun-validator-{authority}"));
@@ -502,7 +524,7 @@ fn run_with_progress(
             let elapsed = start.elapsed().as_secs();
             elapsed_seconds.store(elapsed, Ordering::SeqCst);
 
-            print!("\r{} seconds elapsed", elapsed);
+            print!("\r{elapsed} seconds elapsed");
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             thread::sleep(Duration::from_millis(100));

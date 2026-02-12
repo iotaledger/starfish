@@ -354,8 +354,7 @@ where
                 .inner
                 .block_store
                 .get_transmission_block(block_reference);
-            if block.is_some() {
-                let block = block.expect("Should be some");
+            if let Some(block) = block {
                 if block.author() == own_index {
                     own_block_counter += 1;
                 } else {
@@ -396,8 +395,7 @@ where
         for block_reference in block_references {
             if unknown_blocks_by_peer.contains(&block_reference) {
                 let block = self.inner.block_store.get_storage_block(block_reference);
-                if block.is_some() {
-                    let block = block.expect("Should be some");
+                if let Some(block) = block {
                     block_counter += 1;
                     blocks.push(block);
                     if block_counter >= batch_block_size {
@@ -435,17 +433,16 @@ where
         let unknown_blocks_by_peer = self.inner.block_store.get_unknown_by_authority(peer_id);
         for block_reference in block_references {
             let block = self.inner.block_store.get_storage_block(block_reference);
-            if block.is_some() {
-                let block = block.expect("Should be some");
+            if let Some(block) = block {
                 for parent_reference in block.includes() {
                     if unknown_blocks_by_peer.contains(parent_reference) {
                         let parent = self.inner.block_store.get_storage_block(*parent_reference);
-                        if parent.is_some() {
+                        if let Some(parent) = parent {
                             block_counter += 1;
                             if block_counter >= batch_block_size {
                                 break;
                             }
-                            blocks.push(parent.expect("Should be some"));
+                            blocks.push(parent);
                         }
                     }
                 }

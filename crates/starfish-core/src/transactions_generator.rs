@@ -51,8 +51,7 @@ impl TransactionGenerator {
     pub async fn run(mut self) {
         let load = self.client_parameters.load;
 
-        let transactions_per_block_interval =
-            (load + Self::BATCHES_IN_SECOND - 1) / Self::BATCHES_IN_SECOND;
+        let transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
         // For every 10 validators, add 2 seconds to the initial default delay
         // used for establishing connections between validators
         let initial_delay_plus_extra_delay = self.client_parameters.initial_delay
@@ -106,7 +105,7 @@ impl TransactionGenerator {
                 return;
             }
 
-            if counter % 10_000 == 0 {
+            if counter.is_multiple_of(10_000) {
                 self.metrics.submitted_transactions.inc_by(tx_to_report);
                 tx_to_report = 0
             }

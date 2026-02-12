@@ -318,7 +318,7 @@ impl<H: BlockHandler> Core<H> {
                 block,
                 self.authority,
             );
-            if storage_block.is_some() {
+            if let Some(storage_block) = storage_block {
                 self.metrics
                     .reconstructed_blocks_total
                     .with_label_values(&["core_task"])
@@ -327,8 +327,7 @@ impl<H: BlockHandler> Core<H> {
                     "Reconstruction of block {:?} within core thread task is successful",
                     block_reference
                 );
-                let storage_block: VerifiedStatementBlock =
-                    storage_block.expect("Block is verified to be reconstructed");
+                let storage_block: VerifiedStatementBlock = storage_block;
                 let transmission_block = storage_block.from_storage_to_transmission(self.authority);
                 let data_storage_block = Data::new(storage_block);
                 let data_transmission_block = Data::new(transmission_block);
@@ -524,6 +523,15 @@ impl<H: BlockHandler> Core<H> {
             .0
             .reference()];
         block_references.extend(block_references_without_own.iter().cloned());
+
+        let prev_round_ref_count = block_references
+            .iter()
+            .filter(|r| r.round + 1 == clock_round)
+            .count();
+        self.metrics
+            .previous_round_refs
+            .observe(prev_round_ref_count as f64);
+
         let block = VerifiedStatementBlock::new_with_signer(
             self.authority,
             clock_round,

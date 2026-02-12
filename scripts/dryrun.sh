@@ -10,6 +10,7 @@ NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #Options:| "timeout-leader"          | "leader-withholding" | "chain-bomb"              |
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
 TEST_TIME=${TEST_TIME:-600}               # Total test duration in seconds
+# UNIFORM_LATENCY_MS=100              # Optional: set to use uniform latency (ms) instead of AWS RTT table
 REMOVE_VOLUMES=1                    # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
@@ -121,12 +122,17 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
       EXTRA_FLAGS=""
   fi
 
+  LATENCY_FLAGS="--mimic-extra-latency"
+  if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
+      LATENCY_FLAGS="$LATENCY_FLAGS --uniform-latency-ms $UNIFORM_LATENCY_MS"
+  fi
+
   echo -e "${GREEN}Starting $TYPE validator ${YELLOW}$i${RESET} with load $LOAD..."
   tmux new -d -s "$SESSION_NAME" "RUSTFLAGS=-Ctarget-cpu=native cargo run --release --bin starfish -- \
     dry-run \
     --committee-size $NUM_VALIDATORS \
     --load $LOAD \
-    --mimic-extra-latency \
+    $LATENCY_FLAGS \
     --authority $i \
     --consensus $CONSENSUS \
     $EXTRA_FLAGS \

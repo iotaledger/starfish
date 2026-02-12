@@ -557,9 +557,9 @@ impl VerifiedStatementBlock {
                 }
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                if self.statements.is_some() {
+                if let Some(statements) = &self.statements {
                     let transactions_commitment = TransactionsCommitment::new_from_statements(
-                        self.statements.as_ref().unwrap(),
+                        statements,
                     );
                     ensure!(
                         transactions_commitment == self.transactions_commitment,
@@ -675,7 +675,7 @@ impl BlockReference {
 
 impl fmt::Debug for BlockReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -726,7 +726,7 @@ pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {
 
 impl fmt::Debug for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -734,7 +734,7 @@ impl fmt::Display for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:[", self.reference)?;
         for include in self.includes() {
-            write!(f, "{},", include)?;
+            write!(f, "{include},")?;
         }
         write!(f, "](")?;
         if self.statements.is_some() {
@@ -762,7 +762,7 @@ impl std::hash::Hash for VerifiedStatementBlock {
 
 impl fmt::Debug for BaseStatement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
