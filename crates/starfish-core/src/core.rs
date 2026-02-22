@@ -24,6 +24,7 @@ use crate::{
     consensus::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
+        CommitMetastate,
     },
     crypto::Signer,
     data::Data,
@@ -234,10 +235,9 @@ impl<H: BlockHandler> Core<H> {
             new_blocks_to_reconstruct
         );
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull => {
-                self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-            }
-            ConsensusProtocol::Starfish => {
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => {
                 self.reconstruct_data_blocks(new_blocks_to_reconstruct);
             }
             _ => {}
@@ -500,12 +500,63 @@ impl<H: BlockHandler> Core<H> {
         let parity_length = self.committee.len() - info_length;
 
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => Some(
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => Some(
                 self.encoder
                     .encode_statements(statements.to_owned(), info_length, parity_length),
             ),
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }
+    }
+
+    /// For StarfishS, compute whether this block carries a strong vote for the current
+    /// leader. A strong vote is true when the party votes for the leader AND has data
+    /// available for the leader block and all blocks in the leader's acknowledgement_statements.
+    fn compute_strong_vote(
+        &self,
+        clock_round: RoundNumber,
+        block_references: &[BlockReference],
+    ) -> Option<bool> {
+        if self.block_store.consensus_protocol != ConsensusProtocol::StarfishS {
+            return None;
+        }
+
+        // The leader is from the previous round.
+        let leader_round = clock_round.saturating_sub(1);
+        if leader_round == 0 {
+            return Some(false);
+        }
+        let leader = self.committee.elect_leader(leader_round);
+
+        // Check if we include (vote for) the leader's block.
+        let leader_ref = block_references
+            .iter()
+            .find(|r| r.round == leader_round && r.authority == leader);
+
+        let Some(leader_ref) = leader_ref else {
+            // We don't vote for the leader → not a strong vote.
+            return Some(false);
+        };
+
+        // We vote for the leader. Check data availability for the leader block
+        // and all blocks in the leader's acknowledgement_statements.
+        if !self.block_store.is_data_available(leader_ref) {
+            return Some(false);
+        }
+
+        let leader_block = self
+            .block_store
+            .get_storage_block(*leader_ref)
+            .expect("Leader block should exist if it's in our includes");
+
+        for ack_ref in leader_block.acknowledgement_statements() {
+            if !self.block_store.is_data_available(ack_ref) {
+                return Some(false);
+            }
+        }
+
+        Some(true)
     }
 
     fn build_block(
@@ -532,6 +583,8 @@ impl<H: BlockHandler> Core<H> {
             .previous_round_refs
             .observe(prev_round_ref_count as f64);
 
+        let strong_vote = self.compute_strong_vote(clock_round, &block_references);
+
         let block = VerifiedStatementBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -543,6 +596,7 @@ impl<H: BlockHandler> Core<H> {
             statements.to_vec(),
             encoded_statements.clone(),
             self.block_store.consensus_protocol,
+            strong_vote,
         );
 
         let data_block = Data::new(block);
@@ -643,7 +697,9 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(&mut self) -> Vec<Data<VerifiedStatementBlock>> {
+    pub fn try_commit(
+        &mut self,
+    ) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
@@ -651,7 +707,7 @@ impl<H: BlockHandler> Core<H> {
             .filter_map(|leader| leader.into_decided_block())
             .collect();
 
-        if let Some(last) = sequence.last() {
+        if let Some((last, _meta)) = sequence.last() {
             self.last_commit_leader = *last.reference();
         }
 

@@ -378,11 +378,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Starfish as well because of the practical way we update the DAG known by other validators
         if consensus_protocol == ConsensusProtocol::StarfishPull
             || consensus_protocol == ConsensusProtocol::Starfish
+            || consensus_protocol == ConsensusProtocol::StarfishS
         {
             data_requestor.start().await;
         }
         // To save some bandwidth, we start the updater about authorities with missing blocks for Starfish
-        if consensus_protocol == ConsensusProtocol::Starfish {
+        if consensus_protocol == ConsensusProtocol::Starfish
+            || consensus_protocol == ConsensusProtocol::StarfishS
+        {
             updater_missing_authorities.start().await;
         }
 
@@ -414,7 +417,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
                                 disseminator.disseminate_own_blocks(round).await;
                             }
-                            ConsensusProtocol::Starfish | ConsensusProtocol::CordialMiners => {
+                            ConsensusProtocol::Starfish
+                            | ConsensusProtocol::StarfishS
+                            | ConsensusProtocol::CordialMiners => {
                                 disseminator.disseminate_all_blocks_push().await;
                             }
                         }
@@ -438,6 +443,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     // First process blocks without statements which could be in the causal history
                     if consensus_protocol == ConsensusProtocol::StarfishPull
                         || consensus_protocol == ConsensusProtocol::Starfish
+                        || consensus_protocol == ConsensusProtocol::StarfishS
                     {
                         let mut verified_data_blocks = Vec::new();
                         for data_block in blocks_without_statements {
@@ -565,7 +571,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                                 storage_block.clone()
                             }
-                            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
+                            ConsensusProtocol::Starfish
+                            | ConsensusProtocol::StarfishS
+                            | ConsensusProtocol::StarfishPull => {
                                 storage_block.from_storage_to_transmission(own_id)
                             }
                         };
@@ -627,7 +635,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
                             }
                             ConsensusProtocol::CordialMiners => {}
-                            ConsensusProtocol::Starfish => {
+                            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
                                 if !authorities_to_be_updated.is_empty() {
                                     let mut authorities_with_missing_blocks =
                                         authorities_with_missing_blocks_by_myself_from_peer
@@ -705,6 +713,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 NetworkMessage::MissingTxDataRequest(block_references) => {
                     if consensus_protocol == ConsensusProtocol::StarfishPull
                         || consensus_protocol == ConsensusProtocol::Starfish
+                        || consensus_protocol == ConsensusProtocol::StarfishS
                     {
                         tracing::debug!(
                             "Received request missing data {:?} from peer {:?}",

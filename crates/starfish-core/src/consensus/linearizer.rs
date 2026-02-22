@@ -2,10 +2,12 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use super::CommitMetastate;
 use crate::block_store::ConsensusProtocol;
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
+use crate::types::{AuthorityIndex, RoundNumber};
 use crate::{block_store::BlockStore, types::BlockReference};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,6 +39,9 @@ impl CommittedSubDag {
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
     pub committed: HashSet<BlockReference>,
+    /// Keep track of committed slots (round, author) to avoid sequencing the same
+    /// transaction data twice — e.g. via both the optimistic and standard paths.
+    pub committed_slots: HashSet<(RoundNumber, AuthorityIndex)>,
     pub traversed_blocks: HashSet<BlockReference>,
     pub votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     pub committee: Committee,
@@ -46,6 +51,7 @@ impl Linearizer {
     pub fn new(committee: Committee) -> Self {
         Self {
             committed: HashSet::new(),
+            committed_slots: HashSet::new(),
             traversed_blocks: HashSet::new(),
             votes: HashMap::new(),
             committee,
@@ -145,13 +151,11 @@ impl Linearizer {
                 .then(a.2.cmp(&b.2)) // Finally by digest
         });
 
-        // Select at most one block per (round, author)
-        let mut seen_round_author = HashSet::new();
+        // Select at most one block per (round, author), persisting across subdags
         let to_commit: Vec<_> = to_commit
             .into_iter()
             .filter_map(|(round, author, _, block)| {
-                // Keep only the first occurrence of each (round, author) pair
-                if seen_round_author.insert((round, author)) {
+                if self.committed_slots.insert((round, author)) {
                     Some(block)
                 } else {
                     None
@@ -165,20 +169,37 @@ impl Linearizer {
     pub fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
+        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
         let consensus_protocol = block_store.consensus_protocol;
         let mut committed = vec![];
-        for leader_block in committed_leaders {
+        for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
+            let leader_acks = leader_block.acknowledgement_statements().clone();
             let mut sub_dag = match consensus_protocol {
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
+                ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::StarfishS => {
                     self.collect_subdag_starfish(block_store, leader_block)
                 }
                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                     self.collect_subdag_mysticeti(block_store, leader_block)
                 }
             };
+
+            // For StarfishS Opt: additionally include blocks from the leader's
+            // acknowledgement_statements. The strong vote quorum guarantees data availability.
+            if metastate == Some(CommitMetastate::Opt) {
+                for ack_ref in &leader_acks {
+                    if self.committed.insert(*ack_ref) {
+                        if let Some(block) = block_store.get_storage_block(*ack_ref) {
+                            if self.committed_slots.insert((block.round(), block.author())) {
+                                sub_dag.blocks.push(block);
+                            }
+                        }
+                    }
+                }
+            }
             // [Optional] sort the sub-dag using a deterministic algorithm.
             sub_dag.sort();
             let acknowledgement_authorities: Vec<_> = sub_dag

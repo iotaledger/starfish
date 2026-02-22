@@ -15,12 +15,28 @@ pub mod universal_committer;
 /// under asynchrony at the cost of latency in the common case.
 pub const WAVE_LENGTH: RoundNumber = 3;
 
+/// Metastate for Starfish-S committed leader slots.
+/// Determines the sequencing action for committed leaders.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum CommitMetastate {
+    /// Optimistic: strong vote quorum + StrongQC quorum at r+2.
+    /// Sequence HistDA(L) then L.acks.
+    Opt,
+    /// Standard: strong blame quorum observed.
+    /// Sequence HistDA(L) only.
+    Std,
+    /// Pending: neither strong vote nor strong blame quorum yet.
+    /// Blocks sequencing until resolved via indirect rule.
+    Pending,
+}
+
 /// The status of every leader output by the committers. While the core only cares about committed
 /// leaders, providing a richer status allows for easier debugging, testing, and composition with
 /// advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    Commit(Data<VerifiedStatementBlock>),
+    /// Committed leader block with optional metastate (Some for StarfishS, None for others).
+    Commit(Data<VerifiedStatementBlock>, Option<CommitMetastate>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
 }
@@ -28,7 +44,7 @@ pub enum LeaderStatus {
 impl LeaderStatus {
     pub fn round(&self) -> RoundNumber {
         match self {
-            Self::Commit(block) => block.round(),
+            Self::Commit(block, _) => block.round(),
             Self::Skip(_, round) => *round,
             Self::Undecided(_, round) => *round,
         }
@@ -36,23 +52,38 @@ impl LeaderStatus {
 
     pub fn authority(&self) -> AuthorityIndex {
         match self {
-            Self::Commit(block) => block.author(),
+            Self::Commit(block, _) => block.author(),
             Self::Skip(authority, _) => *authority,
             Self::Undecided(authority, _) => *authority,
         }
     }
 
+    /// Whether the leader slot has a base decision (Commit or Skip).
     pub fn is_decided(&self) -> bool {
         match self {
-            Self::Commit(_) => true,
-            Self::Skip(_, _) => true,
-            Self::Undecided(_, _) => false,
+            Self::Commit(..) => true,
+            Self::Skip(..) => true,
+            Self::Undecided(..) => false,
         }
     }
 
-    pub fn into_decided_block(self) -> Option<Data<VerifiedStatementBlock>> {
+    /// Whether the leader slot is final for sequencing purposes.
+    /// A Commit(Pending) is decided but NOT final — it blocks the sequencing prefix.
+    /// For non-StarfishS protocols (metastate is None), is_final == is_decided.
+    pub fn is_final(&self) -> bool {
         match self {
-            Self::Commit(block) => Some(block),
+            Self::Commit(_, Some(CommitMetastate::Pending)) => false,
+            Self::Commit(..) => true,
+            Self::Skip(..) => true,
+            Self::Undecided(..) => false,
+        }
+    }
+
+    pub fn into_decided_block(
+        self,
+    ) -> Option<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
+        match self {
+            Self::Commit(block, meta) => Some((block, meta)),
             Self::Skip(..) => None,
             Self::Undecided(..) => panic!("Decided block is either Commit or Skip"),
         }
@@ -74,7 +105,10 @@ impl Ord for LeaderStatus {
 impl Display for LeaderStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Commit(block) => write!(f, "Commit({})", block.reference()),
+            Self::Commit(block, Some(meta)) => {
+                write!(f, "Commit({}, {:?})", block.reference(), meta)
+            }
+            Self::Commit(block, None) => write!(f, "Commit({})", block.reference()),
             Self::Skip(a, r) => write!(f, "Skip({})", format_authority_round(*a, *r)),
             Self::Undecided(a, r) => write!(f, "Undecided({})", format_authority_round(*a, *r)),
         }

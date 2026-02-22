@@ -50,6 +50,7 @@ impl SynchronizerParameters {
             },
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS
             | ConsensusProtocol::CordialMiners => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
@@ -786,7 +787,7 @@ where
     let own_index = inner.block_store.get_own_authority_index();
     let max_missing_blocks_age = synchronizer_parameters.max_missing_blocks_age;
     let mut authorities_with_missing_blocks = HashSet::new();
-    if protocol == ConsensusProtocol::Starfish {
+    if protocol == ConsensusProtocol::Starfish || protocol == ConsensusProtocol::StarfishS {
         let mut authorities_with_missing_blocks_by_peer_from_me =
             authorities_with_missing_blocks_by_peer_from_me.read().await;
         let now = Instant::now();

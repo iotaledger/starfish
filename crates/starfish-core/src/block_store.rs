@@ -32,6 +32,7 @@ pub enum ConsensusProtocol {
     StarfishPull,
     CordialMiners,
     Starfish,
+    StarfishS,
 }
 
 impl ConsensusProtocol {
@@ -41,6 +42,7 @@ impl ConsensusProtocol {
             "starfish-pull" => ConsensusProtocol::StarfishPull,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish" => ConsensusProtocol::Starfish,
+            "starfish-s" => ConsensusProtocol::StarfishS,
             _ => ConsensusProtocol::StarfishPull, // Default to Starfish
         }
     }
@@ -175,6 +177,7 @@ impl BlockStore {
                 tracing::info!("Starting Starfish-Pull protocol")
             }
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
+            ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let block_store = Self {

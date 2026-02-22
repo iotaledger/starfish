@@ -10,7 +10,10 @@ use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
     committee::Committee,
-    consensus::linearizer::{CommittedSubDag, Linearizer},
+    consensus::{
+        linearizer::{CommittedSubDag, Linearizer},
+        CommitMetastate,
+    },
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
@@ -206,7 +209,7 @@ impl CommitObserver for RealCommitHandler {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
+        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = self
             .commit_interpreter
@@ -289,6 +292,8 @@ impl CommitObserver for RealCommitHandler {
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
+        self.commit_interpreter.committed_slots =
+            committed.iter().map(|r| (r.round, r.authority)).collect();
         self.commit_interpreter.committed = committed;
     }
 }

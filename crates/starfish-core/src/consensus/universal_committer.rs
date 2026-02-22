@@ -78,12 +78,13 @@ impl UniversalCommitter {
                 drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
-                // If we can't directly decide the leader, try to indirectly decide it.
+                // If the leader is not final (undecided, or Commit(Pending) for StarfishS),
+                // try to resolve via indirect rule.
                 let timer_indirect_decide = self
                     .metrics
                     .utilization_timer
                     .utilization_timer("Committer::indirect_decide");
-                if !status.is_decided() {
+                if !status.is_final() {
                     status = committer.try_indirect_decide(
                         leader,
                         round,
@@ -114,8 +115,9 @@ impl UniversalCommitter {
             .skip(1)
             // Filter out all the genesis.
             .filter(|x| x.round() > 0)
-            // Stop the sequence upon encountering an undecided leader.
-            .take_while(|x| x.is_decided())
+            // Stop the sequence upon encountering a non-final leader.
+            // For StarfishS, Commit(Pending) blocks sequencing; for others is_final == is_decided.
+            .take_while(|x| x.is_final())
             .inspect(|x| tracing::debug!("Decided {x}"))
             .collect()
     }
@@ -135,7 +137,7 @@ impl UniversalCommitter {
         let authority = leader.authority().to_string();
         let direct_or_indirect = if direct_decide { "direct" } else { "indirect" };
         let status = match leader {
-            LeaderStatus::Commit(..) => format!("{direct_or_indirect}-commit"),
+            LeaderStatus::Commit(.., _) => format!("{direct_or_indirect}-commit"),
             LeaderStatus::Skip(..) => format!("{direct_or_indirect}-skip"),
             LeaderStatus::Undecided(..) => return,
         };
@@ -161,7 +163,8 @@ impl UniversalCommitterBuilder {
         match block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::Starfish => Self {
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => Self {
                 committee,
                 block_store,
                 metrics,
