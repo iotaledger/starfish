@@ -29,7 +29,7 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
     /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
-    // Consensus protocol to deploy (starfish | starfish | starfish-push | cordial-miners)
+    // Consensus protocol to deploy (starfish | starfish-s | starfish-pull | mysticeti | cordial-miners)
     pub consensus_protocol: String,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
