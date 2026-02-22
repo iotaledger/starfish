@@ -218,6 +218,9 @@ impl CommitObserver for RealCommitHandler {
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
+                let gap = commit.0.anchor.round.saturating_sub(block.round());
+                self.metrics.commit_gap.observe(gap as f64);
+
                 let block_creation_time = block.meta_creation_time();
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
