@@ -234,14 +234,14 @@ impl<H: BlockHandler> Core<H> {
             processed,
             new_blocks_to_reconstruct
         );
-        match self.block_store.consensus_protocol {
+        if matches!(
+            self.block_store.consensus_protocol,
             ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
-                self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-            }
-            _ => {}
-        };
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
+            self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+        }
 
         let mut result = Vec::with_capacity(processed.len());
         for processed in &processed {
@@ -273,39 +273,17 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn sort_includes_in_pending(&mut self) {
-        // Temporarily extract Includes, leaving Payloads untouched
-        let mut include_positions: Vec<usize> = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, meta)| matches!(meta, MetaStatement::Include(_)))
-            .map(|(index, _)| index)
-            .collect();
-        // Sort the Include entries by round
-        include_positions.sort_by_key(|&index| {
-            if let MetaStatement::Include(block_ref) = &self.pending[index] {
-                block_ref.round()
-            } else {
-                unreachable!() // This should never happen
+        let mut include_positions = Vec::new();
+        let mut includes = Vec::new();
+        for (i, meta) in self.pending.iter().enumerate() {
+            if let MetaStatement::Include(r) = meta {
+                include_positions.push(i);
+                includes.push(*r);
             }
-        });
-
-        // Reorder the Include entries in place
-        for i in 0..include_positions.len() {
-            for j in (i + 1)..include_positions.len() {
-                let i_pos = include_positions[i];
-                let j_pos = include_positions[j];
-
-                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) =
-                    (&self.pending[i_pos], &self.pending[j_pos])
-                {
-                    if j_meta.round() < i_meta.round() {
-                        // Swap the positions and the entries directly
-                        self.pending.swap(i_pos, j_pos);
-                        include_positions.swap(i, j);
-                    }
-                }
-            }
+        }
+        includes.sort_by_key(|r| r.round);
+        for (pos, include) in include_positions.into_iter().zip(includes) {
+            self.pending[pos] = MetaStatement::Include(include);
         }
     }
 
@@ -604,45 +582,33 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn prepare_last_blocks(&mut self) {
-        if let Some(ref strategy) = self.block_store.byzantine_strategy {
-            match strategy {
-                ByzantineStrategy::EquivocatingChains => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                ByzantineStrategy::EquivocatingTwoChains => {
-                    for _ in self.last_own_block.len()..2 {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                ByzantineStrategy::EquivocatingChainsBomb => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                _ => {}
-            }
+        let target = match self.block_store.byzantine_strategy {
+            Some(
+                ByzantineStrategy::EquivocatingChains | ByzantineStrategy::EquivocatingChainsBomb,
+            ) => self.committee.len(),
+            Some(ByzantineStrategy::EquivocatingTwoChains) => 2,
+            _ => return,
+        };
+        for _ in self.last_own_block.len()..target {
+            self.last_own_block.push(self.last_own_block[0].clone());
         }
     }
 
     fn calculate_authority_bounds(&self, num_blocks: usize) -> Vec<usize> {
-        let mut authority_bounds = vec![0];
-
-        match self.block_store.byzantine_strategy {
-            // Skipping Equivocating: Divide the authorities into two groups
-            Some(ByzantineStrategy::EquivocatingTwoChains) => {
-                authority_bounds.push((self.committee.len() as f64 / 2.0).ceil() as usize);
-                authority_bounds.push(self.committee.len());
-            }
-            // Default behavior: Distribute blocks evenly across all authorities
-            _ => {
-                for i in 1..=num_blocks {
-                    authority_bounds.push(i * self.committee.len() / num_blocks);
-                }
+        let len = self.committee.len();
+        let mut bounds = vec![0];
+        if matches!(
+            self.block_store.byzantine_strategy,
+            Some(ByzantineStrategy::EquivocatingTwoChains)
+        ) {
+            bounds.push((len + 1) / 2);
+            bounds.push(len);
+        } else {
+            for i in 1..=num_blocks {
+                bounds.push(i * len / num_blocks);
             }
         }
-        authority_bounds
+        bounds
     }
 
     fn compress_pending_block_references(&self, pending: &[MetaStatement]) -> Vec<BlockReference> {
@@ -736,49 +702,49 @@ impl<H: BlockHandler> Core<H> {
     pub fn ready_new_block(&self, connected_authorities: &HashSet<AuthorityIndex>) -> bool {
         let quorum_round = self.threshold_clock.get_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
-        // Leader round we check if we have a leader block
-        if quorum_round >= self.last_commit_leader.round().max(1) {
-            let leader_round = quorum_round - 1;
-            let mut leaders = self.committer.get_leaders(leader_round);
-            leaders.retain(|leader| connected_authorities.contains(leader));
-            tracing::debug!(
-                "Attempt ready new block, quorum round {}, Before exist at authority round",
-                quorum_round
-            );
-            if !self
-                .block_store
-                .all_blocks_exists_at_authority_round(&leaders, leader_round)
-            {
+
+        if quorum_round < self.last_commit_leader.round().max(1) {
+            return false;
+        }
+
+        let leader_round = quorum_round - 1;
+        let mut leaders = self.committer.get_leaders(leader_round);
+        leaders.retain(|leader| connected_authorities.contains(leader));
+        tracing::debug!(
+            "Attempt ready new block, quorum round {}, Before exist at authority round",
+            quorum_round
+        );
+        if !self
+            .block_store
+            .all_blocks_exists_at_authority_round(&leaders, leader_round)
+        {
+            return false;
+        }
+
+        // Wait for a quorum of blocks at leader_round that voted for
+        // the leader of leader_round - 1.
+        if leader_round >= 2 {
+            let prev_leader = self.committee.elect_leader(leader_round - 1);
+            if !self.block_store.has_votes_quorum_at_round(
+                leader_round,
+                prev_leader,
+                leader_round - 1,
+                &self.committee,
+            ) {
                 return false;
             }
 
-            // Wait for a quorum of blocks at leader_round that voted for
-            // the leader of leader_round - 1.
-            if leader_round >= 2 {
-                let prev_leader = self.committee.elect_leader(leader_round - 1);
-                if !self.block_store.has_votes_quorum_at_round(
-                    leader_round,
-                    prev_leader,
-                    leader_round - 1,
-                    &self.committee,
-                ) {
-                    return false;
-                }
-
-                // StarfishS: also require a quorum of strong votes at leader_round.
-                if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
-                    && !self
-                        .block_store
-                        .has_strong_votes_quorum_at_round(leader_round, &self.committee)
-                {
-                    return false;
-                }
+            // StarfishS: also require a quorum of strong votes at leader_round.
+            if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
+                && !self
+                    .block_store
+                    .has_strong_votes_quorum_at_round(leader_round, &self.committee)
+            {
+                return false;
             }
-
-            true
-        } else {
-            false
         }
+
+        true
     }
 
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
