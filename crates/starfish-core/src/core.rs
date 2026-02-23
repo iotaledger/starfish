@@ -36,6 +36,13 @@ use crate::{
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
 };
 
+macro_rules! timed {
+    ($metrics:expr, $name:expr, $body:expr) => {{
+        let _timer = $metrics.utilization_timer.utilization_timer($name);
+        $body
+    }};
+}
+
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: Vec<MetaStatement>,
@@ -201,13 +208,9 @@ impl<H: BlockHandler> Core<H> {
             .filter(|(b, _)| b.statements().is_some())
             .map(|(b, _)| *b.reference())
             .collect();
-        let block_manager_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("BlockManager::add_blocks");
         let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) =
-            self.block_manager.add_blocks(blocks);
-        drop(block_manager_timer);
+            timed!(self.metrics, "BlockManager::add_blocks",
+                self.block_manager.add_blocks(blocks));
         let processed_references_with_statements: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
@@ -335,55 +338,23 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        // Get relevant pending statements for this round
-        let _pending_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::get_pending_statements");
-        let pending_statements = self.get_pending_statements(clock_round);
-        drop(_pending_timer);
-
-        // Collect statements and references
-        let _collect_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::collect_statements_and_references");
-        let (mut statements, block_references) =
-            self.collect_statements_and_references(&pending_statements);
-        drop(_collect_timer);
-
-        // Create blocks based on byzantine strategy
-        let _prepare_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::prepare_last_blocks");
-        self.prepare_last_blocks();
-        drop(_prepare_timer);
-
-        // Prepare encoded statements if needed
-        let _encode_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::prepare_encoded_statements");
-        let mut encoded_statements = self.prepare_encoded_statements(&statements);
-        drop(_encode_timer);
-
-        // Get pending acknowledgments
-        let _ack_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::get_pending_acknowledgment");
-        let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
-        drop(_ack_timer);
-
-        // Calculate authority bounds
+        let pending_statements = timed!(self.metrics, "Core::new_block::get_pending_statements",
+            self.get_pending_statements(clock_round));
+        let (mut statements, block_references) = timed!(
+            self.metrics, "Core::new_block::collect_statements_and_references",
+            self.collect_statements_and_references(&pending_statements));
+        timed!(self.metrics, "Core::new_block::prepare_last_blocks",
+            self.prepare_last_blocks());
+        let mut encoded_statements = timed!(
+            self.metrics, "Core::new_block::prepare_encoded_statements",
+            self.prepare_encoded_statements(&statements));
+        let acknowledgments = timed!(
+            self.metrics, "Core::new_block::get_pending_acknowledgment",
+            self.block_store.get_pending_acknowledgment(clock_round));
         let number_of_blocks_to_create = self.last_own_block.len();
-        let _bounds_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::calculate_authority_bounds");
-        let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
-        drop(_bounds_timer);
+        let authority_bounds = timed!(
+            self.metrics, "Core::new_block::calculate_authority_bounds",
+            self.calculate_authority_bounds(number_of_blocks_to_create));
 
         // Create and store blocks
         let mut return_blocks = Vec::new();
@@ -394,28 +365,14 @@ impl<H: BlockHandler> Core<H> {
                 statements = vec![];
                 encoded_statements = self.prepare_encoded_statements(&statements);
             }
-            let _build_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::build_block");
-            let block_data = self.build_block(
-                &block_references,
-                &statements,
-                &encoded_statements,
-                &acknowledgments,
-                clock_round,
-                block_id,
-            );
-            drop(_build_timer);
-
+            let block_data = timed!(self.metrics, "Core::new_block::build_block",
+                self.build_block(
+                    &block_references, &statements, &encoded_statements,
+                    &acknowledgments, clock_round, block_id,
+                ));
             tracing::debug!("Created block {:?}", block_data.0);
-
-            let _store_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::store_block");
-            self.store_block(block_data.clone(), &authority_bounds, block_id);
-            drop(_store_timer);
+            timed!(self.metrics, "Core::new_block::store_block",
+                self.store_block(block_data.clone(), &authority_bounds, block_id));
 
             return_blocks.push(block_data);
         }
