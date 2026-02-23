@@ -165,9 +165,7 @@ impl BaseCommitter {
         // Otherwise skip it.
         match certified_leader_blocks.pop() {
             Some(certified_leader_block) => {
-                // For StarfishS: determine metastate via the anchor's path.
-                // Paper §2.6 "Indirect rule": if path passes through StrongQC → Opt;
-                // otherwise through QC → Std; no path → Skip (handled above).
+                // For StarfishS: Opt if path passes through StrongQC, Std otherwise.
                 let metastate =
                     if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS {
                         let has_strong = potential_certificates.iter().any(|cert| {
@@ -336,12 +334,10 @@ impl BaseCommitter {
         false
     }
 
-    /// For StarfishS direct decide: determine the commit metastate after confirming
-    /// 2f+1 QCs exist. Returns `None` for non-StarfishS protocols.
-    ///
-    /// Paper §2.6 "Direct ToCommit":
-    /// - Opt: 2f+1 round-(r+2) blocks each carrying a StrongQC
-    /// - Std: strong blame quorum at round r+1
+    /// Determine the commit metastate for StarfishS direct decide.
+    /// Returns `None` for non-StarfishS protocols.
+    /// - Opt: 2f+1 decision blocks each carrying a StrongQC
+    /// - Std: strong blame quorum at the voting round
     /// - Pending: neither strong vote nor strong blame quorum
     fn determine_metastate(
         &self,

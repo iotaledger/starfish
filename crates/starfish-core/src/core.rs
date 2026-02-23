@@ -745,8 +745,37 @@ impl<H: BlockHandler> Core<H> {
                 "Attempt ready new block, quorum round {}, Before exist at authority round",
                 quorum_round
             );
-            self.block_store
+            if !self
+                .block_store
                 .all_blocks_exists_at_authority_round(&leaders, leader_round)
+            {
+                return false;
+            }
+
+            // Wait for a quorum of blocks at leader_round that voted for
+            // the leader of leader_round - 1.
+            if leader_round >= 2 {
+                let prev_leader = self.committee.elect_leader(leader_round - 1);
+                if !self.block_store.has_votes_quorum_at_round(
+                    leader_round,
+                    prev_leader,
+                    leader_round - 1,
+                    &self.committee,
+                ) {
+                    return false;
+                }
+
+                // StarfishS: also require a quorum of strong votes at leader_round.
+                if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
+                    && !self
+                        .block_store
+                        .has_strong_votes_quorum_at_round(leader_round, &self.committee)
+                {
+                    return false;
+                }
+            }
+
+            true
         } else {
             false
         }
