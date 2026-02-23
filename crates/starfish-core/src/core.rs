@@ -420,22 +420,7 @@ impl<H: BlockHandler> Core<H> {
             return_blocks.push(block_data);
         }
 
-        // Sync if needed
-        if self.options.fsync {
-            let _sync_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::sync_with_disk");
-            self.rocks_store.sync().expect("RocksDB sync failed");
-            drop(_sync_timer);
-        } else {
-            let _sync_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::flush_to_buffer");
-            self.rocks_store.flush().expect("RocksDB sync failed");
-            drop(_sync_timer);
-        }
+        self.persist_to_storage("Core::new_block");
 
         Some(return_blocks[0].0.clone())
     }
@@ -759,21 +744,24 @@ impl<H: BlockHandler> Core<H> {
         self.rocks_store
             .store_commits(commit_data)
             .expect("Store commits should not fail");
-        // Sync if needed
-        if self.options.fsync && !committed.is_empty() {
-            let timer = self
+        if !committed.is_empty() {
+            self.persist_to_storage("Core::commit");
+        }
+    }
+
+    fn persist_to_storage(&self, label: &str) {
+        if self.options.fsync {
+            let _t = self
                 .metrics
                 .utilization_timer
-                .utilization_timer("Core::commit::sync with disk");
+                .utilization_timer(&format!("{label}::sync_with_disk"));
             self.rocks_store.sync().expect("RocksDB sync failed");
-            drop(timer);
-        } else if !committed.is_empty() {
-            let _sync_timer = self
+        } else {
+            let _t = self
                 .metrics
                 .utilization_timer
-                .utilization_timer("Core::commit::flush_to_buffer");
+                .utilization_timer(&format!("{label}::flush_to_buffer"));
             self.rocks_store.flush().expect("RocksDB sync failed");
-            drop(_sync_timer);
         }
     }
 
