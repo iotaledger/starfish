@@ -2,29 +2,32 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use minibytes::Bytes;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::Path;
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::Path,
     sync::Arc,
     time::Instant,
 };
+
+use minibytes::Bytes;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 
 use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::rocks_store::RocksStore;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 use crate::{
     committee::Committee,
-    consensus::linearizer::CommittedSubDag,
+    consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     state::{RecoveredState, RecoveredStateBuilder},
     types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber},
 };
+
+/// Bitmask tracking which authorities know about a block. Supports up to 128 authorities.
+type AuthorityBitmask = u128;
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ConsensusProtocol {
@@ -73,7 +76,7 @@ pub struct BlockStore {
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
-    data_availability: HashSet<BlockReference>,
+    data_availability: BTreeSet<BlockReference>,
     // Blocks for which has available transactions data and didn't yet acknowledge.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
@@ -86,21 +89,17 @@ struct BlockStoreInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    // for each authority, the set of unknown blocks
-    not_known_by_authority: Vec<HashSet<BlockReference>>,
+    // for each authority, the set of blocks they don't know about
+    not_known_by_authority: Vec<BTreeSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
-    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    dag: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>>,
+    // per-authority highest committed round, used as dag eviction threshold
+    last_committed_round: Vec<RoundNumber>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
-#[derive(Clone, Debug)]
-enum IndexEntry {
-    // Block needs to be loaded from RocksDB
-    Unloaded(BlockReference),
-    // Block is currently in memory
-    Loaded((Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)),
-}
+type IndexEntry = (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>);
 
 impl BlockStore {
     pub fn open(
@@ -111,13 +110,20 @@ impl BlockStore {
         byzantine_strategy: String,
         consensus: String,
     ) -> RecoveredState {
+        assert!(
+            committee.len() <= 128,
+            "Committee size {} exceeds AuthorityBitmask capacity (128)",
+            committee.len()
+        );
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
-        let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
+        let not_known_by_authority = committee.authorities().map(|_| BTreeSet::new()).collect();
+        let last_committed_round = committee.authorities().map(|_| 0).collect();
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
             not_known_by_authority,
+            last_committed_round,
             info_length: committee.info_length(),
             committee_size: committee.len(),
             ..Default::default()
@@ -143,7 +149,7 @@ impl BlockStore {
 
                 builder.block(current_round, data_storage_transmission_blocks.clone());
                 block_count += 1;
-                inner.add_unloaded(
+                inner.add_block(
                     data_storage_transmission_blocks,
                     0,
                     committee.len() as AuthorityIndex,
@@ -191,29 +197,28 @@ impl BlockStore {
         builder.build(rocks_store, block_store)
     }
 
-    pub fn get_dag(
-        &self,
-    ) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
-        self.inner.read().dag.clone()
-    }
-
     pub fn get_dag_sorted(
         &self,
-    ) -> Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> {
-        let mut dag: Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> = self
-            .get_dag()
+    ) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
+        let inner = self.inner.read();
+        // BTreeMap is already sorted by round
+        inner
+            .dag
             .iter()
-            .map(|(block_reference, refs_and_indices)| {
-                (
-                    *block_reference,
-                    refs_and_indices.0.clone(),
-                    refs_and_indices.1.clone(),
-                )
+            .flat_map(|(round, map)| {
+                map.iter().map(move |((authority, digest), (parents, known_by))| {
+                    (
+                        BlockReference {
+                            authority: *authority,
+                            round: *round,
+                            digest: *digest,
+                        },
+                        parents.clone(),
+                        *known_by,
+                    )
+                })
             })
-            .collect();
-
-        dag.sort_by_key(|(block_reference, _, _)| block_reference.round());
-        dag
+            .collect()
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
@@ -223,7 +228,7 @@ impl BlockStore {
     pub fn get_unknown_by_authority(
         &self,
         authority_index: AuthorityIndex,
-    ) -> HashSet<BlockReference> {
+    ) -> BTreeSet<BlockReference> {
         self.inner.read().not_known_by_authority[authority_index as usize].clone()
     }
 
@@ -256,7 +261,7 @@ impl BlockStore {
             .store_block(storage_and_transmission_blocks.0.clone())
             .expect("Failed to store block in RocksDB");
 
-        self.inner.write().add_loaded(
+        self.inner.write().add_block(
             storage_and_transmission_blocks,
             authority_index_start,
             authority_index_end,
@@ -270,7 +275,7 @@ impl BlockStore {
             Data<VerifiedStatementBlock>,
         ),
     ) {
-        let authority_index_start = 0 as AuthorityIndex;
+        let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(
             storage_and_transmission_blocks,
@@ -292,41 +297,31 @@ impl BlockStore {
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        // First try to get from memory
-        let entry = self.inner.read().get_block(reference);
-        match entry {
-            Some(IndexEntry::Loaded(blocks)) => Some(blocks.0),
-            Some(IndexEntry::Unloaded(block_ref)) => {
-                // If not in memory, get from RocksDB
-                self.rocks_store
-                    .get_block(&block_ref)
-                    .expect("Failed to read from RocksDB")
-            }
-            None => None,
+        if let Some(blocks) = self.inner.read().get_block(reference) {
+            return Some(blocks.0);
         }
+        // Not in memory — fall back to RocksDB
+        self.rocks_store
+            .get_block(&reference)
+            .expect("Failed to read from RocksDB")
     }
 
     pub fn get_transmission_block(
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        // First try to get from memory
-        let entry = self.inner.read().get_block(reference);
-        match entry {
-            Some(IndexEntry::Loaded(blocks)) => Some(blocks.1),
-            Some(IndexEntry::Unloaded(block_ref)) => {
-                // If not in memory, get from RocksDB and create transmission block
-                let own_id = self.inner.read().authority;
-                self.rocks_store
-                    .get_block(&block_ref)
-                    .expect("Failed to read from RocksDB")
-                    .map(|storage_block| {
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
-                        Data::new(transmission_block)
-                    })
-            }
-            None => None,
+        if let Some(blocks) = self.inner.read().get_block(reference) {
+            return Some(blocks.1);
         }
+        // Not in memory — fall back to RocksDB
+        let own_id = self.inner.read().authority;
+        self.rocks_store
+            .get_block(&reference)
+            .expect("Failed to read from RocksDB")
+            .map(|storage_block| {
+                let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                Data::new(transmission_block)
+            })
     }
 
     pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
@@ -352,7 +347,7 @@ impl BlockStore {
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
-        self.read_index_storage_vec(entries)
+        Self::extract_storage_blocks(entries)
     }
 
     pub fn get_blocks_at_authority_round(
@@ -364,7 +359,7 @@ impl BlockStore {
             .inner
             .read()
             .get_blocks_at_authority_round(authority, round);
-        self.read_index_storage_vec(entries)
+        Self::extract_storage_blocks(entries)
     }
 
     pub fn block_exists_at_authority_round(
@@ -411,17 +406,13 @@ impl BlockStore {
             return false;
         };
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for ((authority, _), entry) in blocks {
-            if let IndexEntry::Loaded((storage_block, _)) = entry {
-                if storage_block
-                    .includes()
-                    .iter()
-                    .any(|r| r.authority == leader && r.round == leader_round)
-                {
-                    if aggregator.add(*authority, committee) {
-                        return true;
-                    }
-                }
+        for ((authority, _), (storage_block, _)) in blocks {
+            let votes_for_leader = storage_block
+                .includes()
+                .iter()
+                .any(|r| r.authority == leader && r.round == leader_round);
+            if votes_for_leader && aggregator.add(*authority, committee) {
+                return true;
             }
         }
         false
@@ -439,13 +430,11 @@ impl BlockStore {
             return false;
         };
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for ((authority, _), entry) in blocks {
-            if let IndexEntry::Loaded((storage_block, _)) = entry {
-                if storage_block.strong_vote() == Some(true) {
-                    if aggregator.add(*authority, committee) {
-                        return true;
-                    }
-                }
+        for ((authority, _), (storage_block, _)) in blocks {
+            if storage_block.strong_vote() == Some(true)
+                && aggregator.add(*authority, committee)
+            {
+                return true;
             }
         }
         false
@@ -494,17 +483,23 @@ impl BlockStore {
         self.inner.read().highest_round
     }
 
+    pub fn update_committed_rounds(&self, committed_blocks: &[Data<VerifiedStatementBlock>]) {
+        let mut inner = self.inner.write();
+        for block in committed_blocks {
+            let authority = block.author() as usize;
+            if let Some(slot) = inner.last_committed_round.get_mut(authority) {
+                *slot = (*slot).max(block.round());
+            }
+        }
+    }
+
     pub fn cleanup(&self, threshold_round: RoundNumber) {
         if threshold_round == 0 {
             return;
         }
         let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
 
-        // Only unload from RAM, keep everything in RocksDB
-        let unloaded = self.inner.write().unload_below_round(threshold_round);
-        self.metrics
-            .block_store_unloaded_blocks
-            .inc_by(unloaded as u64);
+        self.inner.write().evict_below_round();
     }
 
     pub fn get_own_transmission_blocks(
@@ -517,7 +512,7 @@ impl BlockStore {
             self.inner
                 .read()
                 .get_own_blocks(to_whom_authority_index, from_excluded, limit);
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_own_blocks(
@@ -530,7 +525,7 @@ impl BlockStore {
             .read()
             .get_unknown_own_blocks(to_whom_authority_index, batch_own_block_size);
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_other_blocks(
@@ -545,7 +540,7 @@ impl BlockStore {
             max_round_own_blocks,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_causal_history(
@@ -562,7 +557,7 @@ impl BlockStore {
             authorities_with_missing_blocks,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_past_cone(
@@ -579,7 +574,7 @@ impl BlockStore {
             batch_other_block_size,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -590,50 +585,12 @@ impl BlockStore {
         self.inner.read().last_own_block()
     }
 
-    fn read_index(
-        &self,
-        entry: IndexEntry,
-    ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
-        let own_id = self.inner.read().authority;
-        match entry {
-            IndexEntry::Loaded(blocks) => blocks,
-            IndexEntry::Unloaded(reference) => {
-                self.metrics.block_store_loaded_blocks.inc();
-
-                // Get from RocksDB
-                let data_storage_block = self
-                    .rocks_store
-                    .get_block(&reference)
-                    .expect("Failed to read from RocksDB")
-                    .expect("Block not found in RocksDB");
-
-                // Create transmission block
-                let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
-                let data_transmission_block = Data::new(transmission_block);
-
-                (data_storage_block, data_transmission_block)
-            }
-        }
+    fn extract_storage_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
+        entries.into_iter().map(|(s, _)| s).collect()
     }
 
-    fn read_index_storage_vec(
-        &self,
-        entries: Vec<IndexEntry>,
-    ) -> Vec<Data<VerifiedStatementBlock>> {
-        entries
-            .into_iter()
-            .map(|pos| self.read_index(pos).0)
-            .collect()
-    }
-
-    fn read_index_transmission_vec(
-        &self,
-        entries: Vec<IndexEntry>,
-    ) -> Vec<Data<VerifiedStatementBlock>> {
-        entries
-            .into_iter()
-            .map(|pos| self.read_index(pos).1)
-            .collect()
+    fn extract_transmission_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
+        entries.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
@@ -699,53 +656,31 @@ impl BlockStoreInner {
         if block.statements().is_some() {
             return true;
         }
-        // If the block is not in the cache
-        if !self.cached_blocks.contains_key(block_reference) {
+        let Some(cached) = self.cached_blocks.get(block_reference) else {
+            // Block is not in the cache yet
             return true;
-        }
-        // the header is in the cached block in this place
-        // we need at least a shard to update
-        if block.encoded_shard().is_none() {
+        };
+        // The header is already cached; we need a new shard to make progress
+        let Some((_, shard_index)) = block.encoded_shard().as_ref() else {
             return false;
-        }
-        let (_, shard_index) = block
-            .encoded_shard()
-            .as_ref()
-            .expect("It should be some because of the above check");
-        let cached_block = &self
-            .cached_blocks
-            .get(block_reference)
-            .expect("Cached block missing")
-            .0;
-        if cached_block.encoded_statements()[*shard_index].is_none() {
-            return true;
-        }
-        false
+        };
+        cached.0.encoded_statements()[*shard_index].is_none()
     }
 
-    // Chech whether the block can be reconstructed with a new shard
+    // Check whether the block can be reconstructed with a new shard
     pub fn ready_to_reconstruct(
         &self,
         block: &VerifiedStatementBlock,
     ) -> (bool, Option<CachedStatementBlock>) {
-        if block.encoded_shard().is_none() || !self.cached_blocks.contains_key(block.reference()) {
+        let Some((_, shard_index)) = block.encoded_shard().as_ref() else {
             return (false, None);
-        }
-        let (_, shard_index) = block
-            .encoded_shard()
-            .as_ref()
-            .expect("It should be some because of the above check");
-        let cached_block = &self
-            .cached_blocks
-            .get(block.reference())
-            .expect("Cached block missing")
-            .0;
+        };
+        let Some((cached_block, _)) = self.cached_blocks.get(block.reference()) else {
+            return (false, None);
+        };
         if cached_block.encoded_statements()[*shard_index].is_none() {
-            let shard_count = 1 + cached_block
-                .encoded_statements()
-                .iter()
-                .filter(|s| s.is_some())
-                .count();
+            let shard_count =
+                1 + cached_block.encoded_statements().iter().filter(|s| s.is_some()).count();
             if shard_count >= self.info_length {
                 return (true, Some(cached_block.clone()));
             }
@@ -776,11 +711,7 @@ impl BlockStoreInner {
     }
 
     pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool {
-        let count_shards = self.shard_count(block_reference);
-        if count_shards >= self.info_length {
-            return true;
-        }
-        false
+        self.shard_count(block_reference) >= self.info_length
     }
 
     pub fn get_cached_block(&self, block_reference: &BlockReference) -> CachedStatementBlock {
@@ -825,92 +756,51 @@ impl BlockStoreInner {
             .cloned()
     }
 
-    pub fn unload_below_round(&mut self, threshold_round: RoundNumber) -> usize {
-        let mut unloaded = 0usize;
+    pub fn evict_below_round(&mut self) {
+        // Evict metadata below the min committed round across all authorities,
+        // with a safety margin of 2 * MAX_TRAVERSAL_DEPTH
+        let dag_threshold = self
+            .last_committed_round
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
+        if dag_threshold > 0 {
+            self.dag = self.dag.split_off(&dag_threshold);
+            self.index = self.index.split_off(&dag_threshold);
 
-        // Keep the index entries but unload the actual block data from RAM
-        for (round, map) in self.index.iter_mut() {
-            if *round > threshold_round {
-                continue;
+            let split_ref = BlockReference {
+                authority: 0,
+                round: dag_threshold,
+                digest: BlockDigest::default(),
+            };
+            for set in self.not_known_by_authority.iter_mut() {
+                *set = set.split_off(&split_ref);
             }
-
-            // Only remove blocks from cache, keeping the references
-            for ((authority, digest), entry) in map.iter_mut() {
-                if let IndexEntry::Loaded(_block) = entry {
-                    unloaded += 1;
-                    // Convert to unloaded state with reference
-                    *entry = IndexEntry::Unloaded(BlockReference {
-                        round: *round,
-                        authority: *authority,
-                        digest: *digest,
-                    });
-                }
-            }
+            self.data_availability = self.data_availability.split_off(&split_ref);
         }
-
-        tracing::debug!("Unloaded {unloaded} entries from block store cache");
-        unloaded
     }
 
-    pub fn add_unloaded(
+    pub fn add_block(
         &mut self,
-        data_storage_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
+        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        let reference = data_storage_transmission_blocks.0.reference();
-        self.highest_round = max(self.highest_round, reference.round());
-
-        let map = self.index.entry(reference.round()).or_default();
-        map.insert(reference.author_digest(), IndexEntry::Unloaded(*reference));
-
-        self.add_own_index(reference, authority_index_start, authority_index_end);
-        self.update_last_seen_by_authority(reference);
-        self.update_dag(
-            *reference,
-            data_storage_transmission_blocks.0.includes().clone(),
-        );
-        self.update_data_availability_and_cached_blocks(&data_storage_transmission_blocks.0);
-    }
-
-    pub fn add_loaded(
-        &mut self,
-        storage_and_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
-    ) {
-        let reference = storage_and_transmission_blocks.0.reference();
+        let reference = blocks.0.reference();
         self.highest_round = max(self.highest_round, reference.round());
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
 
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(
-            reference.author_digest(),
-            IndexEntry::Loaded(storage_and_transmission_blocks.clone()),
-        );
+        map.insert(reference.author_digest(), blocks.clone());
 
-        tracing::debug!(
-            "Current index map in round {} is : {:?}",
-            reference.round(),
-            map
-        );
-
-        self.update_dag(
-            *reference,
-            storage_and_transmission_blocks.0.includes().clone(),
-        );
-        self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);
+        self.update_dag(*reference, blocks.0.includes().clone());
+        self.update_data_availability_and_cached_blocks(&blocks.0);
     }
-    // Update not known by authorities when the block gets recoverable after decoding
-    // This will send the block to others
+
     pub fn updated_unknown_by_others(&mut self, block_reference: BlockReference) {
         for authority in 0..self.not_known_by_authority.len() {
             if authority == self.authority as usize
@@ -922,26 +812,40 @@ impl BlockStoreInner {
         }
     }
 
-    // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
-    // of the block, and we assume that others are not aware of this block
+    fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
+        self.dag.get(&r.round)?.get(&(r.authority, r.digest))
+    }
+
+    fn dag_get_mut(
+        &mut self,
+        r: &BlockReference,
+    ) -> Option<&mut (Vec<BlockReference>, AuthorityBitmask)> {
+        self.dag
+            .get_mut(&r.round)?
+            .get_mut(&(r.authority, r.digest))
+    }
+
+    fn dag_contains(&self, r: &BlockReference) -> bool {
+        self.dag_get(r).is_some()
+    }
+
+    fn dag_insert(&mut self, r: BlockReference, val: (Vec<BlockReference>, AuthorityBitmask)) {
+        self.dag
+            .entry(r.round)
+            .or_default()
+            .insert((r.authority, r.digest), val);
+    }
+
+    /// Insert a block into the DAG and propagate "known-by" bits along the causal history.
     pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         if block_reference.round == 0 {
             return;
         }
-        // don't update if it is already there
-        if self.dag.contains_key(&block_reference) {
+        if self.dag_contains(&block_reference) {
             return;
         }
-        // update information about block_reference
-        self.dag.insert(
-            block_reference,
-            (
-                parents,
-                vec![block_reference.authority, self.authority]
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-            ),
-        );
+        let known_by = (1u128 << block_reference.authority) | (1u128 << self.authority);
+        self.dag_insert(block_reference, (parents, known_by));
         for authority in 0..self.not_known_by_authority.len() {
             if authority == self.authority as usize
                 || authority == block_reference.authority as usize
@@ -955,13 +859,19 @@ impl BlockStoreInner {
         let mut buffer = vec![block_reference];
 
         while let Some(block_reference) = buffer.pop() {
-            let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
+            let Some((parents, _)) = self.dag_get(&block_reference).cloned() else {
+                continue; // evicted
+            };
             for parent in parents {
                 if parent.round == 0 {
                     continue;
                 }
-                let (_, known_by) = self.dag.get_mut(&parent).unwrap();
-                if known_by.insert(authority) {
+                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
+                    continue; // evicted
+                };
+                let bit = 1u128 << authority;
+                if *known_by & bit == 0 {
+                    *known_by |= bit;
                     self.not_known_by_authority[authority as usize].remove(&parent);
                     buffer.push(parent);
                 }
@@ -970,11 +880,7 @@ impl BlockStoreInner {
     }
 
     pub fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
-        let count = if block.encoded_shard().is_some() {
-            1
-        } else {
-            0
-        };
+        let count = usize::from(block.encoded_shard().is_some());
 
         if block.statements().is_some() {
             if !self.data_availability.contains(block.reference()) {
@@ -994,16 +900,11 @@ impl BlockStoreInner {
     }
 
     pub fn get_pending_acknowledgment(&mut self, round_number: RoundNumber) -> Vec<BlockReference> {
-        // Partition the vector into two parts: one to keep, and one to return
         let (to_return, to_keep): (Vec<_>, Vec<_>) = self
             .pending_acknowledgment
             .drain(..)
             .partition(|x| x.round <= round_number);
-
-        // Replace the original vector with the elements to keep
         self.pending_acknowledgment = to_keep;
-
-        // Return the filtered elements
         to_return
     }
 
@@ -1013,8 +914,9 @@ impl BlockStoreInner {
         authority: AuthorityIndex,
     ) {
         self.not_known_by_authority[authority as usize].remove(&block_reference);
-        let (_, known_by) = self.dag.get_mut(&block_reference).unwrap();
-        known_by.insert(authority);
+        if let Some((_, known_by)) = self.dag_get_mut(&block_reference) {
+            *known_by |= 1u128 << authority;
+        }
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -1029,12 +931,9 @@ impl BlockStoreInner {
             .last_seen_by_authority
             .get_mut(reference.authority as usize)
             .expect("last_seen_by_authority not found");
-        if reference.round() > *last_seen {
-            *last_seen = reference.round();
-        }
+        *last_seen = (*last_seen).max(reference.round());
     }
 
-    // Function returns which own blocks are intended to which authority
     pub fn get_own_blocks(
         &self,
         to_whom_index: AuthorityIndex,
@@ -1042,7 +941,8 @@ impl BlockStoreInner {
         limit: usize,
     ) -> Vec<IndexEntry> {
         self.own_blocks
-            .range((from_excluded + 1, 0 as AuthorityIndex)..)
+            .range((from_excluded + 1, 0)..)
+
             .filter(|((_round, authority_index), _digest)| *authority_index == to_whom_index)
             .take(limit)
             .map(|((round, _authority_index), digest)| {
@@ -1051,13 +951,35 @@ impl BlockStoreInner {
                     round: *round,
                     digest: *digest,
                 };
-                if let Some(block) = self.get_block(reference) {
-                    block
-                } else {
-                    panic!("Own block index corrupted, not found: {reference}");
-                }
+                self.get_block(reference)
+                    .unwrap_or_else(|| panic!("Own block index corrupted, not found: {reference}"))
             })
             .collect()
+    }
+
+    /// Collect unknown blocks for a peer, filtered by predicate and limited in count.
+    fn collect_unknown_blocks(
+        &self,
+        to_whom: AuthorityIndex,
+        filter: impl Fn(&BlockReference) -> bool,
+        limit: usize,
+    ) -> Vec<(IndexEntry, RoundNumber)> {
+        self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|r| filter(r))
+            .take(limit)
+            .map(|r| {
+                let entry = self
+                    .get_block(*r)
+                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
+                (entry, r.round())
+            })
+            .collect()
+    }
+
+    fn into_sorted_entries(mut blocks: Vec<(IndexEntry, RoundNumber)>) -> Vec<IndexEntry> {
+        blocks.sort_by_key(|x| x.1);
+        blocks.into_iter().map(|x| x.0).collect()
     }
 
     pub fn get_unknown_own_blocks(
@@ -1065,22 +987,12 @@ impl BlockStoreInner {
         to_whom: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<IndexEntry> {
-        let mut own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| block_reference.authority == self.authority)
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        own_blocks.sort_by_key(|x| x.1);
-        own_blocks.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        Self::into_sorted_entries(self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority == auth,
+            batch_own_block_size,
+        ))
     }
 
     pub fn get_unknown_other_blocks(
@@ -1089,25 +1001,13 @@ impl BlockStoreInner {
         batch_other_block_size: usize,
         max_round: Option<RoundNumber>,
     ) -> Vec<IndexEntry> {
-        let max_round_own_blocks = max_round.unwrap_or(RoundNumber::MAX);
-        let mut other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (block_reference.authority != self.authority)
-                    && (block_reference.round < max_round_own_blocks)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        other_blocks.sort_by_key(|x| x.1);
-        other_blocks.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let max = max_round.unwrap_or(RoundNumber::MAX);
+        Self::into_sorted_entries(self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority != auth && r.round < max,
+            batch_other_block_size,
+        ))
     }
 
     pub fn get_unknown_causal_history(
@@ -1117,42 +1017,16 @@ impl BlockStoreInner {
         batch_other_block_size: usize,
         authorities_with_missing_blocks: HashSet<AuthorityIndex>,
     ) -> Vec<IndexEntry> {
-        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| block_reference.authority == self.authority)
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        let max_round_own_blocks = own_blocks.iter().map(|own_block| own_block.1).max();
-        let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
-        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (authorities_with_missing_blocks.contains(&block_reference.authority))
-                    && (block_reference.round < max_round_own_blocks)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
-            own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1);
-        blocks_to_send.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let own =
+            self.collect_unknown_blocks(to_whom, |r| r.authority == auth, batch_own_block_size);
+        let max = own.iter().map(|x| x.1).max().unwrap_or(RoundNumber::MAX);
+        let other = self.collect_unknown_blocks(
+            to_whom,
+            |r| authorities_with_missing_blocks.contains(&r.authority) && r.round < max,
+            batch_other_block_size,
+        );
+        Self::into_sorted_entries(own.into_iter().chain(other).collect())
     }
 
     pub fn get_unknown_past_cone(
@@ -1162,42 +1036,19 @@ impl BlockStoreInner {
         batch_own_block_size: usize,
         batch_other_block_size: usize,
     ) -> Vec<IndexEntry> {
-        let max_round = block_reference.round;
-        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                block_reference.authority == self.authority && block_reference.round < max_round
-            })
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (block_reference.authority != self.authority) && (block_reference.round < max_round)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
-            own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1);
-        blocks_to_send.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let max = block_reference.round;
+        let own = self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority == auth && r.round < max,
+            batch_own_block_size,
+        );
+        let other = self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority != auth && r.round < max,
+            batch_other_block_size,
+        );
+        Self::into_sorted_entries(own.into_iter().chain(other).collect())
     }
 
     fn add_own_index(
@@ -1213,13 +1064,14 @@ impl BlockStoreInner {
             self.last_own_block = Some(*reference);
         }
         for authority_index in authority_index_start..authority_index_end {
-            assert!(self
-                .own_blocks
-                .insert(
-                    (reference.round, authority_index as AuthorityIndex),
-                    reference.digest
-                )
-                .is_none());
+            assert!(
+                self.own_blocks
+                    .insert((reference.round, authority_index), reference.digest)
+                    .is_none(),
+                "Duplicate own block at round {} for authority {}",
+                reference.round,
+                authority_index,
+            );
         }
     }
 

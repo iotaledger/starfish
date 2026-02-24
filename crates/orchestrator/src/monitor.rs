@@ -66,12 +66,14 @@ impl Monitor {
     }
 
     /// Start grafana on the dedicated motoring machine.
-    pub async fn start_grafana(&self) -> MonitorResult<()> {
+    pub async fn start_grafana(&self, repo_name: &str) -> MonitorResult<()> {
         // Configure and reload grafana.
         let instance = std::iter::once(self.instance.clone());
         let commands = Grafana::setup_commands();
+        let context =
+            CommandContext::new().with_execute_from_path(PathBuf::from(repo_name));
         self.ssh_manager
-            .execute(instance, commands, CommandContext::default())
+            .execute(instance, commands, context)
             .await?;
 
         Ok(())
@@ -220,7 +222,7 @@ impl Grafana {
             ),
             // copy your default dashboard yaml/json
             &format!(
-                "sudo cp crates/orchestrator/assets/grafana-dashboard.json {}",
+                "sudo cp monitoring/grafana/grafana-dashboard.json {}",
                 Self::DASHBOARDS_PATH
             ),
             "sudo service grafana-server restart",

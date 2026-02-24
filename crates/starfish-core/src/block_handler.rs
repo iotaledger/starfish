@@ -17,7 +17,7 @@ use crate::{
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, Transaction},
+    types::{AuthorityIndex, BlockReference, RoundNumber, Transaction},
 };
 use tokio::sync::mpsc;
 
@@ -158,6 +158,7 @@ impl BlockHandler for TestBlockHandler {
 pub struct RealCommitHandler {
     commit_interpreter: Linearizer,
     committed_leaders: Vec<BlockReference>,
+    commit_digest: [u8; 32],
     start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
@@ -173,6 +174,7 @@ impl RealCommitHandler {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
             committed_leaders: vec![],
+            commit_digest: [0u8; 32],
             start_time: TimeInstant::now(),
             metrics,
         }
@@ -217,6 +219,20 @@ impl CommitObserver for RealCommitHandler {
         let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
+
+            // Chain rolling commit digest: hash(prev_digest || anchor.digest)
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&self.commit_digest);
+            hasher.update(commit.0.anchor.digest.as_ref());
+            self.commit_digest = *hasher.finalize().as_bytes();
+
+            let commit_index = self.committed_leaders.len();
+            self.metrics.commit_index.set(commit_index as i64);
+            if commit_index % 200 == 0 {
+                let digest_short = u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
+                self.metrics.commit_digest.set(digest_short as i64);
+            }
+
             for block in &commit.0.blocks {
                 let gap = commit.0.anchor.round.saturating_sub(block.round());
                 self.metrics.commit_gap.observe(gap as f64);
@@ -297,6 +313,10 @@ impl CommitObserver for RealCommitHandler {
         assert!(self.commit_interpreter.committed.is_empty());
         self.commit_interpreter.committed_slots =
             committed.iter().map(|r| (r.round, r.authority)).collect();
-        self.commit_interpreter.committed = committed;
+        self.commit_interpreter.committed = committed.into_iter().collect();
+    }
+
+    fn cleanup(&mut self, threshold_round: RoundNumber) {
+        self.commit_interpreter.cleanup(threshold_round);
     }
 }

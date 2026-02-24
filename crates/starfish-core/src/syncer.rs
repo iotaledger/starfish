@@ -36,6 +36,8 @@ pub trait CommitObserver: Send + Sync {
     ) -> Vec<CommittedSubDag>;
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>);
+
+    fn cleanup(&mut self, threshold_round: RoundNumber);
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
@@ -129,6 +131,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .handle_commit(self.core.block_store(), newly_committed);
 
         self.core.handle_committed_subdag(committed_subdag);
+    }
+
+    pub fn cleanup(&mut self) {
+        let threshold = self.core.cleanup();
+        self.commit_observer.cleanup(threshold);
     }
 
     pub fn commit_observer(&self) -> &C {

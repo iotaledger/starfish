@@ -22,7 +22,7 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
-        linearizer::CommittedSubDag,
+        linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
         CommitMetastate,
     },
@@ -35,6 +35,13 @@ use crate::{
     threshold_clock::ThresholdClockAggregator,
     types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
 };
+
+macro_rules! timed {
+    ($metrics:expr, $name:expr, $body:expr) => {{
+        let _timer = $metrics.utilization_timer.utilization_timer($name);
+        $body
+    }};
+}
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
@@ -134,7 +141,7 @@ impl<H: BlockHandler> Core<H> {
             pending,
             last_own_block: vec![OwnBlockData {
                 storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
-                authority_index_start: 0 as AuthorityIndex,
+                authority_index_start: 0,
                 authority_index_end: committee.len() as AuthorityIndex,
             }],
             block_handler,
@@ -201,13 +208,11 @@ impl<H: BlockHandler> Core<H> {
             .filter(|(b, _)| b.statements().is_some())
             .map(|(b, _)| *b.reference())
             .collect();
-        let block_manager_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("BlockManager::add_blocks");
-        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) =
-            self.block_manager.add_blocks(blocks);
-        drop(block_manager_timer);
+        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) = timed!(
+            self.metrics,
+            "BlockManager::add_blocks",
+            self.block_manager.add_blocks(blocks)
+        );
         let processed_references_with_statements: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
@@ -234,14 +239,14 @@ impl<H: BlockHandler> Core<H> {
             processed,
             new_blocks_to_reconstruct
         );
-        match self.block_store.consensus_protocol {
+        if matches!(
+            self.block_store.consensus_protocol,
             ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
-                self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-            }
-            _ => {}
-        };
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
+            self.reconstruct_data_blocks(new_blocks_to_reconstruct);
+        }
 
         let mut result = Vec::with_capacity(processed.len());
         for processed in &processed {
@@ -273,39 +278,17 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn sort_includes_in_pending(&mut self) {
-        // Temporarily extract Includes, leaving Payloads untouched
-        let mut include_positions: Vec<usize> = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, meta)| matches!(meta, MetaStatement::Include(_)))
-            .map(|(index, _)| index)
-            .collect();
-        // Sort the Include entries by round
-        include_positions.sort_by_key(|&index| {
-            if let MetaStatement::Include(block_ref) = &self.pending[index] {
-                block_ref.round()
-            } else {
-                unreachable!() // This should never happen
+        let mut include_positions = Vec::new();
+        let mut includes = Vec::new();
+        for (i, meta) in self.pending.iter().enumerate() {
+            if let MetaStatement::Include(r) = meta {
+                include_positions.push(i);
+                includes.push(*r);
             }
-        });
-
-        // Reorder the Include entries in place
-        for i in 0..include_positions.len() {
-            for j in (i + 1)..include_positions.len() {
-                let i_pos = include_positions[i];
-                let j_pos = include_positions[j];
-
-                if let (MetaStatement::Include(ref i_meta), MetaStatement::Include(ref j_meta)) =
-                    (&self.pending[i_pos], &self.pending[j_pos])
-                {
-                    if j_meta.round() < i_meta.round() {
-                        // Swap the positions and the entries directly
-                        self.pending.swap(i_pos, j_pos);
-                        include_positions.swap(i, j);
-                    }
-                }
-            }
+        }
+        includes.sort_by_key(|r| r.round);
+        for (pos, include) in include_positions.into_iter().zip(includes) {
+            self.pending[pos] = MetaStatement::Include(include);
         }
     }
 
@@ -349,7 +332,7 @@ impl<H: BlockHandler> Core<H> {
         // Check if we're ready for a new block
         let clock_round = self.threshold_clock.get_round();
         tracing::debug!(
-            "Attemp to construct block in round {}. Current pending: {:?}",
+            "Attempt to construct block in round {}. Current pending: {:?}",
             clock_round,
             self.pending
         );
@@ -357,55 +340,37 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        // Get relevant pending statements for this round
-        let _pending_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::get_pending_statements");
-        let pending_statements = self.get_pending_statements(clock_round);
-        drop(_pending_timer);
-
-        // Collect statements and references
-        let _collect_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::collect_statements_and_references");
-        let (mut statements, block_references) =
-            self.collect_statements_and_references(&pending_statements);
-        drop(_collect_timer);
-
-        // Create blocks based on byzantine strategy
-        let _prepare_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::prepare_last_blocks");
-        self.prepare_last_blocks();
-        drop(_prepare_timer);
-
-        // Prepare encoded statements if needed
-        let _encode_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::prepare_encoded_statements");
-        let mut encoded_statements = self.prepare_encoded_statements(&statements);
-        drop(_encode_timer);
-
-        // Get pending acknowledgments
-        let _ack_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::get_pending_acknowledgment");
-        let acknowledgments = self.block_store.get_pending_acknowledgment(clock_round);
-        drop(_ack_timer);
-
-        // Calculate authority bounds
+        let pending_statements = timed!(
+            self.metrics,
+            "Core::new_block::get_pending_statements",
+            self.get_pending_statements(clock_round)
+        );
+        let (mut statements, block_references) = timed!(
+            self.metrics,
+            "Core::new_block::collect_statements_and_references",
+            self.collect_statements_and_references(&pending_statements)
+        );
+        timed!(
+            self.metrics,
+            "Core::new_block::prepare_last_blocks",
+            self.prepare_last_blocks()
+        );
+        let mut encoded_statements = timed!(
+            self.metrics,
+            "Core::new_block::prepare_encoded_statements",
+            self.prepare_encoded_statements(&statements)
+        );
+        let acknowledgments = timed!(
+            self.metrics,
+            "Core::new_block::get_pending_acknowledgment",
+            self.block_store.get_pending_acknowledgment(clock_round)
+        );
         let number_of_blocks_to_create = self.last_own_block.len();
-        let _bounds_timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::new_block::calculate_authority_bounds");
-        let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
-        drop(_bounds_timer);
+        let authority_bounds = timed!(
+            self.metrics,
+            "Core::new_block::calculate_authority_bounds",
+            self.calculate_authority_bounds(number_of_blocks_to_create)
+        );
 
         // Create and store blocks
         let mut return_blocks = Vec::new();
@@ -416,48 +381,29 @@ impl<H: BlockHandler> Core<H> {
                 statements = vec![];
                 encoded_statements = self.prepare_encoded_statements(&statements);
             }
-            let _build_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::build_block");
-            let block_data = self.build_block(
-                &block_references,
-                &statements,
-                &encoded_statements,
-                &acknowledgments,
-                clock_round,
-                block_id,
+            let block_data = timed!(
+                self.metrics,
+                "Core::new_block::build_block",
+                self.build_block(
+                    &block_references,
+                    &statements,
+                    &encoded_statements,
+                    &acknowledgments,
+                    clock_round,
+                    block_id,
+                )
             );
-            drop(_build_timer);
-
             tracing::debug!("Created block {:?}", block_data.0);
-
-            let _store_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::store_block");
-            self.store_block(block_data.clone(), &authority_bounds, block_id);
-            drop(_store_timer);
+            timed!(
+                self.metrics,
+                "Core::new_block::store_block",
+                self.store_block(block_data.clone(), &authority_bounds, block_id)
+            );
 
             return_blocks.push(block_data);
         }
 
-        // Sync if needed
-        if self.options.fsync {
-            let _sync_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::sync_with_disk");
-            self.rocks_store.sync().expect("RocksDB sync failed");
-            drop(_sync_timer);
-        } else {
-            let _sync_timer = self
-                .metrics
-                .utilization_timer
-                .utilization_timer("Core::new_block::flush_to_buffer");
-            self.rocks_store.flush().expect("RocksDB sync failed");
-            drop(_sync_timer);
-        }
+        self.persist_to_storage("Core::new_block");
 
         Some(return_blocks[0].0.clone())
     }
@@ -502,10 +448,11 @@ impl<H: BlockHandler> Core<H> {
         match self.block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => Some(
-                self.encoder
-                    .encode_statements(statements.to_owned(), info_length, parity_length),
-            ),
+            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_statements(
+                statements.to_owned(),
+                info_length,
+                parity_length,
+            )),
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }
     }
@@ -604,45 +551,33 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn prepare_last_blocks(&mut self) {
-        if let Some(ref strategy) = self.block_store.byzantine_strategy {
-            match strategy {
-                ByzantineStrategy::EquivocatingChains => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                ByzantineStrategy::EquivocatingTwoChains => {
-                    for _ in self.last_own_block.len()..2 {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                ByzantineStrategy::EquivocatingChainsBomb => {
-                    for _ in self.last_own_block.len()..self.committee.len() {
-                        self.last_own_block.push(self.last_own_block[0].clone());
-                    }
-                }
-                _ => {}
-            }
+        let target = match self.block_store.byzantine_strategy {
+            Some(
+                ByzantineStrategy::EquivocatingChains | ByzantineStrategy::EquivocatingChainsBomb,
+            ) => self.committee.len(),
+            Some(ByzantineStrategy::EquivocatingTwoChains) => 2,
+            _ => return,
+        };
+        for _ in self.last_own_block.len()..target {
+            self.last_own_block.push(self.last_own_block[0].clone());
         }
     }
 
     fn calculate_authority_bounds(&self, num_blocks: usize) -> Vec<usize> {
-        let mut authority_bounds = vec![0];
-
-        match self.block_store.byzantine_strategy {
-            // Skipping Equivocating: Divide the authorities into two groups
-            Some(ByzantineStrategy::EquivocatingTwoChains) => {
-                authority_bounds.push((self.committee.len() as f64 / 2.0).ceil() as usize);
-                authority_bounds.push(self.committee.len());
-            }
-            // Default behavior: Distribute blocks evenly across all authorities
-            _ => {
-                for i in 1..=num_blocks {
-                    authority_bounds.push(i * self.committee.len() / num_blocks);
-                }
+        let len = self.committee.len();
+        let mut bounds = vec![0];
+        if matches!(
+            self.block_store.byzantine_strategy,
+            Some(ByzantineStrategy::EquivocatingTwoChains)
+        ) {
+            bounds.push((len + 1) / 2);
+            bounds.push(len);
+        } else {
+            for i in 1..=num_blocks {
+                bounds.push(i * len / num_blocks);
             }
         }
-        authority_bounds
+        bounds
     }
 
     fn compress_pending_block_references(&self, pending: &[MetaStatement]) -> Vec<BlockReference> {
@@ -697,9 +632,7 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(
-        &mut self,
-    ) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
+    pub fn try_commit(&mut self) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)
@@ -719,14 +652,13 @@ impl<H: BlockHandler> Core<H> {
         sequence
     }
 
-    pub fn cleanup(&self) {
-        const RETAIN_BELOW_COMMIT_ROUNDS: RoundNumber = 50;
-
-        self.block_store.cleanup(
-            self.last_commit_leader
-                .round()
-                .saturating_sub(RETAIN_BELOW_COMMIT_ROUNDS),
-        );
+    pub fn cleanup(&self) -> RoundNumber {
+        let threshold = self
+            .last_commit_leader
+            .round()
+            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
+        self.block_store.cleanup(threshold);
+        threshold
     }
 
     /// This only checks readiness in terms of helping liveness for commit rule,
@@ -736,54 +668,55 @@ impl<H: BlockHandler> Core<H> {
     pub fn ready_new_block(&self, connected_authorities: &HashSet<AuthorityIndex>) -> bool {
         let quorum_round = self.threshold_clock.get_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
-        // Leader round we check if we have a leader block
-        if quorum_round >= self.last_commit_leader.round().max(1) {
-            let leader_round = quorum_round - 1;
-            let mut leaders = self.committer.get_leaders(leader_round);
-            leaders.retain(|leader| connected_authorities.contains(leader));
-            tracing::debug!(
-                "Attempt ready new block, quorum round {}, Before exist at authority round",
-                quorum_round
-            );
-            if !self
-                .block_store
-                .all_blocks_exists_at_authority_round(&leaders, leader_round)
-            {
+
+        if quorum_round < self.last_commit_leader.round().max(1) {
+            return false;
+        }
+
+        let leader_round = quorum_round - 1;
+        let mut leaders = self.committer.get_leaders(leader_round);
+        leaders.retain(|leader| connected_authorities.contains(leader));
+        tracing::debug!(
+            "Attempt ready new block, quorum round {}, Before exist at authority round",
+            quorum_round
+        );
+        if !self
+            .block_store
+            .all_blocks_exists_at_authority_round(&leaders, leader_round)
+        {
+            return false;
+        }
+
+        // Wait for a quorum of blocks at leader_round that voted for
+        // the leader of leader_round - 1.
+        if leader_round >= 2 {
+            let prev_leader = self.committee.elect_leader(leader_round - 1);
+            if !self.block_store.has_votes_quorum_at_round(
+                leader_round,
+                prev_leader,
+                leader_round - 1,
+                &self.committee,
+            ) {
                 return false;
             }
 
-            // Wait for a quorum of blocks at leader_round that voted for
-            // the leader of leader_round - 1.
-            if leader_round >= 2 {
-                let prev_leader = self.committee.elect_leader(leader_round - 1);
-                if !self.block_store.has_votes_quorum_at_round(
-                    leader_round,
-                    prev_leader,
-                    leader_round - 1,
-                    &self.committee,
-                ) {
-                    return false;
-                }
-
-                // StarfishS: also require a quorum of strong votes at leader_round.
-                if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
-                    && !self
-                        .block_store
-                        .has_strong_votes_quorum_at_round(leader_round, &self.committee)
-                {
-                    return false;
-                }
+            // StarfishS: also require a quorum of strong votes at leader_round.
+            if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
+                && !self
+                    .block_store
+                    .has_strong_votes_quorum_at_round(leader_round, &self.committee)
+            {
+                return false;
             }
-
-            true
-        } else {
-            false
         }
+
+        true
     }
 
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
         let mut commit_data = vec![];
         for commit in &committed {
+            self.block_store.update_committed_rounds(&commit.blocks);
             for block in &commit.blocks {
                 self.epoch_manager
                     .observe_committed_block(block, &self.committee);
@@ -793,21 +726,24 @@ impl<H: BlockHandler> Core<H> {
         self.rocks_store
             .store_commits(commit_data)
             .expect("Store commits should not fail");
-        // Sync if needed
-        if self.options.fsync && !committed.is_empty() {
-            let timer = self
+        if !committed.is_empty() {
+            self.persist_to_storage("Core::commit");
+        }
+    }
+
+    fn persist_to_storage(&self, label: &str) {
+        if self.options.fsync {
+            let _t = self
                 .metrics
                 .utilization_timer
-                .utilization_timer("Core::commit::sync with disk");
+                .utilization_timer(&format!("{label}::sync_with_disk"));
             self.rocks_store.sync().expect("RocksDB sync failed");
-            drop(timer);
-        } else if !committed.is_empty() {
-            let _sync_timer = self
+        } else {
+            let _t = self
                 .metrics
                 .utilization_timer
-                .utilization_timer("Core::commit::flush_to_buffer");
+                .utilization_timer(&format!("{label}::flush_to_buffer"));
             self.rocks_store.flush().expect("RocksDB sync failed");
-            drop(_sync_timer);
         }
     }
 

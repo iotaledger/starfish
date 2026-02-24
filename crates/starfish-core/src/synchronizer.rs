@@ -23,7 +23,8 @@ use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -154,15 +155,17 @@ impl UpdaterMissingAuthorities {
         let peer = format_authority_index(peer_id);
         let sample_timeout = parameters.sample_timeout;
         loop {
-            let now = Instant::now();
-            let authorities_with_missing_blocks = authorities_with_missing_blocks.read().await;
-            let mut authorities_to_send = Vec::new();
-            for (idx, time) in authorities_with_missing_blocks.iter().enumerate() {
-                if now.duration_since(*time) < sample_timeout {
-                    authorities_to_send.push(idx as AuthorityIndex);
+            let authorities_to_send = {
+                let now = Instant::now();
+                let guard = authorities_with_missing_blocks.read();
+                let mut out = Vec::new();
+                for (idx, time) in guard.iter().enumerate() {
+                    if now.duration_since(*time) < sample_timeout {
+                        out.push(idx as AuthorityIndex);
+                    }
                 }
-            }
-            drop(authorities_with_missing_blocks);
+                out
+            };
             if !authorities_to_send.is_empty() {
                 tracing::debug!(
                     "Authorities with missing block {authorities_to_send:?} are sent to {peer}"
@@ -789,7 +792,7 @@ where
     let mut authorities_with_missing_blocks = HashSet::new();
     if protocol == ConsensusProtocol::Starfish || protocol == ConsensusProtocol::StarfishS {
         let mut authorities_with_missing_blocks_by_peer_from_me =
-            authorities_with_missing_blocks_by_peer_from_me.read().await;
+            authorities_with_missing_blocks_by_peer_from_me.read();
         let now = Instant::now();
         for (idx, instant) in authorities_with_missing_blocks_by_peer_from_me
             .iter()

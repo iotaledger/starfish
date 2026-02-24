@@ -72,6 +72,9 @@ pub struct Metrics {
 
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
+    pub commit_digest: IntGauge,
+    pub commit_index: IntGauge,
+
     pub utilization_timer: IntCounterVec,
     pub submitted_transactions: IntCounter,
 
@@ -353,8 +356,7 @@ impl Metrics {
 
             commit_gap: {
                 let buckets = vec![
-                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 32.0, 64.0, 128.0,
-                    256.0,
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
                 ];
                 register_histogram_with_registry!(
                     HistogramOpts::new(
@@ -368,6 +370,19 @@ impl Metrics {
             },
 
             connection_latency_sender,
+
+            commit_digest: register_int_gauge_with_registry!(
+                "commit_digest",
+                "Rolling hash of committed leader sequence (first 8 bytes as i64)",
+                registry,
+            )
+            .unwrap(),
+            commit_index: register_int_gauge_with_registry!(
+                "commit_index",
+                "Number of committed leaders",
+                registry,
+            )
+            .unwrap(),
         };
 
         (Arc::new(metrics), Arc::new(reporter))

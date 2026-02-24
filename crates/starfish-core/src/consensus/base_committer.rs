@@ -64,6 +64,17 @@ impl BaseCommitter {
         self
     }
 
+    /// Check whether a quorum of stake is represented by the given authorities.
+    fn has_quorum_support(&self, authorities: impl Iterator<Item = AuthorityIndex>) -> bool {
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for authority in authorities {
+            if aggregator.add(authority, &self.committee) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Return the wave in which the specified round belongs.
     fn wave_number(&self, round: RoundNumber) -> WaveNumber {
         round.saturating_sub(self.options.round_offset) / self.options.wave_length
@@ -101,23 +112,14 @@ impl BaseCommitter {
         leader_block: &Data<VerifiedStatementBlock>,
         voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
     ) -> bool {
-        let mut votes_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for reference in potential_certificate.includes() {
-            let potential_vote = self
-                .block_store
-                .get_storage_block(*reference)
-                .expect("We should have the whole sub-dag by now");
-
-            if voters_for_leaders
-                .contains(&(*leader_block.reference(), *potential_vote.reference()))
-            {
-                //tracing::trace!("[{self}] {potential_vote:?} is a vote for {leader_block:?}");
-                if votes_stake_aggregator.add(reference.authority, &self.committee) {
-                    return true;
-                }
-            }
-        }
-        false
+        let leader_ref = *leader_block.reference();
+        self.has_quorum_support(
+            potential_certificate
+                .includes()
+                .iter()
+                .filter(|r| voters_for_leaders.contains(&(leader_ref, **r)))
+                .map(|r| r.authority),
+        )
     }
 
     /// Decide the status of a target leader from the specified anchor. We commit the target leader
@@ -241,25 +243,12 @@ impl BaseCommitter {
     /// directly skipped.
     fn decide_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
-
-        let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for voting_block in &voting_blocks {
-            let voter = voting_block.reference().authority;
-            if voting_block
-                .includes()
+        self.has_quorum_support(
+            voting_blocks
                 .iter()
-                .all(|include| include.authority != leader)
-            {
-                tracing::trace!(
-                    "[{self}] {voting_block:?} is a blame for leader {}",
-                    format_authority_round(leader, voting_round - 1)
-                );
-                if blame_stake_aggregator.add(voter, &self.committee) {
-                    return true;
-                }
-            }
-        }
-        false
+                .filter(|b| b.includes().iter().all(|inc| inc.authority != leader))
+                .map(|b| b.author()),
+        )
     }
 
     /// Check whether the specified leader has enough support (that is, 2f+1 certificates)
@@ -291,19 +280,12 @@ impl BaseCommitter {
             return false;
         }
 
-        let mut certificate_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for decision_block in &decision_blocks {
-            let authority = decision_block.reference().authority;
-            if self.is_certificate(decision_block, leader_block, voters_for_leaders) {
-                //tracing::trace!(
-                //    "[{self}] {decision_block:?} is a certificate for leader {leader_block:?}"
-                //);
-                if certificate_stake_aggregator.add(authority, &self.committee) {
-                    return true;
-                }
-            }
-        }
-        false
+        self.has_quorum_support(
+            decision_blocks
+                .iter()
+                .filter(|b| self.is_certificate(b, leader_block, voters_for_leaders))
+                .map(|b| b.author()),
+        )
     }
 
     /// Check whether a single round-(r+2) block carries a StrongQC for the leader.
@@ -316,22 +298,21 @@ impl BaseCommitter {
         voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let leader_ref = *leader_block.reference();
-        let mut strong_vote_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for reference in decision_block.includes() {
-            let voting_block = self
-                .block_store
-                .get_storage_block(*reference)
-                .expect("We should have the whole sub-dag by now");
-
-            if voters_for_leaders.contains(&(leader_ref, *voting_block.reference()))
-                && voting_block.strong_vote() == Some(true)
-            {
-                if strong_vote_aggregator.add(reference.authority, &self.committee) {
-                    return true;
-                }
-            }
-        }
-        false
+        self.has_quorum_support(
+            decision_block
+                .includes()
+                .iter()
+                .filter(|r| {
+                    voters_for_leaders.contains(&(leader_ref, **r))
+                        && self
+                            .block_store
+                            .get_storage_block(**r)
+                            .expect("We should have the whole sub-dag by now")
+                            .strong_vote()
+                            == Some(true)
+                })
+                .map(|r| r.authority),
+        )
     }
 
     /// Determine the commit metastate for StarfishS direct decide.
@@ -353,20 +334,15 @@ impl BaseCommitter {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let leader_ref = *leader_block.reference();
 
-        let mut strong_blame_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        let mut has_strong_blame_quorum = false;
-
-        for voting_block in &voting_blocks {
-            let voter = voting_block.reference().authority;
-            if voters_for_leaders.contains(&(leader_ref, *voting_block.reference())) {
-                if voting_block.strong_vote() == Some(false)
-                    && strong_blame_aggregator.add(voter, &self.committee)
-                {
-                    has_strong_blame_quorum = true;
-                }
-            }
-        }
-
+        let has_strong_blame_quorum = self.has_quorum_support(
+            voting_blocks
+                .iter()
+                .filter(|b| {
+                    voters_for_leaders.contains(&(leader_ref, *b.reference()))
+                        && b.strong_vote() == Some(false)
+                })
+                .map(|b| b.author()),
+        );
         if has_strong_blame_quorum {
             return Some(CommitMetastate::Std);
         }
@@ -378,13 +354,13 @@ impl BaseCommitter {
         let decision_round = self.decision_round(wave);
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 
-        let mut strong_qc_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for decision_block in &decision_blocks {
-            if self.carries_strong_qc(decision_block, leader_block, voters_for_leaders) {
-                if strong_qc_aggregator.add(decision_block.author(), &self.committee) {
-                    return Some(CommitMetastate::Opt);
-                }
-            }
+        if self.has_quorum_support(
+            decision_blocks
+                .iter()
+                .filter(|b| self.carries_strong_qc(b, leader_block, voters_for_leaders))
+                .map(|b| b.author()),
+        ) {
+            return Some(CommitMetastate::Opt);
         }
 
         Some(CommitMetastate::Pending)
@@ -466,8 +442,7 @@ impl BaseCommitter {
             .into_iter()
             .filter(|l| self.enough_leader_support(decision_round, l, voters_for_leaders))
             .map(|l| {
-                let metastate =
-                    self.determine_metastate(&l, voting_round, voters_for_leaders);
+                let metastate = self.determine_metastate(&l, voting_round, voters_for_leaders);
                 LeaderStatus::Commit(l, metastate)
             })
             .collect();
