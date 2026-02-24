@@ -226,12 +226,12 @@ impl CommitObserver for RealCommitHandler {
             hasher.update(commit.0.anchor.digest.as_ref());
             self.commit_digest = *hasher.finalize().as_bytes();
 
-            self.metrics
-                .commit_index
-                .set(self.committed_leaders.len() as i64);
-            self.metrics.commit_digest.set(i64::from_le_bytes(
-                self.commit_digest[..8].try_into().unwrap(),
-            ));
+            let commit_index = self.committed_leaders.len();
+            self.metrics.commit_index.set(commit_index as i64);
+            if commit_index % 200 == 0 {
+                let digest_short = u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
+                self.metrics.commit_digest.set(digest_short as i64);
+            }
 
             for block in &commit.0.blocks {
                 let gap = commit.0.anchor.round.saturating_sub(block.round());
