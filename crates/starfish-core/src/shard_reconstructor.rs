@@ -232,10 +232,7 @@ impl ShardReconstructor {
                             );
 
                             if let Some(storage_block) = result {
-                                metrics
-                                    .reconstructed_blocks_total
-                                    .with_label_values(&["shard_reconstructor"])
-                                    .inc();
+                                metrics.reconstructed_blocks_total.inc();
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
                                 if result_tx
@@ -504,7 +501,7 @@ mod tests {
         let own_id: AuthorityIndex = 0;
 
         let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee));
+        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));
@@ -568,7 +565,7 @@ mod tests {
         let own_id: AuthorityIndex = 0;
 
         let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee));
+        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));
