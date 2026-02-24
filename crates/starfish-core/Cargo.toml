@@ -22,7 +22,7 @@ rs_merkle = "1.4.2"
 
 minibytes = { path = "../third-party/minibytes", default_features = false, features = ["frommmap"] }
 parking_lot = "0.12.1"
-prometheus = "0.13.3"
+prometheus = { version = "0.13.3", features = ["process"] }
 
 blake3 = "1.5.5"
 bytes = "1.4.0"

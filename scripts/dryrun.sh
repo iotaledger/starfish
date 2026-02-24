@@ -11,6 +11,7 @@ BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb} #Options:| "t
                                                       #| "equivocating-two-chains" |"equivocating-chains" | "equivocating-chains-bomb"|
 TEST_TIME=${TEST_TIME:-300}               # Total test duration in seconds
 # UNIFORM_LATENCY_MS=100              # Optional: set to use uniform latency (ms) instead of AWS RTT table
+DATA_DIR="scripts/data"              # Directory for logs and validator storage
 REMOVE_VOLUMES=1                    # Set to 1 to clear Grafana/Prometheus volumes
 
 # Calculate TPS per validator
@@ -26,13 +27,32 @@ CYAN=$(tput setaf 6)
 RESET=$(tput sgr0)
 
 #------------------------------------------------------------------------------
+# Signal Handling
+#------------------------------------------------------------------------------
+cleanup() {
+    echo -e "\n${RED}Terminating experiment...${RESET}"
+    tmux kill-server 2>/dev/null || true
+    # Always remove validator databases
+    rm -rf "$DATA_DIR"/dryrun-validator-*/
+}
+
+cleanup_interrupt() {
+    cleanup
+    # On interrupt, also remove logs
+    rm -f "$DATA_DIR"/*.ansi
+    exit 1
+}
+
+trap cleanup_interrupt INT
+
+#------------------------------------------------------------------------------
 # Cleanup Previous Run
 #------------------------------------------------------------------------------
 tmux kill-server || true
 # Remove old logs and validator directories
 echo -e "${CYAN}Cleaning up previous run data...${RESET}"
-find . -type f -name "*.ansi" -exec rm {} \; > /dev/null 2>&1
-find . -type d -name "dryrun-validator*" -exec rm -r {} + > /dev/null 2>&1
+rm -rf "$DATA_DIR"
+mkdir -p "$DATA_DIR"
 
 #------------------------------------------------------------------------------
 # Monitoring Setup
@@ -108,7 +128,7 @@ starfish_core::threshold_core=trace,starfish_core::syncer=trace,
 BYZANTINE_COUNT=0
 for ((i=0; i<NUM_VALIDATORS; i++)); do
   SESSION_NAME="validator_$i"
-  LOG_FILE="validator_${i}.log.ansi"
+  LOG_FILE="$DATA_DIR/validator_${i}.log.ansi"
 
   # Determine if this validator should be Byzantine
   if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
@@ -135,6 +155,7 @@ for ((i=0; i<NUM_VALIDATORS; i++)); do
     $LATENCY_FLAGS \
     --authority $i \
     --consensus $CONSENSUS \
+    --data-dir $DATA_DIR \
     $EXTRA_FLAGS \
     2>&1 | tee $LOG_FILE"
 done
@@ -149,6 +170,4 @@ echo -e "${CYAN}Credentials: admin/admin${RESET}"
 
 sleep "$TEST_TIME"
 
-# Cleanup
-echo -e "${RED}Terminating experiment...${RESET}"
-tmux kill-server
+cleanup
