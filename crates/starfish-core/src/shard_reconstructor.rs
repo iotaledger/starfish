@@ -234,6 +234,7 @@ impl ShardReconstructor {
                                     .reconstructed_blocks_total
                                     .with_label_values(&["shard_reconstructor"])
                                     .inc();
+                                metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!(
                                     "Worker reconstructed block {:?}",
                                     block_reference
@@ -249,6 +250,7 @@ impl ShardReconstructor {
                                     break;
                                 }
                             } else {
+                                metrics.shard_reconstruction_failed_total.inc();
                                 tracing::warn!(
                                     "Worker failed to reconstruct block {:?}",
                                     block_reference
@@ -264,6 +266,7 @@ impl ShardReconstructor {
 
     async fn run(&mut self) {
         self.start_workers();
+        self.update_backlog_metrics();
 
         let flush_timeout = sleep_until(Instant::now() + SEND_TO_CORE_TIMEOUT);
         tokio::pin!(flush_timeout);
@@ -342,25 +345,35 @@ impl ShardReconstructor {
                         .is_err()
                     {
                         tracing::warn!("Worker channel closed");
+                    } else {
+                        self.metrics.shard_reconstruction_jobs_total.inc();
                     }
                 }
             }
             ShardMessage::FullBlock(block_reference) => {
                 self.processed_blocks.insert(block_reference);
-                self.shard_accumulators.remove(&block_reference);
+                let cancelled = self.shard_accumulators.remove(&block_reference).is_some()
+                    || self.reconstruction_queue.remove(&block_reference);
+                if cancelled {
+                    self.metrics.shard_reconstruction_cancelled_total.inc();
+                }
             }
         }
+        self.update_backlog_metrics();
     }
 
     fn handle_reconstruction_result(&mut self, result: ReconstructedBlock) {
         let block_reference = result.block_reference;
+        if !self.reconstruction_queue.remove(&block_reference) {
+            return;
+        }
         self.processed_blocks.insert(block_reference);
-        self.reconstruction_queue.remove(&block_reference);
 
         let storage_block = result.storage_block;
         let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
         self.pending_decoded
             .push((Data::new(storage_block), Data::new(transmission_block)));
+        self.update_backlog_metrics();
     }
 
     async fn flush_to_core(&mut self) {
@@ -371,6 +384,7 @@ impl ShardReconstructor {
         if self.decoded_tx.send(blocks).await.is_err() {
             tracing::warn!("Decoded blocks channel closed");
         }
+        self.update_backlog_metrics();
     }
 
     fn evict_memory(&mut self) {
@@ -386,6 +400,19 @@ impl ShardReconstructor {
         };
         self.shard_accumulators = self.shard_accumulators.split_off(&threshold);
         self.processed_blocks = self.processed_blocks.split_off(&threshold);
+        self.update_backlog_metrics();
+    }
+
+    fn update_backlog_metrics(&self) {
+        self.metrics
+            .shard_reconstruction_pending_accumulators
+            .set(self.shard_accumulators.len() as i64);
+        self.metrics
+            .shard_reconstruction_queued_jobs
+            .set(self.reconstruction_queue.len() as i64);
+        self.metrics
+            .shard_reconstruction_pending_decoded_blocks
+            .set(self.pending_decoded.len() as i64);
     }
 }
 
