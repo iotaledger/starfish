@@ -22,7 +22,7 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
-        linearizer::CommittedSubDag,
+        linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
         CommitMetastate,
     },
@@ -652,14 +652,13 @@ impl<H: BlockHandler> Core<H> {
         sequence
     }
 
-    pub fn cleanup(&self) {
-        const RETAIN_BELOW_COMMIT_ROUNDS: RoundNumber = 50;
-
-        self.block_store.cleanup(
-            self.last_commit_leader
-                .round()
-                .saturating_sub(RETAIN_BELOW_COMMIT_ROUNDS),
-        );
+    pub fn cleanup(&self) -> RoundNumber {
+        let threshold = self
+            .last_commit_leader
+            .round()
+            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
+        self.block_store.cleanup(threshold);
+        threshold
     }
 
     /// This only checks readiness in terms of helping liveness for commit rule,

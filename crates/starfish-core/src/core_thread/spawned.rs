@@ -150,7 +150,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::Cleanup(sender) => {
-                    self.syncer.core().cleanup();
+                    self.syncer.cleanup();
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ConnectionEstablished(authority, sender) => {

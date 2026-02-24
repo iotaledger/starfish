@@ -17,7 +17,7 @@ use crate::{
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, Transaction},
+    types::{AuthorityIndex, BlockReference, RoundNumber, Transaction},
 };
 use tokio::sync::mpsc;
 
@@ -297,6 +297,10 @@ impl CommitObserver for RealCommitHandler {
         assert!(self.commit_interpreter.committed.is_empty());
         self.commit_interpreter.committed_slots =
             committed.iter().map(|r| (r.round, r.authority)).collect();
-        self.commit_interpreter.committed = committed;
+        self.commit_interpreter.committed = committed.into_iter().collect();
+    }
+
+    fn cleanup(&mut self, threshold_round: RoundNumber) {
+        self.commit_interpreter.cleanup(threshold_round);
     }
 }

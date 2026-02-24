@@ -19,7 +19,7 @@ use crate::rocks_store::RocksStore;
 use crate::types::{CachedStatementBlock, VerifiedStatementBlock};
 use crate::{
     committee::Committee,
-    consensus::linearizer::CommittedSubDag,
+    consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     state::{RecoveredState, RecoveredStateBuilder},
@@ -839,15 +839,14 @@ impl BlockStoreInner {
         tracing::debug!("Unloaded {unloaded} entries from block store cache");
 
         // Evict dag metadata below the min committed round across all authorities,
-        // with a safety margin of 50 rounds
-        const DAG_SAFETY_MARGIN: RoundNumber = 50;
+        // with a safety margin of 2 * MAX_TRAVERSAL_DEPTH
         let dag_threshold = self
             .last_committed_round
             .iter()
             .copied()
             .min()
             .unwrap_or(0)
-            .saturating_sub(DAG_SAFETY_MARGIN);
+            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
         if dag_threshold > 0 {
             let dag_kept = self.dag.split_off(&dag_threshold);
             self.dag = dag_kept;

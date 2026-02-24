@@ -8,10 +8,15 @@ use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 use crate::types::{AuthorityIndex, RoundNumber};
-use crate::{block_store::BlockStore, types::BlockReference};
+use crate::{
+    block_store::BlockStore,
+    types::{BlockDigest, BlockReference},
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::{collections::HashSet, fmt};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+pub const MAX_TRAVERSAL_DEPTH: RoundNumber = 50;
 
 /// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
 /// sort the blocks within each sub-dag (but using a deterministic algorithm).
@@ -38,24 +43,36 @@ impl CommittedSubDag {
 /// Expand a committed sequence of leader into a sequence of sub-dags.
 pub struct Linearizer {
     /// Keep track of all committed blocks to avoid committing the same block twice.
-    pub committed: HashSet<BlockReference>,
+    pub committed: BTreeSet<BlockReference>,
     /// Keep track of committed slots (round, author) to avoid sequencing the same
     /// transaction data twice — e.g. via both the optimistic and standard paths.
-    pub committed_slots: HashSet<(RoundNumber, AuthorityIndex)>,
-    pub traversed_blocks: HashSet<BlockReference>,
-    pub votes: HashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
+    pub committed_slots: BTreeSet<(RoundNumber, AuthorityIndex)>,
+    pub traversed_blocks: BTreeSet<BlockReference>,
+    pub votes: BTreeMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     pub committee: Committee,
 }
 
 impl Linearizer {
     pub fn new(committee: Committee) -> Self {
         Self {
-            committed: HashSet::new(),
-            committed_slots: HashSet::new(),
-            traversed_blocks: HashSet::new(),
-            votes: HashMap::new(),
+            committed: BTreeSet::new(),
+            committed_slots: BTreeSet::new(),
+            traversed_blocks: BTreeSet::new(),
+            votes: BTreeMap::new(),
             committee,
         }
+    }
+
+    pub fn cleanup(&mut self, threshold_round: RoundNumber) {
+        let split_ref = BlockReference {
+            authority: 0,
+            round: threshold_round,
+            digest: BlockDigest::default(),
+        };
+        self.committed = self.committed.split_off(&split_ref);
+        self.traversed_blocks = self.traversed_blocks.split_off(&split_ref);
+        self.votes = self.votes.split_off(&split_ref);
+        self.committed_slots = self.committed_slots.split_off(&(threshold_round, 0));
     }
     /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
     /// have already been committed (within previous sub-dags).
@@ -67,6 +84,7 @@ impl Linearizer {
         let mut to_commit = Vec::new();
 
         let leader_block_ref = *leader_block.reference();
+        let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
         let mut buffer = vec![leader_block];
         assert!(self.committed.insert(leader_block_ref));
         while let Some(x) = buffer.pop() {
@@ -74,6 +92,9 @@ impl Linearizer {
             let s = self.votes.entry(*x.reference()).or_default();
             s.add(leader_block_ref.authority, &self.committee);
             for reference in x.includes() {
+                if reference.round < min_round {
+                    continue;
+                }
                 // The block manager may have cleaned up blocks passed the latest committed rounds.
                 let block = block_store
                     .get_storage_block(*reference)
@@ -97,14 +118,16 @@ impl Linearizer {
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
+        let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
         let mut buffer = vec![leader_block];
         let mut blocks_transaction_data_quorum = vec![];
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
             for acknowledgement_statement in x.acknowledgement_statements() {
-                // Todo the authority creating the block might automatically acknowledge for its block
-
+                if acknowledgement_statement.round < min_round {
+                    continue;
+                }
                 let s = self.votes.entry(*acknowledgement_statement).or_default();
                 if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
                     blocks_transaction_data_quorum.push(*acknowledgement_statement);
@@ -112,7 +135,9 @@ impl Linearizer {
             }
             self.traversed_blocks.insert(*x.reference());
             for reference in x.includes() {
-                // Skip the block if it is too far back
+                if reference.round < min_round {
+                    continue;
+                }
                 if self.traversed_blocks.contains(reference) {
                     continue;
                 }
