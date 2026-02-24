@@ -2,17 +2,17 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use minibytes::Bytes;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::Path;
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::Path,
     sync::Arc,
     time::Instant,
 };
+
+use minibytes::Bytes;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 
 use crate::committee::{QuorumThreshold, StakeAggregator};
 use crate::rocks_store::RocksStore;
@@ -25,6 +25,9 @@ use crate::{
     state::{RecoveredState, RecoveredStateBuilder},
     types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber},
 };
+
+/// Bitmask tracking which authorities know about a block. Supports up to 128 authorities.
+type AuthorityBitmask = u128;
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ConsensusProtocol {
@@ -86,10 +89,12 @@ struct BlockStoreInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    // for each authority, the set of unknown blocks
-    not_known_by_authority: Vec<HashSet<BlockReference>>,
+    // for each authority, the set of blocks they don't know about
+    not_known_by_authority: Vec<BTreeSet<BlockReference>>,
     // this dag structure store for each block its predecessors and who knows the block
-    dag: HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)>,
+    dag: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>>,
+    // per-authority highest committed round, used as dag eviction threshold
+    last_committed_round: Vec<RoundNumber>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
@@ -111,13 +116,20 @@ impl BlockStore {
         byzantine_strategy: String,
         consensus: String,
     ) -> RecoveredState {
+        assert!(
+            committee.len() <= 128,
+            "Committee size {} exceeds AuthorityBitmask capacity (128)",
+            committee.len()
+        );
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
-        let not_known_by_authority = committee.authorities().map(|_| HashSet::new()).collect();
+        let not_known_by_authority = committee.authorities().map(|_| BTreeSet::new()).collect();
+        let last_committed_round = committee.authorities().map(|_| 0).collect();
         let mut inner = BlockStoreInner {
             authority,
             last_seen_by_authority,
             not_known_by_authority,
+            last_committed_round,
             info_length: committee.info_length(),
             committee_size: committee.len(),
             ..Default::default()
@@ -191,29 +203,28 @@ impl BlockStore {
         builder.build(rocks_store, block_store)
     }
 
-    pub fn get_dag(
-        &self,
-    ) -> HashMap<BlockReference, (Vec<BlockReference>, HashSet<AuthorityIndex>)> {
-        self.inner.read().dag.clone()
-    }
-
     pub fn get_dag_sorted(
         &self,
-    ) -> Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> {
-        let mut dag: Vec<(BlockReference, Vec<BlockReference>, HashSet<AuthorityIndex>)> = self
-            .get_dag()
+    ) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
+        let inner = self.inner.read();
+        // BTreeMap is already sorted by round
+        inner
+            .dag
             .iter()
-            .map(|(block_reference, refs_and_indices)| {
-                (
-                    *block_reference,
-                    refs_and_indices.0.clone(),
-                    refs_and_indices.1.clone(),
-                )
+            .flat_map(|(round, map)| {
+                map.iter().map(move |((authority, digest), (parents, known_by))| {
+                    (
+                        BlockReference {
+                            authority: *authority,
+                            round: *round,
+                            digest: *digest,
+                        },
+                        parents.clone(),
+                        *known_by,
+                    )
+                })
             })
-            .collect();
-
-        dag.sort_by_key(|(block_reference, _, _)| block_reference.round());
-        dag
+            .collect()
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
@@ -223,7 +234,7 @@ impl BlockStore {
     pub fn get_unknown_by_authority(
         &self,
         authority_index: AuthorityIndex,
-    ) -> HashSet<BlockReference> {
+    ) -> BTreeSet<BlockReference> {
         self.inner.read().not_known_by_authority[authority_index as usize].clone()
     }
 
@@ -270,7 +281,7 @@ impl BlockStore {
             Data<VerifiedStatementBlock>,
         ),
     ) {
-        let authority_index_start = 0 as AuthorityIndex;
+        let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(
             storage_and_transmission_blocks,
@@ -413,14 +424,12 @@ impl BlockStore {
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for ((authority, _), entry) in blocks {
             if let IndexEntry::Loaded((storage_block, _)) = entry {
-                if storage_block
+                let votes_for_leader = storage_block
                     .includes()
                     .iter()
-                    .any(|r| r.authority == leader && r.round == leader_round)
-                {
-                    if aggregator.add(*authority, committee) {
-                        return true;
-                    }
+                    .any(|r| r.authority == leader && r.round == leader_round);
+                if votes_for_leader && aggregator.add(*authority, committee) {
+                    return true;
                 }
             }
         }
@@ -441,10 +450,10 @@ impl BlockStore {
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for ((authority, _), entry) in blocks {
             if let IndexEntry::Loaded((storage_block, _)) = entry {
-                if storage_block.strong_vote() == Some(true) {
-                    if aggregator.add(*authority, committee) {
-                        return true;
-                    }
+                if storage_block.strong_vote() == Some(true)
+                    && aggregator.add(*authority, committee)
+                {
+                    return true;
                 }
             }
         }
@@ -492,6 +501,16 @@ impl BlockStore {
 
     pub fn highest_round(&self) -> RoundNumber {
         self.inner.read().highest_round
+    }
+
+    pub fn update_committed_rounds(&self, committed_blocks: &[Data<VerifiedStatementBlock>]) {
+        let mut inner = self.inner.write();
+        for block in committed_blocks {
+            let authority = block.author() as usize;
+            if let Some(slot) = inner.last_committed_round.get_mut(authority) {
+                *slot = (*slot).max(block.round());
+            }
+        }
     }
 
     pub fn cleanup(&self, threshold_round: RoundNumber) {
@@ -699,53 +718,31 @@ impl BlockStoreInner {
         if block.statements().is_some() {
             return true;
         }
-        // If the block is not in the cache
-        if !self.cached_blocks.contains_key(block_reference) {
+        let Some(cached) = self.cached_blocks.get(block_reference) else {
+            // Block is not in the cache yet
             return true;
-        }
-        // the header is in the cached block in this place
-        // we need at least a shard to update
-        if block.encoded_shard().is_none() {
+        };
+        // The header is already cached; we need a new shard to make progress
+        let Some((_, shard_index)) = block.encoded_shard().as_ref() else {
             return false;
-        }
-        let (_, shard_index) = block
-            .encoded_shard()
-            .as_ref()
-            .expect("It should be some because of the above check");
-        let cached_block = &self
-            .cached_blocks
-            .get(block_reference)
-            .expect("Cached block missing")
-            .0;
-        if cached_block.encoded_statements()[*shard_index].is_none() {
-            return true;
-        }
-        false
+        };
+        cached.0.encoded_statements()[*shard_index].is_none()
     }
 
-    // Chech whether the block can be reconstructed with a new shard
+    // Check whether the block can be reconstructed with a new shard
     pub fn ready_to_reconstruct(
         &self,
         block: &VerifiedStatementBlock,
     ) -> (bool, Option<CachedStatementBlock>) {
-        if block.encoded_shard().is_none() || !self.cached_blocks.contains_key(block.reference()) {
+        let Some((_, shard_index)) = block.encoded_shard().as_ref() else {
             return (false, None);
-        }
-        let (_, shard_index) = block
-            .encoded_shard()
-            .as_ref()
-            .expect("It should be some because of the above check");
-        let cached_block = &self
-            .cached_blocks
-            .get(block.reference())
-            .expect("Cached block missing")
-            .0;
+        };
+        let Some((cached_block, _)) = self.cached_blocks.get(block.reference()) else {
+            return (false, None);
+        };
         if cached_block.encoded_statements()[*shard_index].is_none() {
-            let shard_count = 1 + cached_block
-                .encoded_statements()
-                .iter()
-                .filter(|s| s.is_some())
-                .count();
+            let shard_count =
+                1 + cached_block.encoded_statements().iter().filter(|s| s.is_some()).count();
             if shard_count >= self.info_length {
                 return (true, Some(cached_block.clone()));
             }
@@ -776,11 +773,7 @@ impl BlockStoreInner {
     }
 
     pub fn is_sufficient_shards(&self, block_reference: &BlockReference) -> bool {
-        let count_shards = self.shard_count(block_reference);
-        if count_shards >= self.info_length {
-            return true;
-        }
-        false
+        self.shard_count(block_reference) >= self.info_length
     }
 
     pub fn get_cached_block(&self, block_reference: &BlockReference) -> CachedStatementBlock {
@@ -829,12 +822,7 @@ impl BlockStoreInner {
         let mut unloaded = 0usize;
 
         // Keep the index entries but unload the actual block data from RAM
-        for (round, map) in self.index.iter_mut() {
-            if *round > threshold_round {
-                continue;
-            }
-
-            // Only remove blocks from cache, keeping the references
+        for (round, map) in self.index.range_mut(..=threshold_round) {
             for ((authority, digest), entry) in map.iter_mut() {
                 if let IndexEntry::Loaded(_block) = entry {
                     unloaded += 1;
@@ -849,6 +837,31 @@ impl BlockStoreInner {
         }
 
         tracing::debug!("Unloaded {unloaded} entries from block store cache");
+
+        // Evict dag metadata below the min committed round across all authorities,
+        // with a safety margin of 50 rounds
+        const DAG_SAFETY_MARGIN: RoundNumber = 50;
+        let dag_threshold = self
+            .last_committed_round
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(DAG_SAFETY_MARGIN);
+        if dag_threshold > 0 {
+            let dag_kept = self.dag.split_off(&dag_threshold);
+            self.dag = dag_kept;
+
+            let split_ref = BlockReference {
+                authority: 0,
+                round: dag_threshold,
+                digest: BlockDigest::default(),
+            };
+            for set in self.not_known_by_authority.iter_mut() {
+                *set = set.split_off(&split_ref);
+            }
+        }
+
         unloaded
     }
 
@@ -909,8 +922,7 @@ impl BlockStoreInner {
         );
         self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);
     }
-    // Update not known by authorities when the block gets recoverable after decoding
-    // This will send the block to others
+
     pub fn updated_unknown_by_others(&mut self, block_reference: BlockReference) {
         for authority in 0..self.not_known_by_authority.len() {
             if authority == self.authority as usize
@@ -922,26 +934,40 @@ impl BlockStoreInner {
         }
     }
 
-    // Upon updating the local DAG with a block, we know that the authority created this block is aware of the causal history
-    // of the block, and we assume that others are not aware of this block
+    fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
+        self.dag.get(&r.round)?.get(&(r.authority, r.digest))
+    }
+
+    fn dag_get_mut(
+        &mut self,
+        r: &BlockReference,
+    ) -> Option<&mut (Vec<BlockReference>, AuthorityBitmask)> {
+        self.dag
+            .get_mut(&r.round)?
+            .get_mut(&(r.authority, r.digest))
+    }
+
+    fn dag_contains(&self, r: &BlockReference) -> bool {
+        self.dag_get(r).is_some()
+    }
+
+    fn dag_insert(&mut self, r: BlockReference, val: (Vec<BlockReference>, AuthorityBitmask)) {
+        self.dag
+            .entry(r.round)
+            .or_default()
+            .insert((r.authority, r.digest), val);
+    }
+
+    /// Insert a block into the DAG and propagate "known-by" bits along the causal history.
     pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         if block_reference.round == 0 {
             return;
         }
-        // don't update if it is already there
-        if self.dag.contains_key(&block_reference) {
+        if self.dag_contains(&block_reference) {
             return;
         }
-        // update information about block_reference
-        self.dag.insert(
-            block_reference,
-            (
-                parents,
-                vec![block_reference.authority, self.authority]
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-            ),
-        );
+        let known_by = (1u128 << block_reference.authority) | (1u128 << self.authority);
+        self.dag_insert(block_reference, (parents, known_by));
         for authority in 0..self.not_known_by_authority.len() {
             if authority == self.authority as usize
                 || authority == block_reference.authority as usize
@@ -955,13 +981,19 @@ impl BlockStoreInner {
         let mut buffer = vec![block_reference];
 
         while let Some(block_reference) = buffer.pop() {
-            let (parents, _) = self.dag.get(&block_reference).unwrap().clone();
+            let Some((parents, _)) = self.dag_get(&block_reference).cloned() else {
+                continue; // evicted
+            };
             for parent in parents {
                 if parent.round == 0 {
                     continue;
                 }
-                let (_, known_by) = self.dag.get_mut(&parent).unwrap();
-                if known_by.insert(authority) {
+                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
+                    continue; // evicted
+                };
+                let bit = 1u128 << authority;
+                if *known_by & bit == 0 {
+                    *known_by |= bit;
                     self.not_known_by_authority[authority as usize].remove(&parent);
                     buffer.push(parent);
                 }
@@ -970,11 +1002,7 @@ impl BlockStoreInner {
     }
 
     pub fn update_data_availability_and_cached_blocks(&mut self, block: &VerifiedStatementBlock) {
-        let count = if block.encoded_shard().is_some() {
-            1
-        } else {
-            0
-        };
+        let count = usize::from(block.encoded_shard().is_some());
 
         if block.statements().is_some() {
             if !self.data_availability.contains(block.reference()) {
@@ -994,16 +1022,11 @@ impl BlockStoreInner {
     }
 
     pub fn get_pending_acknowledgment(&mut self, round_number: RoundNumber) -> Vec<BlockReference> {
-        // Partition the vector into two parts: one to keep, and one to return
         let (to_return, to_keep): (Vec<_>, Vec<_>) = self
             .pending_acknowledgment
             .drain(..)
             .partition(|x| x.round <= round_number);
-
-        // Replace the original vector with the elements to keep
         self.pending_acknowledgment = to_keep;
-
-        // Return the filtered elements
         to_return
     }
 
@@ -1013,8 +1036,9 @@ impl BlockStoreInner {
         authority: AuthorityIndex,
     ) {
         self.not_known_by_authority[authority as usize].remove(&block_reference);
-        let (_, known_by) = self.dag.get_mut(&block_reference).unwrap();
-        known_by.insert(authority);
+        if let Some((_, known_by)) = self.dag_get_mut(&block_reference) {
+            *known_by |= 1u128 << authority;
+        }
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -1029,12 +1053,9 @@ impl BlockStoreInner {
             .last_seen_by_authority
             .get_mut(reference.authority as usize)
             .expect("last_seen_by_authority not found");
-        if reference.round() > *last_seen {
-            *last_seen = reference.round();
-        }
+        *last_seen = (*last_seen).max(reference.round());
     }
 
-    // Function returns which own blocks are intended to which authority
     pub fn get_own_blocks(
         &self,
         to_whom_index: AuthorityIndex,
@@ -1042,7 +1063,8 @@ impl BlockStoreInner {
         limit: usize,
     ) -> Vec<IndexEntry> {
         self.own_blocks
-            .range((from_excluded + 1, 0 as AuthorityIndex)..)
+            .range((from_excluded + 1, 0)..)
+
             .filter(|((_round, authority_index), _digest)| *authority_index == to_whom_index)
             .take(limit)
             .map(|((round, _authority_index), digest)| {
@@ -1051,11 +1073,8 @@ impl BlockStoreInner {
                     round: *round,
                     digest: *digest,
                 };
-                if let Some(block) = self.get_block(reference) {
-                    block
-                } else {
-                    panic!("Own block index corrupted, not found: {reference}");
-                }
+                self.get_block(reference)
+                    .unwrap_or_else(|| panic!("Own block index corrupted, not found: {reference}"))
             })
             .collect()
     }
@@ -1167,13 +1186,14 @@ impl BlockStoreInner {
             self.last_own_block = Some(*reference);
         }
         for authority_index in authority_index_start..authority_index_end {
-            assert!(self
-                .own_blocks
-                .insert(
-                    (reference.round, authority_index as AuthorityIndex),
-                    reference.digest
-                )
-                .is_none());
+            assert!(
+                self.own_blocks
+                    .insert((reference.round, authority_index), reference.digest)
+                    .is_none(),
+                "Duplicate own block at round {} for authority {}",
+                reference.round,
+                authority_index,
+            );
         }
     }
 

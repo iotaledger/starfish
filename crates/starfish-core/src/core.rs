@@ -141,7 +141,7 @@ impl<H: BlockHandler> Core<H> {
             pending,
             last_own_block: vec![OwnBlockData {
                 storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
-                authority_index_start: 0 as AuthorityIndex,
+                authority_index_start: 0,
                 authority_index_end: committee.len() as AuthorityIndex,
             }],
             block_handler,
@@ -332,7 +332,7 @@ impl<H: BlockHandler> Core<H> {
         // Check if we're ready for a new block
         let clock_round = self.threshold_clock.get_round();
         tracing::debug!(
-            "Attemp to construct block in round {}. Current pending: {:?}",
+            "Attempt to construct block in round {}. Current pending: {:?}",
             clock_round,
             self.pending
         );
@@ -717,6 +717,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
         let mut commit_data = vec![];
         for commit in &committed {
+            self.block_store.update_committed_rounds(&commit.blocks);
             for block in &commit.blocks {
                 self.epoch_manager
                     .observe_committed_block(block, &self.committee);
