@@ -35,7 +35,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 use tokio::time::Instant;
 use tokio::{
     select,
@@ -591,8 +591,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         let now = Instant::now();
                         let mut authorities_with_missing_blocks = self
                             .authorities_with_missing_blocks_by_myself_from_peer
-                            .write()
-                            .await;
+                            .write();
                         tracing::debug!(
                             "Authorities updates for peer {:?} are {:?}",
                             self.peer,
@@ -635,8 +634,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         );
         let mut guard = self
             .authorities_with_missing_blocks_by_peer_from_me
-            .write()
-            .await;
+            .write();
         for authority in authorities {
             guard[authority as usize] = now;
         }
