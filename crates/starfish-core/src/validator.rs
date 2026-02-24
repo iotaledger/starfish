@@ -60,11 +60,6 @@ impl Validator {
 
         // Boot the prometheus server.
         let registry = Registry::new();
-        #[cfg(target_os = "linux")]
-        {
-            let pc = prometheus::ProcessCollector::for_self();
-            registry.register(Box::new(pc)).unwrap();
-        }
         let (metrics, reporter) = Metrics::new(&registry, Some(&committee));
         reporter.clone().start();
         let metrics_handle =

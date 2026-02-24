@@ -1718,8 +1718,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(process_cpu_seconds_total[1m])",
-          "legendFormat": "{{instance}}",
+          "expr": "1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))",
+          "legendFormat": "cpu busy",
           "range": true,
           "refId": "A"
         }
@@ -1797,8 +1797,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "process_resident_memory_bytes / 1024 / 1024",
-          "legendFormat": "{{instance}}",
+          "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1024 / 1024",
+          "legendFormat": "used",
           "range": true,
           "refId": "A"
         }

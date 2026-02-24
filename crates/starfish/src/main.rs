@@ -79,6 +79,9 @@ enum Operation {
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
+        /// Base IP for validators (IPs assigned as base_ip+0, base_ip+1, ...). Default: 127.0.0.1
+        #[clap(long, value_name = "IP")]
+        base_ip: Option<IpAddr>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -146,6 +149,7 @@ async fn main() -> Result<()> {
             uniform_latency_ms,
             consensus: consensus_protocol,
             data_dir,
+            base_ip,
         } => {
             dryrun(
                 authority,
@@ -156,6 +160,7 @@ async fn main() -> Result<()> {
                 uniform_latency_ms,
                 consensus_protocol,
                 data_dir,
+                base_ip,
             )
             .await?
         }
@@ -465,11 +470,24 @@ async fn dryrun(
     uniform_latency_ms: Option<f64>,
     consensus_protocol: String,
     data_dir: Option<PathBuf>,
+    base_ip: Option<IpAddr>,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
     );
-    let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
+    let ips: Vec<IpAddr> = match base_ip {
+        Some(IpAddr::V4(v4)) => (0..committee_size)
+            .map(|i| {
+                let mut octets = v4.octets();
+                octets[3] = octets[3]
+                    .checked_add(i as u8)
+                    .expect("base-ip overflow: too many validators for last octet");
+                IpAddr::V4(Ipv4Addr::from(octets))
+            })
+            .collect(),
+        Some(_) => eyre::bail!("--base-ip must be an IPv4 address"),
+        None => vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size],
+    };
     let committee = Committee::new_for_benchmarks(committee_size);
     let client_parameters = ClientParameters::almost_default(load);
     let mut node_parameters = NodeParameters::default_with_latency(mimic_latency);
