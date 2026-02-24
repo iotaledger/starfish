@@ -42,7 +42,7 @@ use tokio::{
     sync::{mpsc, oneshot, Notify},
 };
 
-const MAX_FILTER_SIZE: usize = 10000;
+const MAX_FILTER_SIZE: usize = 100_000;
 
 struct FilterForBlocks {
     info_length: usize,

@@ -76,7 +76,7 @@ pub struct BlockStore {
 struct BlockStoreInner {
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
-    data_availability: HashSet<BlockReference>,
+    data_availability: BTreeSet<BlockReference>,
     // Blocks for which has available transactions data and didn't yet acknowledge.
     pending_acknowledgment: Vec<BlockReference>,
     // Store the blocks until the transaction data gets recoverable
@@ -99,13 +99,7 @@ struct BlockStoreInner {
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
-#[derive(Clone, Debug)]
-enum IndexEntry {
-    // Block needs to be loaded from RocksDB
-    Unloaded(BlockReference),
-    // Block is currently in memory
-    Loaded((Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)),
-}
+type IndexEntry = (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>);
 
 impl BlockStore {
     pub fn open(
@@ -303,41 +297,31 @@ impl BlockStore {
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        // First try to get from memory
-        let entry = self.inner.read().get_block(reference);
-        match entry {
-            Some(IndexEntry::Loaded(blocks)) => Some(blocks.0),
-            Some(IndexEntry::Unloaded(block_ref)) => {
-                // If not in memory, get from RocksDB
-                self.rocks_store
-                    .get_block(&block_ref)
-                    .expect("Failed to read from RocksDB")
-            }
-            None => None,
+        if let Some(blocks) = self.inner.read().get_block(reference) {
+            return Some(blocks.0);
         }
+        // Not in memory — fall back to RocksDB
+        self.rocks_store
+            .get_block(&reference)
+            .expect("Failed to read from RocksDB")
     }
 
     pub fn get_transmission_block(
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        // First try to get from memory
-        let entry = self.inner.read().get_block(reference);
-        match entry {
-            Some(IndexEntry::Loaded(blocks)) => Some(blocks.1),
-            Some(IndexEntry::Unloaded(block_ref)) => {
-                // If not in memory, get from RocksDB and create transmission block
-                let own_id = self.inner.read().authority;
-                self.rocks_store
-                    .get_block(&block_ref)
-                    .expect("Failed to read from RocksDB")
-                    .map(|storage_block| {
-                        let transmission_block = storage_block.from_storage_to_transmission(own_id);
-                        Data::new(transmission_block)
-                    })
-            }
-            None => None,
+        if let Some(blocks) = self.inner.read().get_block(reference) {
+            return Some(blocks.1);
         }
+        // Not in memory — fall back to RocksDB
+        let own_id = self.inner.read().authority;
+        self.rocks_store
+            .get_block(&reference)
+            .expect("Failed to read from RocksDB")
+            .map(|storage_block| {
+                let transmission_block = storage_block.from_storage_to_transmission(own_id);
+                Data::new(transmission_block)
+            })
     }
 
     pub fn updated_unknown_by_others(&self, block_reference: BlockReference) {
@@ -422,15 +406,13 @@ impl BlockStore {
             return false;
         };
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for ((authority, _), entry) in blocks {
-            if let IndexEntry::Loaded((storage_block, _)) = entry {
-                let votes_for_leader = storage_block
-                    .includes()
-                    .iter()
-                    .any(|r| r.authority == leader && r.round == leader_round);
-                if votes_for_leader && aggregator.add(*authority, committee) {
-                    return true;
-                }
+        for ((authority, _), (storage_block, _)) in blocks {
+            let votes_for_leader = storage_block
+                .includes()
+                .iter()
+                .any(|r| r.authority == leader && r.round == leader_round);
+            if votes_for_leader && aggregator.add(*authority, committee) {
+                return true;
             }
         }
         false
@@ -448,13 +430,11 @@ impl BlockStore {
             return false;
         };
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for ((authority, _), entry) in blocks {
-            if let IndexEntry::Loaded((storage_block, _)) = entry {
-                if storage_block.strong_vote() == Some(true)
-                    && aggregator.add(*authority, committee)
-                {
-                    return true;
-                }
+        for ((authority, _), (storage_block, _)) in blocks {
+            if storage_block.strong_vote() == Some(true)
+                && aggregator.add(*authority, committee)
+            {
+                return true;
             }
         }
         false
@@ -613,26 +593,7 @@ impl BlockStore {
         &self,
         entry: IndexEntry,
     ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
-        let own_id = self.inner.read().authority;
-        match entry {
-            IndexEntry::Loaded(blocks) => blocks,
-            IndexEntry::Unloaded(reference) => {
-                self.metrics.block_store_loaded_blocks.inc();
-
-                // Get from RocksDB
-                let data_storage_block = self
-                    .rocks_store
-                    .get_block(&reference)
-                    .expect("Failed to read from RocksDB")
-                    .expect("Block not found in RocksDB");
-
-                // Create transmission block
-                let transmission_block = data_storage_block.from_storage_to_transmission(own_id);
-                let data_transmission_block = Data::new(transmission_block);
-
-                (data_storage_block, data_transmission_block)
-            }
-        }
+        entry
     }
 
     fn read_index_storage_vec(
@@ -818,26 +779,7 @@ impl BlockStoreInner {
             .cloned()
     }
 
-    pub fn unload_below_round(&mut self, threshold_round: RoundNumber) -> usize {
-        let mut unloaded = 0usize;
-
-        // Keep the index entries but unload the actual block data from RAM
-        for (round, map) in self.index.range_mut(..=threshold_round) {
-            for ((authority, digest), entry) in map.iter_mut() {
-                if let IndexEntry::Loaded(_block) = entry {
-                    unloaded += 1;
-                    // Convert to unloaded state with reference
-                    *entry = IndexEntry::Unloaded(BlockReference {
-                        round: *round,
-                        authority: *authority,
-                        digest: *digest,
-                    });
-                }
-            }
-        }
-
-        tracing::debug!("Unloaded {unloaded} entries from block store cache");
-
+    pub fn unload_below_round(&mut self, _threshold_round: RoundNumber) -> usize {
         // Evict dag metadata below the min committed round across all authorities,
         // with a safety margin of 2 * MAX_TRAVERSAL_DEPTH
         let dag_threshold = self
@@ -851,6 +793,8 @@ impl BlockStoreInner {
             let dag_kept = self.dag.split_off(&dag_threshold);
             self.dag = dag_kept;
 
+            self.index = self.index.split_off(&dag_threshold);
+
             let split_ref = BlockReference {
                 authority: 0,
                 round: dag_threshold,
@@ -859,9 +803,10 @@ impl BlockStoreInner {
             for set in self.not_known_by_authority.iter_mut() {
                 *set = set.split_off(&split_ref);
             }
+            self.data_availability = self.data_availability.split_off(&split_ref);
         }
 
-        unloaded
+        0
     }
 
     pub fn add_unloaded(
@@ -877,7 +822,10 @@ impl BlockStoreInner {
         self.highest_round = max(self.highest_round, reference.round());
 
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(reference.author_digest(), IndexEntry::Unloaded(*reference));
+        map.insert(
+            reference.author_digest(),
+            data_storage_transmission_blocks.clone(),
+        );
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
@@ -906,7 +854,7 @@ impl BlockStoreInner {
         let map = self.index.entry(reference.round()).or_default();
         map.insert(
             reference.author_digest(),
-            IndexEntry::Loaded(storage_and_transmission_blocks.clone()),
+            storage_and_transmission_blocks.clone(),
         );
 
         tracing::debug!(
