@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{LeaderStatus, WAVE_LENGTH};
+use super::{CommitMetastate, LeaderStatus, WAVE_LENGTH};
 use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
@@ -164,7 +164,28 @@ impl BaseCommitter {
         // We commit the target leader if it has a certificate that is an ancestor of the anchor.
         // Otherwise skip it.
         match certified_leader_blocks.pop() {
-            Some(certified_leader_block) => LeaderStatus::Commit(certified_leader_block.clone()),
+            Some(certified_leader_block) => {
+                // For StarfishS: Opt if path passes through StrongQC, Std otherwise.
+                let metastate =
+                    if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS {
+                        let has_strong = potential_certificates.iter().any(|cert| {
+                            self.is_certificate(cert, &certified_leader_block, voters_for_leaders)
+                                && self.carries_strong_qc(
+                                    cert,
+                                    &certified_leader_block,
+                                    voters_for_leaders,
+                                )
+                        });
+                        if has_strong {
+                            Some(CommitMetastate::Opt)
+                        } else {
+                            Some(CommitMetastate::Std)
+                        }
+                    } else {
+                        None
+                    };
+                LeaderStatus::Commit(certified_leader_block.clone(), metastate)
+            }
             None => LeaderStatus::Skip(leader, leader_round),
         }
     }
@@ -285,6 +306,90 @@ impl BaseCommitter {
         false
     }
 
+    /// Check whether a single round-(r+2) block carries a StrongQC for the leader.
+    /// A block carries StrongQC if its includes contain >=2f+1 round-(r+1) blocks that
+    /// both vote for the leader AND carry `strong_vote == true`.
+    fn carries_strong_qc(
+        &self,
+        decision_block: &Data<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedStatementBlock>,
+        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+    ) -> bool {
+        let leader_ref = *leader_block.reference();
+        let mut strong_vote_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for reference in decision_block.includes() {
+            let voting_block = self
+                .block_store
+                .get_storage_block(*reference)
+                .expect("We should have the whole sub-dag by now");
+
+            if voters_for_leaders.contains(&(leader_ref, *voting_block.reference()))
+                && voting_block.strong_vote() == Some(true)
+            {
+                if strong_vote_aggregator.add(reference.authority, &self.committee) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Determine the commit metastate for StarfishS direct decide.
+    /// Returns `None` for non-StarfishS protocols.
+    /// - Opt: 2f+1 decision blocks each carrying a StrongQC
+    /// - Std: strong blame quorum at the voting round
+    /// - Pending: neither strong vote nor strong blame quorum
+    fn determine_metastate(
+        &self,
+        leader_block: &Data<VerifiedStatementBlock>,
+        voting_round: RoundNumber,
+        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+    ) -> Option<CommitMetastate> {
+        if self.block_store.consensus_protocol != ConsensusProtocol::StarfishS {
+            return None;
+        }
+
+        // Check for strong blame quorum at round r+1.
+        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+        let leader_ref = *leader_block.reference();
+
+        let mut strong_blame_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        let mut has_strong_blame_quorum = false;
+
+        for voting_block in &voting_blocks {
+            let voter = voting_block.reference().authority;
+            if voters_for_leaders.contains(&(leader_ref, *voting_block.reference())) {
+                if voting_block.strong_vote() == Some(false)
+                    && strong_blame_aggregator.add(voter, &self.committee)
+                {
+                    has_strong_blame_quorum = true;
+                }
+            }
+        }
+
+        if has_strong_blame_quorum {
+            return Some(CommitMetastate::Std);
+        }
+
+        // Check for quorum of StrongQCs at round r+2: count decision-round blocks
+        // that each carry a StrongQC, and check if that count reaches 2f+1.
+        let leader_round = voting_round - 1;
+        let wave = self.wave_number(leader_round);
+        let decision_round = self.decision_round(wave);
+        let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
+
+        let mut strong_qc_aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for decision_block in &decision_blocks {
+            if self.carries_strong_qc(decision_block, leader_block, voters_for_leaders) {
+                if strong_qc_aggregator.add(decision_block.author(), &self.committee) {
+                    return Some(CommitMetastate::Opt);
+                }
+            }
+        }
+
+        Some(CommitMetastate::Pending)
+    }
+
     /// Apply the indirect decision rule to the specified leader to see whether we can indirect-commit
     /// or indirect-skip it.
     #[tracing::instrument(skip_all, fields(leader = %format_authority_round(leader, leader_round)))]
@@ -305,7 +410,7 @@ impl BaseCommitter {
             //    format_authority_round(leader, leader_round),
             //);
             match anchor {
-                LeaderStatus::Commit(anchor) => {
+                LeaderStatus::Commit(anchor, _) => {
                     return self.decide_leader_from_anchor(
                         anchor,
                         leader,
@@ -334,7 +439,9 @@ impl BaseCommitter {
         // for that leader (which ensure there will never be a certificate for that leader).
         let voting_round = leader_round + 1;
         match self.block_store.consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => {
                 if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
                     return LeaderStatus::Skip(leader, leader_round);
                 }
@@ -358,7 +465,11 @@ impl BaseCommitter {
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
             .filter(|l| self.enough_leader_support(decision_round, l, voters_for_leaders))
-            .map(LeaderStatus::Commit)
+            .map(|l| {
+                let metastate =
+                    self.determine_metastate(&l, voting_round, voters_for_leaders);
+                LeaderStatus::Commit(l, metastate)
+            })
             .collect();
 
         // There can be at most one leader with enough support for each round, otherwise it means

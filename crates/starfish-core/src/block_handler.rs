@@ -10,7 +10,10 @@ use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
     block_store::BlockStore,
     committee::Committee,
-    consensus::linearizer::{CommittedSubDag, Linearizer},
+    consensus::{
+        linearizer::{CommittedSubDag, Linearizer},
+        CommitMetastate,
+    },
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
@@ -206,7 +209,7 @@ impl CommitObserver for RealCommitHandler {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
+        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = self
             .commit_interpreter
@@ -215,6 +218,9 @@ impl CommitObserver for RealCommitHandler {
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
             for block in &commit.0.blocks {
+                let gap = commit.0.anchor.round.saturating_sub(block.round());
+                self.metrics.commit_gap.observe(gap as f64);
+
                 let block_creation_time = block.meta_creation_time();
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
@@ -289,6 +295,8 @@ impl CommitObserver for RealCommitHandler {
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
+        self.commit_interpreter.committed_slots =
+            committed.iter().map(|r| (r.round, r.authority)).collect();
         self.commit_interpreter.committed = committed;
     }
 }

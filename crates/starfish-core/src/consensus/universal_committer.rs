@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{base_committer::BaseCommitter, LeaderStatus, WAVE_LENGTH};
+use super::{base_committer::BaseCommitter, CommitMetastate, LeaderStatus, WAVE_LENGTH};
 use crate::block_store::ConsensusProtocol;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::{
@@ -23,8 +23,6 @@ pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
-    /// Keep track of all committed blocks to avoid computing the metrics for the same block twice.
-    committed: HashSet<(AuthorityIndex, RoundNumber)>,
 }
 
 impl UniversalCommitter {
@@ -40,6 +38,8 @@ impl UniversalCommitter {
 
         // Try to decide as many leaders as possible, starting with the highest round.
         let mut leaders = VecDeque::new();
+        // Track which leaders were resolved via indirect rule (for metrics).
+        let mut indirect_decided: HashSet<(AuthorityIndex, RoundNumber)> = HashSet::new();
 
         for round in (last_decided_round..=highest_possible_leader_to_decide_round).rev() {
             for committer in self.committers.iter().rev() {
@@ -72,34 +72,28 @@ impl UniversalCommitter {
                     .utilization_timer
                     .utilization_timer("Committer::direct_decide");
                 let mut status = committer.try_direct_decide(leader, round, &voters_for_leaders);
-                if !self.committed.contains(&(leader, round)) {
-                    self.update_metrics(&status, true);
-                }
                 drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
-                // If we can't directly decide the leader, try to indirectly decide it.
+                // If the leader is not final (undecided, or Commit(Pending) for StarfishS),
+                // try to resolve via indirect rule.
                 let timer_indirect_decide = self
                     .metrics
                     .utilization_timer
                     .utilization_timer("Committer::indirect_decide");
-                if !status.is_decided() {
+                if !status.is_final() {
                     status = committer.try_indirect_decide(
                         leader,
                         round,
                         leaders.iter(),
                         &voters_for_leaders,
                     );
-                    if !self.committed.contains(&(leader, round)) {
-                        self.update_metrics(&status, false);
+                    if status.is_decided() {
+                        indirect_decided.insert((leader, round));
                     }
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
                 drop(timer_indirect_decide);
-
-                if status.is_decided() {
-                    self.committed.insert((leader, round));
-                }
 
                 leaders.push_front(status);
             }
@@ -114,9 +108,14 @@ impl UniversalCommitter {
             .skip(1)
             // Filter out all the genesis.
             .filter(|x| x.round() > 0)
-            // Stop the sequence upon encountering an undecided leader.
-            .take_while(|x| x.is_decided())
-            .inspect(|x| tracing::debug!("Decided {x}"))
+            // Stop the sequence upon encountering a non-final leader.
+            // For StarfishS, Commit(Pending) blocks sequencing; for others is_final == is_decided.
+            .take_while(|x| x.is_final())
+            .inspect(|x| {
+                tracing::debug!("Decided {x}");
+                let direct_decide = !indirect_decided.contains(&(x.authority(), x.round()));
+                self.update_metrics(x, direct_decide);
+            })
             .collect()
     }
 
@@ -135,7 +134,14 @@ impl UniversalCommitter {
         let authority = leader.authority().to_string();
         let direct_or_indirect = if direct_decide { "direct" } else { "indirect" };
         let status = match leader {
-            LeaderStatus::Commit(..) => format!("{direct_or_indirect}-commit"),
+            LeaderStatus::Commit(.., Some(CommitMetastate::Opt)) => {
+                format!("{direct_or_indirect}-commit-opt")
+            }
+            LeaderStatus::Commit(.., Some(CommitMetastate::Std)) => {
+                format!("{direct_or_indirect}-commit-std")
+            }
+            LeaderStatus::Commit(.., Some(CommitMetastate::Pending)) => return,
+            LeaderStatus::Commit(.., None) => format!("{direct_or_indirect}-commit"),
             LeaderStatus::Skip(..) => format!("{direct_or_indirect}-skip"),
             LeaderStatus::Undecided(..) => return,
         };
@@ -161,7 +167,8 @@ impl UniversalCommitterBuilder {
         match block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::Starfish => Self {
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => Self {
                 committee,
                 block_store,
                 metrics,
@@ -195,7 +202,6 @@ impl UniversalCommitterBuilder {
             block_store: self.block_store,
             committers,
             metrics: self.metrics,
-            committed: Default::default(),
         }
     }
 }

@@ -106,6 +106,9 @@ pub struct VerifiedStatementBlock {
     merkle_proof_encoded_shard: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     transactions_commitment: TransactionsCommitment,
+    // Starfish-S: strong vote flag. None for non-StarfishS protocols.
+    // true = party has full payload of leader + all L.acks payloads
+    strong_vote: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -136,6 +139,8 @@ pub struct CachedStatementBlock {
     merkle_proof_encoded_shard: Option<Vec<u8>>,
     // merkle root is computed for encoded_statements
     merkle_root_encoded_statements: TransactionsCommitment,
+    // Starfish-S: strong vote flag
+    strong_vote: Option<bool>,
 }
 
 impl CachedStatementBlock {
@@ -163,6 +168,7 @@ impl CachedStatementBlock {
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
                 transactions_commitment: self.merkle_root_encoded_statements,
+                strong_vote: self.strong_vote,
             }
         } else {
             let info_shards: Vec<Vec<u8>> = self
@@ -220,6 +226,7 @@ impl CachedStatementBlock {
                 encoded_shard,
                 merkle_proof_encoded_shard: Some(merkle_proof),
                 transactions_commitment: self.merkle_root_encoded_statements,
+                strong_vote: self.strong_vote,
             }
         }
     }
@@ -266,6 +273,7 @@ impl VerifiedStatementBlock {
         encoded_shard: Option<(Shard, usize)>,
         merkle_proof: Option<Vec<u8>>,
         merkle_root: TransactionsCommitment,
+        strong_vote: Option<bool>,
     ) -> Self {
         Self {
             reference: BlockReference {
@@ -280,6 +288,7 @@ impl VerifiedStatementBlock {
                     epoch_marker,
                     &signature,
                     merkle_root,
+                    strong_vote,
                 ),
             },
             includes,
@@ -291,6 +300,7 @@ impl VerifiedStatementBlock {
             encoded_shard,
             merkle_proof_encoded_shard: merkle_proof,
             transactions_commitment: merkle_root,
+            strong_vote,
         }
     }
 
@@ -311,6 +321,7 @@ impl VerifiedStatementBlock {
             encoded_statements, // Replace `0` with the actual position logic
             merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
             merkle_root_encoded_statements: self.transactions_commitment,
+            strong_vote: self.strong_vote,
         }
     }
 
@@ -329,6 +340,7 @@ impl VerifiedStatementBlock {
                         encoded_shard: None,
                         merkle_proof_encoded_shard: None,
                         transactions_commitment: self.transactions_commitment,
+                        strong_vote: self.strong_vote,
                     };
                 }
             }
@@ -343,6 +355,7 @@ impl VerifiedStatementBlock {
                 encoded_shard: self.encoded_shard.clone(),
                 merkle_proof_encoded_shard: self.merkle_proof_encoded_shard.clone(),
                 transactions_commitment: self.transactions_commitment,
+                strong_vote: self.strong_vote,
             }
         } else {
             Self {
@@ -356,6 +369,7 @@ impl VerifiedStatementBlock {
                 encoded_shard: None,
                 merkle_proof_encoded_shard: None,
                 transactions_commitment: self.transactions_commitment,
+                strong_vote: self.strong_vote,
             }
         }
     }
@@ -373,6 +387,7 @@ impl VerifiedStatementBlock {
             None,
             None,
             TransactionsCommitment::default(),
+            None,
         ))
     }
 
@@ -442,6 +457,10 @@ impl VerifiedStatementBlock {
         self.epoch_marker
     }
 
+    pub fn strong_vote(&self) -> Option<bool> {
+        self.strong_vote
+    }
+
     pub fn from_bytes(bytes: Bytes) -> bincode::Result<Self> {
         IN_MEMORY_BLOCKS.fetch_add(1, Ordering::Relaxed);
         IN_MEMORY_BLOCKS_BYTES.fetch_add(bytes.len(), Ordering::Relaxed);
@@ -464,9 +483,12 @@ impl VerifiedStatementBlock {
         statements: Vec<BaseStatement>,
         encoded_statements: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
+        strong_vote: Option<bool>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishPull => {
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::StarfishS => {
                 TransactionsCommitment::new_from_encoded_statements(
                     encoded_statements.as_ref().unwrap(),
                     authority as usize,
@@ -485,6 +507,7 @@ impl VerifiedStatementBlock {
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
+            strong_vote,
         );
 
         Self::new(
@@ -499,6 +522,7 @@ impl VerifiedStatementBlock {
             None,
             None,
             transactions_commitment,
+            strong_vote,
         )
     }
 
@@ -512,7 +536,9 @@ impl VerifiedStatementBlock {
     ) -> eyre::Result<()> {
         let round = self.round();
         match consensus_protocol {
-            ConsensusProtocol::StarfishPull | ConsensusProtocol::Starfish => {
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS => {
                 let committee_size = committee.len();
                 let info_length = committee.info_length();
                 let parity_length = committee_size - info_length;
@@ -580,6 +606,7 @@ impl VerifiedStatementBlock {
             self.epoch_marker,
             &self.signature,
             self.transactions_commitment,
+            self.strong_vote,
         );
         ensure!(
             digest == self.digest(),
@@ -884,6 +911,7 @@ mod test {
                 encoded_shard: None,
                 merkle_proof_encoded_shard: None,
                 transactions_commitment: TransactionsCommitment::default(),
+                strong_vote: None,
             }
         }
 

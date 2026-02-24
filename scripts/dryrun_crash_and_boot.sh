@@ -8,7 +8,7 @@ DESIRED_TPS=${DESIRED_TPS:-2000}        # Target total transactions per second
 TEST_TIME=${TEST_TIME:-300}               # Total test duration in seconds
 CRASH_TIME=${CRASH_TIME:-60}             # When to crash first nodes and start the last one
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}        # Whether to remove Grafana/Prometheus volumes (1=yes, 0=no)
-CONSENSUS=${CONSENSUS:-starfish-pull}           # Consensus protocol: starfish, starfish-pull, cordial-miners, mysticeti
+CONSENSUS=${CONSENSUS:-starfish-pull}           # Consensus protocol: starfish, starfish-s, starfish-pull, cordial-miners, mysticeti
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}  # Byzantine strategies: timeout-leader, leader-withholding,
                                                                    # equivocating-chains, equivocating-two-chains,
                                                                    # chain-bomb, equivocating-chains-bomb

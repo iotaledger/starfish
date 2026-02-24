@@ -32,6 +32,7 @@ pub enum ConsensusProtocol {
     StarfishPull,
     CordialMiners,
     Starfish,
+    StarfishS,
 }
 
 impl ConsensusProtocol {
@@ -41,6 +42,7 @@ impl ConsensusProtocol {
             "starfish-pull" => ConsensusProtocol::StarfishPull,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish" => ConsensusProtocol::Starfish,
+            "starfish-s" => ConsensusProtocol::StarfishS,
             _ => ConsensusProtocol::StarfishPull, // Default to Starfish
         }
     }
@@ -175,6 +177,7 @@ impl BlockStore {
                 tracing::info!("Starting Starfish-Pull protocol")
             }
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
+            ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let block_store = Self {
@@ -392,6 +395,60 @@ impl BlockStore {
                 .keys()
                 .any(|(block_authority, _)| block_authority == authority)
         })
+    }
+
+    /// Check if a quorum of blocks at `round` include the leader from `leader_round` in their references.
+    /// Only checks cached (in-memory) blocks for performance; unloaded blocks are skipped.
+    pub fn has_votes_quorum_at_round(
+        &self,
+        round: RoundNumber,
+        leader: AuthorityIndex,
+        leader_round: RoundNumber,
+        committee: &Committee,
+    ) -> bool {
+        let inner = self.inner.read();
+        let Some(blocks) = inner.index.get(&round) else {
+            return false;
+        };
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for ((authority, _), entry) in blocks {
+            if let IndexEntry::Loaded((storage_block, _)) = entry {
+                if storage_block
+                    .includes()
+                    .iter()
+                    .any(|r| r.authority == leader && r.round == leader_round)
+                {
+                    if aggregator.add(*authority, committee) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a quorum of blocks at `round` have `strong_vote == Some(true)`.
+    /// Only checks cached (in-memory) blocks for performance; unloaded blocks are skipped.
+    pub fn has_strong_votes_quorum_at_round(
+        &self,
+        round: RoundNumber,
+        committee: &Committee,
+    ) -> bool {
+        let inner = self.inner.read();
+        let Some(blocks) = inner.index.get(&round) else {
+            return false;
+        };
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for ((authority, _), entry) in blocks {
+            if let IndexEntry::Loaded((storage_block, _)) = entry {
+                if storage_block.strong_vote() == Some(true) {
+                    if aggregator.add(*authority, committee) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {

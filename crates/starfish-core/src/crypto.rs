@@ -127,6 +127,7 @@ impl BlockDigest {
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
         merkle_root: TransactionsCommitment,
+        strong_vote: Option<bool>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -138,6 +139,7 @@ impl BlockDigest {
             meta_creation_time_ns,
             epoch_marker,
             merkle_root,
+            strong_vote,
         );
         hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
@@ -152,6 +154,7 @@ impl BlockDigest {
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
         transactions_commitment: TransactionsCommitment,
+        strong_vote: Option<bool>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -163,6 +166,7 @@ impl BlockDigest {
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
+            strong_vote,
         );
         hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
@@ -177,6 +181,7 @@ impl BlockDigest {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
+        strong_vote: Option<bool>,
     ) {
         authority.crypto_hash(hasher);
         round.crypto_hash(hasher);
@@ -189,6 +194,10 @@ impl BlockDigest {
         meta_creation_time_ns.crypto_hash(hasher);
         epoch_marker.crypto_hash(hasher);
         transactions_commitment.crypto_hash(hasher);
+        // Conditional hashing: only hash when Some for backward compatibility
+        if let Some(sv) = strong_vote {
+            [sv as u8].crypto_hash(hasher);
+        }
     }
 }
 
@@ -255,6 +264,7 @@ impl PublicKey {
             block.meta_creation_time_ns(),
             block.epoch_changed(),
             block.merkle_root(),
+            block.strong_vote(),
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())
@@ -278,6 +288,7 @@ impl Signer {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
+        strong_vote: Option<bool>,
     ) -> SignatureBytes {
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
@@ -289,6 +300,7 @@ impl Signer {
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
+            strong_vote,
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         let signature = self.0.sign(digest.as_ref());

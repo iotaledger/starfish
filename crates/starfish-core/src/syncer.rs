@@ -6,7 +6,7 @@ use crate::types::VerifiedStatementBlock;
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
-    consensus::linearizer::CommittedSubDag,
+    consensus::{linearizer::CommittedSubDag, CommitMetastate},
     core::Core,
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -32,7 +32,7 @@ pub trait CommitObserver: Send + Sync {
     fn handle_commit(
         &mut self,
         block_store: &BlockStore,
-        committed_leaders: Vec<Data<VerifiedStatementBlock>>,
+        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>);
@@ -115,7 +115,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if !newly_committed.is_empty() {
             let committed_refs: Vec<_> = newly_committed
                 .iter()
-                .map(|block| {
+                .map(|(block, _meta)| {
                     let age = utc_now
                         .checked_sub(block.meta_creation_time())
                         .unwrap_or_default();
