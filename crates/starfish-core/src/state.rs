@@ -2,7 +2,8 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashSet};
+use ahash::AHashSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::block_store::CommitData;
@@ -21,7 +22,7 @@ pub struct RecoveredState {
     pub rocks_store: Arc<RocksStore>,
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     pub last_committed_leader: Option<BlockReference>,
-    pub committed_blocks: HashSet<BlockReference>,
+    pub committed_blocks: AHashSet<BlockReference>,
 }
 
 #[derive(Default)]
@@ -29,7 +30,7 @@ pub struct RecoveredStateBuilder {
     pending: BTreeMap<u64, MetaStatement>, // Use sequence number instead of WalPosition
     unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     last_committed_leader: Option<BlockReference>,
-    committed_blocks: HashSet<BlockReference>,
+    committed_blocks: AHashSet<BlockReference>,
 }
 
 impl RecoveredStateBuilder {

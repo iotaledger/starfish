@@ -40,7 +40,7 @@ pub struct Metrics {
 
     pub filtered_blocks_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
-    pub reconstructed_blocks_total: IntCounterVec,
+    pub reconstructed_blocks_total: IntCounter,
     pub shard_reconstruction_jobs_total: IntCounter,
     pub shard_reconstruction_success_total: IntCounter,
     pub shard_reconstruction_failed_total: IntCounter,
@@ -114,7 +114,27 @@ impl Metrics {
     pub fn new(
         registry: &Registry,
         committee: Option<&Committee>,
+        consensus_protocol: Option<&str>,
     ) -> (Arc<Self>, Arc<MetricReporter>) {
+        // Write-once info gauges (kept alive by the registry).
+        let committee_size_gauge = register_int_gauge_with_registry!(
+            "committee_size",
+            "Number of validators in the committee",
+            registry,
+        )
+        .unwrap();
+        committee_size_gauge.set(committee.map(Committee::len).unwrap_or(0) as i64);
+
+        let protocol_info = register_int_gauge_vec_with_registry!(
+            "consensus_protocol_info",
+            "Active consensus protocol (label carries the name)",
+            &["protocol"],
+            registry,
+        )
+        .unwrap();
+        if let Some(name) = consensus_protocol {
+            protocol_info.with_label_values(&[name]).set(1);
+        }
         let (transaction_committed_latency_hist, transaction_committed_latency) = histogram();
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
@@ -200,10 +220,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            reconstructed_blocks_total: register_int_counter_vec_with_registry!(
+            reconstructed_blocks_total: register_int_counter_with_registry!(
                 "reconstructed_blocks_total",
-                "Total number of reconstructed blocks per authority",
-                &["reconstruction_place"],
+                "Total number of reconstructed blocks",
                 registry,
             )
             .unwrap(),
@@ -562,9 +581,13 @@ impl Metrics {
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Shard Reconstruction"]);
         table.add_row(row![b->"Average queued jobs:", average_reconstruction_jobs]);
-        table.add_row(row![b->"Average successful reconstructions:", average_reconstruction_success]);
+        table.add_row(
+            row![b->"Average successful reconstructions:", average_reconstruction_success],
+        );
         table.add_row(row![b->"Average failed reconstructions:", average_reconstruction_failures]);
-        table.add_row(row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled]);
+        table.add_row(
+            row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled],
+        );
         table.add_row(row![b->"Pending shard accumulators:", average_pending_accumulators]);
         table.add_row(row![b->"Queued/in-flight jobs:", average_queued_jobs]);
         table.add_row(row![b->"Pending decoded blocks:", average_pending_decoded_blocks]);

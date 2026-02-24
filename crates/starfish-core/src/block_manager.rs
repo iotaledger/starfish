@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
+
+use ahash::AHashSet;
 
 use crate::types::VerifiedStatementBlock;
 use crate::{block_store::BlockStore, committee::Committee, data::Data, types::BlockReference};
@@ -16,11 +18,11 @@ pub struct BlockManager {
     /// Keeps all pending blocks.
     blocks_pending:
         HashMap<BlockReference, (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-    /// Keeps all the blocks (`HashSet<BlockReference>`) waiting for `BlockReference` to be processed.
-    block_references_waiting: HashMap<BlockReference, HashSet<BlockReference>>,
+    /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting for `BlockReference` to be processed.
+    block_references_waiting: HashMap<BlockReference, AHashSet<BlockReference>>,
     /// Keeps all blocks that need to be synced in order to unblock the processing of other pending
     /// blocks. The indices of the vector correspond the authority indices.
-    missing: Vec<HashSet<BlockReference>>,
+    missing: Vec<AHashSet<BlockReference>>,
     block_store: BlockStore,
 }
 
@@ -29,7 +31,7 @@ impl BlockManager {
         Self {
             blocks_pending: Default::default(),
             block_references_waiting: Default::default(),
-            missing: (0..committee.len()).map(|_| HashSet::new()).collect(),
+            missing: (0..committee.len()).map(|_| AHashSet::new()).collect(),
             block_store,
         }
     }
@@ -40,7 +42,7 @@ impl BlockManager {
     ) -> (
         Vec<Data<VerifiedStatementBlock>>,
         bool,
-        HashSet<BlockReference>,
+        AHashSet<BlockReference>,
     ) {
         let block_store = self.block_store.clone();
         let mut updated_statements = false;
@@ -48,7 +50,7 @@ impl BlockManager {
             blocks.into();
         let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
         // missing references that we don't currently have
-        let mut missing_references = HashSet::new();
+        let mut missing_references = AHashSet::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
             // check whether we have already processed this block and skip it if so.
             let block_reference = storage_and_transmission_blocks.0.reference();
@@ -62,8 +64,7 @@ impl BlockManager {
                 {
                     tracing::debug!("Block has new statements: {:?}", block_reference);
                     block_store.insert_general_block(storage_and_transmission_blocks.clone());
-                    newly_storage_blocks_processed
-                        .push(storage_and_transmission_blocks.0.clone());
+                    newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
                     updated_statements = true;
                 }
                 continue;
@@ -139,7 +140,7 @@ impl BlockManager {
         )
     }
 
-    pub fn missing_blocks(&self) -> &[HashSet<BlockReference>] {
+    pub fn missing_blocks(&self) -> &[AHashSet<BlockReference>] {
         &self.missing
     }
 }

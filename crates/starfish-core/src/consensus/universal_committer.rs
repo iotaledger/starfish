@@ -12,7 +12,7 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::HashSet;
+use ahash::AHashSet;
 use std::{collections::VecDeque, sync::Arc};
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
@@ -39,7 +39,7 @@ impl UniversalCommitter {
         // Try to decide as many leaders as possible, starting with the highest round.
         let mut leaders = VecDeque::new();
         // Track which leaders were resolved via indirect rule (for metrics).
-        let mut indirect_decided: HashSet<(AuthorityIndex, RoundNumber)> = HashSet::new();
+        let mut indirect_decided: AHashSet<(AuthorityIndex, RoundNumber)> = AHashSet::new();
 
         for round in (last_decided_round..=highest_possible_leader_to_decide_round).rev() {
             for committer in self.committers.iter().rev() {
@@ -52,8 +52,8 @@ impl UniversalCommitter {
                     "Trying to decide {} with {committer}",
                     format_authority_round(leader, round)
                 );
-                let mut voters_for_leaders: HashSet<(BlockReference, BlockReference)> =
-                    HashSet::new();
+                let mut voters_for_leaders: AHashSet<(BlockReference, BlockReference)> =
+                    AHashSet::new();
                 // this logic is only correct for wave of length 3
                 let voting_round = round + 1 as RoundNumber;
                 let potential_voting_blocks = self.block_store.get_blocks_by_round(voting_round);

@@ -2,9 +2,10 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use ahash::AHashSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Borrow, collections::HashSet, marker::PhantomData, ops::Range, sync::Arc};
+use std::{borrow::Borrow, marker::PhantomData, ops::Range, sync::Arc};
 
 use crate::{
     config::ImportExport,
@@ -125,7 +126,7 @@ impl Committee {
         amount > self.quorum_threshold
     }
 
-    pub fn get_total_stake<A: Borrow<AuthorityIndex>>(&self, authorities: &HashSet<A>) -> Stake {
+    pub fn get_total_stake<A: Borrow<AuthorityIndex>>(&self, authorities: &AHashSet<A>) -> Stake {
         let mut total_stake = 0;
         for authority in authorities {
             total_stake += self.authorities[*authority.borrow() as usize].stake();

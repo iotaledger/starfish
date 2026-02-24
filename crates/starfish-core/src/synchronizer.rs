@@ -15,16 +15,16 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
+use ahash::AHashSet;
 use futures::future::join_all;
+use parking_lot::RwLock;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::cmp::max;
-use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::select;
-use tokio::sync::mpsc::Sender;
-use parking_lot::RwLock;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -96,7 +96,7 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     /// List of authorities that have missing blocks when receiving blocks from me,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
     /// Blocks sent to this peer during this connection. Starts empty — all DAG blocks are candidates.
-    pub sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+    pub sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 }
 
 pub struct UpdaterMissingAuthorities {
@@ -303,7 +303,7 @@ where
             parameters,
             metrics,
             authorities_with_missing_blocks_by_peer_from_me,
-            sent_to_peer: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            sent_to_peer: Arc::new(parking_lot::RwLock::new(AHashSet::new())),
         }
     }
 
@@ -410,7 +410,7 @@ where
             }
         }
         {
-            let mut sent = self.sent_to_peer.lock();
+            let mut sent = self.sent_to_peer.write();
             for block in blocks.iter() {
                 sent.insert(*block.reference());
             }
@@ -452,7 +452,7 @@ where
             }
         }
         {
-            let mut sent = self.sent_to_peer.lock();
+            let mut sent = self.sent_to_peer.write();
             for block in blocks.iter() {
                 sent.insert(*block.reference());
             }
@@ -506,22 +506,25 @@ where
         to: Sender<NetworkMessage>,
         peer_id: AuthorityIndex,
         synchronizer_parameters: SynchronizerParameters,
-        sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+        sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let between_push_timeout = Duration::from_millis(100);
         loop {
             let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-            let sent = sent_to_peer.lock().clone();
-            let blocks = inner.block_store.get_unsent_past_cone(
-                &sent,
-                block_reference,
-                batch_own_block_size,
-                batch_other_block_size,
-            );
+            let blocks = {
+                let sent = sent_to_peer.read();
+                inner.block_store.get_unsent_past_cone(
+                    &sent,
+                    peer_id,
+                    block_reference,
+                    batch_own_block_size,
+                    batch_other_block_size,
+                )
+            };
             {
-                let mut sent = sent_to_peer.lock();
+                let mut sent = sent_to_peer.write();
                 for block in &blocks {
                     sent.insert(*block.reference());
                 }
@@ -544,7 +547,7 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
         synchronizer_parameters: SynchronizerParameters,
-        sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+        sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let committee_size = inner.committee.len();
         let mut rng = StdRng::from_entropy();
@@ -720,7 +723,7 @@ where
         synchronizer_parameters: SynchronizerParameters,
         metrics: Arc<Metrics>,
         authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
-        sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+        sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let sample_timeout = synchronizer_parameters.sample_timeout;
 
@@ -766,7 +769,7 @@ async fn sending_batch_own_blocks<H, C>(
     to_whom_authority_index: AuthorityIndex,
     round: &mut RoundNumber,
     batch_size: usize,
-    sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -778,7 +781,7 @@ where
             .block_store
             .get_own_transmission_blocks(to_whom_authority_index, *round, batch_size);
     {
-        let mut sent = sent_to_peer.lock();
+        let mut sent = sent_to_peer.write();
         for block in blocks.iter() {
             sent.insert(*block.reference());
             *round = max(*round, block.round());
@@ -796,7 +799,7 @@ async fn sending_batch_all_blocks<H, C>(
     to_whom_authority_index: AuthorityIndex,
     synchronizer_parameters: SynchronizerParameters,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
-    sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -806,8 +809,8 @@ where
     let committee_size = inner.committee.len();
     let own_index = inner.block_store.get_own_authority_index();
     let max_missing_blocks_age = synchronizer_parameters.max_missing_blocks_age;
-    let mut authorities_with_missing_blocks = HashSet::new();
-    if protocol == ConsensusProtocol::Starfish || protocol == ConsensusProtocol::StarfishS {
+    let mut authorities_with_missing_blocks = AHashSet::new();
+    if protocol == ConsensusProtocol::StarfishS {
         let authorities_with_missing_blocks_by_peer_from_me =
             authorities_with_missing_blocks_by_peer_from_me.read();
         let now = Instant::now();
@@ -820,25 +823,30 @@ where
             }
         }
     }
-    if protocol == ConsensusProtocol::CordialMiners {
+    if protocol == ConsensusProtocol::Starfish || protocol == ConsensusProtocol::CordialMiners {
         authorities_with_missing_blocks.extend(0..committee_size as AuthorityIndex);
     }
     authorities_with_missing_blocks.remove(&own_index);
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
-    let sent = sent_to_peer.lock().clone();
-    let blocks = inner.block_store.get_unsent_causal_history(
-        &sent,
-        batch_own_block_size,
-        batch_other_block_size,
-        authorities_with_missing_blocks,
-    );
+    let blocks = {
+        let sent = sent_to_peer.read();
+        inner.block_store.get_unsent_causal_history(
+            &sent,
+            to_whom_authority_index,
+            batch_own_block_size,
+            batch_other_block_size,
+            authorities_with_missing_blocks,
+        )
+    };
     {
-        let mut sent = sent_to_peer.lock();
+        let mut sent = sent_to_peer.write();
         for block in &blocks {
             sent.insert(*block.reference());
         }
+        let lowest_round = inner.block_store.lowest_round();
+        sent.retain(|r| r.round >= lowest_round);
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     to.send(NetworkMessage::Batch(blocks)).await.ok()?;
@@ -852,7 +860,7 @@ async fn sending_past_cone_block<H, C>(
     to_whom_authority_index: AuthorityIndex,
     synchronizer_parameters: SynchronizerParameters,
     block_reference: BlockReference,
-    sent_to_peer: Arc<parking_lot::Mutex<HashSet<BlockReference>>>,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -861,15 +869,18 @@ where
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
     let own_index = inner.block_store.get_own_authority_index();
-    let sent = sent_to_peer.lock().clone();
-    let blocks = inner.block_store.get_unsent_past_cone(
-        &sent,
-        block_reference,
-        batch_own_block_size,
-        batch_other_block_size,
-    );
+    let blocks = {
+        let sent = sent_to_peer.read();
+        inner.block_store.get_unsent_past_cone(
+            &sent,
+            to_whom_authority_index,
+            block_reference,
+            batch_own_block_size,
+            batch_other_block_size,
+        )
+    };
     {
-        let mut sent = sent_to_peer.lock();
+        let mut sent = sent_to_peer.write();
         for block in &blocks {
             sent.insert(*block.reference());
         }

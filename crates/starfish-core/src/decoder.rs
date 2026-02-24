@@ -152,7 +152,10 @@ mod tests {
         }
 
         let result = decoder.decode_shards(&committee, &mut encoder, cached, own_id);
-        assert!(result.is_some(), "decode_shards should succeed with all info shards");
+        assert!(
+            result.is_some(),
+            "decode_shards should succeed with all info shards"
+        );
         let reconstructed = result.unwrap();
         assert!(
             reconstructed.statements().as_ref().unwrap() == &statements,
@@ -185,7 +188,10 @@ mod tests {
         cached.add_encoded_shard(2, shards[2].clone());
 
         let result = decoder.decode_shards(&committee, &mut encoder, cached, own_id);
-        assert!(result.is_some(), "decode_shards should succeed with parity recovery");
+        assert!(
+            result.is_some(),
+            "decode_shards should succeed with parity recovery"
+        );
         let reconstructed = result.unwrap();
         assert!(
             reconstructed.statements().as_ref().unwrap() == &statements,
@@ -217,6 +223,9 @@ mod tests {
         cached.add_encoded_shard(0, vec![0xFF; shards[0].len()]);
 
         let result = decoder.decode_shards(&committee, &mut encoder, cached, own_id);
-        assert!(result.is_none(), "decode_shards should return None on merkle mismatch");
+        assert!(
+            result.is_none(),
+            "decode_shards should return None on merkle mismatch"
+        );
     }
 }

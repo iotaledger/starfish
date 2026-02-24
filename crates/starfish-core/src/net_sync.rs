@@ -23,9 +23,11 @@ use crate::{
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{format_authority_index, AuthorityIndex},
 };
+use ahash::AHashSet;
 use futures::future::join_all;
+use parking_lot::RwLock;
 use reed_solomon_simd::ReedSolomonEncoder;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::{
     collections::HashMap,
     sync::{
@@ -34,7 +36,6 @@ use std::{
     },
     time::Duration,
 };
-use parking_lot::RwLock;
 use tokio::time::Instant;
 use tokio::{
     select,
@@ -286,11 +287,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         ) {
             self.data_requestor.start().await;
         }
-        // To save some bandwidth, we start the updater about authorities with missing blocks for Starfish
-        if matches!(
-            self.consensus_protocol,
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
-        ) {
+        // To save some bandwidth, we start the updater about authorities with missing blocks for StarfishS
+        if matches!(self.consensus_protocol, ConsensusProtocol::StarfishS) {
             self.updater_missing_authorities.start().await;
         }
     }
@@ -345,7 +343,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .utilization_timer("Network: verify blocks");
         // Mark received blocks as "sent" so we don't re-send them back to the peer.
         {
-            let mut sent = self.disseminator.sent_to_peer.lock();
+            let mut sent = self.disseminator.sent_to_peer.write();
             for block in &blocks {
                 sent.insert(*block.reference());
             }
@@ -359,7 +357,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 blocks_without_statements.push(block);
             }
         }
-        let mut authorities_to_be_updated: HashSet<AuthorityIndex> = HashSet::new();
+        let mut authorities_to_be_updated: AHashSet<AuthorityIndex> = AHashSet::new();
 
         // First process blocks without statements (causal history shards)
         if matches!(
@@ -385,7 +383,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     async fn process_blocks_without_statements(
         &mut self,
         blocks: Vec<Data<VerifiedStatementBlock>>,
-        authorities_to_be_updated: &mut HashSet<AuthorityIndex>,
+        authorities_to_be_updated: &mut AHashSet<AuthorityIndex>,
     ) {
         use crate::shard_reconstructor::ShardMessage;
 
@@ -423,13 +421,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 if let (Some(shard_tx), Some((shard, shard_index))) =
                     (shard_tx_guard.as_ref(), block.encoded_shard().clone())
                 {
-                    let _ = shard_tx
-                        .try_send(ShardMessage::Shard {
-                            block_reference: *block.reference(),
-                            shard,
-                            shard_index,
-                            block_template: block.clone(),
-                        });
+                    let _ = shard_tx.try_send(ShardMessage::Shard {
+                        block_reference: *block.reference(),
+                        shard,
+                        shard_index,
+                        block_template: block.clone(),
+                    });
                 }
             }
 
@@ -480,7 +477,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     async fn process_blocks_with_statements(
         &mut self,
         blocks: Vec<Data<VerifiedStatementBlock>>,
-        mut authorities_to_be_updated: HashSet<AuthorityIndex>,
+        mut authorities_to_be_updated: AHashSet<AuthorityIndex>,
     ) {
         let mut verified_data_blocks = Vec::new();
         for data_block in blocks {
@@ -525,11 +522,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             {
                 let shard_tx_guard = self.inner.shard_tx.lock();
                 if let Some(shard_tx) = shard_tx_guard.as_ref() {
-                    let _ = shard_tx.try_send(
-                        crate::shard_reconstructor::ShardMessage::FullBlock(
-                            *storage_block.reference(),
-                        ),
-                    );
+                    let _ = shard_tx.try_send(crate::shard_reconstructor::ShardMessage::FullBlock(
+                        *storage_block.reference(),
+                    ));
                 }
             }
             self.filter_for_blocks
@@ -587,7 +582,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
                 ConsensusProtocol::CordialMiners => {}
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                ConsensusProtocol::Starfish => {}
+                ConsensusProtocol::StarfishS => {
                     if !authorities_to_be_updated.is_empty() {
                         let now = Instant::now();
                         let mut authorities_with_missing_blocks = self
@@ -633,9 +629,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .collect::<Vec<_>>(),
             self.peer
         );
-        let mut guard = self
-            .authorities_with_missing_blocks_by_peer_from_me
-            .write();
+        let mut guard = self.authorities_with_missing_blocks_by_peer_from_me.write();
         for authority in authorities {
             guard[authority as usize] = now;
         }
@@ -720,7 +714,8 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     stop: mpsc::Sender<()>,
     epoch_close_signal: mpsc::Sender<()>,
     pub epoch_closing_time: Arc<AtomicU64>,
-    pub shard_tx: parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
+    pub shard_tx:
+        parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {

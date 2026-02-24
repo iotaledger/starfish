@@ -60,7 +60,7 @@ impl Validator {
 
         // Boot the prometheus server.
         let registry = Registry::new();
-        let (metrics, reporter) = Metrics::new(&registry, Some(&committee));
+        let (metrics, reporter) = Metrics::new(&registry, Some(&committee), Some(&consensus));
         reporter.clone().start();
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
@@ -412,8 +412,7 @@ mod smoke_tests {
                     result.insert(auth, metrics);
                 }
             }
-            if result.len() == addresses.len()
-                && result.values().all(|(idx, _)| *idx >= min_index)
+            if result.len() == addresses.len() && result.values().all(|(idx, _)| *idx >= min_index)
             {
                 return result;
             }
@@ -487,10 +486,8 @@ mod smoke_tests {
             fs::create_dir_all(&pc.storage_path).unwrap();
         }
 
-        let all_metrics_addrs: Vec<(usize, SocketAddr)> = public_config
-            .all_metric_addresses()
-            .enumerate()
-            .collect();
+        let all_metrics_addrs: Vec<(usize, SocketAddr)> =
+            public_config.all_metric_addresses().enumerate().collect();
 
         // ─── Start all 5 validators ───
         let mut validators: Vec<Option<Validator>> = Vec::new();
@@ -533,12 +530,8 @@ mod smoke_tests {
             .filter(|(i, _)| *i != node_a)
             .cloned()
             .collect();
-        let phase2a = await_min_commit_index(
-            &running,
-            phase1_min + 1,
-            Duration::from_secs(30),
-        )
-        .await;
+        let phase2a =
+            await_min_commit_index(&running, phase1_min + 1, Duration::from_secs(30)).await;
         verify_digest_consistency(&phase2a);
         let phase2a_min = phase2a.values().map(|(i, _)| *i).min().unwrap();
 
@@ -572,12 +565,8 @@ mod smoke_tests {
             .filter(|(i, _)| *i != node_b && *i != node_a)
             .cloned()
             .collect();
-        let phase3a = await_min_commit_index(
-            &running2,
-            phase2a_min + 1,
-            Duration::from_secs(45),
-        )
-        .await;
+        let phase3a =
+            await_min_commit_index(&running2, phase2a_min + 1, Duration::from_secs(45)).await;
         let _phase3a_min = phase3a.values().map(|(i, _)| *i).min().unwrap();
 
         let v = start_validator(
@@ -602,9 +591,9 @@ mod smoke_tests {
         validators[node_c].take().unwrap().stop().await;
 
         // Wipe the rocksdb directory
-        let storage_path = dir
-            .as_ref()
-            .join(NodePrivateConfig::default_storage_path(node_c as AuthorityIndex));
+        let storage_path = dir.as_ref().join(NodePrivateConfig::default_storage_path(
+            node_c as AuthorityIndex,
+        ));
         let rocks_path = storage_path.join("rocksdb");
         if rocks_path.exists() {
             fs::remove_dir_all(&rocks_path).unwrap();

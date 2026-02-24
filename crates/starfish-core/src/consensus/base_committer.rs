@@ -11,7 +11,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::collections::HashSet;
+use ahash::AHashSet;
 use std::{fmt::Display, sync::Arc};
 
 /// The consensus protocol operates in 'waves'. Each wave is composed of a leader round, at least one
@@ -110,7 +110,7 @@ impl BaseCommitter {
         &self,
         potential_certificate: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
@@ -129,7 +129,7 @@ impl BaseCommitter {
         anchor: &Data<VerifiedStatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> LeaderStatus {
         // Get the block(s) proposed by the leader. There could be more than one leader block
         // per round (produced by a Byzantine leader).
@@ -196,7 +196,7 @@ impl BaseCommitter {
         &self,
         voting_round: RoundNumber,
         leader: AuthorityIndex,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
@@ -257,7 +257,7 @@ impl BaseCommitter {
         &self,
         decision_round: RoundNumber,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
 
@@ -295,7 +295,7 @@ impl BaseCommitter {
         &self,
         decision_block: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> bool {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
@@ -324,7 +324,7 @@ impl BaseCommitter {
         &self,
         leader_block: &Data<VerifiedStatementBlock>,
         voting_round: RoundNumber,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> Option<CommitMetastate> {
         if self.block_store.consensus_protocol != ConsensusProtocol::StarfishS {
             return None;
@@ -374,7 +374,7 @@ impl BaseCommitter {
         leader: AuthorityIndex,
         leader_round: RoundNumber,
         leaders: impl Iterator<Item = &'a LeaderStatus>,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> LeaderStatus {
         // The anchor is the first committed leader with round higher than the decision round of the
         // target leader. We must stop the iteration upon encountering an undecided leader.
@@ -409,7 +409,7 @@ impl BaseCommitter {
         &self,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &HashSet<(BlockReference, BlockReference)>,
+        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
     ) -> LeaderStatus {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
