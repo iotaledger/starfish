@@ -78,6 +78,21 @@ impl Hash for BlockReference {
     }
 }
 
+impl Ord for BlockReference {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.round
+            .cmp(&other.round)
+            .then_with(|| self.authority.cmp(&other.authority))
+            .then_with(|| self.digest.cmp(&other.digest))
+    }
+}
+
+impl PartialOrd for BlockReference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 // Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
 pub struct VerifiedStatementBlock {
@@ -654,18 +669,6 @@ pub type TimestampNs = u128;
 const NANOS_IN_SEC: u128 = Duration::from_secs(1).as_nanos();
 
 const GENESIS_ROUND: RoundNumber = 0;
-
-impl PartialOrd for BlockReference {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for BlockReference {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.round, self.authority, self.digest).cmp(&(other.round, other.authority, other.digest))
-    }
-}
 
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub struct TransactionLocator {

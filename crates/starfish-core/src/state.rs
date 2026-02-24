@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+use crate::block_store::CommitData;
 use crate::core::MetaStatement;
 use crate::core::MetaStatement::Include;
 use crate::rocks_store::RocksStore;
@@ -50,6 +51,18 @@ impl RecoveredStateBuilder {
         );
         self.unprocessed_blocks
             .push(storage_and_transmission_blocks);
+    }
+
+    pub fn commit(&mut self, commit_data: CommitData) {
+        let leader = commit_data.leader;
+        if self
+            .last_committed_leader
+            .map(|current| leader.round > current.round)
+            .unwrap_or(true)
+        {
+            self.last_committed_leader = Some(leader);
+        }
+        self.committed_blocks.extend(commit_data.sub_dag);
     }
 
     pub fn build(self, rocks_store: Arc<RocksStore>, block_store: BlockStore) -> RecoveredState {

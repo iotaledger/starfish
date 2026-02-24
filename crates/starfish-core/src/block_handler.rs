@@ -158,6 +158,7 @@ impl BlockHandler for TestBlockHandler {
 pub struct RealCommitHandler {
     commit_interpreter: Linearizer,
     committed_leaders: Vec<BlockReference>,
+    committed_count: usize,
     commit_digest: [u8; 32],
     start_time: TimeInstant,
     metrics: Arc<Metrics>,
@@ -174,6 +175,7 @@ impl RealCommitHandler {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
             committed_leaders: vec![],
+            committed_count: 0,
             commit_digest: [0u8; 32],
             start_time: TimeInstant::now(),
             metrics,
@@ -219,6 +221,7 @@ impl CommitObserver for RealCommitHandler {
         let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
+            self.committed_count += 1;
 
             // Chain rolling commit digest: hash(prev_digest || anchor.digest)
             let mut hasher = blake3::Hasher::new();
@@ -226,10 +229,12 @@ impl CommitObserver for RealCommitHandler {
             hasher.update(commit.0.anchor.digest.as_ref());
             self.commit_digest = *hasher.finalize().as_bytes();
 
-            let commit_index = self.committed_leaders.len();
+            let commit_index = self.committed_count;
             self.metrics.commit_index.set(commit_index as i64);
-            if commit_index % 200 == 0 {
-                let digest_short = u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
+            let digest_short =
+                u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
+            self.metrics.commit_digest_latest.set(digest_short as i64);
+            if commit_index % 100 == 0 {
                 self.metrics.commit_digest.set(digest_short as i64);
             }
 
@@ -311,6 +316,8 @@ impl CommitObserver for RealCommitHandler {
 
     fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
+        self.committed_count = committed.len();
+        self.metrics.commit_index.set(self.committed_count as i64);
         self.commit_interpreter.committed_slots =
             committed.iter().map(|r| (r.round, r.authority)).collect();
         self.commit_interpreter.committed = committed.into_iter().collect();

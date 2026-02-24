@@ -25,6 +25,7 @@ use tokio::{
 };
 
 use crate::data::Data;
+use crate::runtime::JoinHandle;
 use crate::types::VerifiedStatementBlock;
 use crate::{
     config::NodePublicConfig,
@@ -88,6 +89,7 @@ pub enum NetworkMessage {
 
 pub struct Network {
     connection_receiver: mpsc::Receiver<Connection>,
+    server_task: JoinHandle<()>,
 }
 
 pub struct Connection {
@@ -119,6 +121,11 @@ impl Network {
         &mut self.connection_receiver
     }
 
+    /// Abort the background server task so the TCP listener is released.
+    pub fn abort_server(&self) {
+        self.server_task.abort();
+    }
+
     pub async fn from_socket_addresses(
         addresses: &[SocketAddr],
         our_id: usize,
@@ -133,9 +140,17 @@ impl Network {
             );
         }
         let latency_table = generate_latency_table(addresses.len(), node_parameters);
-        let server = TcpListener::bind(local_addr)
-            .await
-            .expect("Failed to bind to local socket");
+        let server = {
+            let socket = if local_addr.is_ipv4() {
+                TcpSocket::new_v4().unwrap()
+            } else {
+                TcpSocket::new_v6().unwrap()
+            };
+            socket.set_reuseaddr(true).unwrap();
+            socket.set_reuseport(true).unwrap();
+            socket.bind(local_addr).unwrap();
+            socket.listen(1024).unwrap()
+        };
         let mut worker_senders: HashMap<SocketAddr, mpsc::UnboundedSender<TcpStream>> =
             HashMap::default();
         let handle = Handle::current();
@@ -162,7 +177,7 @@ impl Network {
                 .run(receiver),
             );
         }
-        handle.spawn(
+        let server_task = handle.spawn(
             Server {
                 server,
                 worker_senders,
@@ -171,6 +186,7 @@ impl Network {
         );
         Self {
             connection_receiver,
+            server_task,
         }
     }
 }

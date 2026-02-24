@@ -39,7 +39,6 @@ impl BlockManager {
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     ) -> (
         Vec<Data<VerifiedStatementBlock>>,
-        HashSet<BlockReference>,
         bool,
         HashSet<BlockReference>,
     ) {
@@ -48,7 +47,6 @@ impl BlockManager {
         let mut blocks: VecDeque<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)> =
             blocks.into();
         let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
-        let mut recoverable_blocks: HashSet<BlockReference> = HashSet::new();
         // missing references that we don't currently have
         let mut missing_references = HashSet::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
@@ -57,37 +55,16 @@ impl BlockManager {
 
             let block_exists = self.block_store.block_exists(*block_reference);
             if block_exists {
-                tracing::debug!("Block exists: {:?}", block_reference);
-                let contains_new_shard_or_header = self
+                // Block already in store — check if this version brings new statement data
+                if self
                     .block_store
-                    .contains_new_shard_or_header(&storage_and_transmission_blocks.0);
-                if contains_new_shard_or_header {
-                    tracing::debug!("Block contains new shard: {:?}", block_reference);
-                    if storage_and_transmission_blocks.0.statements().is_some() {
-                        // Block can be processed. So need to update indexes etc
-                        block_store.insert_general_block(storage_and_transmission_blocks.clone());
-                        newly_storage_blocks_processed
-                            .push(storage_and_transmission_blocks.0.clone());
-                        updated_statements = true;
-                        self.block_store.updated_unknown_by_others(
-                            *storage_and_transmission_blocks.0.reference(),
-                        );
-                        recoverable_blocks.remove(storage_and_transmission_blocks.0.reference());
-                    } else {
-                        self.block_store
-                            .update_with_new_shard(&storage_and_transmission_blocks.0);
-                        if self
-                            .block_store
-                            .is_sufficient_shards(storage_and_transmission_blocks.0.reference())
-                        {
-                            recoverable_blocks
-                                .insert(*storage_and_transmission_blocks.0.reference());
-                            tracing::debug!(
-                                "Block {:?} to reconstruct in core thread",
-                                block_reference
-                            );
-                        }
-                    }
+                    .contains_new_statements(&storage_and_transmission_blocks.0)
+                {
+                    tracing::debug!("Block has new statements: {:?}", block_reference);
+                    block_store.insert_general_block(storage_and_transmission_blocks.clone());
+                    newly_storage_blocks_processed
+                        .push(storage_and_transmission_blocks.0.clone());
+                    updated_statements = true;
                 }
                 continue;
             }
@@ -157,7 +134,6 @@ impl BlockManager {
 
         (
             newly_storage_blocks_processed,
-            recoverable_blocks,
             updated_statements,
             missing_references,
         )

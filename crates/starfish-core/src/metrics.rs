@@ -73,6 +73,7 @@ pub struct Metrics {
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
     pub commit_digest: IntGauge,
+    pub commit_digest_latest: IntGauge,
     pub commit_index: IntGauge,
 
     pub utilization_timer: IntCounterVec,
@@ -373,7 +374,13 @@ impl Metrics {
 
             commit_digest: register_int_gauge_with_registry!(
                 "commit_digest",
-                "Rolling hash of committed leader sequence (first 8 bytes as i64)",
+                "Rolling hash of committed leader sequence (sampled every 100 commits)",
+                registry,
+            )
+            .unwrap(),
+            commit_digest_latest: register_int_gauge_with_registry!(
+                "commit_digest_latest",
+                "Rolling hash of committed leader sequence (updated every commit)",
                 registry,
             )
             .unwrap(),

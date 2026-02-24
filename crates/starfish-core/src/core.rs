@@ -2,7 +2,6 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use reed_solomon_simd::ReedSolomonDecoder;
 use reed_solomon_simd::ReedSolomonEncoder;
 use std::{
     collections::HashSet,
@@ -11,10 +10,9 @@ use std::{
 };
 
 use crate::block_store::ConsensusProtocol;
-use crate::decoder::CachedStatementBlockDecoder;
 use crate::encoder::ShardEncoder;
 use crate::rocks_store::RocksStore;
-use crate::types::{Decoder, Encoder, Shard, VerifiedStatementBlock};
+use crate::types::{Encoder, Shard, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
@@ -64,7 +62,6 @@ pub struct Core<H: BlockHandler> {
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
     pub(crate) encoder: Encoder,
-    decoder: Decoder,
 }
 
 pub struct CoreOptions {
@@ -132,8 +129,7 @@ impl<H: BlockHandler> Core<H> {
         let committer =
             UniversalCommitterBuilder::new(committee.clone(), block_store.clone(), metrics.clone())
                 .build();
-        let encoder = ReedSolomonEncoder::new(2, 4, 64).unwrap();
-        let decoder = ReedSolomonDecoder::new(2, 4, 64).unwrap();
+        let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
         let this = Self {
             block_manager,
@@ -158,7 +154,6 @@ impl<H: BlockHandler> Core<H> {
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
             encoder,
-            decoder,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -184,7 +179,7 @@ impl<H: BlockHandler> Core<H> {
         self
     }
 
-    // This function attempts to add blocks to the local DAG (and in addition update with shards)
+    // This function attempts to add blocks to the local DAG.
     // It returns four values. First is bool which is true if any update was made successfully.
     // Second, it returns a vector of references for blocks with statements that are not added to the local DAG and remain pending
     // For such blocks we need to send a missing history request
@@ -208,17 +203,17 @@ impl<H: BlockHandler> Core<H> {
             .filter(|(b, _)| b.statements().is_some())
             .map(|(b, _)| *b.reference())
             .collect();
-        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) = timed!(
+        let (processed, updated_statements, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_blocks",
             self.block_manager.add_blocks(blocks)
         );
-        let processed_references_with_statements: Vec<_> = processed
+        let processed_references_with_statements: Vec<BlockReference> = processed
             .iter()
             .filter(|b| b.statements().is_some())
             .map(|b| *b.reference())
             .collect();
-        let processed_references_without_statements: Vec<_> = processed
+        let processed_references_without_statements: Vec<BlockReference> = processed
             .iter()
             .filter(|b| b.statements().is_none())
             .map(|b| *b.reference())
@@ -232,21 +227,8 @@ impl<H: BlockHandler> Core<H> {
                 .copied()
                 .collect();
 
-        let success: bool =
-            !processed.is_empty() || !new_blocks_to_reconstruct.is_empty() || updated_statements;
-        tracing::debug!(
-            "Processed {:?}; to be reconstructed {:?}",
-            processed,
-            new_blocks_to_reconstruct
-        );
-        if matches!(
-            self.block_store.consensus_protocol,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-        ) {
-            self.reconstruct_data_blocks(new_blocks_to_reconstruct);
-        }
+        let success: bool = !processed.is_empty() || updated_statements;
+        tracing::debug!("Processed {:?}", processed);
 
         let mut result = Vec::with_capacity(processed.len());
         for processed in &processed {
@@ -289,37 +271,6 @@ impl<H: BlockHandler> Core<H> {
         includes.sort_by_key(|r| r.round);
         for (pos, include) in include_positions.into_iter().zip(includes) {
             self.pending[pos] = MetaStatement::Include(include);
-        }
-    }
-
-    pub fn reconstruct_data_blocks(&mut self, new_blocks_to_reconstruct: HashSet<BlockReference>) {
-        for block_reference in new_blocks_to_reconstruct {
-            let block = self.block_store.get_cached_block(&block_reference);
-            let storage_block = self.decoder.decode_shards(
-                &self.committee,
-                &mut self.encoder,
-                block,
-                self.authority,
-            );
-            if let Some(storage_block) = storage_block {
-                self.metrics
-                    .reconstructed_blocks_total
-                    .with_label_values(&["core_task"])
-                    .inc();
-                tracing::debug!(
-                    "Reconstruction of block {:?} within core thread task is successful",
-                    block_reference
-                );
-                let storage_block: VerifiedStatementBlock = storage_block;
-                let transmission_block = storage_block.from_storage_to_transmission(self.authority);
-                let data_storage_block = Data::new(storage_block);
-                let data_transmission_block = Data::new(transmission_block);
-                self.block_store()
-                    .insert_general_block((data_storage_block, data_transmission_block));
-                self.block_store.updated_unknown_by_others(block_reference);
-            } else {
-                tracing::debug!("Block {block_reference} is not correctly reconstructed");
-            }
         }
     }
 
