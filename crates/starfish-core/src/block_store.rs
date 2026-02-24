@@ -149,7 +149,7 @@ impl BlockStore {
 
                 builder.block(current_round, data_storage_transmission_blocks.clone());
                 block_count += 1;
-                inner.add_unloaded(
+                inner.add_block(
                     data_storage_transmission_blocks,
                     0,
                     committee.len() as AuthorityIndex,
@@ -261,7 +261,7 @@ impl BlockStore {
             .store_block(storage_and_transmission_blocks.0.clone())
             .expect("Failed to store block in RocksDB");
 
-        self.inner.write().add_loaded(
+        self.inner.write().add_block(
             storage_and_transmission_blocks,
             authority_index_start,
             authority_index_end,
@@ -347,7 +347,7 @@ impl BlockStore {
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_blocks_by_round(round);
-        self.read_index_storage_vec(entries)
+        Self::extract_storage_blocks(entries)
     }
 
     pub fn get_blocks_at_authority_round(
@@ -359,7 +359,7 @@ impl BlockStore {
             .inner
             .read()
             .get_blocks_at_authority_round(authority, round);
-        self.read_index_storage_vec(entries)
+        Self::extract_storage_blocks(entries)
     }
 
     pub fn block_exists_at_authority_round(
@@ -499,11 +499,7 @@ impl BlockStore {
         }
         let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
 
-        // Only unload from RAM, keep everything in RocksDB
-        let unloaded = self.inner.write().unload_below_round(threshold_round);
-        self.metrics
-            .block_store_unloaded_blocks
-            .inc_by(unloaded as u64);
+        self.inner.write().evict_below_round();
     }
 
     pub fn get_own_transmission_blocks(
@@ -516,7 +512,7 @@ impl BlockStore {
             self.inner
                 .read()
                 .get_own_blocks(to_whom_authority_index, from_excluded, limit);
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_own_blocks(
@@ -529,7 +525,7 @@ impl BlockStore {
             .read()
             .get_unknown_own_blocks(to_whom_authority_index, batch_own_block_size);
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_other_blocks(
@@ -544,7 +540,7 @@ impl BlockStore {
             max_round_own_blocks,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_causal_history(
@@ -561,7 +557,7 @@ impl BlockStore {
             authorities_with_missing_blocks,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unknown_past_cone(
@@ -578,7 +574,7 @@ impl BlockStore {
             batch_other_block_size,
         );
 
-        self.read_index_transmission_vec(entries)
+        Self::extract_transmission_blocks(entries)
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -589,31 +585,12 @@ impl BlockStore {
         self.inner.read().last_own_block()
     }
 
-    fn read_index(
-        &self,
-        entry: IndexEntry,
-    ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
-        entry
+    fn extract_storage_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
+        entries.into_iter().map(|(s, _)| s).collect()
     }
 
-    fn read_index_storage_vec(
-        &self,
-        entries: Vec<IndexEntry>,
-    ) -> Vec<Data<VerifiedStatementBlock>> {
-        entries
-            .into_iter()
-            .map(|pos| self.read_index(pos).0)
-            .collect()
-    }
-
-    fn read_index_transmission_vec(
-        &self,
-        entries: Vec<IndexEntry>,
-    ) -> Vec<Data<VerifiedStatementBlock>> {
-        entries
-            .into_iter()
-            .map(|pos| self.read_index(pos).1)
-            .collect()
+    fn extract_transmission_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
+        entries.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
@@ -779,8 +756,8 @@ impl BlockStoreInner {
             .cloned()
     }
 
-    pub fn unload_below_round(&mut self, _threshold_round: RoundNumber) -> usize {
-        // Evict dag metadata below the min committed round across all authorities,
+    pub fn evict_below_round(&mut self) {
+        // Evict metadata below the min committed round across all authorities,
         // with a safety margin of 2 * MAX_TRAVERSAL_DEPTH
         let dag_threshold = self
             .last_committed_round
@@ -790,9 +767,7 @@ impl BlockStoreInner {
             .unwrap_or(0)
             .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
         if dag_threshold > 0 {
-            let dag_kept = self.dag.split_off(&dag_threshold);
-            self.dag = dag_kept;
-
+            self.dag = self.dag.split_off(&dag_threshold);
             self.index = self.index.split_off(&dag_threshold);
 
             let split_ref = BlockReference {
@@ -805,69 +780,25 @@ impl BlockStoreInner {
             }
             self.data_availability = self.data_availability.split_off(&split_ref);
         }
-
-        0
     }
 
-    pub fn add_unloaded(
+    pub fn add_block(
         &mut self,
-        data_storage_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
+        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        let reference = data_storage_transmission_blocks.0.reference();
-        self.highest_round = max(self.highest_round, reference.round());
-
-        let map = self.index.entry(reference.round()).or_default();
-        map.insert(
-            reference.author_digest(),
-            data_storage_transmission_blocks.clone(),
-        );
-
-        self.add_own_index(reference, authority_index_start, authority_index_end);
-        self.update_last_seen_by_authority(reference);
-        self.update_dag(
-            *reference,
-            data_storage_transmission_blocks.0.includes().clone(),
-        );
-        self.update_data_availability_and_cached_blocks(&data_storage_transmission_blocks.0);
-    }
-
-    pub fn add_loaded(
-        &mut self,
-        storage_and_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
-    ) {
-        let reference = storage_and_transmission_blocks.0.reference();
+        let reference = blocks.0.reference();
         self.highest_round = max(self.highest_round, reference.round());
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
 
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(
-            reference.author_digest(),
-            storage_and_transmission_blocks.clone(),
-        );
+        map.insert(reference.author_digest(), blocks.clone());
 
-        tracing::debug!(
-            "Current index map in round {} is : {:?}",
-            reference.round(),
-            map
-        );
-
-        self.update_dag(
-            *reference,
-            storage_and_transmission_blocks.0.includes().clone(),
-        );
-        self.update_data_availability_and_cached_blocks(&storage_and_transmission_blocks.0);
+        self.update_dag(*reference, blocks.0.includes().clone());
+        self.update_data_availability_and_cached_blocks(&blocks.0);
     }
 
     pub fn updated_unknown_by_others(&mut self, block_reference: BlockReference) {
