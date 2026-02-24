@@ -1060,27 +1060,40 @@ impl BlockStoreInner {
             .collect()
     }
 
+    /// Collect unknown blocks for a peer, filtered by predicate and limited in count.
+    fn collect_unknown_blocks(
+        &self,
+        to_whom: AuthorityIndex,
+        filter: impl Fn(&BlockReference) -> bool,
+        limit: usize,
+    ) -> Vec<(IndexEntry, RoundNumber)> {
+        self.not_known_by_authority[to_whom as usize]
+            .iter()
+            .filter(|r| filter(r))
+            .take(limit)
+            .map(|r| {
+                let entry = self
+                    .get_block(*r)
+                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
+                (entry, r.round())
+            })
+            .collect()
+    }
+
+    fn into_sorted_entries(mut blocks: Vec<(IndexEntry, RoundNumber)>) -> Vec<IndexEntry> {
+        blocks.sort_by_key(|x| x.1);
+        blocks.into_iter().map(|x| x.0).collect()
+    }
+
     pub fn get_unknown_own_blocks(
         &self,
         to_whom: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<IndexEntry> {
-        let mut own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| block_reference.authority == self.authority)
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        own_blocks.sort_by_key(|x| x.1);
-        own_blocks.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        Self::into_sorted_entries(
+            self.collect_unknown_blocks(to_whom, |r| r.authority == auth, batch_own_block_size),
+        )
     }
 
     pub fn get_unknown_other_blocks(
@@ -1089,25 +1102,13 @@ impl BlockStoreInner {
         batch_other_block_size: usize,
         max_round: Option<RoundNumber>,
     ) -> Vec<IndexEntry> {
-        let max_round_own_blocks = max_round.unwrap_or(RoundNumber::MAX);
-        let mut other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (block_reference.authority != self.authority)
-                    && (block_reference.round < max_round_own_blocks)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        other_blocks.sort_by_key(|x| x.1);
-        other_blocks.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let max = max_round.unwrap_or(RoundNumber::MAX);
+        Self::into_sorted_entries(self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority != auth && r.round < max,
+            batch_other_block_size,
+        ))
     }
 
     pub fn get_unknown_causal_history(
@@ -1117,42 +1118,19 @@ impl BlockStoreInner {
         batch_other_block_size: usize,
         authorities_with_missing_blocks: HashSet<AuthorityIndex>,
     ) -> Vec<IndexEntry> {
-        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| block_reference.authority == self.authority)
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        let max_round_own_blocks = own_blocks.iter().map(|own_block| own_block.1).max();
-        let max_round_own_blocks = max_round_own_blocks.unwrap_or(RoundNumber::MAX);
-        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (authorities_with_missing_blocks.contains(&block_reference.authority))
-                    && (block_reference.round < max_round_own_blocks)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
-            own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1);
-        blocks_to_send.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let own = self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority == auth,
+            batch_own_block_size,
+        );
+        let max = own.iter().map(|x| x.1).max().unwrap_or(RoundNumber::MAX);
+        let other = self.collect_unknown_blocks(
+            to_whom,
+            |r| authorities_with_missing_blocks.contains(&r.authority) && r.round < max,
+            batch_other_block_size,
+        );
+        Self::into_sorted_entries(own.into_iter().chain(other).collect())
     }
 
     pub fn get_unknown_past_cone(
@@ -1162,42 +1140,19 @@ impl BlockStoreInner {
         batch_own_block_size: usize,
         batch_other_block_size: usize,
     ) -> Vec<IndexEntry> {
-        let max_round = block_reference.round;
-        let own_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                block_reference.authority == self.authority && block_reference.round < max_round
-            })
-            .take(batch_own_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-        let other_blocks: Vec<(IndexEntry, RoundNumber)> = self.not_known_by_authority
-            [to_whom as usize]
-            .iter()
-            .filter(|block_reference| {
-                (block_reference.authority != self.authority) && (block_reference.round < max_round)
-            })
-            .take(batch_other_block_size)
-            .map(|block_reference| {
-                if let Some(index_entry) = self.get_block(*block_reference) {
-                    (index_entry, block_reference.round())
-                } else {
-                    panic!("Block index corrupted, not found: {block_reference}");
-                }
-            })
-            .collect();
-
-        let mut blocks_to_send: Vec<(IndexEntry, RoundNumber)> =
-            own_blocks.into_iter().chain(other_blocks).collect();
-        blocks_to_send.sort_by_key(|x| x.1);
-        blocks_to_send.iter().map(|x| x.0.clone()).collect()
+        let auth = self.authority;
+        let max = block_reference.round;
+        let own = self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority == auth && r.round < max,
+            batch_own_block_size,
+        );
+        let other = self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority != auth && r.round < max,
+            batch_other_block_size,
+        );
+        Self::into_sorted_entries(own.into_iter().chain(other).collect())
     }
 
     fn add_own_index(
