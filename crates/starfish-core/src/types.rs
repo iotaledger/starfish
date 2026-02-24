@@ -150,85 +150,67 @@ impl CachedStatementBlock {
         merkle_proof: Vec<u8>,
         info_length: usize,
     ) -> VerifiedStatementBlock {
-        let encoded_shard: Option<(Shard, usize)> = Some((
+        let encoded_shard = Some((
             self.encoded_statements[own_id]
                 .clone()
                 .expect("Should be shard"),
             own_id,
         ));
-        if self.statements.is_some() {
-            VerifiedStatementBlock {
-                reference: self.reference,
-                includes: self.includes.clone(),
-                acknowledgement_statements: self.acknowledgement_statements.clone(),
-                meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker,
-                signature: self.signature,
-                statements: self.statements.clone(),
-                encoded_shard,
-                merkle_proof_encoded_shard: Some(merkle_proof),
-                transactions_commitment: self.merkle_root_encoded_statements,
-                strong_vote: self.strong_vote,
-            }
-        } else {
-            let info_shards: Vec<Vec<u8>> = self
-                .encoded_statements()
-                .iter()
-                .enumerate()
-                .filter(|(i, _s)| *i < info_length)
-                .map(|(_, s)| s.clone().expect("Should be Some for all info length")) // Safe to unwrap because we filtered for `is_some()`
-                .collect();
-            // Combine all the shards into a single Vec<u8> (assuming they are in order)
-            let mut reconstructed_data = Vec::new();
-            for shard in info_shards {
-                reconstructed_data.extend(shard);
-            }
-
-            // Read the first 4 bytes for `bytes_length` to get the size of the original serialized block
-            if reconstructed_data.len() < 4 {
-                panic!("Reconstructed data is too short to contain a valid length");
-            }
-
-            let bytes_length = u32::from_le_bytes(
-                reconstructed_data[0..4]
-                    .try_into()
-                    .expect("Failed to read bytes_length"),
-            ) as usize;
-
-            // Ensure the data length matches the declared length
-            if reconstructed_data.len() < 4 + bytes_length {
-                panic!(
-                    "Reconstructed data length does not match the declared bytes_length; {} {}",
-                    reconstructed_data.len(),
-                    bytes_length
-                );
-            } else {
-                tracing::debug!(
-                    "Reconstructed data length {}, bytes_length {}",
-                    reconstructed_data.len(),
-                    bytes_length
-                );
-            }
-
-            // Deserialize the rest of the data into `Vec<BaseStatement>`
-            let serialized_block = &reconstructed_data[4..4 + bytes_length];
-            let reconstructed_statements: Vec<BaseStatement> =
-                bincode::deserialize(serialized_block)
-                    .expect("Deserialization of reconstructed data failed");
-            VerifiedStatementBlock {
-                reference: self.reference,
-                includes: self.includes.clone(),
-                acknowledgement_statements: self.acknowledgement_statements.clone(),
-                meta_creation_time_ns: self.meta_creation_time_ns,
-                epoch_marker: self.epoch_marker,
-                signature: self.signature,
-                statements: Some(reconstructed_statements),
-                encoded_shard,
-                merkle_proof_encoded_shard: Some(merkle_proof),
-                transactions_commitment: self.merkle_root_encoded_statements,
-                strong_vote: self.strong_vote,
-            }
+        let statements = self
+            .statements
+            .clone()
+            .or_else(|| Some(Self::reconstruct_statements_from_shards(&self.encoded_statements, info_length)));
+        VerifiedStatementBlock {
+            reference: self.reference,
+            includes: self.includes.clone(),
+            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            meta_creation_time_ns: self.meta_creation_time_ns,
+            epoch_marker: self.epoch_marker,
+            signature: self.signature,
+            statements,
+            encoded_shard,
+            merkle_proof_encoded_shard: Some(merkle_proof),
+            transactions_commitment: self.merkle_root_encoded_statements,
+            strong_vote: self.strong_vote,
         }
+    }
+
+    /// Reconstruct statements by concatenating info shards and deserializing.
+    fn reconstruct_statements_from_shards(
+        encoded_statements: &[Option<Shard>],
+        info_length: usize,
+    ) -> Vec<BaseStatement> {
+        let reconstructed_data: Vec<u8> = encoded_statements
+            .iter()
+            .take(info_length)
+            .flat_map(|s| s.clone().expect("Should be Some for all info shards"))
+            .collect();
+
+        assert!(
+            reconstructed_data.len() >= 4,
+            "Reconstructed data is too short to contain a valid length"
+        );
+
+        let bytes_length = u32::from_le_bytes(
+            reconstructed_data[0..4]
+                .try_into()
+                .expect("Failed to read bytes_length"),
+        ) as usize;
+
+        assert!(
+            reconstructed_data.len() >= 4 + bytes_length,
+            "Reconstructed data length {} does not match declared bytes_length {}",
+            reconstructed_data.len(),
+            bytes_length
+        );
+        tracing::debug!(
+            "Reconstructed data length {}, bytes_length {}",
+            reconstructed_data.len(),
+            bytes_length
+        );
+
+        bincode::deserialize(&reconstructed_data[4..4 + bytes_length])
+            .expect("Deserialization of reconstructed data failed")
     }
 }
 
@@ -534,7 +516,19 @@ impl VerifiedStatementBlock {
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<()> {
-        let round = self.round();
+        self.verify_statements(committee, own_id, peer_id, encoder, consensus_protocol)?;
+        self.verify_block_structure(committee)
+    }
+
+    /// Verify statement commitments and shard proofs (protocol-dependent).
+    fn verify_statements(
+        &mut self,
+        committee: &Committee,
+        own_id: usize,
+        peer_id: usize,
+        encoder: &mut Encoder,
+        consensus_protocol: ConsensusProtocol,
+    ) -> eyre::Result<()> {
         match consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
@@ -584,9 +578,8 @@ impl VerifiedStatementBlock {
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 if let Some(statements) = &self.statements {
-                    let transactions_commitment = TransactionsCommitment::new_from_statements(
-                        statements,
-                    );
+                    let transactions_commitment =
+                        TransactionsCommitment::new_from_statements(statements);
                     ensure!(
                         transactions_commitment == self.transactions_commitment,
                         "Incorrect Merkle root"
@@ -596,7 +589,12 @@ impl VerifiedStatementBlock {
                 }
             }
         }
+        Ok(())
+    }
 
+    /// Verify digest, signature, includes, and threshold clock.
+    fn verify_block_structure(&self, committee: &Committee) -> eyre::Result<()> {
+        let round = self.round();
         let digest = BlockDigest::new(
             self.author(),
             round,
