@@ -70,8 +70,7 @@ impl Monitor {
         // Configure and reload grafana.
         let instance = std::iter::once(self.instance.clone());
         let commands = Grafana::setup_commands();
-        let context =
-            CommandContext::new().with_execute_from_path(PathBuf::from(repo_name));
+        let context = CommandContext::new().with_execute_from_path(PathBuf::from(repo_name));
         self.ssh_manager
             .execute(instance, commands, context)
             .await?;

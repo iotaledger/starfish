@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
 };
+
+use ahash::AHashSet;
 
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
@@ -18,7 +20,7 @@ use tokio::{
         Mutex,
     },
     task::JoinHandle,
-    time::{Instant, sleep_until},
+    time::{sleep_until, Instant},
 };
 
 use crate::{
@@ -126,7 +128,7 @@ struct ShardReconstructor {
     // Shard collection state
     shard_accumulators: BTreeMap<BlockReference, ShardAccumulator>,
     processed_blocks: BTreeSet<BlockReference>,
-    reconstruction_queue: HashSet<BlockReference>,
+    reconstruction_queue: AHashSet<BlockReference>,
     // Incoming shard messages
     shard_rx: Receiver<ShardMessage>,
     // Worker pool channels
@@ -179,7 +181,7 @@ impl ShardReconstructor {
             metrics,
             shard_accumulators: BTreeMap::new(),
             processed_blocks: BTreeSet::new(),
-            reconstruction_queue: HashSet::new(),
+            reconstruction_queue: AHashSet::new(),
             shard_rx,
             ready_tx,
             ready_rx: Arc::new(Mutex::new(ready_rx)),
@@ -235,10 +237,7 @@ impl ShardReconstructor {
                                     .with_label_values(&["shard_reconstructor"])
                                     .inc();
                                 metrics.shard_reconstruction_success_total.inc();
-                                tracing::debug!(
-                                    "Worker reconstructed block {:?}",
-                                    block_reference
-                                );
+                                tracing::debug!("Worker reconstructed block {:?}", block_reference);
                                 if result_tx
                                     .send(ReconstructedBlock {
                                         block_reference,
@@ -327,9 +326,7 @@ impl ShardReconstructor {
                 let acc = self
                     .shard_accumulators
                     .entry(block_reference)
-                    .or_insert_with(|| {
-                        ShardAccumulator::new(&block_template, self.committee_size)
-                    });
+                    .or_insert_with(|| ShardAccumulator::new(&block_template, self.committee_size));
                 acc.update_with_shard(shard, shard_index);
 
                 if acc.is_ready(self.info_length) {
@@ -512,18 +509,18 @@ mod tests {
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));
 
-        let handle = start_shard_reconstructor(
-            committee.clone(),
-            own_id,
-            metrics,
-            decoded_tx,
-            gc_round,
-        );
+        let handle =
+            start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
         let statements = vec![BaseStatement::Share(Transaction::new(vec![7; 200]))];
-        let (block, shards) =
-            make_test_block_and_shards(statements.clone(), 1, &committee, &mut encoder, &signers[1]);
+        let (block, shards) = make_test_block_and_shards(
+            statements.clone(),
+            1,
+            &committee,
+            &mut encoder,
+            &signers[1],
+        );
 
         let block_ref = *block.reference();
         let sender = handle.shard_message_sender();
@@ -543,7 +540,10 @@ mod tests {
 
         // Wait for decoded block (20ms flush + reconstruction time)
         let result = tokio::time::timeout(Duration::from_secs(5), decoded_rx.recv()).await;
-        assert!(result.is_ok(), "should receive decoded blocks within timeout");
+        assert!(
+            result.is_ok(),
+            "should receive decoded blocks within timeout"
+        );
         let decoded_blocks = result.unwrap().unwrap();
         assert!(!decoded_blocks.is_empty());
 
@@ -573,13 +573,8 @@ mod tests {
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));
 
-        let handle = start_shard_reconstructor(
-            committee.clone(),
-            own_id,
-            metrics,
-            decoded_tx,
-            gc_round,
-        );
+        let handle =
+            start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
         let statements = vec![BaseStatement::Share(Transaction::new(vec![9; 50]))];
@@ -620,8 +615,7 @@ mod tests {
         }
 
         // Wait briefly — no decoded block should arrive
-        let result =
-            tokio::time::timeout(Duration::from_millis(200), decoded_rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), decoded_rx.recv()).await;
         assert!(
             result.is_err(),
             "should NOT receive decoded blocks after FullBlock cancellation"

@@ -5,14 +5,15 @@
 #------------------------------------------------------------------------------
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Recommend < number of physical cores. The hard limit is 128
 DESIRED_TPS=${DESIRED_TPS:-100}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-starfish-s}       # Options: starfish, starfish-s, starfish-pull, cordial-miners, mysticeti
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}
+CONSENSUS=${CONSENSUS:-starfish}       # Options: starfish, starfish-s, starfish-pull, cordial-miners, mysticeti
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-2}  # Must be < NUM_VALIDATORS / 3
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-random-drop} # Options: timeout-leader, leader-withholding, equivocating-chains, equivocating-two-chains, chain-bomb, equivocating-chains-bomb, random-drop
 TEST_TIME=${TEST_TIME:-300}               # Total test duration in seconds
 # UNIFORM_LATENCY_MS=100              # Optional: set to use uniform latency (ms) instead of AWS RTT table
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
+CLEAN_MONITORING=${CLEAN_MONITORING:-0}  # Set to 1 to wipe Prometheus/Grafana data
 
 # Docker network
 BASE_IP="172.28.0.10"
@@ -28,6 +29,17 @@ GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)
 RESET=$(tput sgr0)
+
+if (( NUM_BYZANTINE_NODES > 0 )); then
+    case "$BYZANTINE_STRATEGY" in
+        timeout-leader|leader-withholding|equivocating-chains|equivocating-two-chains|chain-bomb|equivocating-chains-bomb|random-drop) ;;
+        *)
+            echo -e "${RED}Invalid BYZANTINE_STRATEGY: ${BYZANTINE_STRATEGY}${RESET}"
+            echo -e "${YELLOW}Supported options: timeout-leader, leader-withholding, equivocating-chains, equivocating-two-chains, chain-bomb, equivocating-chains-bomb, random-drop${RESET}"
+            exit 1
+            ;;
+    esac
+fi
 
 #------------------------------------------------------------------------------
 # Signal Handling
@@ -46,6 +58,19 @@ cleanup_interrupt() {
 trap cleanup_interrupt INT
 
 #------------------------------------------------------------------------------
+# Persistent Monitoring Volumes
+#------------------------------------------------------------------------------
+docker volume create prometheus_data 2>/dev/null || true
+docker volume create grafana_data 2>/dev/null || true
+
+if [ "$CLEAN_MONITORING" = 1 ]; then
+    echo -e "${YELLOW}Wiping monitoring data...${RESET}"
+    docker volume rm prometheus_data grafana_data 2>/dev/null || true
+    docker volume create prometheus_data
+    docker volume create grafana_data
+fi
+
+#------------------------------------------------------------------------------
 # Cleanup Previous Run
 #------------------------------------------------------------------------------
 if [ -f "$COMPOSE_FILE" ]; then
@@ -56,7 +81,7 @@ if [ -f "$COMPOSE_FILE" ]; then
     fi
 fi
 echo -e "${CYAN}Cleaning up previous run data...${RESET}"
-rm -rf "$DATA_DIR"
+rm -f "$DATA_DIR"/*.log "$DATA_DIR"/docker-compose.yml "$DATA_DIR"/prometheus.yaml
 mkdir -p "$DATA_DIR"
 
 #------------------------------------------------------------------------------
@@ -117,7 +142,9 @@ networks:
 
 volumes:
   prometheus_data:
+    external: true
   grafana_data:
+    external: true
 EOH
 
   # Infrastructure services

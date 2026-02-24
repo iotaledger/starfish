@@ -78,8 +78,8 @@ mod tests {
     use crate::committee::Committee;
     use crate::types::{BaseStatement, Transaction};
     use rand::prelude::SliceRandom;
-    use rand::{Rng, SeedableRng};
     use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use reed_solomon_simd::ReedSolomonDecoder;
     use std::collections::HashMap;
 
@@ -172,9 +172,8 @@ mod tests {
                 // Reconstruct statements from info shards
                 let reconstructed_data: Vec<u8> =
                     info_shards.iter().flat_map(|s| s.clone()).collect();
-                let bytes_length = u32::from_le_bytes(
-                    reconstructed_data[0..4].try_into().unwrap(),
-                ) as usize;
+                let bytes_length =
+                    u32::from_le_bytes(reconstructed_data[0..4].try_into().unwrap()) as usize;
                 let reconstructed: Vec<BaseStatement> =
                     bincode::deserialize(&reconstructed_data[4..4 + bytes_length]).unwrap();
                 assert!(

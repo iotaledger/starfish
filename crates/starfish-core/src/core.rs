@@ -4,10 +4,11 @@
 
 use reed_solomon_simd::ReedSolomonEncoder;
 use std::{
-    collections::HashSet,
     mem,
     sync::{atomic::AtomicU64, Arc},
 };
+
+use ahash::AHashSet;
 
 use crate::block_store::ConsensusProtocol;
 use crate::encoder::ShardEncoder;
@@ -57,7 +58,7 @@ pub struct Core<H: BlockHandler> {
     options: CoreOptions,
     signer: Signer,
     // todo - ugly, probably need to merge syncer and core
-    recovered_committed_blocks: Option<HashSet<BlockReference>>,
+    recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
@@ -191,7 +192,7 @@ impl<H: BlockHandler> Core<H> {
     ) -> (
         bool,
         Vec<BlockReference>,
-        HashSet<BlockReference>,
+        AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
         let _timer = self
@@ -532,7 +533,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn compress_pending_block_references(&self, pending: &[MetaStatement]) -> Vec<BlockReference> {
-        let mut references_in_block: HashSet<BlockReference> = HashSet::new();
+        let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();
 
         for statement in pending {
             if let MetaStatement::Include(block_ref) = statement {
@@ -616,7 +617,7 @@ impl<H: BlockHandler> Core<H> {
     /// try_new_block might still return None if threshold clock is not ready
     ///
     /// The algorithm to calling is roughly: if timeout || commit_ready_new_block then try_new_block(..)
-    pub fn ready_new_block(&self, connected_authorities: &HashSet<AuthorityIndex>) -> bool {
+    pub fn ready_new_block(&self, connected_authorities: &AHashSet<AuthorityIndex>) -> bool {
         let quorum_round = self.threshold_clock.get_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
 
@@ -700,7 +701,7 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
 
-    pub fn take_recovered_committed_blocks(&mut self) -> HashSet<BlockReference> {
+    pub fn take_recovered_committed_blocks(&mut self) -> AHashSet<BlockReference> {
         self.recovered_committed_blocks
             .take()
             .expect("take_recovered_committed_blocks called twice")

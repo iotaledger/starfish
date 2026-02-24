@@ -2,7 +2,8 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use ahash::AHashSet;
+use std::sync::Arc;
 
 use crate::data::Data;
 use crate::transactions_generator::TransactionGenerator;
@@ -314,7 +315,7 @@ impl CommitObserver for RealCommitHandler {
         resulted_committed
     }
 
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>) {
+    fn recover_committed(&mut self, committed: AHashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
         self.committed_count = committed.len();
         self.metrics.commit_index.set(self.committed_count as i64);

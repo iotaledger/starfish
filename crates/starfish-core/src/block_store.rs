@@ -4,11 +4,13 @@
 
 use std::{
     cmp::max,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     sync::Arc,
     time::Instant,
 };
+
+use ahash::AHashSet;
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -87,7 +89,10 @@ struct BlockStoreInner {
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     // this dag structure store for each block its predecessors and who knows the block
-    dag: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>>,
+    dag: BTreeMap<
+        RoundNumber,
+        HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>,
+    >,
     // per-authority highest committed round, used as dag eviction threshold
     last_committed_round: Vec<RoundNumber>,
     // committed subdag which contains blocks with at least one unavailable transaction data
@@ -131,7 +136,7 @@ impl BlockStore {
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
         let mut block_count = 0u64;
-        let mut recovered_commit_leaders = HashSet::new();
+        let mut recovered_commit_leaders = AHashSet::new();
         // Recover blocks from RocksDB
         let mut current_round = 0;
         loop {
@@ -209,26 +214,25 @@ impl BlockStore {
         builder.build(rocks_store, block_store)
     }
 
-    pub fn get_dag_sorted(
-        &self,
-    ) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
+    pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
         let inner = self.inner.read();
         // BTreeMap is already sorted by round
         inner
             .dag
             .iter()
             .flat_map(|(round, map)| {
-                map.iter().map(move |((authority, digest), (parents, known_by))| {
-                    (
-                        BlockReference {
-                            authority: *authority,
-                            round: *round,
-                            digest: *digest,
-                        },
-                        parents.clone(),
-                        *known_by,
-                    )
-                })
+                map.iter()
+                    .map(move |((authority, digest), (parents, known_by))| {
+                        (
+                            BlockReference {
+                                authority: *authority,
+                                round: *round,
+                                digest: *digest,
+                            },
+                            parents.clone(),
+                            *known_by,
+                        )
+                    })
             })
             .collect()
     }
@@ -427,6 +431,10 @@ impl BlockStore {
         self.inner.read().highest_round
     }
 
+    pub fn lowest_round(&self) -> RoundNumber {
+        self.inner.read().dag.keys().next().copied().unwrap_or(0)
+    }
+
     pub fn update_committed_rounds(&self, committed_blocks: &[Data<VerifiedStatementBlock>]) {
         let mut inner = self.inner.write();
         for block in committed_blocks {
@@ -465,25 +473,28 @@ impl BlockStore {
 
     pub fn get_unsent_own_blocks(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self
             .inner
             .read()
-            .get_unsent_own_blocks(sent, batch_own_block_size);
+            .get_unsent_own_blocks(sent, peer, batch_own_block_size);
 
         Self::extract_transmission_blocks(entries)
     }
 
     pub fn get_unsent_other_blocks(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_other_block_size: usize,
         max_round_own_blocks: Option<RoundNumber>,
     ) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_unsent_other_blocks(
             sent,
+            peer,
             batch_other_block_size,
             max_round_own_blocks,
         );
@@ -493,13 +504,15 @@ impl BlockStore {
 
     pub fn get_unsent_causal_history(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_own_block_size: usize,
         batch_other_block_size: usize,
-        authorities_with_missing_blocks: HashSet<AuthorityIndex>,
+        authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
     ) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_unsent_causal_history(
             sent,
+            peer,
             batch_own_block_size,
             batch_other_block_size,
             authorities_with_missing_blocks,
@@ -510,13 +523,15 @@ impl BlockStore {
 
     pub fn get_unsent_past_cone(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         block_reference: BlockReference,
         batch_own_block_size: usize,
         batch_other_block_size: usize,
     ) -> Vec<Data<VerifiedStatementBlock>> {
         let entries = self.inner.read().get_unsent_past_cone(
             sent,
+            peer,
             block_reference,
             batch_own_block_size,
             batch_other_block_size,
@@ -547,7 +562,7 @@ impl BlockStore {
         later_block: &Data<VerifiedStatementBlock>,
         earlier_block: &Data<VerifiedStatementBlock>,
     ) -> bool {
-        let mut parents = HashSet::from([later_block.clone()]);
+        let mut parents = AHashSet::from([later_block.clone()]);
         for _round_number in (earlier_block.round()..later_block.round()).rev() {
             // Collect parents from the current set of blocks.
             parents = parents
@@ -826,23 +841,31 @@ impl BlockStoreInner {
     /// Collect unsent blocks for a peer by iterating the DAG, skipping those in `sent`.
     fn collect_unsent_blocks(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         filter: impl Fn(&BlockReference) -> bool,
         limit: usize,
     ) -> Vec<(IndexEntry, RoundNumber)> {
+        let peer_bit = 1u128 << peer;
         self.dag
             .iter()
             .flat_map(|(round, entries)| {
-                entries.iter().map(move |((authority, digest), _)| {
-                    BlockReference {
-                        authority: *authority,
-                        round: *round,
-                        digest: *digest,
-                    }
-                })
+                entries
+                    .iter()
+                    .map(move |((authority, digest), (_, known_by))| {
+                        (
+                            BlockReference {
+                                authority: *authority,
+                                round: *round,
+                                digest: *digest,
+                            },
+                            *known_by,
+                        )
+                    })
             })
-            .filter(|r| !sent.contains(r) && filter(r))
+            .filter(|(r, known_by)| known_by & peer_bit == 0 && !sent.contains(r) && filter(r))
             .take(limit)
+            .map(|(r, _)| r)
             .map(|r| {
                 let entry = self
                     .get_block(r)
@@ -859,12 +882,14 @@ impl BlockStoreInner {
 
     pub fn get_unsent_own_blocks(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<IndexEntry> {
         let auth = self.authority;
         Self::into_sorted_entries(self.collect_unsent_blocks(
             sent,
+            peer,
             |r| r.authority == auth,
             batch_own_block_size,
         ))
@@ -872,7 +897,8 @@ impl BlockStoreInner {
 
     pub fn get_unsent_other_blocks(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_other_block_size: usize,
         max_round: Option<RoundNumber>,
     ) -> Vec<IndexEntry> {
@@ -880,6 +906,7 @@ impl BlockStoreInner {
         let max = max_round.unwrap_or(RoundNumber::MAX);
         Self::into_sorted_entries(self.collect_unsent_blocks(
             sent,
+            peer,
             |r| r.authority != auth && r.round < max,
             batch_other_block_size,
         ))
@@ -887,17 +914,19 @@ impl BlockStoreInner {
 
     pub fn get_unsent_causal_history(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         batch_own_block_size: usize,
         batch_other_block_size: usize,
-        authorities_with_missing_blocks: HashSet<AuthorityIndex>,
+        authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
     ) -> Vec<IndexEntry> {
         let auth = self.authority;
         let own =
-            self.collect_unsent_blocks(sent, |r| r.authority == auth, batch_own_block_size);
+            self.collect_unsent_blocks(sent, peer, |r| r.authority == auth, batch_own_block_size);
         let max = own.iter().map(|x| x.1).max().unwrap_or(RoundNumber::MAX);
         let other = self.collect_unsent_blocks(
             sent,
+            peer,
             |r| authorities_with_missing_blocks.contains(&r.authority) && r.round < max,
             batch_other_block_size,
         );
@@ -906,7 +935,8 @@ impl BlockStoreInner {
 
     pub fn get_unsent_past_cone(
         &self,
-        sent: &HashSet<BlockReference>,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
         block_reference: BlockReference,
         batch_own_block_size: usize,
         batch_other_block_size: usize,
@@ -915,11 +945,13 @@ impl BlockStoreInner {
         let max = block_reference.round;
         let own = self.collect_unsent_blocks(
             sent,
+            peer,
             |r| r.authority == auth && r.round < max,
             batch_own_block_size,
         );
         let other = self.collect_unsent_blocks(
             sent,
+            peer,
             |r| r.authority != auth && r.round < max,
             batch_other_block_size,
         );

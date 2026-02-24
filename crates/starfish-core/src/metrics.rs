@@ -562,9 +562,13 @@ impl Metrics {
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Shard Reconstruction"]);
         table.add_row(row![b->"Average queued jobs:", average_reconstruction_jobs]);
-        table.add_row(row![b->"Average successful reconstructions:", average_reconstruction_success]);
+        table.add_row(
+            row![b->"Average successful reconstructions:", average_reconstruction_success],
+        );
         table.add_row(row![b->"Average failed reconstructions:", average_reconstruction_failures]);
-        table.add_row(row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled]);
+        table.add_row(
+            row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled],
+        );
         table.add_row(row![b->"Pending shard accumulators:", average_pending_accumulators]);
         table.add_row(row![b->"Queued/in-flight jobs:", average_queued_jobs]);
         table.add_row(row![b->"Pending decoded blocks:", average_pending_decoded_blocks]);

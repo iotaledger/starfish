@@ -2,7 +2,8 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc, thread};
+use ahash::AHashSet;
+use std::{sync::Arc, thread};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -29,7 +30,7 @@ enum CoreThreadCommand {
         Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
         oneshot::Sender<(
             Vec<BlockReference>,
-            HashSet<BlockReference>,
+            AHashSet<BlockReference>,
             Vec<BlockReference>,
         )>,
     ),
@@ -70,7 +71,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     ) -> (
         Vec<BlockReference>,
-        HashSet<BlockReference>,
+        AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
         let (sender, receiver) = oneshot::channel();

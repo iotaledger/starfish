@@ -13,14 +13,15 @@ use crate::{
     runtime::timestamp_utc,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
-use std::{collections::HashSet, sync::Arc};
+use ahash::AHashSet;
+use std::sync::Arc;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
     force_new_block: bool,
     signals: S,
     commit_observer: C,
-    pub(crate) connected_authorities: HashSet<AuthorityIndex>,
+    pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
     metrics: Arc<Metrics>,
 }
 
@@ -35,7 +36,7 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
-    fn recover_committed(&mut self, committed: HashSet<BlockReference>);
+    fn recover_committed(&mut self, committed: AHashSet<BlockReference>);
 
     fn cleanup(&mut self, threshold_round: RoundNumber);
 }
@@ -48,7 +49,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             force_new_block: false,
             signals,
             commit_observer,
-            connected_authorities: HashSet::with_capacity(committee_size),
+            connected_authorities: AHashSet::with_capacity(committee_size),
             metrics,
         }
     }
@@ -58,7 +59,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     ) -> (
         Vec<BlockReference>,
-        HashSet<BlockReference>,
+        AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
         // todo: when block is updated we might return false here and it can make committing longer
