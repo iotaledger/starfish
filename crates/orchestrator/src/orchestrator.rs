@@ -323,7 +323,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             let monitor = Monitor::new(instance, clients, nodes, self.ssh_manager.clone());
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
-            monitor.start_grafana().await?;
+            let repo_name = self.settings.repository_name();
+            monitor.start_grafana(&repo_name).await?;
 
             display::done();
             display::config("Grafana address", monitor.grafana_address());

@@ -24,7 +24,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "PA70C939801DFE0D2"
+        "uid": "Fixed-UID-testbed"
       },
       "fieldConfig": {
         "defaults": {
@@ -204,7 +204,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PA70C939801DFE0D2"
+            "uid": "Fixed-UID-testbed"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -220,7 +220,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PA70C939801DFE0D2"
+            "uid": "Fixed-UID-testbed"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -321,11 +321,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PA70C939801DFE0D2"
+            "uid": "Fixed-UID-testbed"
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(sequenced_transactions_total[20])",
+          "expr": "rate(sequenced_transactions_total[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -423,7 +423,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PA70C939801DFE0D2"
+            "uid": "Fixed-UID-testbed"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1211,83 +1211,6 @@
       ],
       "title": "Proposed block size p50(Kbytes)",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "datasource",
-        "uid": "-- Mixed --"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            }
-          },
-          "mappings": [],
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 48
-      },
-      "id": 1,
-      "options": {
-        "displayLabels": [
-          "percent",
-          "value"
-        ],
-        "legend": {
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true,
-          "values": [
-            "value"
-          ]
-        },
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.3.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "committed_leaders_total{instance=\"host.docker.internal:1512\"}",
-          "fullMetaSearch": false,
-          "includeNullMetadata": true,
-          "legendFormat": "Node {{authority}} - {{commit_type}}",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        }
-      ],
-      "title": "Committed Leaders (view of Node 1)",
-      "type": "piechart"
     },
     {
       "datasource": {
