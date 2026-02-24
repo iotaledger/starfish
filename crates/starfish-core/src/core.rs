@@ -208,9 +208,11 @@ impl<H: BlockHandler> Core<H> {
             .filter(|(b, _)| b.statements().is_some())
             .map(|(b, _)| *b.reference())
             .collect();
-        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) =
-            timed!(self.metrics, "BlockManager::add_blocks",
-                self.block_manager.add_blocks(blocks));
+        let (processed, new_blocks_to_reconstruct, updated_statements, missing_references) = timed!(
+            self.metrics,
+            "BlockManager::add_blocks",
+            self.block_manager.add_blocks(blocks)
+        );
         let processed_references_with_statements: Vec<_> = processed
             .iter()
             .filter(|b| b.statements().is_some())
@@ -338,23 +340,37 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let pending_statements = timed!(self.metrics, "Core::new_block::get_pending_statements",
-            self.get_pending_statements(clock_round));
+        let pending_statements = timed!(
+            self.metrics,
+            "Core::new_block::get_pending_statements",
+            self.get_pending_statements(clock_round)
+        );
         let (mut statements, block_references) = timed!(
-            self.metrics, "Core::new_block::collect_statements_and_references",
-            self.collect_statements_and_references(&pending_statements));
-        timed!(self.metrics, "Core::new_block::prepare_last_blocks",
-            self.prepare_last_blocks());
+            self.metrics,
+            "Core::new_block::collect_statements_and_references",
+            self.collect_statements_and_references(&pending_statements)
+        );
+        timed!(
+            self.metrics,
+            "Core::new_block::prepare_last_blocks",
+            self.prepare_last_blocks()
+        );
         let mut encoded_statements = timed!(
-            self.metrics, "Core::new_block::prepare_encoded_statements",
-            self.prepare_encoded_statements(&statements));
+            self.metrics,
+            "Core::new_block::prepare_encoded_statements",
+            self.prepare_encoded_statements(&statements)
+        );
         let acknowledgments = timed!(
-            self.metrics, "Core::new_block::get_pending_acknowledgment",
-            self.block_store.get_pending_acknowledgment(clock_round));
+            self.metrics,
+            "Core::new_block::get_pending_acknowledgment",
+            self.block_store.get_pending_acknowledgment(clock_round)
+        );
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = timed!(
-            self.metrics, "Core::new_block::calculate_authority_bounds",
-            self.calculate_authority_bounds(number_of_blocks_to_create));
+            self.metrics,
+            "Core::new_block::calculate_authority_bounds",
+            self.calculate_authority_bounds(number_of_blocks_to_create)
+        );
 
         // Create and store blocks
         let mut return_blocks = Vec::new();
@@ -365,14 +381,24 @@ impl<H: BlockHandler> Core<H> {
                 statements = vec![];
                 encoded_statements = self.prepare_encoded_statements(&statements);
             }
-            let block_data = timed!(self.metrics, "Core::new_block::build_block",
+            let block_data = timed!(
+                self.metrics,
+                "Core::new_block::build_block",
                 self.build_block(
-                    &block_references, &statements, &encoded_statements,
-                    &acknowledgments, clock_round, block_id,
-                ));
+                    &block_references,
+                    &statements,
+                    &encoded_statements,
+                    &acknowledgments,
+                    clock_round,
+                    block_id,
+                )
+            );
             tracing::debug!("Created block {:?}", block_data.0);
-            timed!(self.metrics, "Core::new_block::store_block",
-                self.store_block(block_data.clone(), &authority_bounds, block_id));
+            timed!(
+                self.metrics,
+                "Core::new_block::store_block",
+                self.store_block(block_data.clone(), &authority_bounds, block_id)
+            );
 
             return_blocks.push(block_data);
         }
@@ -422,10 +448,11 @@ impl<H: BlockHandler> Core<H> {
         match self.block_store.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => Some(
-                self.encoder
-                    .encode_statements(statements.to_owned(), info_length, parity_length),
-            ),
+            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_statements(
+                statements.to_owned(),
+                info_length,
+                parity_length,
+            )),
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
         }
     }
@@ -605,9 +632,7 @@ impl<H: BlockHandler> Core<H> {
             .observe(block.serialized_bytes().len());
     }
 
-    pub fn try_commit(
-        &mut self,
-    ) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
+    pub fn try_commit(&mut self) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
         let sequence: Vec<_> = self
             .committer
             .try_commit(self.last_commit_leader)

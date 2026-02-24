@@ -156,10 +156,12 @@ impl CachedStatementBlock {
                 .expect("Should be shard"),
             own_id,
         ));
-        let statements = self
-            .statements
-            .clone()
-            .or_else(|| Some(Self::reconstruct_statements_from_shards(&self.encoded_statements, info_length)));
+        let statements = self.statements.clone().or_else(|| {
+            Some(Self::reconstruct_statements_from_shards(
+                &self.encoded_statements,
+                info_length,
+            ))
+        });
         VerifiedStatementBlock {
             reference: self.reference,
             includes: self.includes.clone(),

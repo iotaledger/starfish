@@ -353,8 +353,7 @@ impl Metrics {
 
             commit_gap: {
                 let buckets = vec![
-                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 32.0, 64.0, 128.0,
-                    256.0,
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
                 ];
                 register_histogram_with_registry!(
                     HistogramOpts::new(

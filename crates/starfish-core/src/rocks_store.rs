@@ -102,8 +102,7 @@ impl RocksStore {
             ColumnFamilyDescriptor::new(CF_COMMITS, cf_opts),
         ];
 
-        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)
-            .map_err(io::Error::other)?;
+        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(io::Error::other)?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async writes for better performance
@@ -332,8 +331,7 @@ impl RocksStore {
 
                 match reference.round.cmp(&round) {
                     Ordering::Equal => {
-                        let block =
-                            Data::from_bytes(value.into()).map_err(io::Error::other)?;
+                        let block = Data::from_bytes(value.into()).map_err(io::Error::other)?;
                         blocks.push(block);
                     }
                     Ordering::Greater => break,
@@ -369,8 +367,7 @@ impl RocksStore {
             .map_err(io::Error::other)?
         {
             Some(value) => {
-                let commit_data: CommitData =
-                    deserialize(&value).map_err(io::Error::other)?;
+                let commit_data: CommitData = deserialize(&value).map_err(io::Error::other)?;
                 Ok(Some(commit_data.clone()))
             }
             None => Ok(None),

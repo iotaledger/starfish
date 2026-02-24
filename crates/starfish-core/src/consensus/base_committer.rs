@@ -65,10 +65,7 @@ impl BaseCommitter {
     }
 
     /// Check whether a quorum of stake is represented by the given authorities.
-    fn has_quorum_support(
-        &self,
-        authorities: impl Iterator<Item = AuthorityIndex>,
-    ) -> bool {
+    fn has_quorum_support(&self, authorities: impl Iterator<Item = AuthorityIndex>) -> bool {
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for authority in authorities {
             if aggregator.add(authority, &self.committee) {
@@ -445,8 +442,7 @@ impl BaseCommitter {
             .into_iter()
             .filter(|l| self.enough_leader_support(decision_round, l, voters_for_leaders))
             .map(|l| {
-                let metastate =
-                    self.determine_metastate(&l, voting_round, voters_for_leaders);
+                let metastate = self.determine_metastate(&l, voting_round, voters_for_leaders);
                 LeaderStatus::Commit(l, metastate)
             })
             .collect();

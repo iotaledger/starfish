@@ -1091,9 +1091,11 @@ impl BlockStoreInner {
         batch_own_block_size: usize,
     ) -> Vec<IndexEntry> {
         let auth = self.authority;
-        Self::into_sorted_entries(
-            self.collect_unknown_blocks(to_whom, |r| r.authority == auth, batch_own_block_size),
-        )
+        Self::into_sorted_entries(self.collect_unknown_blocks(
+            to_whom,
+            |r| r.authority == auth,
+            batch_own_block_size,
+        ))
     }
 
     pub fn get_unknown_other_blocks(
@@ -1119,11 +1121,8 @@ impl BlockStoreInner {
         authorities_with_missing_blocks: HashSet<AuthorityIndex>,
     ) -> Vec<IndexEntry> {
         let auth = self.authority;
-        let own = self.collect_unknown_blocks(
-            to_whom,
-            |r| r.authority == auth,
-            batch_own_block_size,
-        );
+        let own =
+            self.collect_unknown_blocks(to_whom, |r| r.authority == auth, batch_own_block_size);
         let max = own.iter().map(|x| x.1).max().unwrap_or(RoundNumber::MAX);
         let other = self.collect_unknown_blocks(
             to_whom,

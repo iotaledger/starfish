@@ -10,7 +10,7 @@ use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
 use crate::synchronizer::{DataRequestor, UpdaterMissingAuthorities};
-use crate::types::{BlockDigest, BlockReference, VerifiedStatementBlock};
+use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
@@ -192,6 +192,518 @@ impl FilterForBlocks {
     }
 }
 
+/// Per-connection state for `connection_task`. Groups the 15+ shared locals
+/// into a struct so the 400-line match body can be split into focused handlers.
+struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static> {
+    consensus_protocol: ConsensusProtocol,
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    metrics: Arc<Metrics>,
+    filter_for_blocks: Arc<FilterForBlocks>,
+    disseminator: BlockDisseminator<H, C>,
+    data_requestor: DataRequestor<H, C>,
+    updater_missing_authorities: UpdaterMissingAuthorities,
+    authorities_with_missing_blocks_by_myself_from_peer: Arc<RwLock<Vec<Instant>>>,
+    authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
+    encoder: ReedSolomonEncoder,
+    decoder: ReedSolomonDecoder,
+    peer_id: AuthorityIndex,
+    peer_usize: usize,
+    peer: char,
+    own_id: AuthorityIndex,
+    sender: mpsc::Sender<NetworkMessage>,
+}
+
+impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H, C> {
+    fn new(
+        connection: &Connection,
+        universal_committer: UniversalCommitter,
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        metrics: Arc<Metrics>,
+        filter_for_blocks: Arc<FilterForBlocks>,
+    ) -> Self {
+        let consensus_protocol = inner.block_store.consensus_protocol;
+        let committee_size = inner.block_store.committee_size;
+        let now = Instant::now();
+        let authorities_with_missing_blocks_by_myself_from_peer =
+            Arc::new(RwLock::new(vec![now; committee_size]));
+        let authorities_with_missing_blocks_by_peer_from_me =
+            Arc::new(RwLock::new(vec![now; committee_size]));
+        let synchronizer_parameters =
+            SynchronizerParameters::new(committee_size, consensus_protocol);
+        let peer_id = connection.peer_id as AuthorityIndex;
+
+        let disseminator = BlockDisseminator::new(
+            peer_id,
+            connection.sender.clone(),
+            universal_committer,
+            inner.clone(),
+            synchronizer_parameters.clone(),
+            metrics.clone(),
+            authorities_with_missing_blocks_by_peer_from_me.clone(),
+        );
+        let data_requestor = DataRequestor::new(
+            peer_id,
+            connection.sender.clone(),
+            inner.clone(),
+            synchronizer_parameters.clone(),
+        );
+        let updater_missing_authorities = UpdaterMissingAuthorities::new(
+            peer_id,
+            connection.sender.clone(),
+            synchronizer_parameters,
+            authorities_with_missing_blocks_by_myself_from_peer.clone(),
+        );
+
+        let encoder = ReedSolomonEncoder::new(2, 4, 64).expect("Encoder should be created");
+        let decoder = ReedSolomonDecoder::new(2, 4, 64).expect("Decoder should be created");
+        let own_id = inner.block_store.get_own_authority_index();
+        let peer = format_authority_index(peer_id);
+
+        Self {
+            consensus_protocol,
+            inner,
+            metrics,
+            filter_for_blocks,
+            disseminator,
+            data_requestor,
+            updater_missing_authorities,
+            authorities_with_missing_blocks_by_myself_from_peer,
+            authorities_with_missing_blocks_by_peer_from_me,
+            encoder,
+            decoder,
+            peer_id,
+            peer_usize: peer_id as usize,
+            peer,
+            own_id,
+            sender: connection.sender.clone(),
+        }
+    }
+
+    async fn start(&mut self) {
+        // Data requestor is needed in theory only for StarfishPull. However, we enable it for
+        // Starfish as well because of the practical way we update the DAG known by other validators
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
+            self.data_requestor.start().await;
+        }
+        // To save some bandwidth, we start the updater about authorities with missing blocks for Starfish
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
+        ) {
+            self.updater_missing_authorities.start().await;
+        }
+    }
+
+    /// Dispatch a single message. Returns `true` to continue, `false` to break the loop.
+    async fn handle_message(&mut self, message: NetworkMessage) -> bool {
+        match message {
+            NetworkMessage::SubscribeBroadcastRequest(round) => {
+                self.handle_subscribe(round).await;
+            }
+            NetworkMessage::Batch(blocks) => {
+                self.handle_batch(blocks).await;
+            }
+            NetworkMessage::MissingHistoryRequest(block_ref) => {
+                self.handle_missing_history_request(block_ref).await;
+            }
+            NetworkMessage::AuthoritiesWithMissingBlocks(authorities) => {
+                self.handle_authorities_missing_blocks(authorities).await;
+            }
+            NetworkMessage::MissingParentsRequest(refs) => {
+                return self.handle_missing_parents_request(refs).await;
+            }
+            NetworkMessage::MissingTxDataRequest(refs) => {
+                return self.handle_missing_tx_data_request(refs).await;
+            }
+        }
+        true
+    }
+
+    async fn handle_subscribe(&mut self, round: RoundNumber) {
+        if self.inner.block_store.byzantine_strategy.is_some() {
+            let round = 0;
+            self.disseminator.disseminate_own_blocks(round).await;
+        } else {
+            match self.consensus_protocol {
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
+                    self.disseminator.disseminate_own_blocks(round).await;
+                }
+                ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::CordialMiners => {
+                    self.disseminator.disseminate_all_blocks_push().await;
+                }
+            }
+        }
+    }
+
+    async fn handle_batch(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+        let timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Network: verify blocks");
+        let mut blocks_with_statements = Vec::new();
+        let mut blocks_without_statements = Vec::new();
+        for block in blocks {
+            if block.statements().is_some() {
+                blocks_with_statements.push(block);
+            } else {
+                blocks_without_statements.push(block);
+            }
+        }
+        let mut authorities_to_be_updated: HashSet<AuthorityIndex> = HashSet::new();
+
+        // First process blocks without statements (causal history shards)
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
+            self.process_blocks_without_statements(
+                blocks_without_statements,
+                &mut authorities_to_be_updated,
+            )
+            .await;
+        }
+
+        // Then process blocks with statements
+        self.process_blocks_with_statements(blocks_with_statements, authorities_to_be_updated)
+            .await;
+
+        drop(timer);
+    }
+
+    async fn process_blocks_without_statements(
+        &mut self,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
+        authorities_to_be_updated: &mut HashSet<AuthorityIndex>,
+    ) {
+        let mut verified_data_blocks = Vec::new();
+        for data_block in blocks {
+            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            tracing::debug!("Received {} from {}", block, self.peer);
+            let block_status = Status::get_status(&block, self.peer_usize);
+            let contains_new_shard_or_header = self
+                .filter_for_blocks
+                .is_needed(&block.digest(), block_status);
+            if !contains_new_shard_or_header {
+                self.metrics.filtered_blocks_total.inc();
+                continue;
+            }
+            if let Err(e) = block.verify(
+                &self.inner.committee,
+                self.own_id as usize,
+                self.peer_id as usize,
+                &mut self.encoder,
+                self.consensus_protocol,
+            ) {
+                tracing::warn!(
+                    "Rejected incorrect block {} from {}: {:?}",
+                    block.reference(),
+                    self.peer,
+                    e
+                );
+                // todo: Terminate connection upon receiving incorrect block.
+                break;
+            }
+            let (ready_to_reconstruct, cached_block) =
+                self.inner.block_store.ready_to_reconstruct(&block);
+            if ready_to_reconstruct {
+                let mut cached_block = cached_block.expect("Should be Some");
+                cached_block.copy_shard(&block);
+                let reconstructed_block = self.decoder.decode_shards(
+                    &self.inner.committee,
+                    &mut self.encoder,
+                    cached_block,
+                    self.own_id,
+                );
+                if let Some(reconstructed) = reconstructed_block {
+                    self.metrics
+                        .reconstructed_blocks_total
+                        .with_label_values(&["connection_task"])
+                        .inc();
+                    block = reconstructed;
+                    tracing::debug!(
+                        "Reconstruction of block {:?} within connection task is successful",
+                        block
+                    );
+                } else {
+                    tracing::debug!(
+                        "Incorrect reconstruction of block {:?} within connection task",
+                        block
+                    );
+                }
+            }
+            let block_status = Status::get_status(&block, self.peer_usize);
+            let contains_new_shard_or_header = self
+                .filter_for_blocks
+                .is_needed(&block.digest(), block_status);
+            let storage_block = block;
+            let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
+            if !contains_new_shard_or_header {
+                self.metrics.processed_after_filtering_total.inc();
+                continue;
+            }
+            let data_storage_block = Data::new(storage_block);
+            let data_transmission_block = Data::new(transmission_block);
+            verified_data_blocks.push((data_storage_block, data_transmission_block));
+        }
+
+        tracing::debug!(
+            "To be processed after verification from {:?}, {} blocks without statements {:?}",
+            self.peer,
+            verified_data_blocks.len(),
+            verified_data_blocks
+        );
+        if !verified_data_blocks.is_empty() {
+            let mut batch_with_status = Vec::new();
+            for block in &verified_data_blocks {
+                batch_with_status.push((
+                    block.0.digest(),
+                    Status::get_status(&block.0, self.peer_usize),
+                ))
+            }
+            self.filter_for_blocks.add_batch(batch_with_status);
+            let (_, _, processed_additional_blocks_without_statements) =
+                self.inner.syncer.add_blocks(verified_data_blocks).await;
+            self.metrics
+                .used_additional_blocks_total
+                .inc_by(processed_additional_blocks_without_statements.len() as u64);
+            authorities_to_be_updated.extend(
+                processed_additional_blocks_without_statements
+                    .iter()
+                    .map(|b| b.authority),
+            );
+            tracing::debug!(
+                "Processed additional blocks from peer {:?}: {:?}",
+                self.peer,
+                processed_additional_blocks_without_statements
+            );
+        }
+    }
+
+    async fn process_blocks_with_statements(
+        &mut self,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
+        mut authorities_to_be_updated: HashSet<AuthorityIndex>,
+    ) {
+        let mut verified_data_blocks = Vec::new();
+        for data_block in blocks {
+            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            tracing::debug!("Received {} from {}", block, self.peer);
+            let block_status = Status::get_status(&block, self.peer_usize);
+            let contains_new_shard_or_header = self
+                .filter_for_blocks
+                .is_needed(&block.digest(), block_status);
+            if !contains_new_shard_or_header {
+                self.metrics.filtered_blocks_total.inc();
+                continue;
+            }
+            if let Err(e) = block.verify(
+                &self.inner.committee,
+                self.own_id as usize,
+                self.peer_id as usize,
+                &mut self.encoder,
+                self.consensus_protocol,
+            ) {
+                tracing::warn!(
+                    "Rejected incorrect block {} from {}: {:?}",
+                    block.reference(),
+                    self.peer,
+                    e
+                );
+                // todo: Terminate connection upon receiving incorrect block.
+                break;
+            }
+            let storage_block = block;
+            let transmission_block = match self.consensus_protocol {
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                    storage_block.clone()
+                }
+                ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishPull => {
+                    storage_block.from_storage_to_transmission(self.own_id)
+                }
+            };
+            self.filter_for_blocks
+                .add_batch(vec![(storage_block.digest(), Status::Full)]);
+            let data_storage_block = Data::new(storage_block);
+            let data_transmission_block = Data::new(transmission_block);
+            verified_data_blocks.push((data_storage_block, data_transmission_block));
+        }
+
+        tracing::debug!(
+            "To be processed after verification from {:?}, {} blocks with statements {:?}",
+            self.peer,
+            verified_data_blocks.len(),
+            verified_data_blocks
+        );
+        if !verified_data_blocks.is_empty() {
+            let (pending_block_references, missing_parents, _processed_additional_blocks) =
+                self.inner.syncer.add_blocks(verified_data_blocks).await;
+            if !missing_parents.is_empty() {
+                authorities_to_be_updated.extend(missing_parents.iter().map(|b| b.authority));
+                tracing::debug!(
+                    "Missing parents when processing block from peer {:?}: {:?}",
+                    self.peer,
+                    missing_parents
+                );
+            }
+            match self.consensus_protocol {
+                ConsensusProtocol::StarfishPull => {
+                    let max_round_ref = pending_block_references
+                        .into_iter()
+                        .max_by_key(|r| r.round());
+                    if let Some(block_ref) = max_round_ref {
+                        tracing::debug!(
+                            "Make request missing history of block {:?} from peer {:?}",
+                            block_ref,
+                            self.peer
+                        );
+                        if let Ok(permit) = self.sender.try_reserve() {
+                            permit.send(NetworkMessage::MissingHistoryRequest(block_ref));
+                        }
+                    }
+                }
+                ConsensusProtocol::Mysticeti => {
+                    if !missing_parents.is_empty() {
+                        let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                        tracing::debug!(
+                            "Make request missing parents of blocks {:?} from peer {:?}",
+                            missing_parents,
+                            self.peer
+                        );
+                        if let Ok(permit) = self.sender.try_reserve() {
+                            permit.send(NetworkMessage::MissingParentsRequest(missing_parents));
+                        }
+                    }
+                }
+                ConsensusProtocol::CordialMiners => {}
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                    if !authorities_to_be_updated.is_empty() {
+                        let now = Instant::now();
+                        let mut authorities_with_missing_blocks = self
+                            .authorities_with_missing_blocks_by_myself_from_peer
+                            .write()
+                            .await;
+                        tracing::debug!(
+                            "Authorities updates for peer {:?} are {:?}",
+                            self.peer,
+                            authorities_to_be_updated
+                        );
+                        for authority in authorities_to_be_updated {
+                            authorities_with_missing_blocks[authority as usize] = now;
+                        }
+                        drop(authorities_with_missing_blocks);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_missing_history_request(&mut self, block_reference: BlockReference) {
+        if self.consensus_protocol == ConsensusProtocol::StarfishPull {
+            tracing::debug!(
+                "Received request missing history for block {:?} from peer {:?}",
+                block_reference,
+                self.peer
+            );
+            if self.inner.block_store.byzantine_strategy.is_none() {
+                self.disseminator
+                    .push_block_history_with_shards(block_reference)
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_authorities_missing_blocks(&self, authorities: Vec<AuthorityIndex>) {
+        let now = Instant::now();
+        tracing::debug!(
+            "Received authorities with missing blocks {:?} from peer {:?}",
+            authorities
+                .iter()
+                .map(|a| format_authority_index(*a))
+                .collect::<Vec<_>>(),
+            self.peer
+        );
+        let mut guard = self
+            .authorities_with_missing_blocks_by_peer_from_me
+            .write()
+            .await;
+        for authority in authorities {
+            guard[authority as usize] = now;
+        }
+    }
+
+    /// Returns `true` to continue, `false` to break the connection loop.
+    async fn handle_missing_parents_request(
+        &mut self,
+        block_references: Vec<BlockReference>,
+    ) -> bool {
+        if self.consensus_protocol == ConsensusProtocol::Mysticeti {
+            tracing::debug!(
+                "Received request missing data {:?} from peer {:?}",
+                block_references,
+                self.peer
+            );
+            if self.inner.block_store.byzantine_strategy.is_none() {
+                if self
+                    .disseminator
+                    .send_storage_blocks(self.peer_id, block_references)
+                    .await
+                    .is_none()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Returns `true` to continue, `false` to break the connection loop.
+    async fn handle_missing_tx_data_request(
+        &mut self,
+        block_references: Vec<BlockReference>,
+    ) -> bool {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
+            tracing::debug!(
+                "Received request missing data {:?} from peer {:?}",
+                block_references,
+                self.peer
+            );
+            if self.inner.block_store.byzantine_strategy.is_none() {
+                if self
+                    .disseminator
+                    .send_transmission_blocks(self.peer_id, block_references)
+                    .await
+                    .is_none()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    async fn shutdown(self) {
+        self.disseminator.shutdown().await;
+        self.data_requestor.shutdown().await;
+        self.updater_missing_authorities.shutdown().await;
+    }
+}
+
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     main_task: JoinHandle<()>,
@@ -341,15 +853,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
-        let consensus_protocol = inner.block_store.consensus_protocol;
-        let committee_size = inner.block_store.committee_size;
-        let now = Instant::now();
-        let authorities_with_missing_blocks_by_myself_from_peer =
-            Arc::new(RwLock::new(vec![now; committee_size]));
-        let authorities_with_missing_blocks_by_peer_from_me =
-            Arc::new(RwLock::new(vec![now; committee_size]));
-        let synchronizer_parameters =
-            SynchronizerParameters::new(committee_size, consensus_protocol);
         let last_seen = inner
             .block_store
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
@@ -359,51 +862,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .await
             .ok()?;
 
-        let mut disseminator = BlockDisseminator::new(
-            connection.peer_id as AuthorityIndex,
-            connection.sender.clone(),
+        let mut handler = ConnectionHandler::new(
+            &connection,
             universal_committer,
             inner.clone(),
-            synchronizer_parameters.clone(),
-            metrics.clone(),
-            authorities_with_missing_blocks_by_peer_from_me.clone(),
+            metrics,
+            filter_for_blocks,
         );
-        let mut data_requestor = DataRequestor::new(
-            connection.peer_id as AuthorityIndex,
-            connection.sender.clone(),
-            inner.clone(),
-            synchronizer_parameters.clone(),
-        );
-        let mut updater_missing_authorities = UpdaterMissingAuthorities::new(
-            connection.peer_id as AuthorityIndex,
-            connection.sender.clone(),
-            synchronizer_parameters.clone(),
-            authorities_with_missing_blocks_by_myself_from_peer.clone(),
-        );
-        // Data requestor is needed in theory only for StarfishPull. However, we enable it for
-        // Starfish as well because of the practical way we update the DAG known by other validators
-        if consensus_protocol == ConsensusProtocol::StarfishPull
-            || consensus_protocol == ConsensusProtocol::Starfish
-            || consensus_protocol == ConsensusProtocol::StarfishS
-        {
-            data_requestor.start().await;
-        }
-        // To save some bandwidth, we start the updater about authorities with missing blocks for Starfish
-        if consensus_protocol == ConsensusProtocol::Starfish
-            || consensus_protocol == ConsensusProtocol::StarfishS
-        {
-            updater_missing_authorities.start().await;
-        }
+        handler.start().await;
 
-        let mut encoder = ReedSolomonEncoder::new(2, 4, 64).expect("Encoder should be created");
-        let mut decoder = ReedSolomonDecoder::new(2, 4, 64).expect("Decoder should be created");
-
-        let peer_id = connection.peer_id as AuthorityIndex;
-        let peer_usize = peer_id as usize;
+        let peer_id = handler.peer_id;
+        let own_id = handler.own_id;
         inner.syncer.authority_connection(peer_id, true).await;
-
-        let peer = format_authority_index(peer_id);
-        let own_id = inner.block_store.get_own_authority_index();
 
         tracing::debug!(
             "Connection from {:?} to {:?} is established",
@@ -411,354 +881,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             peer_id
         );
         while let Some(message) = inner.recv_or_stopped(&mut connection.receiver).await {
-            match message {
-                NetworkMessage::SubscribeBroadcastRequest(round) => {
-                    if inner.block_store.byzantine_strategy.is_some() {
-                        let round = 0;
-                        disseminator.disseminate_own_blocks(round).await;
-                    } else {
-                        // For Mysticeti and Starfish-Pull disseminate
-                        // own blocks only. For Starfish and Cordial Miners, push all blocks
-                        match consensus_protocol {
-                            ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
-                                disseminator.disseminate_own_blocks(round).await;
-                            }
-                            ConsensusProtocol::Starfish
-                            | ConsensusProtocol::StarfishS
-                            | ConsensusProtocol::CordialMiners => {
-                                disseminator.disseminate_all_blocks_push().await;
-                            }
-                        }
-                    }
-                }
-                NetworkMessage::Batch(blocks) => {
-                    let timer = metrics
-                        .utilization_timer
-                        .utilization_timer("Network: verify blocks");
-                    let mut blocks_with_statements = Vec::new();
-                    let mut blocks_without_statements = Vec::new();
-                    for block in blocks {
-                        if block.statements().is_some() {
-                            blocks_with_statements.push(block);
-                        } else {
-                            blocks_without_statements.push(block);
-                        }
-                    }
-                    let mut authorities_to_be_updated: HashSet<AuthorityIndex> = HashSet::new();
-                    let now = Instant::now();
-                    // First process blocks without statements which could be in the causal history
-                    if consensus_protocol == ConsensusProtocol::StarfishPull
-                        || consensus_protocol == ConsensusProtocol::Starfish
-                        || consensus_protocol == ConsensusProtocol::StarfishS
-                    {
-                        let mut verified_data_blocks = Vec::new();
-                        for data_block in blocks_without_statements {
-                            let mut block: VerifiedStatementBlock = (*data_block).clone();
-                            tracing::debug!("Received {} from {}", block, peer);
-                            let block_status = Status::get_status(&block, peer_usize);
-                            let contains_new_shard_or_header =
-                                filter_for_blocks.is_needed(&block.digest(), block_status);
-                            if !contains_new_shard_or_header {
-                                metrics.filtered_blocks_total.inc();
-                                continue;
-                            }
-                            if let Err(e) = block.verify(
-                                &inner.committee,
-                                own_id as usize,
-                                peer_id as usize,
-                                &mut encoder,
-                                consensus_protocol,
-                            ) {
-                                tracing::warn!(
-                                    "Rejected incorrect block {} from {}: {:?}",
-                                    block.reference(),
-                                    peer,
-                                    e
-                                );
-                                // todo: Terminate connection upon receiving incorrect block.
-                                break;
-                            }
-                            let (ready_to_reconstruct, cached_block) =
-                                inner.block_store.ready_to_reconstruct(&block);
-                            if ready_to_reconstruct {
-                                let mut cached_block = cached_block.expect("Should be Some");
-                                cached_block.copy_shard(&block);
-                                let reconstructed_block = decoder.decode_shards(
-                                    &inner.committee,
-                                    &mut encoder,
-                                    cached_block,
-                                    own_id,
-                                );
-                                if let Some(reconstructed) = reconstructed_block {
-                                    metrics
-                                        .reconstructed_blocks_total
-                                        .with_label_values(&["connection_task"])
-                                        .inc();
-                                    block = reconstructed;
-                                    tracing::debug!("Reconstruction of block {:?} within connection task is successful", block);
-                                } else {
-                                    tracing::debug!("Incorrect reconstruction of block {:?} within connection task", block);
-                                }
-                            }
-                            let block_status = Status::get_status(&block, peer_usize);
-                            let contains_new_shard_or_header =
-                                filter_for_blocks.is_needed(&block.digest(), block_status);
-                            let storage_block = block;
-                            let transmission_block =
-                                storage_block.from_storage_to_transmission(own_id);
-                            if !contains_new_shard_or_header {
-                                metrics.processed_after_filtering_total.inc();
-                                continue;
-                            }
-                            let data_storage_block = Data::new(storage_block);
-                            let data_transmission_block = Data::new(transmission_block);
-                            verified_data_blocks
-                                .push((data_storage_block, data_transmission_block));
-                        }
-
-                        tracing::debug!("To be processed after verification from {:?}, {} blocks without statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
-                        if !verified_data_blocks.is_empty() {
-                            let mut batch_with_status = Vec::new();
-                            for block in &verified_data_blocks {
-                                batch_with_status.push((
-                                    block.0.digest(),
-                                    Status::get_status(&block.0, peer_usize),
-                                ))
-                            }
-                            filter_for_blocks.add_batch(batch_with_status);
-                            let (_, _, processed_additional_blocks_without_statements) =
-                                inner.syncer.add_blocks(verified_data_blocks).await;
-                            metrics
-                                .used_additional_blocks_total
-                                .inc_by(processed_additional_blocks_without_statements.len() as u64);
-                            authorities_to_be_updated.extend(
-                                processed_additional_blocks_without_statements
-                                    .iter()
-                                    .map(|b| b.authority),
-                            );
-                            tracing::debug!(
-                                "Processed additional blocks from peer {:?}: {:?}",
-                                peer,
-                                processed_additional_blocks_without_statements
-                            );
-                        }
-                    }
-
-                    // Second process blocks with statements
-                    let mut verified_data_blocks = Vec::new();
-                    for data_block in blocks_with_statements {
-                        let mut block: VerifiedStatementBlock = (*data_block).clone();
-                        tracing::debug!("Received {} from {}", block, peer);
-                        let block_status = Status::get_status(&block, peer_usize);
-                        let contains_new_shard_or_header =
-                            filter_for_blocks.is_needed(&block.digest(), block_status);
-                        if !contains_new_shard_or_header {
-                            metrics.filtered_blocks_total.inc();
-                            continue;
-                        }
-                        if let Err(e) = block.verify(
-                            &inner.committee,
-                            own_id as usize,
-                            peer_id as usize,
-                            &mut encoder,
-                            consensus_protocol,
-                        ) {
-                            tracing::warn!(
-                                "Rejected incorrect block {} from {}: {:?}",
-                                block.reference(),
-                                peer,
-                                e
-                            );
-                            // todo: Terminate connection upon receiving incorrect block.
-                            break;
-                        }
-                        let storage_block = block;
-                        let transmission_block = match consensus_protocol {
-                            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                                storage_block.clone()
-                            }
-                            ConsensusProtocol::Starfish
-                            | ConsensusProtocol::StarfishS
-                            | ConsensusProtocol::StarfishPull => {
-                                storage_block.from_storage_to_transmission(own_id)
-                            }
-                        };
-                        filter_for_blocks.add_batch(vec![(storage_block.digest(), Status::Full)]);
-                        let data_storage_block = Data::new(storage_block);
-                        let data_transmission_block = Data::new(transmission_block);
-                        verified_data_blocks.push((data_storage_block, data_transmission_block));
-                    }
-
-                    tracing::debug!("To be processed after verification from {:?}, {} blocks with statements {:?}", peer, verified_data_blocks.len(), verified_data_blocks);
-                    if !verified_data_blocks.is_empty() {
-                        let (
-                            pending_block_references,
-                            missing_parents,
-                            _processed_additional_blocks,
-                        ) = inner.syncer.add_blocks(verified_data_blocks).await;
-                        if !missing_parents.is_empty() {
-                            authorities_to_be_updated
-                                .extend(missing_parents.iter().map(|b| b.authority));
-                            tracing::debug!(
-                                "Missing parents when processing block from peer {:?}: {:?}",
-                                peer,
-                                missing_parents
-                            );
-                        }
-                        match consensus_protocol {
-                            ConsensusProtocol::StarfishPull => {
-                                let mut max_round_pending_block_reference: Option<BlockReference> =
-                                    None;
-                                for block_reference in pending_block_references {
-                                    if max_round_pending_block_reference.is_none()
-                                        || block_reference.round()
-                                            > max_round_pending_block_reference.unwrap().round()
-                                    {
-                                        max_round_pending_block_reference = Some(block_reference);
-                                    }
-                                }
-                                if let Some(block_ref) = max_round_pending_block_reference {
-                                    tracing::debug!(
-                                        "Make request missing history of block {:?} from peer {:?}",
-                                        block_ref,
-                                        peer
-                                    );
-                                    Self::request_missing_history_block(
-                                        block_ref,
-                                        &connection.sender,
-                                    );
-                                }
-                            }
-                            ConsensusProtocol::Mysticeti => {
-                                if !missing_parents.is_empty() {
-                                    let missing_parents =
-                                        missing_parents.iter().copied().collect::<Vec<_>>();
-                                    tracing::debug!("Make request missing parents of blocks {:?} from peer {:?}", missing_parents, peer);
-                                    Self::request_parents_blocks(
-                                        missing_parents,
-                                        &connection.sender,
-                                    );
-                                }
-                            }
-                            ConsensusProtocol::CordialMiners => {}
-                            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
-                                if !authorities_to_be_updated.is_empty() {
-                                    let mut authorities_with_missing_blocks =
-                                        authorities_with_missing_blocks_by_myself_from_peer
-                                            .write()
-                                            .await;
-                                    tracing::debug!(
-                                        "Authorities updates for peer {:?} are {:?}",
-                                        peer,
-                                        authorities_to_be_updated
-                                    );
-                                    for authority in authorities_to_be_updated {
-                                        authorities_with_missing_blocks[authority as usize] = now;
-                                    }
-
-                                    drop(authorities_with_missing_blocks);
-                                }
-                            }
-                        }
-                    }
-
-                    drop(timer);
-                }
-
-                NetworkMessage::MissingHistoryRequest(block_reference) => {
-                    if consensus_protocol == ConsensusProtocol::StarfishPull {
-                        tracing::debug!(
-                            "Received request missing history for block {:?} from peer {:?}",
-                            block_reference,
-                            peer
-                        );
-                        if inner.block_store.byzantine_strategy.is_none() {
-                            disseminator
-                                .push_block_history_with_shards(block_reference)
-                                .await;
-                        }
-                    }
-                }
-                NetworkMessage::AuthoritiesWithMissingBlocks(authorities) => {
-                    let now = Instant::now();
-                    tracing::debug!(
-                        "Received authorities with missing blocks {:?} from peer {:?}",
-                        authorities
-                            .iter()
-                            .map(|a| format_authority_index(*a))
-                            .collect::<Vec<_>>(),
-                        peer
-                    );
-                    let mut authorities_with_missing_blocks_by_peer_from_me =
-                        authorities_with_missing_blocks_by_peer_from_me
-                            .write()
-                            .await;
-                    for authority in authorities {
-                        authorities_with_missing_blocks_by_peer_from_me[authority as usize] = now;
-                    }
-                }
-                NetworkMessage::MissingParentsRequest(block_references) => {
-                    if consensus_protocol == ConsensusProtocol::Mysticeti {
-                        tracing::debug!(
-                            "Received request missing data {:?} from peer {:?}",
-                            block_references,
-                            peer
-                        );
-                        if inner.block_store.byzantine_strategy.is_none() {
-                            let authority = connection.peer_id as AuthorityIndex;
-                            if disseminator
-                                .send_storage_blocks(authority, block_references)
-                                .await
-                                .is_none()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
-                NetworkMessage::MissingTxDataRequest(block_references) => {
-                    if consensus_protocol == ConsensusProtocol::StarfishPull
-                        || consensus_protocol == ConsensusProtocol::Starfish
-                        || consensus_protocol == ConsensusProtocol::StarfishS
-                    {
-                        tracing::debug!(
-                            "Received request missing data {:?} from peer {:?}",
-                            block_references,
-                            peer
-                        );
-                        if inner.block_store.byzantine_strategy.is_none() {
-                            let authority = connection.peer_id as AuthorityIndex;
-                            if disseminator
-                                .send_transmission_blocks(authority, block_references)
-                                .await
-                                .is_none()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
+            if !handler.handle_message(message).await {
+                break;
             }
         }
+
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
         inner.syncer.authority_connection(peer_id, false).await;
-        disseminator.shutdown().await;
-        data_requestor.shutdown().await;
-        updater_missing_authorities.shutdown().await;
+        handler.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
         None
-    }
-
-    fn request_missing_history_block(block: BlockReference, sender: &mpsc::Sender<NetworkMessage>) {
-        if let Ok(permit) = sender.try_reserve() {
-            permit.send(NetworkMessage::MissingHistoryRequest(block));
-        }
-    }
-
-    fn request_parents_blocks(blocks: Vec<BlockReference>, sender: &mpsc::Sender<NetworkMessage>) {
-        if let Ok(permit) = sender.try_reserve() {
-            permit.send(NetworkMessage::MissingParentsRequest(blocks));
-        }
     }
 
     async fn leader_timeout_task(
