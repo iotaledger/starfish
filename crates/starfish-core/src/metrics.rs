@@ -41,6 +41,13 @@ pub struct Metrics {
     pub filtered_blocks_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
     pub reconstructed_blocks_total: IntCounterVec,
+    pub shard_reconstruction_jobs_total: IntCounter,
+    pub shard_reconstruction_success_total: IntCounter,
+    pub shard_reconstruction_failed_total: IntCounter,
+    pub shard_reconstruction_cancelled_total: IntCounter,
+    pub shard_reconstruction_pending_accumulators: IntGauge,
+    pub shard_reconstruction_queued_jobs: IntGauge,
+    pub shard_reconstruction_pending_decoded_blocks: IntGauge,
     pub used_additional_blocks_total: IntCounter,
 
     pub block_store_unloaded_blocks: IntCounter,
@@ -73,6 +80,7 @@ pub struct Metrics {
     pub connection_latency_sender: Vec<HistogramSender<Duration>>,
 
     pub commit_digest: IntGauge,
+    pub commit_digest_latest: IntGauge,
     pub commit_index: IntGauge,
 
     pub utilization_timer: IntCounterVec,
@@ -196,6 +204,48 @@ impl Metrics {
                 "reconstructed_blocks_total",
                 "Total number of reconstructed blocks per authority",
                 &["reconstruction_place"],
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_jobs_total: register_int_counter_with_registry!(
+                "shard_reconstruction_jobs_total",
+                "Total number of shard reconstruction jobs queued",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_success_total: register_int_counter_with_registry!(
+                "shard_reconstruction_success_total",
+                "Total number of successfully reconstructed blocks",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_failed_total: register_int_counter_with_registry!(
+                "shard_reconstruction_failed_total",
+                "Total number of failed shard reconstruction attempts",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_cancelled_total: register_int_counter_with_registry!(
+                "shard_reconstruction_cancelled_total",
+                "Total number of shard reconstruction cancellations due to full blocks",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_pending_accumulators: register_int_gauge_with_registry!(
+                "shard_reconstruction_pending_accumulators",
+                "Current number of blocks accumulating shards",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_queued_jobs: register_int_gauge_with_registry!(
+                "shard_reconstruction_queued_jobs",
+                "Current number of queued/in-flight shard reconstruction jobs",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_pending_decoded_blocks: register_int_gauge_with_registry!(
+                "shard_reconstruction_pending_decoded_blocks",
+                "Current number of decoded blocks pending flush to core",
                 registry,
             )
             .unwrap(),
@@ -373,7 +423,13 @@ impl Metrics {
 
             commit_digest: register_int_gauge_with_registry!(
                 "commit_digest",
-                "Rolling hash of committed leader sequence (first 8 bytes as i64)",
+                "Rolling hash of committed leader sequence (sampled every 100 commits)",
+                registry,
+            )
+            .unwrap(),
+            commit_digest_latest: register_int_gauge_with_registry!(
+                "commit_digest_latest",
+                "Rolling hash of committed leader sequence (updated every commit)",
                 registry,
             )
             .unwrap(),
@@ -420,6 +476,41 @@ impl Metrics {
             .map(|m| m.bytes_received_total.get())
             .sum::<u64>()
             / num_validators;
+        let average_reconstruction_jobs: u64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_jobs_total.get())
+            .sum::<u64>()
+            / num_validators;
+        let average_reconstruction_success: u64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_success_total.get())
+            .sum::<u64>()
+            / num_validators;
+        let average_reconstruction_failures: u64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_failed_total.get())
+            .sum::<u64>()
+            / num_validators;
+        let average_reconstruction_cancelled: u64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_cancelled_total.get())
+            .sum::<u64>()
+            / num_validators;
+        let average_pending_accumulators: i64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_pending_accumulators.get())
+            .sum::<i64>()
+            / num_validators as i64;
+        let average_queued_jobs: i64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_queued_jobs.get())
+            .sum::<i64>()
+            / num_validators as i64;
+        let average_pending_decoded_blocks: i64 = metrics
+            .iter()
+            .map(|m| m.shard_reconstruction_pending_decoded_blocks.get())
+            .sum::<i64>()
+            / num_validators as i64;
 
         let p50_block_committed_latency = reporters
             .iter()
@@ -466,6 +557,17 @@ impl Metrics {
             0.0
         };
         table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", bandwidth_efficiency)]);
+
+        // Shard reconstruction metrics
+        table.add_row(row![bH2->""]);
+        table.add_row(row![bH2->"Shard Reconstruction"]);
+        table.add_row(row![b->"Average queued jobs:", average_reconstruction_jobs]);
+        table.add_row(row![b->"Average successful reconstructions:", average_reconstruction_success]);
+        table.add_row(row![b->"Average failed reconstructions:", average_reconstruction_failures]);
+        table.add_row(row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled]);
+        table.add_row(row![b->"Pending shard accumulators:", average_pending_accumulators]);
+        table.add_row(row![b->"Queued/in-flight jobs:", average_queued_jobs]);
+        table.add_row(row![b->"Pending decoded blocks:", average_pending_decoded_blocks]);
         println!("\n");
         table.printstd();
         println!("\n");

@@ -4,7 +4,7 @@
 # Configuration Parameters
 #------------------------------------------------------------------------------
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Recommend < number of physical cores. The hard limit is 128
-DESIRED_TPS=${DESIRED_TPS:-10000}       # Target transactions per second
+DESIRED_TPS=${DESIRED_TPS:-100}       # Target transactions per second
 CONSENSUS=${CONSENSUS:-starfish-s}       # Options: starfish, starfish-s, starfish-pull, cordial-miners, mysticeti
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}  # Must be < NUM_VALIDATORS / 3
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}

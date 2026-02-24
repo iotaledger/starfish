@@ -27,7 +27,7 @@ prometheus = "0.13.3"
 blake3 = "1.5.5"
 bytes = "1.4.0"
 rand = { version = "0.8.5", features = ["small_rng"] }
-reed-solomon-simd = { version = "2.2.2" }
+reed-solomon-simd = { version = "3.0.1" }
 serde = { workspace = true }
 serde_yaml = "0.9.21"
 tabled = "0.12.2"

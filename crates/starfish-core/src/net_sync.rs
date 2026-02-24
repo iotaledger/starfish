@@ -5,7 +5,6 @@
 use crate::block_store::ConsensusProtocol;
 use crate::consensus::universal_committer::UniversalCommitter;
 use crate::data::Data;
-use crate::decoder::CachedStatementBlockDecoder;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
@@ -25,7 +24,7 @@ use crate::{
     types::{format_authority_index, AuthorityIndex},
 };
 use futures::future::join_all;
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use reed_solomon_simd::ReedSolomonEncoder;
 use std::collections::{HashSet, VecDeque};
 use std::{
     collections::HashMap,
@@ -205,7 +204,6 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     authorities_with_missing_blocks_by_myself_from_peer: Arc<RwLock<Vec<Instant>>>,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
     encoder: ReedSolomonEncoder,
-    decoder: ReedSolomonDecoder,
     peer_id: AuthorityIndex,
     peer_usize: usize,
     peer: char,
@@ -254,8 +252,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             authorities_with_missing_blocks_by_myself_from_peer.clone(),
         );
 
-        let encoder = ReedSolomonEncoder::new(2, 4, 64).expect("Encoder should be created");
-        let decoder = ReedSolomonDecoder::new(2, 4, 64).expect("Decoder should be created");
+        let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         let own_id = inner.block_store.get_own_authority_index();
         let peer = format_authority_index(peer_id);
 
@@ -270,7 +267,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             authorities_with_missing_blocks_by_myself_from_peer,
             authorities_with_missing_blocks_by_peer_from_me,
             encoder,
-            decoder,
             peer_id,
             peer_usize: peer_id as usize,
             peer,
@@ -347,6 +343,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .metrics
             .utilization_timer
             .utilization_timer("Network: verify blocks");
+        // Mark received blocks as "sent" so we don't re-send them back to the peer.
+        {
+            let mut sent = self.disseminator.sent_to_peer.lock();
+            for block in &blocks {
+                sent.insert(*block.reference());
+            }
+        }
         let mut blocks_with_statements = Vec::new();
         let mut blocks_without_statements = Vec::new();
         for block in blocks {
@@ -384,15 +387,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         blocks: Vec<Data<VerifiedStatementBlock>>,
         authorities_to_be_updated: &mut HashSet<AuthorityIndex>,
     ) {
+        use crate::shard_reconstructor::ShardMessage;
+
         let mut verified_data_blocks = Vec::new();
         for data_block in blocks {
             let mut block: VerifiedStatementBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
             let block_status = Status::get_status(&block, self.peer_usize);
-            let contains_new_shard_or_header = self
+            if !self
                 .filter_for_blocks
-                .is_needed(&block.digest(), block_status);
-            if !contains_new_shard_or_header {
+                .is_needed(&block.digest(), block_status)
+            {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
@@ -409,47 +414,36 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     self.peer,
                     e
                 );
-                // todo: Terminate connection upon receiving incorrect block.
                 break;
             }
-            let (ready_to_reconstruct, cached_block) =
-                self.inner.block_store.ready_to_reconstruct(&block);
-            if ready_to_reconstruct {
-                let mut cached_block = cached_block.expect("Should be Some");
-                cached_block.copy_shard(&block);
-                let reconstructed_block = self.decoder.decode_shards(
-                    &self.inner.committee,
-                    &mut self.encoder,
-                    cached_block,
-                    self.own_id,
-                );
-                if let Some(reconstructed) = reconstructed_block {
-                    self.metrics
-                        .reconstructed_blocks_total
-                        .with_label_values(&["connection_task"])
-                        .inc();
-                    block = reconstructed;
-                    tracing::debug!(
-                        "Reconstruction of block {:?} within connection task is successful",
-                        block
-                    );
-                } else {
-                    tracing::debug!(
-                        "Incorrect reconstruction of block {:?} within connection task",
-                        block
-                    );
+
+            // Send shard to reconstructor for off-critical-path decoding
+            {
+                let shard_tx_guard = self.inner.shard_tx.lock();
+                if let (Some(shard_tx), Some((shard, shard_index))) =
+                    (shard_tx_guard.as_ref(), block.encoded_shard().clone())
+                {
+                    let _ = shard_tx
+                        .try_send(ShardMessage::Shard {
+                            block_reference: *block.reference(),
+                            shard,
+                            shard_index,
+                            block_template: block.clone(),
+                        });
                 }
             }
+
+            // Still send block (as header/shard) to Core for DAG tracking
             let block_status = Status::get_status(&block, self.peer_usize);
-            let contains_new_shard_or_header = self
+            if !self
                 .filter_for_blocks
-                .is_needed(&block.digest(), block_status);
-            let storage_block = block;
-            let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
-            if !contains_new_shard_or_header {
+                .is_needed(&block.digest(), block_status)
+            {
                 self.metrics.processed_after_filtering_total.inc();
                 continue;
             }
+            let storage_block = block;
+            let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
             let data_storage_block = Data::new(storage_block);
             let data_transmission_block = Data::new(transmission_block);
             verified_data_blocks.push((data_storage_block, data_transmission_block));
@@ -479,11 +473,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 processed_additional_blocks_without_statements
                     .iter()
                     .map(|b| b.authority),
-            );
-            tracing::debug!(
-                "Processed additional blocks from peer {:?}: {:?}",
-                self.peer,
-                processed_additional_blocks_without_statements
             );
         }
     }
@@ -532,6 +521,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     storage_block.from_storage_to_transmission(self.own_id)
                 }
             };
+            // Notify reconstructor to stop collecting shards for this block
+            {
+                let shard_tx_guard = self.inner.shard_tx.lock();
+                if let Some(shard_tx) = shard_tx_guard.as_ref() {
+                    let _ = shard_tx.try_send(
+                        crate::shard_reconstructor::ShardMessage::FullBlock(
+                            *storage_block.reference(),
+                        ),
+                    );
+                }
+            }
             self.filter_for_blocks
                 .add_batch(vec![(storage_block.digest(), Status::Full)]);
             let data_storage_block = Data::new(storage_block);
@@ -580,9 +580,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                             missing_parents,
                             self.peer
                         );
-                        if let Ok(permit) = self.sender.try_reserve() {
-                            permit.send(NetworkMessage::MissingParentsRequest(missing_parents));
-                        }
+                        self.sender
+                            .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                            .await
+                            .ok();
                     }
                 }
                 ConsensusProtocol::CordialMiners => {}
@@ -708,6 +709,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     syncer_task: oneshot::Receiver<()>,
     flusher_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
+    bridge_task: Option<JoinHandle<()>>,
 }
 
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
@@ -718,6 +720,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     stop: mpsc::Sender<()>,
     epoch_close_signal: mpsc::Sender<()>,
     pub epoch_closing_time: Arc<AtomicU64>,
+    pub shard_tx: parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -744,6 +747,33 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         stop_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
         let (epoch_sender, epoch_receiver) = mpsc::channel(1);
         epoch_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
+
+        // Conditionally prepare shard reconstructor channels for Starfish protocols
+        let is_starfish = matches!(
+            block_store.consensus_protocol,
+            ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishPull
+        );
+        let (shard_tx, decoded_rx) = if is_starfish {
+            let gc_round = Arc::new(AtomicU64::new(0));
+            let (decoded_tx, decoded_rx) =
+                mpsc::channel::<crate::shard_reconstructor::DecodedBlocks>(1000);
+            let reconstructor_handle = crate::shard_reconstructor::start_shard_reconstructor(
+                committee.clone(),
+                block_store.get_own_authority_index(),
+                metrics.clone(),
+                decoded_tx,
+                gc_round,
+            );
+            (
+                Some(reconstructor_handle.shard_message_sender()),
+                Some(decoded_rx),
+            )
+        } else {
+            (None, None)
+        };
+
         let inner = Arc::new(NetworkSyncerInner {
             notify,
             syncer,
@@ -752,6 +782,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             stop: stop_sender.clone(),
             epoch_close_signal: epoch_sender.clone(),
             epoch_closing_time,
+            shard_tx: parking_lot::Mutex::new(shard_tx),
+        });
+
+        // Start bridge task that forwards decoded blocks to core via add_blocks
+        let bridge_task = decoded_rx.map(|mut decoded_rx| {
+            let bridge_inner = inner.clone();
+            handle.spawn(async move {
+                while let Some(blocks) = decoded_rx.recv().await {
+                    bridge_inner.syncer.add_blocks(blocks).await;
+                }
+            })
         });
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(
@@ -772,6 +813,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             stop: stop_receiver,
             syncer_task,
             flusher_task,
+            bridge_task,
         }
     }
 
@@ -781,6 +823,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         self.main_task.await.ok();
         self.syncer_task.await.ok();
         self.flusher_task.await.ok();
+        // Close the shard reconstructor channel so the bridge task can exit
+        // and release its Arc reference.
+        self.inner.shard_tx.lock().take();
+        // Wait for the bridge task to observe channel closure and exit.
+        if let Some(bridge_task) = self.bridge_task {
+            bridge_task.await.ok();
+        }
         let Ok(inner) = Arc::try_unwrap(self.inner) else {
             panic!("Shutdown failed - not all resources are freed after main task is completed");
         };
@@ -841,6 +890,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .unwrap_or_else(|_| panic!("Failed to drop all connections"))
             .shutdown()
             .await;
+        // Abort the TCP server so the listening port is released.
+        network.abort_server();
     }
 
     async fn connection_task(

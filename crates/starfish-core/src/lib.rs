@@ -24,6 +24,7 @@ pub mod prometheus;
 mod rocks_store;
 mod runtime;
 mod serde;
+pub mod shard_reconstructor;
 mod stat;
 mod state;
 mod syncer;
