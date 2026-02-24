@@ -71,6 +71,55 @@ enum StatusFilter {
     Header,
 }
 
+impl StatusFilter {
+    fn from_status(status: &Status) -> Self {
+        match status {
+            Status::Full => StatusFilter::Full,
+            Status::Shard(peer) => StatusFilter::Shards {
+                count: 1,
+                bitmap: 1u128 << peer,
+            },
+            Status::Header => StatusFilter::Header,
+        }
+    }
+
+    /// Apply an incoming status. Returns `true` if this digest was already fully covered.
+    fn transition(&mut self, status: &Status, info_length: usize) -> bool {
+        match (status, &*self) {
+            (_, StatusFilter::Full) => true,
+            (Status::Header, _) => true,
+            (Status::Full, _) => {
+                *self = StatusFilter::Full;
+                false
+            }
+            (Status::Shard(peer), StatusFilter::Shards { count, bitmap }) => {
+                let mask = 1u128 << peer;
+                if *bitmap & mask != 0 {
+                    return true;
+                }
+                let new_count = *count + 1;
+                let new_bitmap = *bitmap | mask;
+                if new_count >= info_length {
+                    *self = StatusFilter::Full;
+                } else {
+                    *self = StatusFilter::Shards {
+                        count: new_count,
+                        bitmap: new_bitmap,
+                    };
+                }
+                false
+            }
+            (Status::Shard(peer), StatusFilter::Header) => {
+                *self = StatusFilter::Shards {
+                    count: 1,
+                    bitmap: 1u128 << peer,
+                };
+                false
+            }
+        }
+    }
+}
+
 impl FilterForBlocks {
     fn new(info_length: usize) -> Self {
         Self {
@@ -87,57 +136,14 @@ impl FilterForBlocks {
         {
             let mut digests = self.digests.write();
 
-            for (digest, status) in new_digests {
-                match (status, digests.get_mut(&digest)) {
-                    (_, Some(StatusFilter::Full)) => {
-                        already_inserted.push(digest);
+            for (digest, status) in &new_digests {
+                if let Some(existing) = digests.get_mut(digest) {
+                    if existing.transition(status, self.info_length) {
+                        already_inserted.push(*digest);
                     }
-                    (Status::Full, Some(_)) => {
-                        digests.insert(digest, StatusFilter::Full);
-                    }
-                    (Status::Full, None) => {
-                        digests.insert(digest, StatusFilter::Full);
-                        queue_updates.push(digest);
-                    }
-                    (Status::Shard(peer), Some(StatusFilter::Shards { count, bitmap })) => {
-                        let mask = 1u128 << peer;
-                        if *bitmap & mask != 0 {
-                            already_inserted.push(digest);
-                        } else {
-                            *bitmap |= mask;
-                            *count += 1;
-                            if *count >= self.info_length {
-                                digests.insert(digest, StatusFilter::Full);
-                            }
-                        }
-                    }
-                    (Status::Shard(peer), Some(StatusFilter::Header)) => {
-                        digests.insert(
-                            digest,
-                            StatusFilter::Shards {
-                                count: 1,
-                                bitmap: 1u128 << peer,
-                            },
-                        );
-                    }
-                    (Status::Shard(peer), None) => {
-                        digests.insert(
-                            digest,
-                            StatusFilter::Shards {
-                                count: 1,
-                                bitmap: 1u128 << peer,
-                            },
-                        );
-                        queue_updates.push(digest);
-                    }
-
-                    (Status::Header, Some(_)) => {
-                        already_inserted.push(digest);
-                    }
-                    (Status::Header, None) => {
-                        digests.insert(digest, StatusFilter::Header);
-                        queue_updates.push(digest);
-                    }
+                } else {
+                    digests.insert(*digest, StatusFilter::from_status(status));
+                    queue_updates.push(*digest);
                 }
             }
         }
