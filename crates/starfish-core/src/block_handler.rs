@@ -158,6 +158,7 @@ impl BlockHandler for TestBlockHandler {
 pub struct RealCommitHandler {
     commit_interpreter: Linearizer,
     committed_leaders: Vec<BlockReference>,
+    commit_digest: [u8; 32],
     start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
@@ -173,6 +174,7 @@ impl RealCommitHandler {
         Self {
             commit_interpreter: Linearizer::new((*committee).clone()),
             committed_leaders: vec![],
+            commit_digest: [0u8; 32],
             start_time: TimeInstant::now(),
             metrics,
         }
@@ -217,6 +219,20 @@ impl CommitObserver for RealCommitHandler {
         let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
+
+            // Chain rolling commit digest: hash(prev_digest || anchor.digest)
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&self.commit_digest);
+            hasher.update(commit.0.anchor.digest.as_ref());
+            self.commit_digest = *hasher.finalize().as_bytes();
+
+            self.metrics
+                .commit_index
+                .set(self.committed_leaders.len() as i64);
+            self.metrics.commit_digest.set(i64::from_le_bytes(
+                self.commit_digest[..8].try_into().unwrap(),
+            ));
+
             for block in &commit.0.blocks {
                 let gap = commit.0.anchor.round.saturating_sub(block.round());
                 self.metrics.commit_gap.observe(gap as f64);
