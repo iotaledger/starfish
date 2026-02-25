@@ -1,4 +1,0 @@
-# Original starfish files with IOTA-only copyright (not derived from Mysten Labs)
-crates/starfish-core/src/encoder.rs
-crates/starfish-core/src/decoder.rs
-crates/starfish-core/src/rocks_store.rs
