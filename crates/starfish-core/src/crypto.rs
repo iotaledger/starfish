@@ -9,10 +9,10 @@ use crate::{
     types::{AuthorityIndex, BlockReference, EpochStatus, RoundNumber, TimestampNs},
 };
 use ed25519_consensus::Signature;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use rs_merkle::Hasher;
 use rs_merkle::{MerkleProof, MerkleTree};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::fmt;
 use zeroize::Zeroize;
 
@@ -33,7 +33,8 @@ pub struct PublicKey(ed25519_consensus::VerificationKey);
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Hash)]
 pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 
-// Box ensures value is not copied in memory when Signer itself is moved around for better security
+// Box ensures value is not copied in memory when Signer itself is moved around
+// for better security
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 pub type Blake3Hasher = blake3::Hasher;
@@ -101,7 +102,8 @@ impl TransactionsCommitment {
         computed_merkle_root == merkle_root.0
     }
 
-    // The function assumes that encoded_statements[leaf_index] is Some. Otherwise panics
+    // The function assumes that encoded_statements[leaf_index] is Some. Otherwise
+    // panics
     pub fn check_correctness_merkle_leaf(
         shard: Shard,
         merkle_root: TransactionsCommitment,
@@ -205,12 +207,15 @@ pub trait AsBytes {
     // This is pretty much same as AsRef<[u8]>
     //
     // We need this separate trait because we want to impl CryptoHash
-    // for primitive types(u64, etc) and types like XxxDigest that implement AsRef<[u8]>.
+    // for primitive types(u64, etc) and types like XxxDigest that implement
+    // AsRef<[u8]>.
     //
-    // Rust unfortunately does not allow to impl trait for AsRef<[u8]> and primitive types like u64.
+    // Rust unfortunately does not allow to impl trait for AsRef<[u8]> and primitive
+    // types like u64.
     //
-    // While AsRef<[u8]> is not implemented for u64, it seem to be reserved in compiler,
-    // so `impl CryptoHash for u64` and `impl<T: AsRef<[u8]>> CryptoHash for T` collide.
+    // While AsRef<[u8]> is not implemented for u64, it seem to be reserved in
+    // compiler, so `impl CryptoHash for u64` and `impl<T: AsRef<[u8]>>
+    // CryptoHash for T` collide.
     fn as_bytes(&self) -> &[u8];
 }
 
@@ -230,11 +235,11 @@ impl CryptoHash for u64 {
     }
 }
 
-/*impl CryptoHash for StatementDigest {
-    fn crypto_hash(&self, state: &mut BlockHasher) {
-        state.update(self.as_ref());
-    }
-}*/
+// impl CryptoHash for StatementDigest {
+// fn crypto_hash(&self, state: &mut BlockHasher) {
+// state.update(self.as_ref());
+// }
+// }
 
 impl CryptoHash for u128 {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {

@@ -8,7 +8,7 @@ use std::{
 };
 
 use ::prometheus::Registry;
-use eyre::{eyre, Context, Result};
+use eyre::{Context, Result, eyre};
 
 use crate::metrics::MetricReporter;
 use crate::{
@@ -187,7 +187,8 @@ mod smoke_tests {
         "starfish-s",
     ];
 
-    /// Check whether the validator specified by its metrics address has committed at least once.
+    /// Check whether the validator specified by its metrics address has
+    /// committed at least once.
     async fn check_commit(address: &SocketAddr) -> Result<bool, reqwest::Error> {
         let route = prometheus::METRICS_ROUTE;
         let res = reqwest::get(format! {"http://{address}{route}"}).await?;
@@ -196,7 +197,8 @@ mod smoke_tests {
         Ok(commit)
     }
 
-    /// Await for all the validators specified by their metrics addresses to commit.
+    /// Await for all the validators specified by their metrics addresses to
+    /// commit.
     async fn await_for_commits(addresses: Vec<SocketAddr>) {
         let mut queue = VecDeque::from(addresses);
         while let Some(address) = queue.pop_front() {
@@ -245,7 +247,10 @@ mod smoke_tests {
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!(
+                "[{consensus}] Failed to gather commits \
+                within a few timeouts"
+            ),
         }
 
         for v in validators {
@@ -303,7 +308,10 @@ mod smoke_tests {
         let timeout = config::node_defaults::default_leader_timeout() * 20;
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!(
+                "[{consensus}] Failed to gather commits \
+                within a few timeouts"
+            ),
         }
 
         // Boot the last validator.
@@ -388,7 +396,10 @@ mod smoke_tests {
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!(
+                "[{consensus}] Failed to gather commits \
+                within a few timeouts"
+            ),
         }
 
         for v in validators {
@@ -396,7 +407,8 @@ mod smoke_tests {
         }
     }
 
-    // Ensure that honest validators commit despite the presence of a crash fault, for all protocols.
+    // Ensure that honest validators commit despite the presence
+    // of a crash fault, for all protocols.
     #[tokio::test]
     async fn validator_crash_faults() {
         for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
@@ -404,7 +416,8 @@ mod smoke_tests {
         }
     }
 
-    /// Scrape commit_index and commit_digest from a validator's Prometheus endpoint.
+    /// Scrape commit_index and commit_digest from a validator's Prometheus
+    /// endpoint.
     async fn scrape_metrics(address: &SocketAddr) -> Option<(i64, i64)> {
         let route = prometheus::METRICS_ROUTE;
         let text = reqwest::get(format!("http://{address}{route}"))
@@ -474,7 +487,8 @@ mod smoke_tests {
                 assert_eq!(
                     first_digest, digest,
                     "Digest mismatch at commit_index {index}: \
-                     authority {auth} has {digest}, expected {first_digest}",
+                    authority {auth} has {digest}, \
+                    expected {first_digest}",
                 );
             }
         }
@@ -543,12 +557,7 @@ mod smoke_tests {
         // ─── Phase 1: All 5 run for 20s ───
         time::sleep(Duration::from_secs(20)).await;
 
-        let phase1 = await_min_commit_index(
-            &all_metrics_addrs,
-            5,
-            Duration::from_secs(10),
-        )
-        .await;
+        let phase1 = await_min_commit_index(&all_metrics_addrs, 5, Duration::from_secs(10)).await;
         verify_digest_consistency(&phase1);
         let phase1_min = phase1.values().map(|(i, _)| *i).min().unwrap();
 

@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 
-use axum::{http::StatusCode, routing::get, Extension, Router, Server};
+use axum::{Extension, Router, Server, http::StatusCode, routing::get};
 use prometheus::{Registry, TextEncoder};
 
 use crate::runtime::{Handle, JoinHandle};

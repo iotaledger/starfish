@@ -9,3 +9,7 @@ specs: m5d.4xlarge
 repository:
   url: https://github.com/iotaledger/starfish.git
   commit: main
+# Pre-built binary (optional). Skips source compilation on remote machines.
+# URL downloads via curl; local path SCPs to all machines.
+# pre_built_binary: "https://github.com/iotaledger/starfish/releases/download/nightly/starfish-linux-amd64"
+# pre_built_binary: "./target/release/starfish"

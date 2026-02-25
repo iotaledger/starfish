@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use crate::data::Data;

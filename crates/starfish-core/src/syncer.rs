@@ -6,7 +6,7 @@ use crate::types::VerifiedStatementBlock;
 use crate::{
     block_handler::BlockHandler,
     block_store::BlockStore,
-    consensus::{linearizer::CommittedSubDag, CommitMetastate},
+    consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -62,7 +62,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
-        // todo: when block is updated we might return false here and it can make committing longer
+        // todo: when block is updated we might return false here and it can make
+        // committing longer
         let (success, pending_blocks_with_statements, missing_parents, used_additional_blocks) =
             self.core.add_blocks(blocks);
         if success {

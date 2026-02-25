@@ -1,11 +1,12 @@
-// Copyright (c) 2025 IOTA Stiftung
+// Copyright (c) Mysten Labs, Inc.
+// Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -15,12 +16,11 @@ use ahash::AHashSet;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     sync::{
-        mpsc,
+        Mutex, mpsc,
         mpsc::{Receiver, Sender},
-        Mutex,
     },
     task::JoinHandle,
-    time::{sleep_until, Instant},
+    time::{Instant, sleep_until},
 };
 
 use crate::{

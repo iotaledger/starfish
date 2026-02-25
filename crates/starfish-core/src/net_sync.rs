@@ -8,7 +8,7 @@ use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
-use crate::synchronizer::{DataRequestor, UpdaterMissingAuthorities};
+use crate::synchronizer::{DataRequester, UpdaterMissingAuthorities};
 use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
@@ -18,10 +18,10 @@ use crate::{
     core_thread::CoreThreadDispatcher,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
-    runtime::{timestamp_utc, Handle, JoinError, JoinHandle},
+    runtime::{Handle, JoinError, JoinHandle, timestamp_utc},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
-    types::{format_authority_index, AuthorityIndex},
+    types::{AuthorityIndex, format_authority_index},
 };
 use ahash::AHashSet;
 use futures::future::join_all;
@@ -31,15 +31,15 @@ use std::collections::VecDeque;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tokio::time::Instant;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, Notify},
+    sync::{Notify, mpsc, oneshot},
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
@@ -83,7 +83,8 @@ impl StatusFilter {
         }
     }
 
-    /// Apply an incoming status. Returns `true` if this digest was already fully covered.
+    /// Apply an incoming status. Returns `true` if this digest was already
+    /// fully covered.
     fn transition(&mut self, status: &Status, info_length: usize) -> bool {
         match (status, &*self) {
             (_, StatusFilter::Full) => true,
@@ -172,7 +173,8 @@ impl FilterForBlocks {
                 !self.digests.read().contains_key(digest)
             }
             Status::Shard(peer) => {
-                // Shard is needed if not already in the filter or if the number of shards is not sufficient
+                // Shard is needed if not already in the filter
+                // or if the number of shards is not sufficient
                 let digests = self.digests.read();
                 match digests.get(digest) {
                     Some(StatusFilter::Full) => false,
@@ -200,7 +202,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     metrics: Arc<Metrics>,
     filter_for_blocks: Arc<FilterForBlocks>,
     disseminator: BlockDisseminator<H, C>,
-    data_requestor: DataRequestor<H, C>,
+    data_requester: DataRequester<H, C>,
     updater_missing_authorities: UpdaterMissingAuthorities,
     authorities_with_missing_blocks_by_myself_from_peer: Arc<RwLock<Vec<Instant>>>,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
@@ -240,7 +242,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             metrics.clone(),
             authorities_with_missing_blocks_by_peer_from_me.clone(),
         );
-        let data_requestor = DataRequestor::new(
+        let data_requester = DataRequester::new(
             peer_id,
             connection.sender.clone(),
             inner.clone(),
@@ -263,7 +265,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             metrics,
             filter_for_blocks,
             disseminator,
-            data_requestor,
+            data_requester,
             updater_missing_authorities,
             authorities_with_missing_blocks_by_myself_from_peer,
             authorities_with_missing_blocks_by_peer_from_me,
@@ -277,23 +279,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn start(&mut self) {
-        // Data requestor is needed in theory only for StarfishPull. However, we enable it for
-        // Starfish as well because of the practical way we update the DAG known by other validators
+        // Data requester is needed in theory only for StarfishPull. However, we enable
+        // it for Starfish as well because of the practical way we update the
+        // DAG known by other validators
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
         ) {
-            self.data_requestor.start().await;
+            self.data_requester.start().await;
         }
-        // To save some bandwidth, we start the updater about authorities with missing blocks for StarfishS
+        // To save some bandwidth, we start the updater about
+        // authorities with missing blocks for StarfishS
         if matches!(self.consensus_protocol, ConsensusProtocol::StarfishS) {
             self.updater_missing_authorities.start().await;
         }
     }
 
-    /// Dispatch a single message. Returns `true` to continue, `false` to break the loop.
+    /// Dispatch a single message. Returns `true` to continue, `false` to break
+    /// the loop.
     async fn handle_message(&mut self, message: NetworkMessage) -> bool {
         match message {
             NetworkMessage::SubscribeBroadcastRequest(round) => {
@@ -692,7 +697,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
     async fn shutdown(self) {
         self.disseminator.shutdown().await;
-        self.data_requestor.shutdown().await;
+        self.data_requester.shutdown().await;
         self.updater_missing_authorities.shutdown().await;
     }
 }
@@ -739,9 +744,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         syncer.force_new_block(0);
         let syncer = CoreThreadDispatcher::start(syncer);
         let (stop_sender, stop_receiver) = mpsc::channel(1);
-        stop_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
+        // Occupy the only available permit, so that all other
+        // calls to send() will block.
+        stop_sender.try_send(()).unwrap();
         let (epoch_sender, epoch_receiver) = mpsc::channel(1);
-        epoch_sender.try_send(()).unwrap(); // occupy the only available permit, so that all other calls to send() will block
+        // Occupy the only available permit, so that all other
+        // calls to send() will block.
+        epoch_sender.try_send(()).unwrap();
 
         // Conditionally prepare shard reconstructor channels for Starfish protocols
         let is_starfish = matches!(
@@ -1044,7 +1053,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<H, C> {
-    // Returns None either if channel is closed or NetworkSyncerInner receives stop signal
+    // Returns None either if channel is closed or NetworkSyncerInner receives stop
+    // signal
     async fn recv_or_stopped<T>(&self, channel: &mut mpsc::Receiver<T>) -> Option<T> {
         select! {
             stopped = self.stop.send(()) => {

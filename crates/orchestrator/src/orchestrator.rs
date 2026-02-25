@@ -28,20 +28,21 @@ use crate::{
 pub struct Orchestrator<P> {
     /// The testbed's settings.
     settings: Settings,
-    /// The state of the testbed (reflecting accurately the state of the machines).
+    /// The state of the testbed (reflecting accurately the state of the
+    /// machines).
     instances: Vec<Instance>,
     /// Provider-specific commands to install on the instance.
     instance_setup_commands: Vec<String>,
-    /// Protocol-specific commands generator to generate the protocol configuration files,
-    /// boot clients and nodes, etc.
+    /// Protocol-specific commands generator to generate the protocol
+    /// configuration files, boot clients and nodes, etc.
     protocol_commands: P,
     /// Handle ssh connections to instances.
     ssh_manager: SshConnectionManager,
-    /// Skip the testbed update. Setting this value to true is dangerous and may lead to
-    /// unexpected behavior.
-    skip_testbed_update: bool,
-    /// Skip the testbed configuration. Setting this value to true is dangerous and may
+    /// Skip the testbed update. Setting this value to true is dangerous and may
     /// lead to unexpected behavior.
+    skip_testbed_update: bool,
+    /// Skip the testbed configuration. Setting this value to true is dangerous
+    /// and may lead to unexpected behavior.
     skip_testbed_configuration: bool,
 }
 
@@ -86,9 +87,10 @@ impl<P> Orchestrator<P> {
 
     /// Returns the instances of the testbed on which to run the benchmarks.
     ///
-    /// This function returns two vectors of instances; the first contains the instances on which to
-    /// run the load generators and the second contains the instances on which to run the nodes.
-    /// Additionally returns an optional monitoring instance.
+    /// This function returns two vectors of instances; the first contains the
+    /// instances on which to run the load generators and the second
+    /// contains the instances on which to run the nodes. Additionally
+    /// returns an optional monitoring instance.
     pub fn select_instances(
         &self,
         parameters: &BenchmarkParameters,
@@ -103,8 +105,8 @@ impl<P> Orchestrator<P> {
             TestbedError::InsufficientCapacity(minimum_instances - available_instances.len())
         );
 
-        // Sort the instances by region. This step ensures that the instances are selected as
-        // equally as possible from all regions.
+        // Sort the instances by region. This step ensures that the instances are
+        // selected as equally as possible from all regions.
         let mut instances_by_regions = HashMap::new();
         for instance in available_instances {
             instances_by_regions
@@ -148,8 +150,8 @@ impl<P> Orchestrator<P> {
             }
         }
 
-        // Spawn a load generate collocated with each node if there are no instances dedicated
-        // to excursively run load generators.
+        // Spawn a load generate collocated with each node if there are no instances
+        // dedicated to excursively run load generators.
         if client_instances.is_empty() {
             client_instances.clone_from(&nodes_instances);
         }
@@ -165,34 +167,49 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let working_dir = self.settings.working_dir.display();
         let url = &self.settings.repository.url;
-        let basic_commands = [
-            "sudo apt-get update",
-            "sudo apt-get -y upgrade",
-            "sudo apt-get -y autoremove",
-            // Disable "pending kernel upgrade" message.
-            "sudo apt-get -y remove needrestart",
-            // The following dependencies
-            // * build-essential: prevent the error: [error: linker *`cc`* not found].
-            // * sysstat - for getting disk stats
-            // * iftop - for getting network stats
-            // * libssl-dev - Required to compile the orchestrator
-            // * clang, libclang-dev, etc. - Required for RocksDB compilation
-            "sudo apt-get -y install build-essential sysstat iftop libssl-dev clang libclang-dev libclang1 llvm",
-            "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config",
-            // Install rust (non-interactive).
-            "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
-            "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc",
-            "source $HOME/.cargo/env",
-            "rustup default stable",
-            "rustup toolchain install 1.78",
-            // Create the working directory.
-            &format!("mkdir -p {working_dir}"),
-            // Clone the repo.
-            &format!("(git clone {url} || true)"),
-        ];
+        let repo_name = self.settings.repository_name();
+
+        let basic_commands: Vec<String> = if self.settings.pre_built_binary.is_some() {
+            // Pre-built binary mode: minimal runtime dependencies only.
+            // Directory at $HOME/{repo_name} to match protocol commands (cd {repo_name}).
+            vec![
+                "sudo apt-get update".into(),
+                "sudo apt-get -y upgrade".into(),
+                "sudo apt-get -y autoremove".into(),
+                "sudo apt-get -y remove needrestart".into(),
+                "sudo apt-get -y install sysstat iftop libssl3 ca-certificates curl".into(),
+                format!("mkdir -p $HOME/{repo_name}/target/release"),
+                // Create empty cargo env so `source $HOME/.cargo/env` in protocol
+                // commands is a harmless no-op.
+                "mkdir -p $HOME/.cargo && touch $HOME/.cargo/env".into(),
+            ]
+        } else {
+            // Build from source: full toolchain and dependencies.
+            vec![
+                "sudo apt-get update".into(),
+                "sudo apt-get -y upgrade".into(),
+                "sudo apt-get -y autoremove".into(),
+                "sudo apt-get -y remove needrestart".into(),
+                "sudo apt-get -y install build-essential \
+                sysstat iftop libssl-dev clang libclang-dev \
+                libclang1 llvm"
+                    .into(),
+                "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config".into(),
+                "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y".into(),
+                "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc".into(),
+                "source $HOME/.cargo/env".into(),
+                "rustup default stable".into(),
+                "rustup toolchain install 1.78".into(),
+                format!("mkdir -p {working_dir}"),
+                format!("(git clone {url} || true)"),
+            ]
+        };
 
         let command = [
-            &basic_commands[..],
+            &basic_commands
+                .iter()
+                .map(|x| x.as_str())
+                .collect::<Vec<_>>()[..],
             &Monitor::dependencies()
                 .iter()
                 .map(|x| x.as_str())
@@ -215,37 +232,71 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(())
     }
 
-    /// Update all instances to use the version of the codebase specified in the setting file.
+    /// Update all instances to use the version of the codebase specified in the
+    /// setting file.
     pub async fn update(&self) -> TestbedResult<()> {
         display::action("Updating all instances");
 
-        // Update all active instances. This requires compiling the codebase in release (which
-        // may take a long time) so we run the command in the background to avoid keeping alive
-        // many ssh connections for too long.
-        let commit = &self.settings.repository.commit;
-        let command = [
-            "git fetch origin",
-            &format!("git checkout -B {commit} origin/{commit}"),
-            "source $HOME/.cargo/env",
-            "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --workspace --exclude orchestrator",
-        ]
-        .join(" && ");
-
-        let active = self.instances.iter().filter(|x| x.is_active()).cloned();
-
-        let id = "update";
+        let active: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .cloned()
+            .collect();
         let repo_name = self.settings.repository_name();
-        let context = CommandContext::new()
-            .run_background(id.into())
-            .with_execute_from_path(repo_name.into());
-        self.ssh_manager
-            .execute(active.clone(), command, context)
-            .await?;
 
-        // Wait until the command finished running.
-        self.ssh_manager
-            .wait_for_command(active, id, CommandStatus::Terminated)
-            .await?;
+        match &self.settings.pre_built_binary {
+            Some(source) if source.starts_with("http://") || source.starts_with("https://") => {
+                // Download pre-built binary from URL on each remote machine.
+                let command = format!(
+                    "curl -fSL -o target/release/starfish \
+                    '{source}' && \
+                    chmod +x target/release/starfish"
+                );
+                let id = "update";
+                let context = CommandContext::new()
+                    .run_background(id.into())
+                    .with_execute_from_path(repo_name.into());
+                self.ssh_manager
+                    .execute(active.clone().into_iter(), command, context)
+                    .await?;
+                self.ssh_manager
+                    .wait_for_command(active.into_iter(), id, CommandStatus::Terminated)
+                    .await?;
+            }
+            Some(source) => {
+                // SCP local binary to all remote machines.
+                let local_path = PathBuf::from(source);
+                let remote_path: PathBuf = format!("{repo_name}/target/release/starfish").into();
+                self.ssh_manager
+                    .upload_to_all(active.into_iter(), &local_path, &remote_path)
+                    .await?;
+            }
+            None => {
+                // Build from source (current behavior).
+                let commit = &self.settings.repository.commit;
+                let command = [
+                    "git fetch origin",
+                    &format!("git checkout -B {commit} origin/{commit}"),
+                    "source $HOME/.cargo/env",
+                    "RUSTFLAGS=-Ctarget-cpu=native \
+                    cargo build --release --workspace \
+                    --exclude orchestrator",
+                ]
+                .join(" && ");
+
+                let id = "update";
+                let context = CommandContext::new()
+                    .run_background(id.into())
+                    .with_execute_from_path(repo_name.into());
+                self.ssh_manager
+                    .execute(active.clone().into_iter(), command, context)
+                    .await?;
+                self.ssh_manager
+                    .wait_for_command(active.into_iter(), id, CommandStatus::Terminated)
+                    .await?;
+            }
+        }
 
         display::done();
         Ok(())
@@ -264,7 +315,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::config(format!("  - client {i}"), client.ssh_address());
         }
 
-        // Generate the genesis configuration file and the keystore allowing access to gas objects.
+        // Generate the genesis configuration file and the keystore allowing access to
+        // gas objects.
         let command = self
             .protocol_commands
             .genesis_command(nodes.iter(), parameters)
@@ -517,7 +569,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         .collect();
         fs::create_dir_all(&path).expect("Failed to create log directory");
 
-        // NOTE: Our ssh library does not seem to be able to transfers files in parallel reliably.
+        // NOTE: Our ssh library does not seem to be able to transfers files in parallel
+        // reliably.
         let mut log_parsers = Vec::new();
 
         // Download the clients log files.
@@ -583,7 +636,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         set_of_parameters: Vec<BenchmarkParameters>,
     ) -> TestbedResult<()> {
         display::header("Preparing testbed");
-        display::config("Commit", format!("'{}'", &self.settings.repository.commit));
+        if let Some(binary) = &self.settings.pre_built_binary {
+            display::config("Pre-built binary", binary);
+        } else {
+            display::config("Commit", format!("'{}'", &self.settings.repository.commit));
+        }
         display::newline();
 
         // Cleanup the testbed (in case the previous run was not completed).
@@ -624,7 +681,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Deploy the load generators.
             self.run_clients(&parameters).await?;
 
-            // Wait for the benchmark to terminate. Then save the results and print a summary.
+            // Wait for the benchmark to terminate. Then save the results and print a
+            // summary.
             let aggregator = self.run(&parameters).await?;
             aggregator.display_summary();
 

@@ -6,23 +6,26 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
-use crate::types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber};
+use crate::types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round};
 use std::fmt::Display;
 
 pub mod base_committer;
 pub mod linearizer;
 pub mod universal_committer;
 
-/// Default wave length for all committers. A longer wave_length increases the chance of committing the leader
+/// Default wave length for all committers. A longer
+/// wave_length increases the chance of committing the leader
 /// under asynchrony at the cost of latency in the common case.
 pub const WAVE_LENGTH: RoundNumber = 3;
 
-/// Cached per-leader voter information, built from scanning voting-round blocks.
+/// Cached per-leader voter information, built from scanning voting-round
+/// blocks.
 #[derive(Clone)]
 pub struct VoterInfo {
     /// Set of (leader_block_ref, voter_block_ref) pairs at the voting round.
     pub voters: AHashSet<(BlockReference, BlockReference)>,
-    /// strong_vote value for each voter block (populated for StarfishS, empty otherwise).
+    /// strong_vote value for each voter block (populated for StarfishS, empty
+    /// otherwise).
     pub voter_strong_votes: AHashMap<BlockReference, Option<bool>>,
 }
 
@@ -41,12 +44,13 @@ pub enum CommitMetastate {
     Pending,
 }
 
-/// The status of every leader output by the committers. While the core only cares about committed
-/// leaders, providing a richer status allows for easier debugging, testing, and composition with
-/// advanced commit strategies.
+/// The status of every leader output by the committers. While the core only
+/// cares about committed leaders, providing a richer status allows for easier
+/// debugging, testing, and composition with advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    /// Committed leader block with optional metastate (Some for StarfishS, None for others).
+    /// Committed leader block with optional metastate (Some for StarfishS, None
+    /// for others).
     Commit(Data<VerifiedStatementBlock>, Option<CommitMetastate>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
@@ -79,8 +83,9 @@ impl LeaderStatus {
     }
 
     /// Whether the leader slot is final for sequencing purposes.
-    /// A Commit(Pending) is decided but NOT final — it blocks the sequencing prefix.
-    /// For non-StarfishS protocols (metastate is None), is_final == is_decided.
+    /// A Commit(Pending) is decided but NOT final — it blocks the sequencing
+    /// prefix. For non-StarfishS protocols (metastate is None), is_final ==
+    /// is_decided.
     pub fn is_final(&self) -> bool {
         match self {
             Self::Commit(_, Some(CommitMetastate::Pending)) => false,

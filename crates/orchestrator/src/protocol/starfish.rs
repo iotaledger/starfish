@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::{ProtocolCommands, ProtocolMetrics, ProtocolParameters, BINARY_PATH};
+use super::{BINARY_PATH, ProtocolCommands, ProtocolMetrics, ProtocolParameters};
 use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 use serde::{Deserialize, Serialize};
 use starfish_core::{

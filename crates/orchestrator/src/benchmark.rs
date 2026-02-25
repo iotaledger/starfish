@@ -6,13 +6,13 @@ use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{protocol::ProtocolParameters, settings::Settings, ClientParameters, NodeParameters};
+use crate::{ClientParameters, NodeParameters, protocol::ProtocolParameters, settings::Settings};
 
 /// Shortcut avoiding to use the generic version of the benchmark parameters.
 pub type BenchmarkParameters = BenchmarkParametersGeneric<NodeParameters, ClientParameters>;
 
-/// The benchmark parameters for a run. These parameters are stored along with the performance data
-/// and should be used to reproduce the results.
+/// The benchmark parameters for a run. These parameters are stored along with
+/// the performance data and should be used to reproduce the results.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BenchmarkParametersGeneric<N, C> {
     /// The testbed settings.
@@ -25,11 +25,17 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub nodes: usize,
     /// The total load (tx/s) to submit to the system.
     pub load: usize,
-    /// Flag indicating whether nodes should advertise their internal or public IP address for inter-node communication.
-    /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
-    /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
+    /// Flag indicating whether nodes should advertise their
+    /// internal or public IP address for inter-node
+    /// communication. When running the simulation in multiple
+    /// regions, nodes need to use their public IPs to correctly
+    /// communicate, however when a simulation is running in a
+    /// single VPC, they should use their internal IPs to avoid
+    /// paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
-    // Consensus protocol to deploy (starfish | starfish-s | starfish-pull | mysticeti | cordial-miners)
+    // Consensus protocol to deploy
+    // (starfish | starfish-s | starfish-pull | mysticeti
+    // | cordial-miners)
     pub consensus_protocol: String,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
@@ -62,7 +68,9 @@ impl<N, C> Display for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Consensus choice: {}. Settings:{} nodes, {} Byzantine, {} strategy ({}) - {} tx/s (use internal IPs: {}); enable tracing: {}",
+            "Consensus choice: {}. Settings:{} nodes, \
+            {} Byzantine, {} strategy ({}) - {} tx/s \
+            (use internal IPs: {}); enable tracing: {}",
             self.consensus_protocol,
             self.nodes,
             self.byzantine_nodes,

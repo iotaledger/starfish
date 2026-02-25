@@ -5,7 +5,7 @@
 use rand::Rng;
 use reqwest::{Client as NetworkClient, Response, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fmt::Display, net::Ipv4Addr};
 
 use super::{Instance, ServerProviderClient};
@@ -61,7 +61,8 @@ impl From<VultrInstance> for Instance {
 }
 
 impl VultrInstance {
-    /// Return whether the instance matches the parameters specified in the setting file.
+    /// Return whether the instance matches the parameters specified in the
+    /// setting file.
     pub fn filter(&self, settings: &Settings) -> bool {
         settings.regions.contains(&self.region)
             && self.tags.contains(&settings.testbed_id)

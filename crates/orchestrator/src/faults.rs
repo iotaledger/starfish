@@ -59,8 +59,8 @@ impl Display for FaultsType {
 }
 
 impl FaultsType {
-    /// The interval between crashes. If the type is `Permanent`, the interval is 1s
-    /// to crash the nodes as fast as possible.
+    /// The interval between crashes. If the type is `Permanent`, the interval
+    /// is 1s to crash the nodes as fast as possible.
     pub fn crash_interval(&self) -> Duration {
         match self {
             Self::Permanent { .. } => Duration::from_secs(1),
@@ -69,7 +69,8 @@ impl FaultsType {
     }
 }
 
-/// The actions to apply to the testbed, i.e., which instances to crash and recover.
+/// The actions to apply to the testbed, i.e., which instances to crash and
+/// recover.
 #[derive(Default)]
 pub struct CrashRecoveryAction {
     /// The instances to boot.

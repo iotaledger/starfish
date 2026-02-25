@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
-use eyre::{eyre, Context, Result};
+use eyre::{Context, Result, eyre};
 use prettytable::format;
 use starfish_core::metrics::Metrics;
 use starfish_core::{
@@ -22,7 +22,7 @@ use std::{
     thread,
 };
 use tokio::time::Instant;
-use tracing_subscriber::{filter::LevelFilter, fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -33,8 +33,9 @@ struct Args {
 
 #[derive(Parser)]
 enum Operation {
-    /// Generate a committee file, parameters files and the private config files of all validators
-    /// from a list of initial peers. This is only suitable for benchmarks as it exposes all keys.
+    /// Generate a committee file, parameters files and the private config files
+    /// of all validators from a list of initial peers. This is only
+    /// suitable for benchmarks as it exposes all keys.
     BenchmarkGenesis {
         #[clap(long, value_name = "ADDR", value_delimiter = ' ', num_args(4..))]
         ips: Vec<IpAddr>,
@@ -60,7 +61,8 @@ enum Operation {
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
     },
-    /// Deploy a local validator for test. Dryrun mode uses default keys and committee configurations.
+    /// Deploy a local validator for test. Dryrun mode uses
+    /// default keys and committee configurations.
     DryRun {
         #[clap(long, value_name = "INT")]
         authority: AuthorityIndex,
@@ -79,7 +81,8 @@ enum Operation {
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
-        /// Base IP for validators (IPs assigned as base_ip+0, base_ip+1, ...). Default: 127.0.0.1
+        /// Base IP for validators (IPs assigned as base_ip+0, base_ip+1, ...).
+        /// Default: 127.0.0.1
         #[clap(long, value_name = "IP")]
         base_ip: Option<IpAddr>,
     },
@@ -307,8 +310,9 @@ async fn local_benchmark(
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
-        "Starting validator {authority} in local benchmark mode (committee size: {committee_size})"
-    );
+            "Starting validator {authority} in local \
+            benchmark mode (committee size: {committee_size})"
+        );
         let working_dir = base_dir.join(format!("validator-{authority}"));
         fs::create_dir_all(&working_dir)?;
         match fs::remove_dir_all(&working_dir) {
@@ -318,7 +322,7 @@ async fn local_benchmark(
                 return Err(e).wrap_err(format!(
                     "Failed to remove directory '{}'",
                     working_dir.display()
-                ))
+                ));
             }
         }
         let mut private_configs =
@@ -330,7 +334,7 @@ async fn local_benchmark(
                 return Err(e).wrap_err(format!(
                     "Failed to create directory '{}'",
                     working_dir.display()
-                ))
+                ));
             }
         }
         let is_byzantine = authority.is_multiple_of(3) && authority / 3 < num_byzantine_nodes;
@@ -379,7 +383,11 @@ async fn local_benchmark(
             println!();
             println!("Benchmark completed after {duration_secs} seconds");
             // Display metrics
-            Metrics::aggregate_and_display(metrics_of_honest_validators, reporters_of_honest_validators, duration_secs);
+            Metrics::aggregate_and_display(
+                metrics_of_honest_validators,
+                reporters_of_honest_validators,
+                duration_secs,
+            );
 
             // Abort all tasks
             for abort_handle in abort_handles {
@@ -398,7 +406,11 @@ async fn local_benchmark(
             }
         } => {
             println!("All validators completed before timeout");
-            Metrics::aggregate_and_display(metrics_of_honest_validators, reporters_of_honest_validators, duration_secs);
+            Metrics::aggregate_and_display(
+                metrics_of_honest_validators,
+                reporters_of_honest_validators,
+                duration_secs,
+            );
             fs::remove_dir_all(base_dir)?;
             Ok(())
         }
@@ -508,7 +520,7 @@ async fn dryrun(
             return Err(e).wrap_err(format!(
                 "Failed to remove directory '{}'",
                 working_dir.display()
-            ))
+            ));
         }
     }
     match fs::create_dir_all(&private_config.storage_path) {
@@ -517,7 +529,7 @@ async fn dryrun(
             return Err(e).wrap_err(format!(
                 "Failed to create directory '{}'",
                 working_dir.display()
-            ))
+            ));
         }
     }
 

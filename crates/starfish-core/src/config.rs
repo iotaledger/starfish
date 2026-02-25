@@ -9,10 +9,10 @@ use std::{
     time::Duration,
 };
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    crypto::{dummy_signer, Signer},
+    crypto::{Signer, dummy_signer},
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
 
@@ -181,12 +181,14 @@ impl NodePublicConfig {
         self
     }
 
-    /// Return all network addresses (including our own) in the order of the authority index.
+    /// Return all network addresses (including our own) in the order of the
+    /// authority index.
     pub fn all_network_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.identifiers.iter().map(|id| id.network_address)
     }
 
-    /// Return all metric addresses (including our own) in the order of the authority index.
+    /// Return all metric addresses (including our own) in the order of the
+    /// authority index.
     pub fn all_metric_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.identifiers.iter().map(|id| id.metrics_address)
     }

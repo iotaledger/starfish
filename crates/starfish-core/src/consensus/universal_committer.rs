@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{base_committer::BaseCommitter, CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH};
+use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH, base_committer::BaseCommitter};
 use crate::block_store::ConsensusProtocol;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::{
@@ -10,14 +10,14 @@ use crate::{
     committee::Committee,
     consensus::base_committer::BaseCommitterOptions,
     metrics::Metrics,
-    types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
+    types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round},
 };
 use ahash::{AHashMap, AHashSet};
 use std::{collections::VecDeque, sync::Arc};
 
-/// A universal committer uses a collection of committers to commit a sequence of leaders.
-/// It can be configured to use a combination of different commit strategies, including
-/// multi-leaders, backup leaders, and pipelines.
+/// A universal committer uses a collection of committers to commit a sequence
+/// of leaders. It can be configured to use a combination of different commit
+/// strategies, including multi-leaders, backup leaders, and pipelines.
 #[derive(Clone)]
 pub struct UniversalCommitter {
     block_store: BlockStore,
@@ -31,8 +31,8 @@ pub struct UniversalCommitter {
 }
 
 impl UniversalCommitter {
-    /// Try to commit part of the dag. This function is idempotent and returns a list of
-    /// ordered decided leaders.
+    /// Try to commit part of the dag. This function is idempotent and returns a
+    /// list of ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
         let highest_known_round = self.block_store.highest_round();
@@ -117,12 +117,8 @@ impl UniversalCommitter {
                     .utilization_timer
                     .utilization_timer("Committer::indirect_decide");
                 if !status.is_final() {
-                    status = committer.try_indirect_decide(
-                        leader,
-                        round,
-                        leaders.iter(),
-                        voter_info,
-                    );
+                    status =
+                        committer.try_indirect_decide(leader, round, leaders.iter(), voter_info);
                     if status.is_decided() {
                         indirect_decided.insert((leader, round));
                     }
@@ -160,8 +156,9 @@ impl UniversalCommitter {
             .collect()
     }
 
-    /// Return list of leaders for the round. Syncer may give those leaders some extra time.
-    /// To preserve (theoretical) liveness, we should wait `Delta` time for at least the first leader.
+    /// Return list of leaders for the round. Syncer may give those leaders some
+    /// extra time. To preserve (theoretical) liveness, we should wait
+    /// `Delta` time for at least the first leader.
     /// Can return empty vec if round does not have a designated leader.
     pub fn get_leaders(&self, round: RoundNumber) -> Vec<AuthorityIndex> {
         self.committers
@@ -172,7 +169,8 @@ impl UniversalCommitter {
 
     /// Evict cached decisions below the given threshold round.
     pub fn cleanup(&mut self, threshold_round: RoundNumber) {
-        self.decided.retain(|&(_, round), _| round >= threshold_round);
+        self.decided
+            .retain(|&(_, round), _| round >= threshold_round);
         self.voters_cache
             .retain(|&(_, round), _| round >= threshold_round);
     }
@@ -200,8 +198,8 @@ impl UniversalCommitter {
     }
 }
 
-/// A builder for a universal committer. By default, the builder creates a single base committer,
-/// that is, a single leader and no pipeline.
+/// A builder for a universal committer. By default, the builder creates a
+/// single base committer, that is, a single leader and no pipeline.
 pub struct UniversalCommitterBuilder {
     committee: Arc<Committee>,
     block_store: BlockStore,

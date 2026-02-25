@@ -4,7 +4,10 @@
 #!/bin/bash -e
 
 (sudo systemctl status node_exporter && exit 0) || echo "Installing node explorer"
-curl -LO https://github.com/prometheus/node_exporter/releases/download/v0.18.1/node_exporter-0.18.1.linux-amd64.tar.gz
+NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases"
+NODE_EXPORTER_URL="$NODE_EXPORTER_URL/download/v0.18.1"
+NODE_EXPORTER_URL="$NODE_EXPORTER_URL/node_exporter-0.18.1.linux-amd64.tar.gz"
+curl -LO "$NODE_EXPORTER_URL"
 tar -xvf node_exporter-0.18.1.linux-amd64.tar.gz
 sudo mv node_exporter-0.18.1.linux-amd64/node_exporter /usr/local/bin/
 sudo useradd -rs /bin/false node_exporter || true

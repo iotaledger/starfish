@@ -12,7 +12,7 @@ use std::{
 
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, DurationSeconds};
+use serde_with::{DisplayFromStr, DurationSeconds, serde_as};
 
 use crate::{
     client::Instance,
@@ -41,9 +41,10 @@ impl Default for Repository {
 }
 
 impl Repository {
-    /// Set the commit to 'unknown'. This options is useful when the orchestrator cannot
-    /// be certain of the commit that is running on the instances. This is a failsafe against
-    /// reporting wrong commit values in the measurements.
+    /// Set the commit to 'unknown'. This options is useful when the
+    /// orchestrator cannot be certain of the commit that is running on the
+    /// instances. This is a failsafe against reporting wrong commit values
+    /// in the measurements.
     pub fn set_unknown_commit(&mut self) {
         self.commit = "unknown".into();
     }
@@ -69,8 +70,9 @@ pub enum CloudProvider {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Settings {
-    /// The testbed unique id. This allows multiple users to run concurrent testbeds on the
-    /// same cloud provider's account without interference with each others.
+    /// The testbed unique id. This allows multiple users to run concurrent
+    /// testbeds on the same cloud provider's account without interference
+    /// with each others.
     pub testbed_id: String,
     /// The cloud provider hosting the testbed.
     pub cloud_provider: CloudProvider,
@@ -78,37 +80,43 @@ pub struct Settings {
     pub token_file: PathBuf,
     /// The ssh private key to access the instances.
     pub ssh_private_key_file: PathBuf,
-    /// The corresponding ssh public key registered on the instances. If not specified. the
-    /// public key defaults the same path as the private key with an added extension 'pub'.
+    /// The corresponding ssh public key registered on the instances. If not
+    /// specified. the public key defaults the same path as the private key
+    /// with an added extension 'pub'.
     pub ssh_public_key_file: Option<PathBuf>,
     /// The list of cloud provider regions to deploy the testbed.
     pub regions: Vec<String>,
-    /// The specs of the instances to deploy. Those are dependent on the cloud provider, e.g.,
-    /// specifying 't3.medium' creates instances with 2 vCPU and 4GBo of ram on AWS.
+    /// The specs of the instances to deploy. Those are dependent on the cloud
+    /// provider, e.g., specifying 't3.medium' creates instances with 2 vCPU
+    /// and 4GBo of ram on AWS.
     pub specs: String,
     /// The details of the git reposit to deploy.
     pub repository: Repository,
-    /// The path to the node's configuration file. If not specified, the orchestrator uses the
-    /// default configurations.
+    /// The path to the node's configuration file. If not specified, the
+    /// orchestrator uses the default configurations.
     pub node_parameters_path: Option<String>,
-    /// The path to the client's configuration file. If not specified, the orchestrator uses the
-    /// default configurations.
+    /// The path to the client's configuration file. If not specified, the
+    /// orchestrator uses the default configurations.
     pub client_parameters_path: Option<String>,
-    /// The duration of the benchmark. The orchestrator stops the benchmark after this duration.
-    /// If this value is set to zero, the orchestrator runs the benchmark indefinitely.
+    /// The duration of the benchmark. The orchestrator stops the benchmark
+    /// after this duration. If this value is set to zero, the orchestrator
+    /// runs the benchmark indefinitely.
     #[serde(default = "defaults::default_benchmark_duration")]
     #[serde_as(as = "DurationSeconds")]
     pub benchmark_duration: Duration,
     /// The default faults type to apply to the testbed's nodes.
     #[serde(default = "defaults::default_faults_type")]
     pub faults: FaultsType,
-    /// The working directory on the remote instance (containing all configuration files).
+    /// The working directory on the remote instance (containing all
+    /// configuration files).
     #[serde(default = "defaults::default_working_dir")]
     pub working_dir: PathBuf,
-    /// The directory (on the local machine) where to save benchmarks measurements.
+    /// The directory (on the local machine) where to save benchmarks
+    /// measurements.
     #[serde(default = "defaults::default_results_dir")]
     pub results_dir: PathBuf,
-    /// The directory (on the local machine) where to download logs files from the instances.
+    /// The directory (on the local machine) where to download logs files from
+    /// the instances.
     #[serde(default = "defaults::default_logs_dir")]
     pub logs_dir: PathBuf,
     /// Whether to use NVMe drives for data storage (if available).
@@ -121,11 +129,13 @@ pub struct Settings {
     /// Whether to downloading and analyze the client and node log files.
     #[serde(default = "defaults::default_log_processing")]
     pub log_processing: bool,
-    /// Number of instances running only load generators (not nodes). If this value is set
-    /// to zero, the orchestrator runs a load generate collocated with each node.
+    /// Number of instances running only load generators (not nodes). If this
+    /// value is set to zero, the orchestrator runs a load generate
+    /// collocated with each node.
     #[serde(default = "defaults::default_dedicated_clients")]
     pub dedicated_clients: usize,
-    /// Whether to start a grafana and prometheus instance on a dedicate machine.
+    /// Whether to start a grafana and prometheus instance on a dedicate
+    /// machine.
     #[serde(default = "defaults::default_monitoring")]
     pub monitoring: bool,
     /// The timeout duration for ssh commands (in seconds).
@@ -135,6 +145,12 @@ pub struct Settings {
     /// The number of times the orchestrator should retry an ssh command.
     #[serde(default = "defaults::default_ssh_retries")]
     pub ssh_retries: usize,
+    /// Pre-built starfish binary. When set, skips git clone + cargo
+    /// build on remote machines. If the value starts with "http://" or
+    /// "https://", remote machines download it via curl. Otherwise, the
+    /// orchestrator treats it as a local path and SCPs it to each machine.
+    #[serde(default)]
+    pub pre_built_binary: Option<String>,
 }
 
 mod defaults {
@@ -272,7 +288,8 @@ impl Settings {
         }
     }
 
-    /// Check whether the input instance matches the criteria described in the settings.
+    /// Check whether the input instance matches the criteria described in the
+    /// settings.
     pub fn filter_instances(&self, instance: &Instance) -> bool {
         self.regions.contains(&instance.region)
             && instance.specs.to_lowercase().replace('.', "")

@@ -18,8 +18,10 @@ use std::fmt;
 
 pub const MAX_TRAVERSAL_DEPTH: RoundNumber = 50;
 
-/// The output of consensus is an ordered list of [`CommittedSubDag`]. The application can arbitrarily
-/// sort the blocks within each sub-dag (but using a deterministic algorithm).
+/// The output of consensus is an ordered list of
+/// [`CommittedSubDag`]. The application can arbitrarily sort
+/// the blocks within each sub-dag (but using a deterministic
+/// algorithm).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
@@ -34,7 +36,8 @@ impl CommittedSubDag {
         Self { anchor, blocks }
     }
 
-    /// Sort the blocks of the sub-dag by round number. Any deterministic algorithm works.
+    /// Sort the blocks of the sub-dag by round number. Any deterministic
+    /// algorithm works.
     pub fn sort(&mut self) {
         self.blocks.sort_by_key(|x| x.round());
     }
@@ -42,10 +45,12 @@ impl CommittedSubDag {
 
 /// Expand a committed sequence of leader into a sequence of sub-dags.
 pub struct Linearizer {
-    /// Keep track of all committed blocks to avoid committing the same block twice.
+    /// Keep track of all committed blocks to avoid committing the same block
+    /// twice.
     pub committed: BTreeSet<BlockReference>,
-    /// Keep track of committed slots (round, author) to avoid sequencing the same
-    /// transaction data twice — e.g. via both the optimistic and standard paths.
+    /// Keep track of committed slots (round, author) to avoid sequencing the
+    /// same transaction data twice — e.g. via both the optimistic and
+    /// standard paths.
     pub committed_slots: BTreeSet<(RoundNumber, AuthorityIndex)>,
     pub traversed_blocks: BTreeSet<BlockReference>,
     pub votes: BTreeMap<BlockReference, StakeAggregator<QuorumThreshold>>,
@@ -74,8 +79,8 @@ impl Linearizer {
         self.votes = self.votes.split_off(&split_ref);
         self.committed_slots = self.committed_slots.split_off(&(threshold_round, 0));
     }
-    /// Collect the sub-dag from a specific anchor excluding any duplicates or blocks that
-    /// have already been committed (within previous sub-dags).
+    /// Collect the sub-dag from a specific anchor excluding any duplicates or
+    /// blocks that have already been committed (within previous sub-dags).
     fn collect_subdag_mysticeti(
         &mut self,
         block_store: &BlockStore,
@@ -95,7 +100,8 @@ impl Linearizer {
                 if reference.round < min_round {
                     continue;
                 }
-                // The block manager may have cleaned up blocks passed the latest committed rounds.
+                // The block manager may have cleaned up blocks passed the latest committed
+                // rounds.
                 let block = block_store
                     .get_storage_block(*reference)
                     .expect("We should have the whole sub-dag by now");
@@ -109,8 +115,8 @@ impl Linearizer {
         }
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
-    // Collect all blocks in the history of committed leader that have a quorum of blocks
-    // acknowledging them.
+    // Collect all blocks in the history of committed leader that have a quorum of
+    // blocks acknowledging them.
     fn collect_subdag_starfish(
         &mut self,
         block_store: &BlockStore,
@@ -213,7 +219,8 @@ impl Linearizer {
             };
 
             // For StarfishS Opt: additionally include blocks from the leader's
-            // acknowledgement_statements. The strong vote quorum guarantees data availability.
+            // acknowledgement_statements. The strong vote quorum guarantees data
+            // availability.
             if metastate == Some(CommitMetastate::Opt) {
                 for ack_ref in &leader_acks {
                     if self.committed.insert(*ack_ref) {
@@ -233,7 +240,7 @@ impl Linearizer {
                 .map(|x| {
                     self.votes
                         .get(x.reference())
-                        .expect("After commiting expect a quorum in starfish")
+                        .expect("After committing expect a quorum in starfish")
                         .clone()
                 })
                 .collect();

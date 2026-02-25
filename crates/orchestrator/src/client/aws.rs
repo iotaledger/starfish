@@ -9,11 +9,11 @@ use aws_sdk_ec2::{
     meta::PKG_VERSION,
     primitives::Blob,
     types::{
+        EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType,
         builders::{
             BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder, TagBuilder,
             TagSpecificationBuilder,
         },
-        EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType,
     },
 };
 use rand::Rng;
@@ -81,7 +81,8 @@ impl AwsClient {
         Self { settings, clients }
     }
 
-    /// Parse an AWS response and ignore errors if they mean a request is a duplicate.
+    /// Parse an AWS response and ignore errors if they mean a request is a
+    /// duplicate.
     fn check_but_ignore_duplicates<T, E>(
         response: Result<T, SdkError<E>>,
     ) -> CloudProviderResult<()>
@@ -97,7 +98,8 @@ impl AwsClient {
         Ok(())
     }
 
-    /// Convert an AWS instance into an orchestrator instance (used in the rest of the codebase).
+    /// Convert an AWS instance into an orchestrator instance (used in the rest
+    /// of the codebase).
     fn make_instance(&self, region: String, aws_instance: &AwsInstance) -> Instance {
         Instance {
             id: aws_instance
@@ -179,7 +181,8 @@ impl AwsClient {
             .clone()
             .ok_or_else(|| CloudProviderError::UnexpectedResponse("Image without ID".into()))
     }
-    /// Create a new security group for the instance (if it doesn't already exist).
+    /// Create a new security group for the instance (if it doesn't already
+    /// exist).
     async fn create_security_group(&self, client: &aws_sdk_ec2::Client) -> CloudProviderResult<()> {
         // Create a security group (if it doesn't already exist).
         let request = client
@@ -225,10 +228,11 @@ impl AwsClient {
         vec![format!("(sudo umount {directory} || true)")]
     }
 
-    /// Check whether the instance type specified in the settings supports NVMe drives.
+    /// Check whether the instance type specified in the settings supports NVMe
+    /// drives.
     async fn check_nvme_support(&self) -> CloudProviderResult<bool> {
-        // Get the client for the first region. A given instance type should either have NVMe
-        // support in all regions or in none.
+        // Get the client for the first region. A given instance type should either have
+        // NVMe support in all regions or in none.
         let client = match self
             .settings
             .regions

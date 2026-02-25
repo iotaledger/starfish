@@ -12,8 +12,8 @@ use crate::{
     block_store::BlockStore,
     committee::Committee,
     consensus::{
-        linearizer::{CommittedSubDag, Linearizer},
         CommitMetastate,
+        linearizer::{CommittedSubDag, Linearizer},
     },
     metrics::Metrics,
     runtime::{self, TimeInstant},
@@ -41,14 +41,16 @@ const fn assert_constants() {
 pub struct RealBlockHandler {
     receiver: mpsc::Receiver<Vec<Transaction>>,
     pending_transactions: usize,
-    max_transactions_per_block: usize, // max number of transaction in block. Depends on the committee size
+    // Max number of transactions in block. Depends on committee size.
+    max_transactions_per_block: usize,
 }
 
 impl RealBlockHandler {
     pub fn new(committee: &Committee) -> (Self, mpsc::Sender<Vec<Transaction>>) {
         let (sender, receiver) = mpsc::channel(1024);
-        // Assuming max TPS to be 600.000 and 4 blocks per second (for this TPS), we limit the max number of
-        // transactions per block to ensure fast processing
+        // Assuming max TPS to be 600.000 and 4 blocks per second
+        // (for this TPS), we limit the max number of transactions
+        // per block to ensure fast processing
         let max_transactions_per_block = 150 * 1024 / committee.len();
         let this = Self {
             max_transactions_per_block,
@@ -143,7 +145,8 @@ impl BlockHandler for TestBlockHandler {
     }
 
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
-        // todo - this is ugly, but right now we need a way to recover self.last_transaction
+        // todo - this is ugly, but right now we need a way to recover
+        // self.last_transaction
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {
@@ -249,7 +252,14 @@ impl CommitObserver for RealCommitHandler {
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
 
                 if block_creation_time.is_zero() || block_latency.as_secs() > 60 {
-                    tracing::debug!("Latency of block {} is too large, skip updating metrics - (latency: {:?}; block creation time: {:?})", block.reference(), block_latency, block_creation_time);
+                    tracing::debug!(
+                        "Latency of block {} is too large, \
+                        skip updating metrics - \
+                        (latency: {:?}; block creation time: {:?})",
+                        block.reference(),
+                        block_latency,
+                        block_creation_time
+                    );
                     continue;
                 }
 
@@ -307,8 +317,8 @@ impl CommitObserver for RealCommitHandler {
             } else {
                 break;
             }
-            // todo: need to change the committed subdag again, but it is ok for now as the storage
-            // is not used.
+            // todo: need to change the committed subdag again, but it is ok for now as the
+            // storage is not used.
             resulted_committed.push(commit.0.clone());
             // self.committed_dags.push(commit);
             slice_index += 1;
