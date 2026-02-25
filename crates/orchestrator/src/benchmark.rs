@@ -141,6 +141,7 @@ pub mod test {
     use super::ProtocolParameters;
 
     /// Mock benchmark type for unit tests.
+    #[allow(dead_code)]
     #[derive(
         Serialize, Deserialize, Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Default,
     )]

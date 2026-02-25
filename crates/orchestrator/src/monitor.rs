@@ -67,6 +67,32 @@ impl Monitor {
 
     /// Start grafana on the dedicated motoring machine.
     pub async fn start_grafana(&self, repo_name: &str) -> MonitorResult<()> {
+        let local_dashboard: PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "..",
+            "monitoring",
+            "grafana",
+            "grafana-dashboard.json",
+        ]
+        .iter()
+        .collect();
+        if !local_dashboard.exists() {
+            return Err(MonitorError::GrafanaError(format!(
+                "Dashboard file not found at {}",
+                local_dashboard.display()
+            )));
+        }
+
+        let remote_dashboard: PathBuf = format!("{repo_name}/grafana-dashboard.json").into();
+        self.ssh_manager
+            .upload_to_all(
+                std::iter::once(self.instance.clone()),
+                &local_dashboard,
+                &remote_dashboard,
+            )
+            .await?;
+
         // Configure and reload grafana.
         let instance = std::iter::once(self.instance.clone());
         let commands = Grafana::setup_commands();
@@ -222,10 +248,7 @@ impl Grafana {
                 Self::DASHBOARDS_PATH
             ),
             // copy your default dashboard yaml/json
-            &format!(
-                "sudo cp monitoring/grafana/grafana-dashboard.json {}",
-                Self::DASHBOARDS_PATH
-            ),
+            &format!("sudo cp grafana-dashboard.json {}", Self::DASHBOARDS_PATH),
             "sudo service grafana-server restart",
         ]
         .join(" && ")

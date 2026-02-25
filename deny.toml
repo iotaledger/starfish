@@ -32,6 +32,7 @@ allow = [
   "LicenseRef-ring",
   "MIT",
   "MPL-2.0",
+  "Unicode-3.0",
   "Unicode-DFS-2016",
 ]
 # The confidence threshold for detecting a license from license text.
@@ -58,11 +59,13 @@ ignore = true
 [bans]
 # Lint level for when multiple versions of the same crate are detected
 multiple-versions = "deny"
-skip = [{ name = "itertools", version = "<=12.1" }]
+skip = [
+  { name = "itertools", version = "<=12.1" },
+  # transitive windows-sys 0.52/0.53 duplicates
+  { name = "windows_x86_64_msvc", version = "<=0.52" },
+  { name = "windows_x86_64_gnullvm", version = "<=0.52" },
+]
 skip-tree = [
-  { name = "fastcrypto", depth = 4 },
-  { name = "typed-store", depth = 6 },
-  { name = "test-cluster", depth = 6 },
   # several crates depend on an older version of windows-sys
   { name = "windows-sys", depth = 3, version = "0.48" },
 ]
@@ -79,10 +82,6 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
   "https://github.com/asonnino/prometheus-parser",
-  "https://github.com/mystenmark/tokio-madsim-fork",
-  "https://github.com/mystenmark/async-task",
-  "https://github.com/wlmyng/jsonrpsee",
-  "https://github.com/zhiburt/tabled",
 ]
 
 [sources.allow-org]

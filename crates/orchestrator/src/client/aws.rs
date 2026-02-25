@@ -69,6 +69,7 @@ impl AwsClient {
 
         let mut clients = HashMap::new();
         for region in settings.regions.clone() {
+            #[allow(deprecated)] // TODO: update to v2025_01_17 when ready
             let sdk_config = aws_config::defaults(BehaviorVersion::v2024_03_28())
                 .region(Region::new(region.clone()))
                 .profile_files(profile_files.clone())
@@ -218,6 +219,7 @@ impl AwsClient {
         let directory = self.settings.working_dir.display();
         vec![
             format!("(sudo mkfs.ext4 -E nodiscard /dev/{DRIVE} || true)"),
+            format!("sudo mkdir -p {directory}"),
             format!("(sudo mount /dev/{DRIVE} {directory} || true)"),
             format!("sudo chmod 777 -R {directory}"),
         ]

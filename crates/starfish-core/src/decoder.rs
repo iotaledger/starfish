@@ -147,8 +147,8 @@ mod tests {
 
         // Build CachedStatementBlock with only info shards (0 and 1)
         let mut cached = block.to_cached_block(committee_size);
-        for i in 0..committee.info_length() {
-            cached.add_encoded_shard(i, shards[i].clone());
+        for (i, shard) in shards[..committee.info_length()].iter().enumerate() {
+            cached.add_encoded_shard(i, shard.clone());
         }
 
         let result = decoder.decode_shards(&committee, &mut encoder, cached, own_id);

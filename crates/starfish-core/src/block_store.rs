@@ -74,9 +74,10 @@ pub struct BlockStore {
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
     /// Version-gated cache of round block snapshots (outside the RwLock).
-    round_block_cache:
-        Arc<parking_lot::Mutex<AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBlock>]>)>>>,
+    round_block_cache: Arc<parking_lot::Mutex<RoundBlockCache>>,
 }
+
+type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBlock>]>)>;
 
 struct BlockStoreInner {
     rocks_store: Arc<RocksStore>,
@@ -93,10 +94,7 @@ struct BlockStoreInner {
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     // this dag structure store for each block its predecessors and who knows the block
-    dag: BTreeMap<
-        RoundNumber,
-        HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>,
-    >,
+    dag: BTreeMap<RoundNumber, DagRoundEntries>,
     // per-authority highest committed round, used as dag eviction threshold
     last_committed_round: Vec<RoundNumber>,
     // per-round version counter, incremented on each add_block to that round
@@ -106,6 +104,8 @@ struct BlockStoreInner {
 }
 
 type IndexEntry = (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>);
+type DagRoundEntries =
+    HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>;
 
 impl BlockStore {
     pub fn open(
@@ -834,11 +834,9 @@ impl BlockStoreInner {
     }
 
     pub fn update_data_availability(&mut self, block: &VerifiedStatementBlock) {
-        if block.statements().is_some() {
-            if !self.data_availability.contains(block.reference()) {
-                self.data_availability.insert(*block.reference());
-                self.pending_acknowledgment.push(*block.reference());
-            }
+        if block.statements().is_some() && !self.data_availability.contains(block.reference()) {
+            self.data_availability.insert(*block.reference());
+            self.pending_acknowledgment.push(*block.reference());
         }
     }
 
