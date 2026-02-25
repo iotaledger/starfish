@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use itertools::Itertools;
-use prettytable::{row, Table};
+use prettytable::{Table, row};
 use prometheus_parse::Scrape;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -283,7 +283,8 @@ impl MeasurementsCollection {
             .unwrap_or_default()
     }
 
-    /// Aggregate the benchmark duration of multiple data points by taking the max.
+    /// Aggregate the benchmark duration of multiple data points by taking the
+    /// max.
     pub fn benchmark_duration(&self) -> Duration {
         self.labels()
             .map(|label| self.max_result(label, |x| x.timestamp))
@@ -294,11 +295,14 @@ impl MeasurementsCollection {
     /// Aggregate the tps of multiple data points.
     pub fn aggregate_tps(&self, label: &Label) -> u64 {
         self.max_result(label, |x| x.count)
-            .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize)) // TODO: transactions are injected in blocks after a timeout (10 sec)
+            // TODO: transactions are injected in blocks after
+            // a timeout (10 sec)
+            .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize))
             .unwrap_or_default() as u64
     }
 
-    /// Aggregate the average latency of multiple data points by taking the average.
+    /// Aggregate the average latency of multiple data points by taking the
+    /// average.
     pub fn aggregate_bandwidth(&self, label: &Label) -> Vec<usize> {
         let all_measurements = self.all_measurements(label);
         let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
@@ -312,7 +316,8 @@ impl MeasurementsCollection {
             .collect()
     }
 
-    /// Aggregate the average latency of multiple data points by taking the average.
+    /// Aggregate the average latency of multiple data points by taking the
+    /// average.
     pub fn aggregate_average_latency(&self, label: &Label) -> Duration {
         let all_measurements = self.all_measurements(label);
         let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
@@ -408,25 +413,60 @@ impl MeasurementsCollection {
             table.add_row(row![b->"Workload:", label]);
             match label.as_str() {
                 "block_committed_latency" => {
-                    table.add_row(row![b->"BPS:", format!("{total_tps} blocks/s")]);
-                    table.add_row(row![b->"Block latency (avg):", format!("{} ms", average_latency.as_millis())]);
-                    table.add_row(row![b->"Block latency (stdev):", format!("{} ms", stdev_latency.as_millis())]);
+                    table.add_row(row![
+                        b->"BPS:",
+                        format!("{total_tps} blocks/s")
+                    ]);
+                    table.add_row(row![
+                        b->"Block latency (avg):",
+                        format!("{} ms", average_latency.as_millis())
+                    ]);
+                    table.add_row(row![
+                        b->"Block latency (stdev):",
+                        format!("{} ms", stdev_latency.as_millis())
+                    ]);
                     for (label, latency_vec) in buckets_latency {
-                        table.add_row(                            row![
-                                b->format!("Block latency ({}):", label),
-                                latency_vec.iter().map(|x| format!("{} ms", x.as_millis())).collect::<Vec<String>>().join(", ")
-                            ]);
+                        let vals: Vec<String> = latency_vec
+                            .iter()
+                            .map(|x| format!("{} ms", x.as_millis()))
+                            .collect();
+                        table.add_row(row![
+                            b->format!("Block latency ({}):", label),
+                            vals.join(", ")
+                        ]);
                     }
                 }
                 "transaction_committed_latency" => {
                     tps_value = total_tps as f64;
-                    table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
-                    table.add_row(row![b->"Transaction latency (avg):", format!("{} ms", average_latency.as_millis())]);
-                    table.add_row(row![b->"Transaction latency (stdev):", format!("{} ms", stdev_latency.as_millis())]);
+                    table.add_row(row![
+                        b->"TPS:",
+                        format!("{total_tps} tx/s")
+                    ]);
+                    table.add_row(row![
+                        b->"Transaction latency (avg):",
+                        format!(
+                            "{} ms",
+                            average_latency.as_millis()
+                        )
+                    ]);
+                    table.add_row(row![
+                        b->"Transaction latency (stdev):",
+                        format!(
+                            "{} ms",
+                            stdev_latency.as_millis()
+                        )
+                    ]);
                     for (label, latency_vec) in buckets_latency {
+                        let vals: Vec<String> = latency_vec
+                            .iter()
+                            .map(|x| format!("{} ms", x.as_millis()))
+                            .collect();
                         table.add_row(row![
-                                b->format!("Transaction latency ({}):", label),
-                                latency_vec.iter().map(|x| format!("{} ms", x.as_millis())).collect::<Vec<String>>().join(", ")
+                            b->format!(
+                                "Transaction latency ({}):",
+                                label
+                            ),
+                            vals.join(", ")
                         ]);
                     }
                 }
@@ -439,16 +479,23 @@ impl MeasurementsCollection {
                     let average_bandwidth_bytes =
                         bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64;
                     let avg_bandwidth = average_bandwidth_bytes / 1024.0 / 1024.0;
-                    table.add_row(row![b->"Bandwidth:", format!("{:.2} MB/s", avg_bandwidth)]);
-                    table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2} ", average_bandwidth_bytes / tps_value / 512.0)]);
+                    table.add_row(row![
+                        b->"Bandwidth:",
+                        format!("{:.2} MB/s", avg_bandwidth)
+                    ]);
+                    let efficiency = average_bandwidth_bytes / tps_value / 512.0;
+                    table.add_row(row![
+                        b->"Bandwidth efficiency:",
+                        format!("{:.2} ", efficiency)
+                    ]);
                 }
 
                 // "committed_leaders_total" => {
                 //     for (label, count) in count_buckets {
                 //         table.add_row(row![
                 //                 b->format!("Committed leaders ({}):", label),
-                //                 count.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ")
-                //         ]);
+                //                 count.iter().map(|x| format!("{}",
+                // x)).collect::<Vec<String>>().join(", ")         ]);
                 //     }
                 // }
                 _ => {
@@ -487,41 +534,41 @@ mod test {
     #[test]
     fn prometheus_parse() {
         let report = r#"
-            # HELP benchmark_duration Duration of the benchmark
-            # TYPE benchmark_duration counter
-            benchmark_duration 300
-            # HELP block_committed_latency block_committed_latency
-            # TYPE block_committed_latency gauge
-            block_committed_latency{v="count"} 28547
-            block_committed_latency{v="p50"} 487770
-            block_committed_latency{v="p90"} 719253
-            block_committed_latency{v="p99"} 848723
-            block_committed_latency{v="sum"} 17374616335344112
-            # HELP block_committed_latency_squared_micros Square of total end-to-end latency of a block commitment in seconds
-            # TYPE block_committed_latency_squared_micros counter
-            block_committed_latency_squared_micros 13465046685909033000
-            # HELP sequenced_transactions_total Total number of sequenced transactions
-            # TYPE sequenced_transactions_total counter
-            sequenced_transactions_total 2310200
-            # HELP submitted_transactions Total number of submitted transactions
-            # TYPE submitted_transactions counter
-            submitted_transactions 100000
-            # HELP transaction_committed_latency transaction_committed_latency
-            # TYPE transaction_committed_latency gauge
-            transaction_committed_latency{v="count"} 2065300
-            transaction_committed_latency{v="p50"} 522793
-            transaction_committed_latency{v="p90"} 740793
-            transaction_committed_latency{v="p99"} 857100
-            transaction_committed_latency{v="sum"} 1147380944831
-            # HELP transaction_committed_latency_squared_micros Square of total end-to-end latency of a transaction commitment in seconds
-            # TYPE transaction_committed_latency_squared_micros counter
-            transaction_committed_latency_squared_micros 745207728837251500
-            # HELP bytes_received_total Total number of bytes sent
-            # TYPE bytes_received_total counter
-            bytes_received_total 86639456
-            # HELP bytes_sent_total Total number of bytes sent
-            # TYPE bytes_sent_total counter
-            bytes_sent_total 6284648
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration 300
+# HELP block_committed_latency block_committed_latency
+# TYPE block_committed_latency gauge
+block_committed_latency{v="count"} 28547
+block_committed_latency{v="p50"} 487770
+block_committed_latency{v="p90"} 719253
+block_committed_latency{v="p99"} 848723
+block_committed_latency{v="sum"} 17374616335344112
+# HELP block_committed_latency_squared_micros Squared latency
+# TYPE block_committed_latency_squared_micros counter
+block_committed_latency_squared_micros 13465046685909033000
+# HELP sequenced_transactions_total Total sequenced txs
+# TYPE sequenced_transactions_total counter
+sequenced_transactions_total 2310200
+# HELP submitted_transactions Total submitted transactions
+# TYPE submitted_transactions counter
+submitted_transactions 100000
+# HELP transaction_committed_latency transaction latency
+# TYPE transaction_committed_latency gauge
+transaction_committed_latency{v="count"} 2065300
+transaction_committed_latency{v="p50"} 522793
+transaction_committed_latency{v="p90"} 740793
+transaction_committed_latency{v="p99"} 857100
+transaction_committed_latency{v="sum"} 1147380944831
+# HELP transaction_committed_latency_squared_micros Squared latency
+# TYPE transaction_committed_latency_squared_micros counter
+transaction_committed_latency_squared_micros 745207728837251500
+# HELP bytes_received_total Total number of bytes sent
+# TYPE bytes_received_total counter
+bytes_received_total 86639456
+# HELP bytes_sent_total Total number of bytes sent
+# TYPE bytes_sent_total counter
+bytes_sent_total 6284648
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
@@ -621,154 +668,154 @@ mod test {
     #[test]
     fn prometheus_parse_large() {
         let report = r#"
-            # HELP benchmark_duration Duration of the benchmark
-            # TYPE benchmark_duration counter
-            benchmark_duration 300
-            # HELP block_committed_latency block_committed_latency
-            # TYPE block_committed_latency gauge
-            block_committed_latency{v="count"} 28547
-            block_committed_latency{v="p50"} 487770
-            block_committed_latency{v="p90"} 719253
-            block_committed_latency{v="p99"} 848723
-            block_committed_latency{v="sum"} 17374616335344112
-            # HELP block_committed_latency_squared_micros Square of total end-to-end latency of a block commitment in seconds
-            # TYPE block_committed_latency_squared_micros counter
-            block_committed_latency_squared_micros 13465046685909033000
-            # HELP block_handler_cleanup_util block_handler_cleanup_util
-            # TYPE block_handler_cleanup_util counter
-            block_handler_cleanup_util 0
-            # HELP block_store_cleanup_util block_store_cleanup_util
-            # TYPE block_store_cleanup_util counter
-            block_store_cleanup_util 451078
-            # HELP block_store_entries Number of entries in block store
-            # TYPE block_store_entries counter
-            block_store_entries 33238
-            # HELP block_store_loaded_blocks Blocks loaded from wal position in the block store
-            # TYPE block_store_loaded_blocks counter
-            block_store_loaded_blocks 0
-            # HELP block_store_unloaded_blocks Blocks unloaded from wal position during cleanup
-            # TYPE block_store_unloaded_blocks counter
-            block_store_unloaded_blocks 31228
-            # HELP committed_leaders_total Total number of (direct or indirect) committed leaders per authority
-            # TYPE committed_leaders_total counter
-            committed_leaders_total{authority="0",commit_type="direct-commit"} 1
-            committed_leaders_total{authority="0",commit_type="indirect-skip"} 301
-            committed_leaders_total{authority="1",commit_type="direct-commit"} 302
-            committed_leaders_total{authority="2",commit_type="direct-commit"} 301
-            committed_leaders_total{authority="2",commit_type="indirect-commit"} 1
-            committed_leaders_total{authority="3",commit_type="direct-commit"} 302
-            committed_leaders_total{authority="4",commit_type="direct-commit"} 302
-            committed_leaders_total{authority="5",commit_type="direct-commit"} 301
-            committed_leaders_total{authority="6",commit_type="direct-commit"} 301
-            committed_leaders_total{authority="7",commit_type="direct-commit"} 301
-            committed_leaders_total{authority="8",commit_type="direct-commit"} 301
-            committed_leaders_total{authority="9",commit_type="direct-commit"} 301
-            # HELP connection_latency connection_latency
-            # TYPE connection_latency gauge
-            connection_latency{peer="B",v="count"} 7
-            connection_latency{peer="B",v="p50"} 86312
-            connection_latency{peer="B",v="p90"} 86312
-            connection_latency{peer="B",v="p99"} 86312
-            connection_latency{peer="B",v="sum"} 608659
-            connection_latency{peer="C",v="count"} 7
-            connection_latency{peer="C",v="p50"} 256175
-            connection_latency{peer="C",v="p90"} 256175
-            connection_latency{peer="C",v="p99"} 256175
-            connection_latency{peer="C",v="sum"} 1647236
-            connection_latency{peer="D",v="count"} 7
-            connection_latency{peer="D",v="p50"} 11215
-            connection_latency{peer="D",v="p90"} 11215
-            connection_latency{peer="D",v="p99"} 11215
-            connection_latency{peer="D",v="sum"} 93637
-            connection_latency{peer="E",v="count"} 7
-            connection_latency{peer="E",v="p50"} 82607
-            connection_latency{peer="E",v="p90"} 82607
-            connection_latency{peer="E",v="p99"} 82607
-            connection_latency{peer="E",v="sum"} 575597
-            connection_latency{peer="F",v="count"} 7
-            connection_latency{peer="F",v="p50"} 73969
-            connection_latency{peer="F",v="p90"} 73969
-            connection_latency{peer="F",v="p99"} 73969
-            connection_latency{peer="F",v="sum"} 509440
-            connection_latency{peer="G",v="count"} 7
-            connection_latency{peer="G",v="p50"} 82956
-            connection_latency{peer="G",v="p90"} 82956
-            connection_latency{peer="G",v="p99"} 82956
-            connection_latency{peer="G",v="sum"} 575995
-            connection_latency{peer="H",v="count"} 7
-            connection_latency{peer="H",v="p50"} 142971
-            connection_latency{peer="H",v="p90"} 142971
-            connection_latency{peer="H",v="p99"} 142971
-            connection_latency{peer="H",v="sum"} 775515
-            connection_latency{peer="I",v="count"} 7
-            connection_latency{peer="I",v="p50"} 220944
-            connection_latency{peer="I",v="p90"} 220944
-            connection_latency{peer="I",v="p99"} 220944
-            connection_latency{peer="I",v="sum"} 1532119
-            connection_latency{peer="J",v="count"} 7
-            connection_latency{peer="J",v="p50"} 244825
-            connection_latency{peer="J",v="p90"} 244825
-            connection_latency{peer="J",v="p99"} 244825
-            connection_latency{peer="J",v="sum"} 1715661
-            # HELP core_lock_dequeued Number of dequeued core requests
-            # TYPE core_lock_dequeued counter
-            core_lock_dequeued 27234
-            # HELP core_lock_enqueued Number of enqueued core requests
-            # TYPE core_lock_enqueued counter
-            core_lock_enqueued 27234
-            # HELP core_lock_util Utilization of core write lock
-            # TYPE core_lock_util counter
-            core_lock_util 15917462
-            # HELP global_in_memory_blocks Number of blocks loaded in memory
-            # TYPE global_in_memory_blocks gauge
-            global_in_memory_blocks 4194
-            # HELP global_in_memory_blocks_bytes Total size of blocks loaded in memory
-            # TYPE global_in_memory_blocks_bytes gauge
-            global_in_memory_blocks_bytes 137022992
-            # HELP leader_timeout_total Total number of leader timeouts
-            # TYPE leader_timeout_total counter
-            leader_timeout_total 2
-            # HELP proposed_block_size_bytes proposed_block_size_bytes
-            # TYPE proposed_block_size_bytes gauge
-            proposed_block_size_bytes{v="count"} 5416
-            proposed_block_size_bytes{v="p50"} 1220
-            proposed_block_size_bytes{v="p90"} 1612
-            proposed_block_size_bytes{v="p99"} 1724
-            proposed_block_size_bytes{v="sum"} 6906560
-            # HELP sequenced_transactions_total Total number of sequenced transactions
-            # TYPE sequenced_transactions_total counter
-            sequenced_transactions_total 2310200
-            # HELP submitted_transactions Total number of submitted transactions
-            # TYPE submitted_transactions counter
-            submitted_transactions 100000
-            # HELP transaction_committed_latency transaction_committed_latency
-            # TYPE transaction_committed_latency gauge
-            transaction_committed_latency{v="count"} 2065300
-            transaction_committed_latency{v="p50"} 522793
-            transaction_committed_latency{v="p90"} 740793
-            transaction_committed_latency{v="p99"} 857100
-            transaction_committed_latency{v="sum"} 1147380944831
-            # HELP transaction_committed_latency_squared_micros Square of total end-to-end latency of a transaction commitment in seconds
-            # TYPE transaction_committed_latency_squared_micros counter
-            transaction_committed_latency_squared_micros 745207728837251500
-            # HELP utilization_timer Utilization timer
-            # TYPE utilization_timer counter
-            utilization_timer{proc="BlockManager::add_blocks"} 4799566
-            utilization_timer{proc="Committer::direct_decide"} 2645510
-            utilization_timer{proc="Committer::indirect_decide"} 693165
-            utilization_timer{proc="Core::add_blocks"} 5694911
-            utilization_timer{proc="Core::run_block_handler"} 198119
-            utilization_timer{proc="Core::try_new_block"} 1285400
-            utilization_timer{proc="Core::try_new_block::build block"} 674913
-            utilization_timer{proc="Core::try_new_block::encoding"} 31602
-            utilization_timer{proc="Core::try_new_block::serialize block"} 11766
-            utilization_timer{proc="Core::try_new_block::writing to disk"} 188706
-            utilization_timer{proc="Core::try_new_commit"} 6288004
-            utilization_timer{proc="Network: verify blocks"} 41800099
-            utilization_timer{proc="Syncer::try_new_commit"} 8128094
-            # HELP wal_mappings Number of mappings retained by the wal
-            # TYPE wal_mappings gauge
-            wal_mappings 0
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration 300
+# HELP block_committed_latency block_committed_latency
+# TYPE block_committed_latency gauge
+block_committed_latency{v="count"} 28547
+block_committed_latency{v="p50"} 487770
+block_committed_latency{v="p90"} 719253
+block_committed_latency{v="p99"} 848723
+block_committed_latency{v="sum"} 17374616335344112
+# HELP block_committed_latency_squared_micros Squared latency
+# TYPE block_committed_latency_squared_micros counter
+block_committed_latency_squared_micros 13465046685909033000
+# HELP block_handler_cleanup_util block_handler_cleanup_util
+# TYPE block_handler_cleanup_util counter
+block_handler_cleanup_util 0
+# HELP block_store_cleanup_util block_store_cleanup_util
+# TYPE block_store_cleanup_util counter
+block_store_cleanup_util 451078
+# HELP block_store_entries Number of entries in block store
+# TYPE block_store_entries counter
+block_store_entries 33238
+# HELP block_store_loaded_blocks Blocks loaded from wal
+# TYPE block_store_loaded_blocks counter
+block_store_loaded_blocks 0
+# HELP block_store_unloaded_blocks Blocks unloaded during cleanup
+# TYPE block_store_unloaded_blocks counter
+block_store_unloaded_blocks 31228
+# HELP committed_leaders_total Total committed leaders
+# TYPE committed_leaders_total counter
+committed_leaders_total{authority="0",commit_type="direct-commit"} 1
+committed_leaders_total{authority="0",commit_type="indirect-skip"} 301
+committed_leaders_total{authority="1",commit_type="direct-commit"} 302
+committed_leaders_total{authority="2",commit_type="direct-commit"} 301
+committed_leaders_total{authority="2",commit_type="indirect-commit"} 1
+committed_leaders_total{authority="3",commit_type="direct-commit"} 302
+committed_leaders_total{authority="4",commit_type="direct-commit"} 302
+committed_leaders_total{authority="5",commit_type="direct-commit"} 301
+committed_leaders_total{authority="6",commit_type="direct-commit"} 301
+committed_leaders_total{authority="7",commit_type="direct-commit"} 301
+committed_leaders_total{authority="8",commit_type="direct-commit"} 301
+committed_leaders_total{authority="9",commit_type="direct-commit"} 301
+# HELP connection_latency connection_latency
+# TYPE connection_latency gauge
+connection_latency{peer="B",v="count"} 7
+connection_latency{peer="B",v="p50"} 86312
+connection_latency{peer="B",v="p90"} 86312
+connection_latency{peer="B",v="p99"} 86312
+connection_latency{peer="B",v="sum"} 608659
+connection_latency{peer="C",v="count"} 7
+connection_latency{peer="C",v="p50"} 256175
+connection_latency{peer="C",v="p90"} 256175
+connection_latency{peer="C",v="p99"} 256175
+connection_latency{peer="C",v="sum"} 1647236
+connection_latency{peer="D",v="count"} 7
+connection_latency{peer="D",v="p50"} 11215
+connection_latency{peer="D",v="p90"} 11215
+connection_latency{peer="D",v="p99"} 11215
+connection_latency{peer="D",v="sum"} 93637
+connection_latency{peer="E",v="count"} 7
+connection_latency{peer="E",v="p50"} 82607
+connection_latency{peer="E",v="p90"} 82607
+connection_latency{peer="E",v="p99"} 82607
+connection_latency{peer="E",v="sum"} 575597
+connection_latency{peer="F",v="count"} 7
+connection_latency{peer="F",v="p50"} 73969
+connection_latency{peer="F",v="p90"} 73969
+connection_latency{peer="F",v="p99"} 73969
+connection_latency{peer="F",v="sum"} 509440
+connection_latency{peer="G",v="count"} 7
+connection_latency{peer="G",v="p50"} 82956
+connection_latency{peer="G",v="p90"} 82956
+connection_latency{peer="G",v="p99"} 82956
+connection_latency{peer="G",v="sum"} 575995
+connection_latency{peer="H",v="count"} 7
+connection_latency{peer="H",v="p50"} 142971
+connection_latency{peer="H",v="p90"} 142971
+connection_latency{peer="H",v="p99"} 142971
+connection_latency{peer="H",v="sum"} 775515
+connection_latency{peer="I",v="count"} 7
+connection_latency{peer="I",v="p50"} 220944
+connection_latency{peer="I",v="p90"} 220944
+connection_latency{peer="I",v="p99"} 220944
+connection_latency{peer="I",v="sum"} 1532119
+connection_latency{peer="J",v="count"} 7
+connection_latency{peer="J",v="p50"} 244825
+connection_latency{peer="J",v="p90"} 244825
+connection_latency{peer="J",v="p99"} 244825
+connection_latency{peer="J",v="sum"} 1715661
+# HELP core_lock_dequeued Number of dequeued core requests
+# TYPE core_lock_dequeued counter
+core_lock_dequeued 27234
+# HELP core_lock_enqueued Number of enqueued core requests
+# TYPE core_lock_enqueued counter
+core_lock_enqueued 27234
+# HELP core_lock_util Utilization of core write lock
+# TYPE core_lock_util counter
+core_lock_util 15917462
+# HELP global_in_memory_blocks Blocks loaded in memory
+# TYPE global_in_memory_blocks gauge
+global_in_memory_blocks 4194
+# HELP global_in_memory_blocks_bytes Total block bytes in memory
+# TYPE global_in_memory_blocks_bytes gauge
+global_in_memory_blocks_bytes 137022992
+# HELP leader_timeout_total Total number of leader timeouts
+# TYPE leader_timeout_total counter
+leader_timeout_total 2
+# HELP proposed_block_size_bytes proposed_block_size_bytes
+# TYPE proposed_block_size_bytes gauge
+proposed_block_size_bytes{v="count"} 5416
+proposed_block_size_bytes{v="p50"} 1220
+proposed_block_size_bytes{v="p90"} 1612
+proposed_block_size_bytes{v="p99"} 1724
+proposed_block_size_bytes{v="sum"} 6906560
+# HELP sequenced_transactions_total Total sequenced txs
+# TYPE sequenced_transactions_total counter
+sequenced_transactions_total 2310200
+# HELP submitted_transactions Total submitted transactions
+# TYPE submitted_transactions counter
+submitted_transactions 100000
+# HELP transaction_committed_latency transaction latency
+# TYPE transaction_committed_latency gauge
+transaction_committed_latency{v="count"} 2065300
+transaction_committed_latency{v="p50"} 522793
+transaction_committed_latency{v="p90"} 740793
+transaction_committed_latency{v="p99"} 857100
+transaction_committed_latency{v="sum"} 1147380944831
+# HELP transaction_committed_latency_squared_micros Squared latency
+# TYPE transaction_committed_latency_squared_micros counter
+transaction_committed_latency_squared_micros 745207728837251500
+# HELP utilization_timer Utilization timer
+# TYPE utilization_timer counter
+utilization_timer{proc="BlockManager::add_blocks"} 4799566
+utilization_timer{proc="Committer::direct_decide"} 2645510
+utilization_timer{proc="Committer::indirect_decide"} 693165
+utilization_timer{proc="Core::add_blocks"} 5694911
+utilization_timer{proc="Core::run_block_handler"} 198119
+utilization_timer{proc="Core::try_new_block"} 1285400
+utilization_timer{proc="Core::try_new_block::build block"} 674913
+utilization_timer{proc="Core::try_new_block::encoding"} 31602
+utilization_timer{proc="Core::try_new_block::serialize block"} 11766
+utilization_timer{proc="Core::try_new_block::writing to disk"} 188706
+utilization_timer{proc="Core::try_new_commit"} 6288004
+utilization_timer{proc="Network: verify blocks"} 41800099
+utilization_timer{proc="Syncer::try_new_commit"} 8128094
+# HELP wal_mappings Number of mappings retained by the wal
+# TYPE wal_mappings gauge
+wal_mappings 0
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);

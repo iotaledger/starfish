@@ -28,7 +28,8 @@ use crate::{
     types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber},
 };
 
-/// Bitmask tracking which authorities know about a block. Supports up to 128 authorities.
+/// Bitmask tracking which authorities know about a block. Supports up to 128
+/// authorities.
 type AuthorityBitmask = u128;
 
 #[derive(Clone, Debug, Copy, PartialEq)]
@@ -300,7 +301,8 @@ impl BlockStore {
         );
     }
 
-    // Insert own blocks is primarily needed to capture Byzantine behavior with equivocating blocks
+    // Insert own blocks is primarily needed to capture Byzantine behavior with
+    // equivocating blocks
     pub fn insert_own_block(&self, own_block: OwnBlockData) {
         self.insert_block_bounds(
             own_block.storage_transmission_blocks,
@@ -348,7 +350,8 @@ impl BlockStore {
                 }
             }
         }
-        let blocks: Arc<[_]> = Self::extract_storage_blocks(inner.get_blocks_by_round(round)).into();
+        let blocks: Arc<[_]> =
+            Self::extract_storage_blocks(inner.get_blocks_by_round(round)).into();
         self.round_block_cache
             .lock()
             .insert(round, (version, blocks.clone()));
@@ -394,7 +397,8 @@ impl BlockStore {
             .all(|auth| blocks.iter().any(|(sb, _)| sb.author() == *auth))
     }
 
-    /// Check if a quorum of blocks at `round` include the leader from `leader_round` in their references.
+    /// Check if a quorum of blocks at `round` include the leader
+    /// from `leader_round` in their references.
     pub fn has_votes_quorum_at_round(
         &self,
         round: RoundNumber,
@@ -461,10 +465,15 @@ impl BlockStore {
         self.inner.read().highest_round
     }
 
-    /// Version counter for a round, incremented each time a block is added at that round.
-    /// Used as cache invalidation key.
+    /// Version counter for a round, incremented each time a block is added at
+    /// that round. Used as cache invalidation key.
     pub fn round_version(&self, round: RoundNumber) -> u64 {
-        self.inner.read().round_version.get(&round).copied().unwrap_or(0)
+        self.inner
+            .read()
+            .round_version
+            .get(&round)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn lowest_round(&self) -> RoundNumber {
@@ -611,14 +620,16 @@ impl BlockStore {
                     self.get_storage_block(*block_reference)
                         .expect("Block should be in Block Store")
                 })
-                .filter(|included_block| included_block.round() >= earlier_block.round()) // Filter by round.
+                // Filter by round.
+                .filter(|included_block| included_block.round() >= earlier_block.round())
                 .collect();
         }
         parents.contains(earlier_block)
     }
 
-    /// Compute all block references reachable from `later_block` at `target_round`.
-    /// Single BFS traversal replaces N separate `linked()` calls for the same anchor.
+    /// Compute all block references reachable from `later_block` at
+    /// `target_round`. Single BFS traversal replaces N separate `linked()`
+    /// calls for the same anchor.
     pub fn reachable_at_round(
         &self,
         later_block: &Data<VerifiedStatementBlock>,
@@ -786,7 +797,8 @@ impl BlockStoreInner {
             .insert((r.authority, r.digest), val);
     }
 
-    /// Insert a block into the DAG and propagate "known-by" bits along the causal history.
+    /// Insert a block into the DAG and propagate "known-by" bits along the
+    /// causal history.
     pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         if block_reference.round == 0 {
             return;
@@ -796,7 +808,8 @@ impl BlockStoreInner {
         }
         let known_by = (1u128 << block_reference.authority) | (1u128 << self.authority);
         self.dag_insert(block_reference, (parents, known_by));
-        // traverse the DAG from block_reference and update the blocks known by block_reference.authority
+        // Traverse the DAG from block_reference and update the
+        // blocks known by block_reference.authority
         let authority = block_reference.authority;
         let mut buffer = vec![block_reference];
 
@@ -871,7 +884,8 @@ impl BlockStoreInner {
             .collect()
     }
 
-    /// Collect unsent blocks for a peer by iterating the DAG, skipping those in `sent`.
+    /// Collect unsent blocks for a peer by iterating the DAG, skipping those in
+    /// `sent`.
     fn collect_unsent_blocks(
         &self,
         sent: &AHashSet<BlockReference>,

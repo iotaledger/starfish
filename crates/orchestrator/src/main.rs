@@ -6,7 +6,7 @@
 
 use benchmark::BenchmarkParameters;
 use clap::Parser;
-use client::{aws::AwsClient, vultr::VultrClient, ServerProviderClient};
+use client::{ServerProviderClient, aws::AwsClient, vultr::VultrClient};
 use eyre::Context;
 use measurements::MeasurementsCollection;
 use orchestrator::Orchestrator;
@@ -41,8 +41,9 @@ type ClientParameters = protocol::starfish::StarfishClientParameters;
 #[command(author, version, about = "Testbed orchestrator", long_about = None)]
 #[clap(rename_all = "kebab-case")]
 pub struct Opts {
-    /// The path to the settings file. This file contains basic information to deploy testbeds
-    /// and run benchmarks such as the url of the git repo, the commit to deploy, etc.
+    /// The path to the settings file. This file contains basic information to
+    /// deploy testbeds and run benchmarks such as the url of the git repo,
+    /// the commit to deploy, etc.
     #[clap(
         long,
         value_name = "FILE",
@@ -67,7 +68,8 @@ pub enum Operation {
         action: TestbedAction,
     },
     /// Build the starfish binary inside Docker for Linux x86_64 deployment.
-    /// Run this before `testbed deploy` to avoid paying for idle machines during compilation.
+    /// Run this before `testbed deploy` to avoid paying for idle machines
+    /// during compilation.
     Build,
     /// Deploy nodes and run a benchmark on the specified testbed.
     Benchmark {
@@ -87,38 +89,48 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         mimic_extra_latency: bool,
 
-        /// The set of loads to submit to the system (tx/s). Each load triggers a separate
-        /// benchmark run. Setting a load to zero will not deploy any benchmark clients
-        /// (useful to boot testbeds designed to run with external clients and load generators).
+        /// The set of loads to submit to the system (tx/s). Each load triggers
+        /// a separate benchmark run. Setting a load to zero will not
+        /// deploy any benchmark clients (useful to boot testbeds
+        /// designed to run with external clients and load generators).
         #[clap(long, value_name = "[INT]", default_value = "200", global = true)]
         loads: Vec<usize>,
 
-        /// Whether to skip testbed updates before running benchmarks. This is a dangerous
-        /// operation as it may lead to running benchmarks on outdated nodes. It is however
-        /// useful when debugging in some specific scenarios.
+        /// Whether to skip testbed updates before running benchmarks. This is a
+        /// dangerous operation as it may lead to running benchmarks on
+        /// outdated nodes. It is however useful when debugging in some
+        /// specific scenarios.
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_update: bool,
 
-        /// Whether to skip testbed configuration before running benchmarks. This is a dangerous
-        /// operation as it may lead to running benchmarks on misconfigured nodes. It is however
-        /// useful when debugging in some specific scenarios.
+        /// Whether to skip testbed configuration before running benchmarks.
+        /// This is a dangerous operation as it may lead to running
+        /// benchmarks on misconfigured nodes. It is however useful when
+        /// debugging in some specific scenarios.
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Consensus to deploy. Available options: starfish | starfish-s | starfish-pull | mysticeti | cordial-miners
+        /// Consensus to deploy. Available options:
+        /// starfish | starfish-s | starfish-pull |
+        /// mysticeti | cordial-miners
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,
 
-        /// Flag indicating whether nodes should advertise their internal or public IP address for inter-node communication.
-        /// When running the simulation in multiple regions, nodes need to use their public IPs to correctly communicate,
-        /// however when a simulation is running in a single VPC, they should use their internal IPs to avoid paying for data sent between the nodes.
+        /// Flag indicating whether nodes should advertise
+        /// their internal or public IP address for inter-node
+        /// communication. When running the simulation in
+        /// multiple regions, nodes need to use their public
+        /// IPs to correctly communicate, however when a
+        /// simulation is running in a single VPC, they should
+        /// use their internal IPs to avoid paying for data
+        /// sent between the nodes.
         #[clap(long, action, default_value_t = false, global = true)]
         use_internal_ip_addresses: bool,
 
-        /// Flag indicating whether nodes use log traces or not, this is useful for debugging
+        /// Flag indicating whether nodes use log traces or not, this is useful
+        /// for debugging
         #[clap(long, action, default_value_t = false, global = true)]
         enable_tracing: bool,
-
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -135,20 +147,22 @@ pub enum TestbedAction {
     /// Display the testbed status.
     Status,
 
-    /// Deploy the specified number of instances in all regions specified by in the setting file.
+    /// Deploy the specified number of instances in all regions specified by in
+    /// the setting file.
     Deploy {
         /// Number of instances to deploy.
         #[clap(long)]
         instances: usize,
 
-        /// The region where to deploy the instances. If this parameter is not specified, the
-        /// command deploys the specified number of instances in all regions listed in the
-        /// setting file.
+        /// The region where to deploy the instances. If this parameter is not
+        /// specified, the command deploys the specified number of
+        /// instances in all regions listed in the setting file.
         #[clap(long)]
         region: Option<String>,
     },
 
-    /// Start at most the specified number of instances per region on an existing testbed.
+    /// Start at most the specified number of instances per region on an
+    /// existing testbed.
     Start {
         /// Number of instances to deploy.
         #[clap(long, default_value_t = 10)]
@@ -193,7 +207,8 @@ async fn main() -> eyre::Result<()> {
 
 const DOCKER_BINARY_OUTPUT: &str = "./starfish-linux-amd64";
 
-/// Build the starfish binary inside Docker and extract the resulting Linux x86_64 binary.
+/// Build the starfish binary inside Docker and extract the resulting Linux
+/// x86_64 binary.
 fn docker_build_and_extract() -> eyre::Result<PathBuf> {
     display::action("Building starfish binary via Docker");
 
@@ -202,7 +217,10 @@ fn docker_build_and_extract() -> eyre::Result<PathBuf> {
         .args(["build", "-t", "starfish-build", "."])
         .status()
         .wrap_err("Failed to invoke docker build")?;
-    eyre::ensure!(status.success(), "Docker build failed (exit code: {status})");
+    eyre::ensure!(
+        status.success(),
+        "Docker build failed (exit code: {status})"
+    );
 
     // Extract the binary from the image.
     let _ = Command::new("docker")

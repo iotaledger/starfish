@@ -53,7 +53,8 @@ pub enum InternalEpochStatus {
     Open,
     /// Change is triggered by an external deterministic mechanism
     BeginChange,
-    /// Epoch is safe to close -- committed blocks from >= 2f+1 stake indicate epoch change
+    /// Epoch is safe to close -- committed blocks from >= 2f+1 stake indicate
+    /// epoch change
     SafeToClose,
 }
 
@@ -94,13 +95,16 @@ impl PartialOrd for BlockReference {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+// Important. Adding fields here requires updating BlockDigest::new, and
+// StatementBlock::verify
 pub struct VerifiedStatementBlock {
     reference: BlockReference,
 
     //  A list of block references to other blocks that this block includes
-    //  Note that the order matters: if a reference to two blocks from the same round and same authority
-    //  are included, then the first reference is the one that this block conceptually votes for.
+    //  Note that the order matters: if a reference to two blocks
+    //  from the same round and same authority are included, then
+    //  the first reference is the one that this block
+    //  conceptually votes for.
     includes: Vec<BlockReference>,
 
     // Transaction data acknowledgment
@@ -127,13 +131,16 @@ pub struct VerifiedStatementBlock {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-// Important. Adding fields here requires updating BlockDigest::new, and StatementBlock::verify
+// Important. Adding fields here requires updating BlockDigest::new, and
+// StatementBlock::verify
 pub struct CachedStatementBlock {
     reference: BlockReference,
 
     //  A list of block references to other blocks that this block includes
-    //  Note that the order matters: if a reference to two blocks from the same round and same authority
-    //  are included, then the first reference is the one that this block conceptually votes for.
+    //  Note that the order matters: if a reference to two blocks
+    //  from the same round and same authority are included, then
+    //  the first reference is the one that this block
+    //  conceptually votes for.
     includes: Vec<BlockReference>,
 
     // Transaction data acknowledgment
@@ -866,7 +873,7 @@ mod test {
         sync::Arc,
     };
 
-    use rand::{prelude::SliceRandom, Rng};
+    use rand::{Rng, prelude::SliceRandom};
 
     use super::*;
 
@@ -875,9 +882,11 @@ mod test {
     #[cfg(test)]
     impl Dag {
         /// Takes a string in form "Block:[Dependencies, ...]; ..."
-        /// Where Block is one letter denoting a node and a number denoting a round
-        /// For example B3 is a block for round 3 made by validator index 2
-        /// Note that blocks are separated with semicolon(;) and dependencies within block are separated with coma(,)
+        /// Where Block is one letter denoting a node and a number denoting a
+        /// round For example B3 is a block for round 3 made by
+        /// validator index 2 Note that blocks are separated with
+        /// semicolon(;) and dependencies within block are separated
+        /// with coma(,)
         pub fn draw(s: &str) -> Self {
             let mut blocks = HashMap::new();
             for block in s.split(";") {
@@ -973,7 +982,7 @@ mod test {
 
         fn next(&mut self) -> Option<Self::Item> {
             let next = self.1.next()?;
-            Some(self.0 .0.get(&next).unwrap())
+            Some(self.0.0.get(&next).unwrap())
         }
     }
 

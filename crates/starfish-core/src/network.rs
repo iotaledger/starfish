@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use futures::{
-    future::{select, select_all, Either},
     FutureExt,
+    future::{Either, select, select_all},
 };
 use prometheus::IntCounter;
-use rand::{prelude::ThreadRng, Rng};
+use rand::{Rng, prelude::ThreadRng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpSocket, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     runtime::Handle,
     sync::mpsc,
@@ -29,16 +29,18 @@ use crate::runtime::JoinHandle;
 use crate::types::VerifiedStatementBlock;
 use crate::{
     config::NodePublicConfig,
-    metrics::{print_network_address_table, Metrics},
+    metrics::{Metrics, print_network_address_table},
     runtime,
     stat::HistogramSender,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
-// Max buffer size controls the max amount of data (in bytes) to be sent/received when sending
-// batches of blocks. Based on the committee size we control the max number of transactions in a block
-// We aim to send committee_size own blocks and committee_size * committee_size other blocks (encoded)
+// Max buffer size controls the max amount of data (in bytes) to
+// be sent/received when sending batches of blocks. Based on the
+// committee size we control the max number of transactions in a
+// block. We aim to send committee_size own blocks and
+// committee_size * committee_size other blocks (encoded).
 // 80*1024 transactions in blocks in one round = 40 MB pure txs data
 // encoded shards could take up to 120 MB, resulting in 160 MB total
 const MAX_BUFFER_SIZE: u32 = 170 * 1024 * 1024;
@@ -77,11 +79,13 @@ pub enum NetworkMessage {
     SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     // A batch of blocks is sent
     Batch(Vec<Data<VerifiedStatementBlock>>),
-    /// Request a potentially missing history of a given block (only shards are sent)
+    /// Request a potentially missing history of a given block (only shards are
+    /// sent)
     MissingHistoryRequest(BlockReference),
     /// Request specific block (blocks with full data are sent)
     MissingParentsRequest(Vec<BlockReference>),
-    /// Request a tx data for a few specific block references (only shards are sent).
+    /// Request a tx data for a few specific block references (only shards are
+    /// sent).
     MissingTxDataRequest(Vec<BlockReference>),
     /// Send authorities with missing blocks
     AuthoritiesWithMissingBlocks(Vec<AuthorityIndex>),
@@ -199,7 +203,8 @@ fn write_extra_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
     // Write the header (optional)
     writeln!(file, "Latency Delays")?;
 
-    // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line in the file
+    // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line
+    // in the file
     for row in latency_delays {
         let row_string: String = row
             .iter()
@@ -369,7 +374,15 @@ impl Worker {
             writer,
             receiver,
             pong_receiver,
-            metrics.connection_latency_sender.get(peer_id).expect("Can not locate connection_latency_sender metric - did you initialize metrics with correct committee?").clone(),
+            metrics
+                .connection_latency_sender
+                .get(peer_id)
+                .expect(
+                    "Can not locate connection_latency_sender \
+                    metric - did you initialize metrics with \
+                    correct committee?",
+                )
+                .clone(),
             metrics.bytes_sent_total.clone(),
             extra_connection_latency,
         )
@@ -490,8 +503,8 @@ impl Worker {
                         // Write the length
                         writer_guard.write_u32(serialized.len() as u32).await?;
 
-                        bytes_sent_total_clone.inc_by(serialized.len() as u64 + 4); // u32 and serialized
-                                                                                    // Write the serialized data
+                        // u32 and serialized data
+                        bytes_sent_total_clone.inc_by(serialized.len() as u64 + 4);
                         writer_guard.write_all(&serialized).await
                     }
                     .await
@@ -525,7 +538,8 @@ impl Worker {
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
-        // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]); does not work with large MAX_BUFFER_SIZE
+        // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]);
+        // does not work with large MAX_BUFFER_SIZE
         let mut buf = vec![0u8; Self::MAX_BUFFER_SIZE as usize].into_boxed_slice();
         loop {
             let size = stream.read_u32().await?;
@@ -586,7 +600,8 @@ impl Worker {
 /// `n` is the number of nodes.
 /// `seed` is a global seed used for deterministic generation.
 /// If `seed == 0`, the table is initialized with all zeros.
-/// expected mean latency for a quorum of nodes should be below within expected thresholds
+/// expected mean latency for a quorum of nodes should be below within expected
+/// thresholds
 fn generate_latency_table(n: usize, node_params: &crate::config::NodeParameters) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![]; n];
 

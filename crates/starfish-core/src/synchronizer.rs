@@ -11,7 +11,7 @@ use crate::{
     metrics::Metrics,
     net_sync::NetworkSyncerInner,
     network::NetworkMessage,
-    runtime::{sleep, Handle},
+    runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber},
 };
@@ -77,7 +77,8 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     to_whom_authority_index: AuthorityIndex,
     /// The sender to the network.
     sender: mpsc::Sender<NetworkMessage>,
-    /// Universal Committer. This is needed for Byzantine nodes to control when to send the blocks
+    /// Universal Committer. This is needed for Byzantine nodes to control when
+    /// to send the blocks
     universal_committer: UniversalCommitter,
     /// The inner state of the network syncer.
     inner: Arc<NetworkSyncerInner<H, C>>,
@@ -93,9 +94,11 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     parameters: SynchronizerParameters,
     /// Metrics.
     metrics: Arc<Metrics>,
-    /// List of authorities that have missing blocks when receiving blocks from me,
+    /// List of authorities that have missing blocks when receiving blocks from
+    /// me,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
-    /// Blocks sent to this peer during this connection. Starts empty — all DAG blocks are candidates.
+    /// Blocks sent to this peer during this connection.
+    /// Starts empty -- all DAG blocks are candidates.
     pub sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 }
 
@@ -608,9 +611,11 @@ where
                     }
                     notified.await;
                 }
-                // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
+                // Send a chain of own blocks to the next leader,
+                // after having sent no own blocks the last K rounds
                 Some(ByzantineStrategy::ChainBomb) => {
-                    // send own chain of blocks after becoming the leader and only to the leader in the next round
+                    // Send own chain of blocks after becoming the
+                    // leader and only to the leader in the next round
                     if current_round as usize % committee_size == own_authority_index as usize {
                         let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                         // Only send blocks if the next leader is the intended recipient
@@ -674,7 +679,8 @@ where
 
                     notified.await;
                 }
-                // Send a chain of own equivocating blocks to the authority when it is the leader in the next round
+                // Send a chain of own equivocating blocks to the
+                // authority when it is the leader in the next round
                 Some(ByzantineStrategy::EquivocatingChainsBomb) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
@@ -703,7 +709,7 @@ where
                     )
                     .await?;
                     select! {
-                         _sleep =  sleep(sample_timeout) =>  {}
+                        _sleep = sleep(sample_timeout) => {}
                         _created_block = notified => {}
                     }
                 }
@@ -730,32 +736,50 @@ where
         loop {
             let notified = inner.notify.notified();
             select! {
-                _sleep =  sleep(sample_timeout) => {
-                     let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
-                    tracing::debug!("Disseminate to {to_whom_authority_index} after timeout");
+                _sleep = sleep(sample_timeout) => {
+                    let timer = metrics
+                        .utilization_timer
+                        .utilization_timer(
+                            "Broadcaster: send blocks",
+                        );
+                    tracing::debug!(
+                        "Disseminate to \
+                        {to_whom_authority_index} \
+                        after timeout"
+                    );
                     sending_batch_all_blocks(
-                inner.clone(),
-                to.clone(),
-                to_whom_authority_index,
-                synchronizer_parameters.clone(),
-                        authorities_with_missing_blocks_by_peer_from_me.clone(),
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        synchronizer_parameters.clone(),
+                        authorities_with_missing_blocks_by_peer_from_me
+                            .clone(),
                         sent_to_peer.clone(),
-            )
-            .await?;
+                    )
+                    .await?;
                     drop(timer);
                 }
-               _created_block = notified => {
-                    let timer = metrics.utilization_timer.utilization_timer("Broadcaster: send blocks");
-                    tracing::debug!("Disseminate to {to_whom_authority_index} after creating new block");
+                _created_block = notified => {
+                    let timer = metrics
+                        .utilization_timer
+                        .utilization_timer(
+                            "Broadcaster: send blocks",
+                        );
+                    tracing::debug!(
+                        "Disseminate to \
+                        {to_whom_authority_index} \
+                        after creating new block"
+                    );
                     sending_batch_all_blocks(
-                inner.clone(),
-                to.clone(),
-                to_whom_authority_index,
-                synchronizer_parameters.clone(),
-                        authorities_with_missing_blocks_by_peer_from_me.clone(),
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        synchronizer_parameters.clone(),
+                        authorities_with_missing_blocks_by_peer_from_me
+                            .clone(),
                         sent_to_peer.clone(),
-            )
-            .await?;
+                    )
+                    .await?;
                     drop(timer);
                 }
             }

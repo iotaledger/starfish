@@ -4,7 +4,7 @@
 
 use std::{cmp::min, sync::Arc, time::Duration};
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc;
 
 use crate::crypto::AsBytes;
@@ -59,8 +59,11 @@ impl TransactionGenerator {
                 (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
             );
         tracing::info!(
-            "Starting tx generator. After {} sec, generating {transactions_per_block_interval} transactions every {} ms",
-            initial_delay_plus_extra_delay.as_secs(), Self::TARGET_BLOCK_INTERVAL.as_millis()
+            "Starting tx generator. After {} sec, \
+            generating {transactions_per_block_interval} \
+            transactions every {} ms",
+            initial_delay_plus_extra_delay.as_secs(),
+            Self::TARGET_BLOCK_INTERVAL.as_millis()
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
@@ -68,7 +71,8 @@ impl TransactionGenerator {
         let mut counter = 0;
         let mut tx_to_report = 0;
         let mut random: u64 = self.rng.gen(); // 8 bytes
-        let zeros = vec![0u8; self.client_parameters.transaction_size - 8 - 8]; // 8 bytes timestamp + 8 bytes random
+        // 8 bytes timestamp + 8 bytes random
+        let zeros = vec![0u8; self.client_parameters.transaction_size - 8 - 8];
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
         runtime::sleep(initial_delay_plus_extra_delay).await;

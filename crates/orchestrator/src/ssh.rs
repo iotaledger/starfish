@@ -27,8 +27,8 @@ pub enum CommandStatus {
 }
 
 impl CommandStatus {
-    /// Return whether a background command is still running. Returns `Terminated` if the
-    /// command is not running in the background.
+    /// Return whether a background command is still running. Returns
+    /// `Terminated` if the command is not running in the background.
     pub fn status(command_id: &str, text: &str) -> Self {
         if text.contains(command_id) {
             Self::Running
@@ -41,8 +41,8 @@ impl CommandStatus {
 /// The command to execute on all specified remote machines.
 #[derive(Clone, Default)]
 pub struct CommandContext {
-    /// Whether to run the command in the background (and return immediately). Commands
-    /// running in the background are identified by a unique id.
+    /// Whether to run the command in the background (and return immediately).
+    /// Commands running in the background are identified by a unique id.
     pub background: Option<String>,
     /// The path from where to execute the command.
     pub path: Option<PathBuf>,
@@ -126,7 +126,8 @@ impl SshConnectionManager {
         self
     }
 
-    /// Set the maximum number of times to retries to establish a connection and execute commands.
+    /// Set the maximum number of times to retries to establish a connection and
+    /// execute commands.
     pub fn with_retries(mut self, retries: usize) -> Self {
         self.retries = retries;
         self
@@ -280,10 +281,11 @@ impl SshConnectionManager {
         P: AsRef<Path>,
         Q: AsRef<Path>,
     {
-        let data = std::fs::read(local_path.as_ref()).map_err(|error| SshError::ConnectionError {
-            address: SocketAddr::from(([0, 0, 0, 0], 0)),
-            error,
-        })?;
+        let data =
+            std::fs::read(local_path.as_ref()).map_err(|error| SshError::ConnectionError {
+                address: SocketAddr::from(([0, 0, 0, 0], 0)),
+                error,
+            })?;
         let remote = remote_path.as_ref().to_path_buf();
 
         let handles: Vec<_> = instances
@@ -353,8 +355,8 @@ impl SshConnection {
         })
     }
 
-    /// Set a timeout for the ssh connection. If no timeouts are specified, reset it to the
-    /// default value.
+    /// Set a timeout for the ssh connection. If no timeouts are specified,
+    /// reset it to the default value.
     pub fn with_timeout(self, timeout: &Option<Duration>) -> Self {
         let duration = match timeout {
             Some(value) => value,
@@ -364,7 +366,8 @@ impl SshConnection {
         self
     }
 
-    /// Set the maximum number of times to retries to establish a connection and execute commands.
+    /// Set the maximum number of times to retries to establish a connection and
+    /// execute commands.
     pub fn with_retries(mut self, retries: usize) -> Self {
         self.retries = retries;
         self
@@ -405,7 +408,8 @@ impl SshConnection {
         Err(error.unwrap())
     }
 
-    /// Execute an ssh command on the remote machine and return both stdout and stderr.
+    /// Execute an ssh command on the remote machine and return both stdout and
+    /// stderr.
     fn execute_impl(&self, mut channel: Channel, command: String) -> SshResult<(String, String)> {
         channel
             .exec(&command)
@@ -471,30 +475,25 @@ impl SshConnection {
     pub fn upload_bytes<P: AsRef<Path>>(&self, data: &[u8], remote_path: P) -> SshResult<()> {
         let mut error = None;
         for _ in 0..self.retries + 1 {
-            let mut channel = match self
-                .session
-                .scp_send(remote_path.as_ref(), 0o755, data.len() as u64, None)
-            {
-                Ok(x) => x,
-                Err(e) => {
-                    error = Some(self.make_session_error(e));
-                    continue;
-                }
-            };
+            let mut channel =
+                match self
+                    .session
+                    .scp_send(remote_path.as_ref(), 0o755, data.len() as u64, None)
+                {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error = Some(self.make_session_error(e));
+                        continue;
+                    }
+                };
 
             match (|| -> SshResult<()> {
                 channel
                     .write_all(data)
                     .map_err(|e| self.make_connection_error(e))?;
-                channel
-                    .send_eof()
-                    .map_err(|e| self.make_session_error(e))?;
-                channel
-                    .wait_eof()
-                    .map_err(|e| self.make_session_error(e))?;
-                channel
-                    .close()
-                    .map_err(|e| self.make_session_error(e))?;
+                channel.send_eof().map_err(|e| self.make_session_error(e))?;
+                channel.wait_eof().map_err(|e| self.make_session_error(e))?;
+                channel.close().map_err(|e| self.make_session_error(e))?;
                 channel
                     .wait_close()
                     .map_err(|e| self.make_session_error(e))?;

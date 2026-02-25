@@ -8,7 +8,7 @@ use tokio::time::{Interval, MissedTickBehavior};
 pub use tokio::{
     runtime::Handle,
     task::{JoinError, JoinHandle},
-    time::{sleep, Instant},
+    time::{Instant, sleep},
 };
 
 #[allow(dead_code)]

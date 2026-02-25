@@ -5,7 +5,10 @@
 
 ## Overview
 
-The code in this repository is a prototype of Starfish, a partially synchronous BFT protocol in which validators employ an uncertified DAG. The theoretical description of Starfish is available at https://eprint.iacr.org/2025/567.
+The code in this repository is a prototype of Starfish,
+a partially synchronous BFT protocol in which validators employ an uncertified DAG.
+The theoretical description of Starfish is available
+at https://eprint.iacr.org/2025/567.
 
 Three versions of Starfish are available in this repository:
 
@@ -23,9 +26,14 @@ Three versions of Starfish are available in this repository:
 
 The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
 
-- **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf). Validators use a bandwidth efficient pull-based block dissemination strategy:
+- **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).
+Validators use a bandwidth efficient pull-based block dissemination strategy:
 they push their own blocks and request the peers about missing ancestors only. A scalable BFT protocol.
-- **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174). Validators use a push-based block dissemination strategy, pushing all unknown history of blocks to their peers. Due to the push strategy, Cordial Miners can tolerate Byzantine attacks, but it is overall a less scalable solution.
+- **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174).
+Validators use a push-based block dissemination strategy,
+pushing all unknown history of blocks to their peers.
+Due to the push strategy, Cordial Miners can tolerate Byzantine attacks,
+but it is overall a less scalable solution.
 
 ## Key Features of Starfish
 
@@ -36,15 +44,20 @@ they push their own blocks and request the peers about missing ancestors only. A
 
 ## Byzantine strategies
 
-The testbed implements several Byzantine behaviors to evaluate consensus robustness. The number of Byzantine nodes can be set using `--num-byzantine-nodes`
-and has to be less than 1/3 of the total number of validators. The Byzantine strategies include:
+The testbed implements several Byzantine behaviors to evaluate consensus robustness.
+The number of Byzantine nodes can be set using `--num-byzantine-nodes`
+and has to be less than 1/3 of the total number of validators.
+The Byzantine strategies include:
 
 - `timeout-leader`: Byzantine validators time out when elected as leader to slow down consensus
 - `leader-withholding`: Byzantine leaders withhold block proposals and send it to only a few other validators to delay the commit rule
 - `chain-bomb`: Attackers attempt to disrupt the network by flooding some validators with their generated chains of blocks
-- `equivocating-two-chains`: Byzantine validators create two equivocating blocks and disseminate them to half of network, not allowing to directly skip their proposals
+- `equivocating-two-chains`: Byzantine validators create two equivocating blocks
+and disseminate them to half of network, not allowing to directly skip their proposals
 - `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
-- `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks and send the chain just before the respected validator is elected as a leader. Recommend to use 1 Byzantine validator as they are not coordinated
+- `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks
+and send the chain just before the respected validator is elected as a leader.
+Recommend to use 1 Byzantine validator as they are not coordinated
 - `random-drop`: Byzantine validators randomly drop outgoing messages with probability `1/n` where `n` is the committee size
 
 ## Implementation Details

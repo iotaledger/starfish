@@ -99,8 +99,9 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         receiver.await.expect("core thread is not expected to stop");
     }
 
-    /// Update the syncer with the connection status of an authority. This function must be called
-    /// whenever a connection to an authority is established or dropped.
+    /// Update the syncer with the connection status of an authority. This
+    /// function must be called whenever a connection to an authority is
+    /// established or dropped.
     pub async fn authority_connection(&self, authority: AuthorityIndex, connected: bool) {
         let (sender, receiver) = oneshot::channel();
         let status = if connected {

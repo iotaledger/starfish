@@ -5,7 +5,7 @@
 use reed_solomon_simd::ReedSolomonEncoder;
 use std::{
     mem,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
 };
 
 use ahash::AHashSet;
@@ -21,9 +21,9 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
+        CommitMetastate,
         linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
-        CommitMetastate,
     },
     crypto::Signer,
     data::Data,
@@ -181,11 +181,15 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // This function attempts to add blocks to the local DAG.
-    // It returns four values. First is bool which is true if any update was made successfully.
-    // Second, it returns a vector of references for blocks with statements that are not added to the local DAG and remain pending
-    // For such blocks we need to send a missing history request
-    // Third, it returns a set of parents that are still missing and need to be requested
-    // Fourth, it returns a vector of references for blocks without statements that are added to the local DAG
+    // It returns four values. First is bool which is true if any update was made
+    // successfully. Second, it returns a vector of references for blocks with
+    // statements that are not added to the local DAG and remain
+    // pending. For such blocks we need to send a missing history
+    // request.
+    // Third, it returns a set of parents that are still missing
+    // and need to be requested.
+    // Fourth, it returns a vector of references for blocks without
+    // statements that are added to the local DAG.
     pub fn add_blocks(
         &mut self,
         blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
@@ -327,8 +331,8 @@ impl<H: BlockHandler> Core<H> {
         // Create and store blocks
         let mut return_blocks = Vec::new();
         for block_id in 0..number_of_blocks_to_create {
-            // Equivocators include their transactions only in first block, but leave other empty
-            // to not overload the bandwidth
+            // Equivocators include their transactions only in first block, but leave other
+            // empty to not overload the bandwidth
             if block_id == 1 {
                 statements = vec![];
                 encoded_statements = self.prepare_encoded_statements(&statements);
@@ -409,9 +413,10 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// For StarfishS, compute whether this block carries a strong vote for the current
-    /// leader. A strong vote is true when the party votes for the leader AND has data
-    /// available for the leader block and all blocks in the leader's acknowledgement_statements.
+    /// For StarfishS, compute whether this block carries a strong vote for the
+    /// current leader. A strong vote is true when the party votes for the
+    /// leader AND has data available for the leader block and all blocks in
+    /// the leader's acknowledgement_statements.
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
@@ -468,10 +473,12 @@ impl<H: BlockHandler> Core<H> {
         block_id_in_round: usize,
     ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
-        let mut block_references = vec![*self.last_own_block[block_id_in_round]
-            .storage_transmission_blocks
-            .0
-            .reference()];
+        let mut block_references = vec![
+            *self.last_own_block[block_id_in_round]
+                .storage_transmission_blocks
+                .0
+                .reference(),
+        ];
         block_references.extend(block_references_without_own.iter().cloned());
 
         let prev_round_ref_count = block_references
@@ -617,7 +624,8 @@ impl<H: BlockHandler> Core<H> {
     /// This only checks readiness in terms of helping liveness for commit rule,
     /// try_new_block might still return None if threshold clock is not ready
     ///
-    /// The algorithm to calling is roughly: if timeout || commit_ready_new_block then try_new_block(..)
+    /// The algorithm to calling is roughly:
+    /// if timeout || commit_ready_new_block then try_new_block(..)
     pub fn ready_new_block(&self, connected_authorities: &AHashSet<AuthorityIndex>) -> bool {
         let quorum_round = self.threshold_clock.get_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
@@ -720,7 +728,8 @@ impl<H: BlockHandler> Core<H> {
         &self.last_own_block[0].storage_transmission_blocks.0
     }
 
-    // This function is needed only for retrieving the last round of a block we proposed
+    // This function is needed only for retrieving the last round of a block we
+    // proposed
     pub fn last_proposed(&self) -> RoundNumber {
         self.last_own_block[0].storage_transmission_blocks.0.round()
     }

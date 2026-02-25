@@ -9,7 +9,7 @@ use std::{borrow::Borrow, marker::PhantomData, ops::Range, sync::Arc};
 
 use crate::{
     config::ImportExport,
-    crypto::{dummy_public_key, PublicKey, Signer},
+    crypto::{PublicKey, Signer, dummy_public_key},
     data::Data,
     types::{AuthorityIndex, AuthoritySet, Stake, VerifiedStatementBlock},
 };
@@ -41,7 +41,8 @@ impl Committee {
 
         // Ensure all stakes are positive
         assert!(authorities.iter().all(|a| a.stake() > 0));
-        assert!(authorities.len() <= 128); // For now AuthoritySet only supports up to 128 authorities
+        // For now AuthoritySet only supports up to 128 authorities
+        assert!(authorities.len() <= 128);
 
         let mut total_stake: Stake = 0;
         for a in authorities.iter() {

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::block_store::CommitData;
-use crate::data::Data;
 use crate::crypto::BlockDigest;
+use crate::data::Data;
 use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
 use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
-use rocksdb::{ColumnFamilyDescriptor, Options, ReadOptions, WriteOptions, DB};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options, ReadOptions, WriteOptions};
 use std::collections::VecDeque;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
 use tokio::sync::watch;
@@ -80,9 +80,11 @@ impl RocksStore {
         // Add these settings for sync optimization
         opts.set_use_fsync(false); // Use fdatasync instead of fsync
         opts.set_writable_file_max_buffer_size(64 * 1048576); // 64MB buffer
-        opts.set_use_direct_io_for_flush_and_compaction(true); // Use direct I/O for background ops
-        opts.set_level_compaction_dynamic_level_bytes(true); // Dynamically change the level of compaction
-                                                             // Additional optimizations for high write throughput
+        // Use direct I/O for background ops
+        opts.set_use_direct_io_for_flush_and_compaction(true);
+        // Dynamically change the level of compaction
+        opts.set_level_compaction_dynamic_level_bytes(true);
+        // Additional optimizations for high write throughput
         opts.set_min_level_to_compress(2);
         opts.set_compression_type(rocksdb::DBCompressionType::Zlib);
         opts.set_max_subcompactions(4); // Allow parallel compactions
@@ -324,15 +326,12 @@ impl RocksStore {
             iter.seek(&seek_key);
 
             while iter.valid() {
-                let key_bytes = iter
-                    .key()
-                    .ok_or_else(|| io::Error::other("Invalid key"))?;
+                let key_bytes = iter.key().ok_or_else(|| io::Error::other("Invalid key"))?;
                 let value = iter
                     .value()
                     .ok_or_else(|| io::Error::other("Invalid value"))?;
 
-                let reference: BlockReference =
-                    deserialize(key_bytes).map_err(io::Error::other)?;
+                let reference: BlockReference = deserialize(key_bytes).map_err(io::Error::other)?;
 
                 if reference.round > round {
                     break;

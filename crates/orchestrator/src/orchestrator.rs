@@ -28,20 +28,21 @@ use crate::{
 pub struct Orchestrator<P> {
     /// The testbed's settings.
     settings: Settings,
-    /// The state of the testbed (reflecting accurately the state of the machines).
+    /// The state of the testbed (reflecting accurately the state of the
+    /// machines).
     instances: Vec<Instance>,
     /// Provider-specific commands to install on the instance.
     instance_setup_commands: Vec<String>,
-    /// Protocol-specific commands generator to generate the protocol configuration files,
-    /// boot clients and nodes, etc.
+    /// Protocol-specific commands generator to generate the protocol
+    /// configuration files, boot clients and nodes, etc.
     protocol_commands: P,
     /// Handle ssh connections to instances.
     ssh_manager: SshConnectionManager,
-    /// Skip the testbed update. Setting this value to true is dangerous and may lead to
-    /// unexpected behavior.
-    skip_testbed_update: bool,
-    /// Skip the testbed configuration. Setting this value to true is dangerous and may
+    /// Skip the testbed update. Setting this value to true is dangerous and may
     /// lead to unexpected behavior.
+    skip_testbed_update: bool,
+    /// Skip the testbed configuration. Setting this value to true is dangerous
+    /// and may lead to unexpected behavior.
     skip_testbed_configuration: bool,
 }
 
@@ -86,9 +87,10 @@ impl<P> Orchestrator<P> {
 
     /// Returns the instances of the testbed on which to run the benchmarks.
     ///
-    /// This function returns two vectors of instances; the first contains the instances on which to
-    /// run the load generators and the second contains the instances on which to run the nodes.
-    /// Additionally returns an optional monitoring instance.
+    /// This function returns two vectors of instances; the first contains the
+    /// instances on which to run the load generators and the second
+    /// contains the instances on which to run the nodes. Additionally
+    /// returns an optional monitoring instance.
     pub fn select_instances(
         &self,
         parameters: &BenchmarkParameters,
@@ -103,8 +105,8 @@ impl<P> Orchestrator<P> {
             TestbedError::InsufficientCapacity(minimum_instances - available_instances.len())
         );
 
-        // Sort the instances by region. This step ensures that the instances are selected as
-        // equally as possible from all regions.
+        // Sort the instances by region. This step ensures that the instances are
+        // selected as equally as possible from all regions.
         let mut instances_by_regions = HashMap::new();
         for instance in available_instances {
             instances_by_regions
@@ -148,8 +150,8 @@ impl<P> Orchestrator<P> {
             }
         }
 
-        // Spawn a load generate collocated with each node if there are no instances dedicated
-        // to excursively run load generators.
+        // Spawn a load generate collocated with each node if there are no instances
+        // dedicated to excursively run load generators.
         if client_instances.is_empty() {
             client_instances.clone_from(&nodes_instances);
         }
@@ -204,7 +206,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         };
 
         let command = [
-            &basic_commands.iter().map(|x| x.as_str()).collect::<Vec<_>>()[..],
+            &basic_commands
+                .iter()
+                .map(|x| x.as_str())
+                .collect::<Vec<_>>()[..],
             &Monitor::dependencies()
                 .iter()
                 .map(|x| x.as_str())
@@ -227,18 +232,21 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(())
     }
 
-    /// Update all instances to use the version of the codebase specified in the setting file.
+    /// Update all instances to use the version of the codebase specified in the
+    /// setting file.
     pub async fn update(&self) -> TestbedResult<()> {
         display::action("Updating all instances");
 
-        let active: Vec<_> = self.instances.iter().filter(|x| x.is_active()).cloned().collect();
+        let active: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .cloned()
+            .collect();
         let repo_name = self.settings.repository_name();
 
         match &self.settings.pre_built_binary {
-            Some(source)
-                if source.starts_with("http://")
-                    || source.starts_with("https://") =>
-            {
+            Some(source) if source.starts_with("http://") || source.starts_with("https://") => {
                 // Download pre-built binary from URL on each remote machine.
                 let command = format!(
                     "curl -fSL -o target/release/starfish \
@@ -307,7 +315,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::config(format!("  - client {i}"), client.ssh_address());
         }
 
-        // Generate the genesis configuration file and the keystore allowing access to gas objects.
+        // Generate the genesis configuration file and the keystore allowing access to
+        // gas objects.
         let command = self
             .protocol_commands
             .genesis_command(nodes.iter(), parameters)
@@ -560,7 +569,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         .collect();
         fs::create_dir_all(&path).expect("Failed to create log directory");
 
-        // NOTE: Our ssh library does not seem to be able to transfers files in parallel reliably.
+        // NOTE: Our ssh library does not seem to be able to transfers files in parallel
+        // reliably.
         let mut log_parsers = Vec::new();
 
         // Download the clients log files.
@@ -671,7 +681,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Deploy the load generators.
             self.run_clients(&parameters).await?;
 
-            // Wait for the benchmark to terminate. Then save the results and print a summary.
+            // Wait for the benchmark to terminate. Then save the results and print a
+            // summary.
             let aggregator = self.run(&parameters).await?;
             aggregator.display_summary();
 

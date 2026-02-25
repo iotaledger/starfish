@@ -6,20 +6,20 @@ use crate::{
     committee::Committee,
     data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
     runtime,
-    stat::{histogram, DivUsize, HistogramSender, PreciseHistogram},
-    types::{format_authority_index, AuthorityIndex},
+    stat::{DivUsize, HistogramSender, PreciseHistogram, histogram},
+    types::{AuthorityIndex, format_authority_index},
 };
-use prettytable::{format, row, Table as PrettyTable};
+use prettytable::{Table as PrettyTable, format, row};
 use prometheus::{
+    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
     register_histogram_with_registry, register_int_counter_vec_with_registry,
     register_int_counter_with_registry, register_int_gauge_vec_with_registry,
-    register_int_gauge_with_registry, Histogram, HistogramOpts, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec, Registry,
+    register_int_gauge_with_registry,
 };
 use std::{
     net::SocketAddr,
     ops::AddAssign,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 use tabled::{Table, Tabled};
@@ -567,15 +567,26 @@ impl Metrics {
         table.add_row(
             row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)],
         );
-        table.add_row(row![b->"Average e2e latency:", format!("{:.2} millis", p50_transaction_committed_latency)]);
+        table.add_row(row![
+            b->"Average e2e latency:",
+            format!("{:.2} millis", p50_transaction_committed_latency)
+        ]);
         table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
 
         // Network metrics
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Network Metrics"]);
-        table.add_row(row![b->"Average bandwidth out:", format!("{:.2} MB/s", average_bytes_sent as f64 / duration_secs as f64 / 1024.0 / 1024.0)]);
-        table.add_row(row![b->"Average bandwidth in:", format!("{:.2} MB/s", average_bytes_received as f64 / duration_secs as f64/ 1024.0 / 1024.0)]);
+        let bw_out = average_bytes_sent as f64 / duration_secs as f64 / 1024.0 / 1024.0;
+        let bw_in = average_bytes_received as f64 / duration_secs as f64 / 1024.0 / 1024.0;
+        table.add_row(row![
+            b->"Average bandwidth out:",
+            format!("{:.2} MB/s", bw_out)
+        ]);
+        table.add_row(row![
+            b->"Average bandwidth in:",
+            format!("{:.2} MB/s", bw_in)
+        ]);
         let total_average_transactions = (average_tps * duration_secs as f64) as u64;
         let bandwidth_efficiency = if total_average_transactions > 0 {
             average_bytes_sent as f64 / total_average_transactions as f64 / 512.0

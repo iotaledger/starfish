@@ -1,19 +1,28 @@
 #!/bin/bash
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Configuration Parameters
-#------------------------------------------------------------------------------
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}     # Recommend < number of physical cores. The hard limit is 128
-DESIRED_TPS=${DESIRED_TPS:-100}       # Target transactions per second
-CONSENSUS=${CONSENSUS:-starfish}       # Options: starfish, starfish-s, starfish-pull, cordial-miners, mysticeti
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-2}  # Must be < NUM_VALIDATORS / 3
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-random-drop} # Options: timeout-leader, leader-withholding, equivocating-chains, equivocating-two-chains, chain-bomb, equivocating-chains-bomb, random-drop
-TEST_TIME=${TEST_TIME:-300}               # Total test duration in seconds
-# UNIFORM_LATENCY_MS=100              # Optional: set to use uniform latency (ms) instead of AWS RTT table
+#----------------------------------------------------------------------
+# Recommend < physical cores. Hard limit is 128
+NUM_VALIDATORS=${NUM_VALIDATORS:-10}
+DESIRED_TPS=${DESIRED_TPS:-100}
+# Options: starfish, starfish-s, starfish-pull,
+#          cordial-miners, mysticeti
+CONSENSUS=${CONSENSUS:-starfish}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-2}
+# Options: timeout-leader, leader-withholding,
+#   equivocating-chains, equivocating-two-chains,
+#   chain-bomb, equivocating-chains-bomb, random-drop
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-random-drop}
+TEST_TIME=${TEST_TIME:-300}
+# Optional: set to use uniform latency (ms)
+# instead of AWS RTT table
+# UNIFORM_LATENCY_MS=100
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
-CLEAN_MONITORING=${CLEAN_MONITORING:-0}  # Set to 1 to wipe Prometheus/Grafana data
+# Set to 1 to wipe Prometheus/Grafana data
+CLEAN_MONITORING=${CLEAN_MONITORING:-0}
 
 # Docker network
 BASE_IP="172.28.0.10"
@@ -21,9 +30,9 @@ SUBNET="172.28.0.0/24"
 
 TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Terminal Colors
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
@@ -32,18 +41,34 @@ RESET=$(tput sgr0)
 
 if (( NUM_BYZANTINE_NODES > 0 )); then
     case "$BYZANTINE_STRATEGY" in
-        timeout-leader|leader-withholding|equivocating-chains|equivocating-two-chains|chain-bomb|equivocating-chains-bomb|random-drop) ;;
+        timeout-leader \
+        |leader-withholding \
+        |equivocating-chains \
+        |equivocating-two-chains \
+        |chain-bomb \
+        |equivocating-chains-bomb \
+        |random-drop) ;;
         *)
-            echo -e "${RED}Invalid BYZANTINE_STRATEGY: ${BYZANTINE_STRATEGY}${RESET}"
-            echo -e "${YELLOW}Supported options: timeout-leader, leader-withholding, equivocating-chains, equivocating-two-chains, chain-bomb, equivocating-chains-bomb, random-drop${RESET}"
+            echo -e \
+                "${RED}Invalid BYZANTINE_STRATEGY:" \
+                "${BYZANTINE_STRATEGY}${RESET}"
+            echo -e \
+                "${YELLOW}Supported:" \
+                "timeout-leader," \
+                "leader-withholding," \
+                "equivocating-chains," \
+                "equivocating-two-chains," \
+                "chain-bomb," \
+                "equivocating-chains-bomb," \
+                "random-drop${RESET}"
             exit 1
             ;;
     esac
 fi
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Signal Handling
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 cleanup() {
     echo -e "\n${RED}Terminating validators...${RESET}"
     # Build validator service names list
@@ -51,11 +76,17 @@ cleanup() {
     for ((i=0; i<NUM_VALIDATORS; i++)); do
         validators="$validators validator-$i"
     done
-    # Stop all validators at once with short timeout, keep monitoring running
-    docker compose -f "$COMPOSE_FILE" stop -t 1 $validators 2>/dev/null || true
-    docker compose -f "$COMPOSE_FILE" rm -f $validators 2>/dev/null || true
-    echo -e "${GREEN}Monitoring still running at: ${CYAN}http://localhost:3000${RESET}"
-    echo -e "${YELLOW}To stop everything: docker compose -f $COMPOSE_FILE down${RESET}"
+    # Stop all validators at once with short timeout
+    docker compose -f "$COMPOSE_FILE" \
+        stop -t 1 $validators 2>/dev/null || true
+    docker compose -f "$COMPOSE_FILE" \
+        rm -f $validators 2>/dev/null || true
+    echo -e \
+        "${GREEN}Monitoring still running at:" \
+        "${CYAN}http://localhost:3000${RESET}"
+    echo -e \
+        "${YELLOW}To stop everything:" \
+        "docker compose -f $COMPOSE_FILE down${RESET}"
 }
 
 cleanup_interrupt() {
@@ -66,48 +97,53 @@ cleanup_interrupt() {
 
 trap cleanup_interrupt INT
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Persistent Monitoring Volumes
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 docker volume create prometheus_data 2>/dev/null || true
 docker volume create grafana_data 2>/dev/null || true
 
 if [ "$CLEAN_MONITORING" = 1 ]; then
     echo -e "${YELLOW}Wiping monitoring data...${RESET}"
-    docker volume rm prometheus_data grafana_data 2>/dev/null || true
+    docker volume rm prometheus_data grafana_data \
+        2>/dev/null || true
     docker volume create prometheus_data
     docker volume create grafana_data
 fi
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Cleanup Previous Run
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 if [ -f "$COMPOSE_FILE" ]; then
     if [ "$REMOVE_VOLUMES" = 1 ]; then
-        docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+        docker compose -f "$COMPOSE_FILE" down -v \
+            2>/dev/null || true
     else
-        docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+        docker compose -f "$COMPOSE_FILE" down \
+            2>/dev/null || true
     fi
 fi
 echo -e "${CYAN}Cleaning up previous run data...${RESET}"
-rm -f "$DATA_DIR"/*.log "$DATA_DIR"/docker-compose.yml "$DATA_DIR"/prometheus.yaml
+rm -f "$DATA_DIR"/*.log \
+    "$DATA_DIR"/docker-compose.yml \
+    "$DATA_DIR"/prometheus.yaml
 mkdir -p "$DATA_DIR"
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Build Docker Image
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 echo -e "${CYAN}Building starfish Docker image...${RESET}"
 docker build -t starfish . || {
     echo -e "${RED}Docker build failed${RESET}"
     exit 1
 }
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Generate Prometheus Configuration
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 PROMETHEUS_CONFIG="$DATA_DIR/prometheus.yaml"
 {
-  cat <<'EOH'
+    cat <<'EOH'
 global:
   scrape_interval: 1s
 scrape_configs:
@@ -120,32 +156,42 @@ scrape_configs:
   - job_name: 'starfish-metrics'
     static_configs:
 EOH
-  for ((i=0; i<NUM_VALIDATORS; i++)); do
-    LAST_OCTET=$((${BASE_IP##*.} + i))
-    METRICS_PORT=$((1500 + NUM_VALIDATORS + i))
-    VALIDATOR_NAME="validator-$((i + 1))"
-    cat <<EOT
+    for ((i=0; i<NUM_VALIDATORS; i++)); do
+        LAST_OCTET=$((${BASE_IP##*.} + i))
+        METRICS_PORT=$((1500 + NUM_VALIDATORS + i))
+        VALIDATOR_NAME="validator-$((i + 1))"
+        cat <<EOT
       - targets: ['172.28.0.$LAST_OCTET:$METRICS_PORT']
         labels:
           validator: '$VALIDATOR_NAME'
 EOT
-  done
+    done
 } > "$PROMETHEUS_CONFIG"
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Generate Docker Compose File
-#------------------------------------------------------------------------------
-echo -e "${CYAN}Generating docker-compose.yml for $NUM_VALIDATORS validators...${RESET}"
+#----------------------------------------------------------------------
+echo -e \
+    "${CYAN}Generating docker-compose.yml for" \
+    "$NUM_VALIDATORS validators...${RESET}"
 
-RUST_LOG="warn,starfish_core::block_manager=trace,starfish_core::block_handler=trace,\
-starfish_core::consensus=trace,starfish_core::net_sync=DEBUG,starfish_core::core=DEBUG,\
-starfish_core::synchronizer=DEBUG,starfish_core::transactions_generator=DEBUG,\
-starfish_core::validator=trace,starfish_core::network=trace,starfish_core::block_store=trace,\
-starfish_core::threshold_core=trace,starfish_core::syncer=trace"
+RUST_LOG="warn"
+RUST_LOG+=",starfish_core::block_manager=trace"
+RUST_LOG+=",starfish_core::block_handler=trace"
+RUST_LOG+=",starfish_core::consensus=trace"
+RUST_LOG+=",starfish_core::net_sync=DEBUG"
+RUST_LOG+=",starfish_core::core=DEBUG"
+RUST_LOG+=",starfish_core::synchronizer=DEBUG"
+RUST_LOG+=",starfish_core::transactions_generator=DEBUG"
+RUST_LOG+=",starfish_core::validator=trace"
+RUST_LOG+=",starfish_core::network=trace"
+RUST_LOG+=",starfish_core::block_store=trace"
+RUST_LOG+=",starfish_core::threshold_core=trace"
+RUST_LOG+=",starfish_core::syncer=trace"
 
 {
-  # Header: networks and volumes
-  cat <<EOH
+    # Header: networks and volumes
+    cat <<EOH
 networks:
   starfish-net:
     driver: bridge
@@ -160,8 +206,9 @@ volumes:
     external: true
 EOH
 
-  # Infrastructure services
-  cat <<'EOH'
+    # Infrastructure services
+    GD="../../monitoring/grafana"
+    cat <<EOH
 
 services:
   prometheus:
@@ -190,9 +237,9 @@ services:
     user: "472"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ../../monitoring/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml:ro
-      - ../../monitoring/grafana/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml:ro
-      - ../../monitoring/grafana/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
+      - ${GD}/datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml:ro
+      - ${GD}/dashboard.yaml:/etc/grafana/provisioning/dashboards/main.yaml:ro
+      - ${GD}/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
     networks:
       starfish-net:
         ipv4_address: 172.28.0.3
@@ -216,27 +263,28 @@ services:
     restart: unless-stopped
 EOH
 
-  # Validator services
-  BYZANTINE_COUNT=0
-  for ((i=0; i<NUM_VALIDATORS; i++)); do
-    LAST_OCTET=$((${BASE_IP##*.} + i))
-    VALIDATOR_IP="172.28.0.$LAST_OCTET"
+    # Validator services
+    BYZANTINE_COUNT=0
+    for ((i=0; i<NUM_VALIDATORS; i++)); do
+        LAST_OCTET=$((${BASE_IP##*.} + i))
+        VALIDATOR_IP="172.28.0.$LAST_OCTET"
 
-    if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
-        LOAD=0
-        ((BYZANTINE_COUNT++))
-        EXTRA_FLAGS="--byzantine-strategy $BYZANTINE_STRATEGY"
-    else
-        LOAD=$TPS_PER_VALIDATOR
-        EXTRA_FLAGS=""
-    fi
+        if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
+            LOAD=0
+            ((BYZANTINE_COUNT++))
+            EXTRA_FLAGS="--byzantine-strategy $BYZANTINE_STRATEGY"
+        else
+            LOAD=$TPS_PER_VALIDATOR
+            EXTRA_FLAGS=""
+        fi
 
-    LATENCY_FLAGS="--mimic-extra-latency"
-    if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
-        LATENCY_FLAGS="$LATENCY_FLAGS --uniform-latency-ms $UNIFORM_LATENCY_MS"
-    fi
+        LATENCY_FLAGS="--mimic-extra-latency"
+        if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
+            LATENCY_FLAGS+=" --uniform-latency-ms"
+            LATENCY_FLAGS+=" $UNIFORM_LATENCY_MS"
+        fi
 
-    cat <<EOV
+        cat <<EOV
 
   validator-$i:
     image: starfish
@@ -258,26 +306,37 @@ EOH
         ipv4_address: $VALIDATOR_IP
     restart: unless-stopped
 EOV
-  done
+    done
 } > "$COMPOSE_FILE"
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Launch
-#------------------------------------------------------------------------------
-echo -e "${GREEN}Run dryrun for: ${YELLOW}$TEST_TIME${RESET} seconds"
-echo -e "${GREEN}Number of validators: ${YELLOW}$NUM_VALIDATORS${RESET}"
-echo -e "${CYAN}Deploying consensus protocol: ${YELLOW}$CONSENSUS${RESET}"
+#----------------------------------------------------------------------
+echo -e \
+    "${GREEN}Run dryrun for:" \
+    "${YELLOW}$TEST_TIME${RESET} seconds"
+echo -e \
+    "${GREEN}Number of validators:" \
+    "${YELLOW}$NUM_VALIDATORS${RESET}"
+echo -e \
+    "${CYAN}Deploying consensus protocol:" \
+    "${YELLOW}$CONSENSUS${RESET}"
 
 docker compose -f "$COMPOSE_FILE" up -d || {
     echo -e "${RED}Failed to start services${RESET}"
     exit 1
 }
 
-#------------------------------------------------------------------------------
+#----------------------------------------------------------------------
 # Monitoring Dashboard
-#------------------------------------------------------------------------------
-DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/consensus?from=now-5m&to=now&refresh=5s"
-echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
+#----------------------------------------------------------------------
+DASH_ID="bdd54ee7-84de-4018-8bb7-92af2defc041"
+DASH_PATH="d/$DASH_ID/consensus"
+DASH_QUERY="from=now-5m&to=now&refresh=5s"
+DASHBOARD_URL="http://localhost:3000/${DASH_PATH}?${DASH_QUERY}"
+echo -e \
+    "${CYAN}Grafana dashboard:" \
+    "${GREEN}$DASHBOARD_URL${RESET}"
 echo -e "${CYAN}Credentials: admin/admin${RESET}"
 
 sleep "$TEST_TIME"
@@ -285,7 +344,9 @@ sleep "$TEST_TIME"
 # Save logs before cleanup
 echo -e "${CYAN}Saving validator logs...${RESET}"
 for ((i=0; i<NUM_VALIDATORS; i++)); do
-  docker compose -f "$COMPOSE_FILE" logs "validator-$i" > "$DATA_DIR/validator_${i}.log" 2>&1
+    docker compose -f "$COMPOSE_FILE" \
+        logs "validator-$i" \
+        > "$DATA_DIR/validator_${i}.log" 2>&1
 done
 
 cleanup

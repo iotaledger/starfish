@@ -12,16 +12,18 @@ use ahash::AHashSet;
 use crate::types::VerifiedStatementBlock;
 use crate::{block_store::BlockStore, committee::Committee, data::Data, types::BlockReference};
 
-/// Block manager suspends incoming blocks until they are connected to the existing graph,
-/// returning newly connected blocks
+/// Block manager suspends incoming blocks until they are connected to the
+/// existing graph, returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
     blocks_pending:
         HashMap<BlockReference, (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
-    /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting for `BlockReference` to be processed.
+    /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting
+    /// for `BlockReference` to be processed.
     block_references_waiting: HashMap<BlockReference, AHashSet<BlockReference>>,
-    /// Keeps all blocks that need to be synced in order to unblock the processing of other pending
-    /// blocks. The indices of the vector correspond the authority indices.
+    /// Keeps all blocks that need to be synced in order to unblock the
+    /// processing of other pending blocks. The indices of the vector
+    /// correspond the authority indices.
     missing: Vec<AHashSet<BlockReference>>,
     block_store: BlockStore,
 }
@@ -81,7 +83,8 @@ impl BlockManager {
 
             let mut processed = true;
             for included_reference in storage_and_transmission_blocks.0.includes() {
-                // If we are missing a reference then we insert into pending and update the waiting index
+                // If we are missing a reference then we insert
+                // into pending and update the waiting index
                 if !self.block_store.block_exists(*included_reference) {
                     processed = false;
 
@@ -90,7 +93,8 @@ impl BlockManager {
                         .or_default()
                         .insert(*block_reference);
                     if !self.blocks_pending.contains_key(included_reference) {
-                        // add missing references if it is not available in both pending set and storage
+                        // add missing references if it is not available
+                        // in both pending set and storage
                         missing_references.insert(*included_reference);
                         self.missing[included_reference.authority as usize]
                             .insert(*included_reference);
@@ -115,7 +119,12 @@ impl BlockManager {
                 {
                     // For each reference see if it's unblocked.
                     for waiting_block_reference in waiting_references {
-                        let block_pointer = self.blocks_pending.get(&waiting_block_reference).expect("Safe since we ensure the block waiting reference has a valid primary key.");
+                        let block_pointer =
+                            self.blocks_pending.get(&waiting_block_reference).expect(
+                                "Safe since we ensure the block \
+                                waiting reference has a valid \
+                                primary key.",
+                            );
 
                         if block_pointer
                             .0
@@ -123,9 +132,15 @@ impl BlockManager {
                             .iter()
                             .all(|item_ref| !self.block_references_waiting.contains_key(item_ref))
                         {
-                            // No dependencies are left unprocessed, so remove from unprocessed list, and add to the
-                            // blocks we are processing now.
-                            let block = self.blocks_pending.remove(&waiting_block_reference).expect("Safe since we ensure the block waiting reference has a valid primary key.");
+                            // No dependencies are left unprocessed,
+                            // so remove from unprocessed list, and
+                            // add to the blocks we are processing now.
+                            let block =
+                                self.blocks_pending.remove(&waiting_block_reference).expect(
+                                    "Safe since we ensure the block \
+                                    waiting reference has a valid \
+                                    primary key.",
+                                );
                             blocks.push_front(block);
                         }
                     }

@@ -4,27 +4,30 @@
 
 use minibytes::Bytes;
 use serde::{
-    de::{DeserializeOwned, Error},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{DeserializeOwned, Error},
 };
 use std::{
     fmt,
     hash::{Hash, Hasher},
     ops::Deref,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 /// Data<T> carries both the value and it's serialized bytes.
 /// When Data is created, it's value is serialized into a cache variable.
-/// When Data is serialized, instead of serializing a value we use a cached serialized bytes.
-/// When Data is deserialized, cache is initialized with the bytes that used to deserialized value.
+/// When Data is serialized, instead of serializing a value we use a cached
+/// serialized bytes. When Data is deserialized, cache is initialized with the
+/// bytes that used to deserialized value.
 ///
 /// Note that cache always stores data serialized in a single format (bincode).
-/// When data is serialized, instead of serializing the value, the byte array is written into target serializer.
-/// This means that serialize(T) != serialize(Data<T>), e.g. Data<T> is not a transparent wrapper.
+/// When data is serialized, instead of serializing the value,
+/// the byte array is written into target serializer.
+/// This means that serialize(T) != serialize(Data<T>), e.g. Data<T> is not a
+/// transparent wrapper.
 #[derive(Clone)]
 pub struct Data<T>(Arc<DataInner<T>>);
 
