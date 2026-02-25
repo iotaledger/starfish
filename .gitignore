@@ -29,3 +29,8 @@ scripts/data/
 *.pdf
 *.tex
 *.txt
+
+# Local tooling
+.claude/
+starfish-linux-amd64
+.claude/settings.local.json
