@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -267,6 +267,48 @@ impl SshConnectionManager {
             .await?;
         Ok(())
     }
+
+    /// Upload a local file to all provided instances in parallel via SCP.
+    pub async fn upload_to_all<I, P, Q>(
+        &self,
+        instances: I,
+        local_path: P,
+        remote_path: Q,
+    ) -> SshResult<()>
+    where
+        I: IntoIterator<Item = Instance>,
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let data = std::fs::read(local_path.as_ref()).map_err(|error| SshError::ConnectionError {
+            address: SocketAddr::from(([0, 0, 0, 0], 0)),
+            error,
+        })?;
+        let remote = remote_path.as_ref().to_path_buf();
+
+        let handles: Vec<_> = instances
+            .into_iter()
+            .map(|instance| {
+                let ssh_manager = self.clone();
+                let data = data.clone();
+                let remote = remote.clone();
+                tokio::spawn(async move {
+                    let connection = ssh_manager.connect(instance.ssh_address()).await?;
+                    Handle::current()
+                        .spawn_blocking(move || connection.upload_bytes(&data, &remote))
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        try_join_all(handles)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<SshResult<Vec<_>>>()?;
+        Ok(())
+    }
 }
 
 /// Representation of an ssh connection.
@@ -419,6 +461,46 @@ impl SshConnection {
                 .map_err(|e| self.make_connection_error(e))
             {
                 Ok(..) => return Ok(content),
+                Err(e) => error = Some(e),
+            }
+        }
+        Err(error.unwrap())
+    }
+
+    /// Upload bytes to a remote file through scp.
+    pub fn upload_bytes<P: AsRef<Path>>(&self, data: &[u8], remote_path: P) -> SshResult<()> {
+        let mut error = None;
+        for _ in 0..self.retries + 1 {
+            let mut channel = match self
+                .session
+                .scp_send(remote_path.as_ref(), 0o755, data.len() as u64, None)
+            {
+                Ok(x) => x,
+                Err(e) => {
+                    error = Some(self.make_session_error(e));
+                    continue;
+                }
+            };
+
+            match (|| -> SshResult<()> {
+                channel
+                    .write_all(data)
+                    .map_err(|e| self.make_connection_error(e))?;
+                channel
+                    .send_eof()
+                    .map_err(|e| self.make_session_error(e))?;
+                channel
+                    .wait_eof()
+                    .map_err(|e| self.make_session_error(e))?;
+                channel
+                    .close()
+                    .map_err(|e| self.make_session_error(e))?;
+                channel
+                    .wait_close()
+                    .map_err(|e| self.make_session_error(e))?;
+                Ok(())
+            })() {
+                Ok(()) => return Ok(()),
                 Err(e) => error = Some(e),
             }
         }

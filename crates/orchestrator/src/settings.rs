@@ -135,6 +135,11 @@ pub struct Settings {
     /// The number of times the orchestrator should retry an ssh command.
     #[serde(default = "defaults::default_ssh_retries")]
     pub ssh_retries: usize,
+    /// Pre-built starfish binary. When set, skips git clone + cargo build on remote machines.
+    /// If the value starts with "http://" or "https://", remote machines download it via curl.
+    /// Otherwise, the orchestrator treats it as a local file path and SCPs it to each machine.
+    #[serde(default)]
+    pub pre_built_binary: Option<String>,
 }
 
 mod defaults {
