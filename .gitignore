@@ -30,6 +30,9 @@ scripts/data/
 *.tex
 *.txt
 
+# Benchmark results
+results/
+
 # Local tooling
 .claude/
 starfish-linux-amd64
