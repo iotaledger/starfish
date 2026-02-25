@@ -218,6 +218,7 @@ impl AwsClient {
         let directory = self.settings.working_dir.display();
         vec![
             format!("(sudo mkfs.ext4 -E nodiscard /dev/{DRIVE} || true)"),
+            format!("sudo mkdir -p {directory}"),
             format!("(sudo mount /dev/{DRIVE} {directory} || true)"),
             format!("sudo chmod 777 -R {directory}"),
         ]
