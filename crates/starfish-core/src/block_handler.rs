@@ -160,6 +160,7 @@ pub struct RealCommitHandler {
     commit_interpreter: Linearizer,
     committed_leaders: Vec<BlockReference>,
     committed_count: usize,
+    sequenced_commit_count: usize,
     commit_digest: [u8; 32],
     start_time: TimeInstant,
     metrics: Arc<Metrics>,
@@ -177,6 +178,7 @@ impl RealCommitHandler {
             commit_interpreter: Linearizer::new((*committee).clone()),
             committed_leaders: vec![],
             committed_count: 0,
+            sequenced_commit_count: 0,
             commit_digest: [0u8; 32],
             start_time: TimeInstant::now(),
             metrics,
@@ -312,12 +314,17 @@ impl CommitObserver for RealCommitHandler {
             slice_index += 1;
         }
         block_store.update_pending_unavailable(committed[slice_index..].to_vec());
+        self.sequenced_commit_count += slice_index;
+        self.metrics
+            .commit_availability_gap
+            .set((self.committed_count - self.sequenced_commit_count) as i64);
         resulted_committed
     }
 
     fn recover_committed(&mut self, committed: AHashSet<BlockReference>) {
         assert!(self.commit_interpreter.committed.is_empty());
         self.committed_count = committed.len();
+        self.sequenced_commit_count = committed.len();
         self.metrics.commit_index.set(self.committed_count as i64);
         self.commit_interpreter.committed_slots =
             committed.iter().map(|r| (r.round, r.authority)).collect();

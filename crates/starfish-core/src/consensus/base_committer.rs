@@ -2,16 +2,15 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{CommitMetastate, LeaderStatus, WAVE_LENGTH};
+use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH};
 use crate::block_store::ConsensusProtocol;
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 use crate::{
     block_store::BlockStore,
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
+    types::{format_authority_round, AuthorityIndex, RoundNumber},
 };
-use ahash::AHashSet;
 use std::{fmt::Display, sync::Arc};
 
 /// The consensus protocol operates in 'waves'. Each wave is composed of a leader round, at least one
@@ -110,14 +109,14 @@ impl BaseCommitter {
         &self,
         potential_certificate: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
             potential_certificate
                 .includes()
                 .iter()
-                .filter(|r| voters_for_leaders.contains(&(leader_ref, **r)))
+                .filter(|r| voter_info.voters.contains(&(leader_ref, **r)))
                 .map(|r| r.authority),
         )
     }
@@ -129,7 +128,7 @@ impl BaseCommitter {
         anchor: &Data<VerifiedStatementBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> LeaderStatus {
         // Get the block(s) proposed by the leader. There could be more than one leader block
         // per round (produced by a Byzantine leader).
@@ -139,12 +138,14 @@ impl BaseCommitter {
 
         // Get all blocks that could be potential certificates for the target leader. These blocks
         // are in the decision round of the target leader and are linked to the anchor.
+        // Use batch reachability: one BFS from anchor to decision_round instead of N linked() calls.
         let wave = self.wave_number(leader_round);
         let decision_round = self.decision_round(wave);
-        let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
+        let decision_blocks = self.block_store.get_blocks_by_round_cached(decision_round);
+        let reachable = self.block_store.reachable_at_round(anchor, decision_round);
         let potential_certificates: Vec<_> = decision_blocks
             .iter()
-            .filter(|block| self.block_store.linked(anchor, block))
+            .filter(|block| reachable.contains(block.reference()))
             .collect();
 
         // Use those potential certificates to determine which (if any) of the target leader
@@ -153,7 +154,7 @@ impl BaseCommitter {
             .into_iter()
             .filter(|leader_block| {
                 potential_certificates.iter().any(|potential_certificate| {
-                    self.is_certificate(potential_certificate, leader_block, voters_for_leaders)
+                    self.is_certificate(potential_certificate, leader_block, voter_info)
                 })
             })
             .collect();
@@ -171,11 +172,11 @@ impl BaseCommitter {
                 let metastate =
                     if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS {
                         let has_strong = potential_certificates.iter().any(|cert| {
-                            self.is_certificate(cert, &certified_leader_block, voters_for_leaders)
+                            self.is_certificate(cert, &certified_leader_block, voter_info)
                                 && self.carries_strong_qc(
                                     cert,
                                     &certified_leader_block,
-                                    voters_for_leaders,
+                                    voter_info,
                                 )
                         });
                         if has_strong {
@@ -196,11 +197,11 @@ impl BaseCommitter {
         &self,
         voting_round: RoundNumber,
         leader: AuthorityIndex,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> bool {
-        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+        let voting_blocks = self.block_store.get_blocks_by_round_cached(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for voting_block in &voting_blocks {
+        for voting_block in voting_blocks.iter() {
             let voter = voting_block.reference().authority;
             blame_stake_aggregator.add(voter, &self.committee);
         }
@@ -218,10 +219,10 @@ impl BaseCommitter {
         for leader_block in &leader_blocks {
             let mut vote_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
             let leader_block_reference = leader_block.reference();
-            for voting_block in &voting_blocks {
+            for voting_block in voting_blocks.iter() {
                 let voter = voting_block.author();
-                if voters_for_leaders
-                    .contains(&(*leader_block_reference, *voting_block.reference()))
+                if voter_info
+                    .voters.contains(&(*leader_block_reference, *voting_block.reference()))
                 {
                     //tracing::trace!(
                     //    "[{self}] {voting_block:?} is a blame for leader {}",
@@ -242,7 +243,7 @@ impl BaseCommitter {
     /// Check whether the specified leader has enough blames (that is, 2f+1 non-votes) to be
     /// directly skipped.
     fn decide_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
-        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+        let voting_blocks = self.block_store.get_blocks_by_round_cached(voting_round);
         self.has_quorum_support(
             voting_blocks
                 .iter()
@@ -257,15 +258,15 @@ impl BaseCommitter {
         &self,
         decision_round: RoundNumber,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> bool {
-        let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
+        let decision_blocks = self.block_store.get_blocks_by_round_cached(decision_round);
 
         let mut total_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         // Quickly reject if there isn't enough stake to support the leader from
         // the potential certificates.
         let mut early_stop = true;
-        for decision_block in &decision_blocks {
+        for decision_block in decision_blocks.iter() {
             if total_stake_aggregator.add(decision_block.author(), &self.committee) {
                 early_stop = false;
                 break;
@@ -283,7 +284,7 @@ impl BaseCommitter {
         self.has_quorum_support(
             decision_blocks
                 .iter()
-                .filter(|b| self.is_certificate(b, leader_block, voters_for_leaders))
+                .filter(|b| self.is_certificate(b, leader_block, voter_info))
                 .map(|b| b.author()),
         )
     }
@@ -295,7 +296,7 @@ impl BaseCommitter {
         &self,
         decision_block: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
@@ -303,12 +304,12 @@ impl BaseCommitter {
                 .includes()
                 .iter()
                 .filter(|r| {
-                    voters_for_leaders.contains(&(leader_ref, **r))
-                        && self
-                            .block_store
-                            .get_storage_block(**r)
-                            .expect("We should have the whole sub-dag by now")
-                            .strong_vote()
+                    voter_info.voters.contains(&(leader_ref, **r))
+                        && voter_info
+                            .voter_strong_votes
+                            .get(r)
+                            .copied()
+                            .flatten()
                             == Some(true)
                 })
                 .map(|r| r.authority),
@@ -324,21 +325,21 @@ impl BaseCommitter {
         &self,
         leader_block: &Data<VerifiedStatementBlock>,
         voting_round: RoundNumber,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> Option<CommitMetastate> {
         if self.block_store.consensus_protocol != ConsensusProtocol::StarfishS {
             return None;
         }
 
         // Check for strong blame quorum at round r+1.
-        let voting_blocks = self.block_store.get_blocks_by_round(voting_round);
+        let voting_blocks = self.block_store.get_blocks_by_round_cached(voting_round);
         let leader_ref = *leader_block.reference();
 
         let has_strong_blame_quorum = self.has_quorum_support(
             voting_blocks
                 .iter()
                 .filter(|b| {
-                    voters_for_leaders.contains(&(leader_ref, *b.reference()))
+                    voter_info.voters.contains(&(leader_ref, *b.reference()))
                         && b.strong_vote() == Some(false)
                 })
                 .map(|b| b.author()),
@@ -352,12 +353,12 @@ impl BaseCommitter {
         let leader_round = voting_round - 1;
         let wave = self.wave_number(leader_round);
         let decision_round = self.decision_round(wave);
-        let decision_blocks = self.block_store.get_blocks_by_round(decision_round);
+        let decision_blocks = self.block_store.get_blocks_by_round_cached(decision_round);
 
         if self.has_quorum_support(
             decision_blocks
                 .iter()
-                .filter(|b| self.carries_strong_qc(b, leader_block, voters_for_leaders))
+                .filter(|b| self.carries_strong_qc(b, leader_block, voter_info))
                 .map(|b| b.author()),
         ) {
             return Some(CommitMetastate::Opt);
@@ -374,7 +375,7 @@ impl BaseCommitter {
         leader: AuthorityIndex,
         leader_round: RoundNumber,
         leaders: impl Iterator<Item = &'a LeaderStatus>,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> LeaderStatus {
         // The anchor is the first committed leader with round higher than the decision round of the
         // target leader. We must stop the iteration upon encountering an undecided leader.
@@ -391,7 +392,7 @@ impl BaseCommitter {
                         anchor,
                         leader,
                         leader_round,
-                        voters_for_leaders,
+                        voter_info,
                     );
                 }
                 LeaderStatus::Skip(..) => (),
@@ -409,7 +410,7 @@ impl BaseCommitter {
         &self,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
-        voters_for_leaders: &AHashSet<(BlockReference, BlockReference)>,
+        voter_info: &VoterInfo,
     ) -> LeaderStatus {
         // Check whether the leader has enough blame. That is, whether there are 2f+1 non-votes
         // for that leader (which ensure there will never be a certificate for that leader).
@@ -418,7 +419,7 @@ impl BaseCommitter {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS => {
-                if self.decide_skip_starfish(voting_round, leader, voters_for_leaders) {
+                if self.decide_skip_starfish(voting_round, leader, voter_info) {
                     return LeaderStatus::Skip(leader, leader_round);
                 }
             }
@@ -440,9 +441,9 @@ impl BaseCommitter {
 
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|l| self.enough_leader_support(decision_round, l, voters_for_leaders))
+            .filter(|l| self.enough_leader_support(decision_round, l, voter_info))
             .map(|l| {
-                let metastate = self.determine_metastate(&l, voting_round, voters_for_leaders);
+                let metastate = self.determine_metastate(&l, voting_round, voter_info);
                 LeaderStatus::Commit(l, metastate)
             })
             .collect();

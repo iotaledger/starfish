@@ -82,6 +82,7 @@ pub struct Metrics {
     pub commit_digest: IntGauge,
     pub commit_digest_latest: IntGauge,
     pub commit_index: IntGauge,
+    pub commit_availability_gap: IntGauge,
 
     pub utilization_timer: IntCounterVec,
     pub submitted_transactions: IntCounter,
@@ -455,6 +456,12 @@ impl Metrics {
             commit_index: register_int_gauge_with_registry!(
                 "commit_index",
                 "Number of committed leaders",
+                registry,
+            )
+            .unwrap(),
+            commit_availability_gap: register_int_gauge_with_registry!(
+                "commit_availability_gap",
+                "Gap between last commit and last commit with available transactions",
                 registry,
             )
             .unwrap(),

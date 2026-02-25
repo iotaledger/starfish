@@ -179,6 +179,14 @@ mod smoke_tests {
         types::AuthorityIndex,
     };
 
+    const ALL_PROTOCOLS: &[&str] = &[
+        "mysticeti",
+        "starfish-pull",
+        "cordial-miners",
+        "starfish",
+        "starfish-s",
+    ];
+
     /// Check whether the validator specified by its metrics address has committed at least once.
     async fn check_commit(address: &SocketAddr) -> Result<bool, reqwest::Error> {
         let route = prometheus::METRICS_ROUTE;
@@ -200,172 +208,199 @@ mod smoke_tests {
         }
     }
 
-    /// Ensure that a committee of honest validators commits.
-    #[tokio::test]
-    async fn validator_commit() {
+    async fn run_commit_test(consensus: &str, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(0);
+        let public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let mut handles = Vec::new();
-        let dir = TempDir::new("validator_commit").unwrap();
+        let dir = TempDir::new("commit").unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
-        private_configs.iter().for_each(|private_config| {
-            fs::create_dir_all(&private_config.storage_path).unwrap();
-        });
+        for pc in &private_configs {
+            fs::create_dir_all(&pc.storage_path).unwrap();
+        }
 
+        let mut validators = Vec::new();
         for (i, private_config) in private_configs.into_iter().enumerate() {
-            let authority = i as AuthorityIndex;
-
             let validator = Validator::start(
-                authority,
+                i as AuthorityIndex,
                 committee.clone(),
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                "starfish".to_string(),
+                consensus.to_string(),
             )
             .await
             .unwrap();
-            handles.push(validator.await_completion());
+            validators.push(validator);
         }
 
         let addresses = public_config
             .all_metric_addresses()
-            .map(|address| address.to_owned())
+            .map(|a| a.to_owned())
             .collect();
         let timeout = config::node_defaults::default_leader_timeout() * 5;
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
+        }
+
+        for v in validators {
+            v.stop().await;
         }
     }
 
-    /// Ensure validators can sync missing blocks
+    /// Ensure that a committee of honest validators commits for all protocols.
     #[tokio::test]
-    async fn validator_sync() {
+    async fn validator_commit() {
+        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
+            run_commit_test(consensus, i as u16 * 20).await;
+        }
+    }
+
+    async fn run_sync_test(consensus: &str, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(100);
+        let public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let mut handles = Vec::new();
-        let dir = TempDir::new("validator_sync").unwrap();
+        let dir = TempDir::new("sync").unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
-        private_configs.iter().for_each(|private_config| {
-            fs::create_dir_all(&private_config.storage_path).unwrap();
-        });
+        for pc in &private_configs {
+            fs::create_dir_all(&pc.storage_path).unwrap();
+        }
 
         // Boot all validators but one.
+        let mut validators = Vec::new();
         for (i, private_config) in private_configs.into_iter().enumerate() {
             if i == 0 {
                 continue;
             }
-            let authority = i as AuthorityIndex;
             let validator = Validator::start(
-                authority,
+                i as AuthorityIndex,
                 committee.clone(),
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                "starfish".to_string(),
+                consensus.to_string(),
             )
             .await
             .unwrap();
-            handles.push(validator.await_completion());
+            validators.push(validator);
         }
 
-        // Boot the last validator after they others commit.
+        // Boot the last validator after the others commit.
         let addresses = public_config
             .all_metric_addresses()
             .skip(1)
-            .map(|address| address.to_owned())
+            .map(|a| a.to_owned())
             .collect();
         let timeout = config::node_defaults::default_leader_timeout() * 20;
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
         }
 
         // Boot the last validator.
-        let authority = 0;
         let private_config =
-            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(authority);
+            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(0);
         let validator = Validator::start(
-            authority as AuthorityIndex,
+            0 as AuthorityIndex,
             committee.clone(),
             public_config.clone(),
             private_config,
             client_parameters,
             "honest".to_string(),
-            "starfish".to_string(),
+            consensus.to_string(),
         )
         .await
         .unwrap();
-        handles.push(validator.await_completion());
+        validators.push(validator);
 
         // Ensure the last validator commits.
         let address = public_config
             .all_metric_addresses()
             .next()
-            .map(|address| address.to_owned())
+            .map(|a| a.to_owned())
             .unwrap();
         let timeout = config::node_defaults::default_leader_timeout() * 5;
         tokio::select! {
             _ = await_for_commits(vec![address]) => (),
-            _ = time::sleep(timeout) => panic!("Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!("[{consensus}] Late validator failed to commit"),
+        }
+
+        for v in validators {
+            v.stop().await;
         }
     }
 
-    // Ensure that honest validators commit despite the presence of a crash fault.
+    /// Ensure validators can sync missing blocks for all protocols.
     #[tokio::test]
-    async fn validator_crash_faults() {
+    async fn validator_sync() {
+        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
+            run_sync_test(consensus, 100 + i as u16 * 20).await;
+        }
+    }
+
+    async fn run_crash_faults_test(consensus: &str, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(200);
+        let public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let mut handles = Vec::new();
-        let dir = TempDir::new("validator_crash_faults").unwrap();
+        let dir = TempDir::new("crash_faults").unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
-        private_configs.iter().for_each(|private_config| {
-            fs::create_dir_all(&private_config.storage_path).unwrap();
-        });
+        for pc in &private_configs {
+            fs::create_dir_all(&pc.storage_path).unwrap();
+        }
 
+        let mut validators = Vec::new();
         for (i, private_config) in private_configs.into_iter().enumerate() {
             if i == 0 {
                 continue;
             }
-
-            let authority = i as AuthorityIndex;
             let validator = Validator::start(
-                authority,
+                i as AuthorityIndex,
                 committee.clone(),
                 public_config.clone(),
                 private_config,
                 client_parameters.clone(),
                 "honest".to_string(),
-                "starfish".to_string(),
+                consensus.to_string(),
             )
             .await
             .unwrap();
-            handles.push(validator.await_completion());
+            validators.push(validator);
         }
 
         let addresses = public_config
             .all_metric_addresses()
             .skip(1)
-            .map(|address| address.to_owned())
+            .map(|a| a.to_owned())
             .collect();
         let timeout = config::node_defaults::default_leader_timeout() * 15;
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!("Failed to gather commits within a few timeouts"),
+            _ = time::sleep(timeout) => panic!("[{consensus}] Failed to gather commits within a few timeouts"),
+        }
+
+        for v in validators {
+            v.stop().await;
+        }
+    }
+
+    // Ensure that honest validators commit despite the presence of a crash fault, for all protocols.
+    #[tokio::test]
+    async fn validator_crash_faults() {
+        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
+            run_crash_faults_test(consensus, 200 + i as u16 * 20).await;
         }
     }
 
@@ -470,16 +505,15 @@ mod smoke_tests {
         .unwrap()
     }
 
-    /// Comprehensive lifecycle test: 5 nodes with mimic latency, digest
-    /// agreement, stop/restart recovery, and fresh-DB recovery.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn validator_lifecycle_and_recovery() {
+    /// Comprehensive lifecycle test: 5 nodes with digest agreement,
+    /// stop/restart recovery, and fresh-DB recovery.
+    async fn run_lifecycle_test(consensus: &str, port_offset: u16) {
         let committee_size = 5;
-        let consensus = "mysticeti";
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config = NodePublicConfig::new_for_tests(committee_size).with_port_offset(500);
+        let public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
-        let dir = TempDir::new("validator_lifecycle").unwrap();
+        let dir = TempDir::new("lifecycle").unwrap();
 
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
         for pc in &private_configs {
@@ -511,7 +545,7 @@ mod smoke_tests {
 
         let phase1 = await_min_commit_index(
             &all_metrics_addrs,
-            5, // conservative: at least 5 commits in 20s with mimic_latency
+            5,
             Duration::from_secs(10),
         )
         .await;
@@ -524,7 +558,6 @@ mod smoke_tests {
 
         time::sleep(Duration::from_secs(10)).await;
 
-        // Verify remaining 4 progressed
         let running: Vec<_> = all_metrics_addrs
             .iter()
             .filter(|(i, _)| *i != node_a)
@@ -535,7 +568,6 @@ mod smoke_tests {
         verify_digest_consistency(&phase2a);
         let phase2a_min = phase2a.values().map(|(i, _)| *i).min().unwrap();
 
-        // Restart node_a
         let v = start_validator(
             node_a,
             &committee,
@@ -548,9 +580,6 @@ mod smoke_tests {
         .await;
         validators[node_a] = Some(v);
 
-        // Wait for node_a to recover to at least the pre-stop baseline.
-        // Full catch-up to live nodes can be significantly slower depending on
-        // how much historical parent resolution is needed after restart.
         let node_a_addr = &[all_metrics_addrs[node_a]];
         await_min_commit_index(node_a_addr, phase1_min, Duration::from_secs(60)).await;
 
@@ -590,7 +619,6 @@ mod smoke_tests {
         let node_c = 0usize;
         validators[node_c].take().unwrap().stop().await;
 
-        // Wipe the rocksdb directory
         let storage_path = dir.as_ref().join(NodePrivateConfig::default_storage_path(
             node_c as AuthorityIndex,
         ));
@@ -620,6 +648,13 @@ mod smoke_tests {
         // ─── Cleanup ───
         for v in validators.into_iter().flatten() {
             v.stop().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validator_lifecycle_and_recovery() {
+        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
+            run_lifecycle_test(consensus, 500 + i as u16 * 20).await;
         }
     }
 }
