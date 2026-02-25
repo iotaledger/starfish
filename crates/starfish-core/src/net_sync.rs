@@ -430,7 +430,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         block_reference: *block.reference(),
                         shard,
                         shard_index,
-                        block_template: block.clone(),
+                        block_template: Box::new(block.clone()),
                     });
                 }
             }
@@ -651,15 +651,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.block_store.byzantine_strategy.is_none() {
-                if self
+            if self.inner.block_store.byzantine_strategy.is_none()
+                && self
                     .disseminator
                     .send_storage_blocks(self.peer_id, block_references)
                     .await
                     .is_none()
-                {
-                    return false;
-                }
+            {
+                return false;
             }
         }
         true
@@ -681,15 +680,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.block_store.byzantine_strategy.is_none() {
-                if self
+            if self.inner.block_store.byzantine_strategy.is_none()
+                && self
                     .disseminator
                     .send_transmission_blocks(self.peer_id, block_references)
                     .await
                     .is_none()
-                {
-                    return false;
-                }
+            {
+                return false;
             }
         }
         true

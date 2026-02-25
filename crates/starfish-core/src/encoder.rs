@@ -148,14 +148,14 @@ mod tests {
                 decoder
                     .reset(info_length, parity_length, shard_size)
                     .unwrap();
-                for i in 0..info_length {
-                    if let Some(ref s) = available[i] {
+                for (i, shard) in available[..info_length].iter().enumerate() {
+                    if let Some(ref s) = shard {
                         decoder.add_original_shard(i, s).unwrap();
                     }
                 }
-                for i in info_length..committee_size {
-                    if let Some(ref s) = available[i] {
-                        decoder.add_recovery_shard(i - info_length, s).unwrap();
+                for (i, shard) in available[info_length..committee_size].iter().enumerate() {
+                    if let Some(ref s) = shard {
+                        decoder.add_recovery_shard(i, s).unwrap();
                     }
                 }
 

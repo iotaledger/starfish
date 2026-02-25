@@ -240,7 +240,7 @@ impl CommitObserver for RealCommitHandler {
             let digest_short =
                 u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
             self.metrics.commit_digest_latest.set(digest_short as i64);
-            if commit_index % 100 == 0 {
+            if commit_index.is_multiple_of(100) {
                 self.metrics.commit_digest.set(digest_short as i64);
             }
 

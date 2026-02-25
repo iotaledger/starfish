@@ -47,7 +47,7 @@ pub enum ShardMessage {
         shard: Shard,
         shard_index: usize,
         /// Block metadata needed to initialize the accumulator.
-        block_template: VerifiedStatementBlock,
+        block_template: Box<VerifiedStatementBlock>,
     },
     /// Full block with statements arrived — stop collecting shards.
     FullBlock(BlockReference),
@@ -523,13 +523,13 @@ mod tests {
         let sender = handle.shard_message_sender();
 
         // Send exactly info_length shards to trigger reconstruction
-        for i in 0..info_length {
+        for (i, shard) in shards[..info_length].iter().enumerate() {
             sender
                 .send(ShardMessage::Shard {
                     block_reference: block_ref,
-                    shard: shards[i].clone(),
+                    shard: shard.clone(),
                     shard_index: i,
-                    block_template: block.clone(),
+                    block_template: Box::new(block.clone()),
                 })
                 .await
                 .unwrap();
@@ -587,7 +587,7 @@ mod tests {
                 block_reference: block_ref,
                 shard: shards[0].clone(),
                 shard_index: 0,
-                block_template: block.clone(),
+                block_template: Box::new(block.clone()),
             })
             .await
             .unwrap();
@@ -599,13 +599,13 @@ mod tests {
             .unwrap();
 
         // Send remaining shards — should be ignored
-        for i in 1..committee_size {
+        for (i, shard) in shards.iter().enumerate().skip(1) {
             sender
                 .send(ShardMessage::Shard {
                     block_reference: block_ref,
-                    shard: shards[i].clone(),
+                    shard: shard.clone(),
                     shard_index: i,
-                    block_template: block.clone(),
+                    block_template: Box::new(block.clone()),
                 })
                 .await
                 .unwrap();

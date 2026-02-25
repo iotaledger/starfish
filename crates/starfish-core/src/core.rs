@@ -529,7 +529,7 @@ impl<H: BlockHandler> Core<H> {
             self.block_store.byzantine_strategy,
             Some(ByzantineStrategy::EquivocatingTwoChains)
         ) {
-            bounds.push((len + 1) / 2);
+            bounds.push(len.div_ceil(2));
             bounds.push(len);
         } else {
             for i in 1..=num_blocks {

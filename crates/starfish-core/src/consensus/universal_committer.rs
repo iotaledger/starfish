@@ -69,10 +69,10 @@ impl UniversalCommitter {
                 // Build or retrieve cached voter info for this (leader, round).
                 let voting_round = round + 1 as RoundNumber;
                 let voting_round_version = self.block_store.round_version(voting_round);
-                let needs_rebuild = match self.voters_cache.get(&(leader, round)) {
-                    Some((ver, _)) if *ver == voting_round_version => false,
-                    _ => true,
-                };
+                let needs_rebuild = !matches!(
+                    self.voters_cache.get(&(leader, round)),
+                    Some((ver, _)) if *ver == voting_round_version
+                );
                 if needs_rebuild {
                     let potential_voting_blocks =
                         self.block_store.get_blocks_by_round_cached(voting_round);

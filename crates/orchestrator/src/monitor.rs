@@ -248,10 +248,7 @@ impl Grafana {
                 Self::DASHBOARDS_PATH
             ),
             // copy your default dashboard yaml/json
-            &format!(
-                "sudo cp grafana-dashboard.json {}",
-                Self::DASHBOARDS_PATH
-            ),
+            &format!("sudo cp grafana-dashboard.json {}", Self::DASHBOARDS_PATH),
             "sudo service grafana-server restart",
         ]
         .join(" && ")
