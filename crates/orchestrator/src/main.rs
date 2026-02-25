@@ -14,6 +14,7 @@ use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::SshConnectionManager;
 use std::path::PathBuf;
+use std::process::Command;
 use testbed::Testbed;
 
 mod benchmark;
@@ -65,6 +66,9 @@ pub enum Operation {
         #[clap(subcommand)]
         action: TestbedAction,
     },
+    /// Build the starfish binary inside Docker for Linux x86_64 deployment.
+    /// Run this before `testbed deploy` to avoid paying for idle machines during compilation.
+    Build,
     /// Deploy nodes and run a benchmark on the specified testbed.
     Benchmark {
         /// The committee size to deploy.
@@ -114,6 +118,7 @@ pub enum Operation {
         /// Flag indicating whether nodes use log traces or not, this is useful for debugging
         #[clap(long, action, default_value_t = false, global = true)]
         enable_tracing: bool,
+
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -186,6 +191,52 @@ async fn main() -> eyre::Result<()> {
     }
 }
 
+const DOCKER_BINARY_OUTPUT: &str = "./starfish-linux-amd64";
+
+/// Build the starfish binary inside Docker and extract the resulting Linux x86_64 binary.
+fn docker_build_and_extract() -> eyre::Result<PathBuf> {
+    display::action("Building starfish binary via Docker");
+
+    // Build the Docker image.
+    let status = Command::new("docker")
+        .args(["build", "-t", "starfish-build", "."])
+        .status()
+        .wrap_err("Failed to invoke docker build")?;
+    eyre::ensure!(status.success(), "Docker build failed (exit code: {status})");
+
+    // Extract the binary from the image.
+    let _ = Command::new("docker")
+        .args(["rm", "-f", "starfish-extract"])
+        .status();
+    let status = Command::new("docker")
+        .args(["create", "--name", "starfish-extract", "starfish-build"])
+        .status()
+        .wrap_err("Failed to create container for extraction")?;
+    eyre::ensure!(
+        status.success(),
+        "docker create failed (exit code: {status})"
+    );
+
+    let status = Command::new("docker")
+        .args([
+            "cp",
+            "starfish-extract:/usr/local/bin/starfish",
+            DOCKER_BINARY_OUTPUT,
+        ])
+        .status()
+        .wrap_err("Failed to copy binary from container")?;
+
+    // Cleanup container regardless of cp result.
+    let _ = Command::new("docker")
+        .args(["rm", "starfish-extract"])
+        .status();
+
+    eyre::ensure!(status.success(), "docker cp failed (exit code: {status})");
+
+    display::done();
+    Ok(PathBuf::from(DOCKER_BINARY_OUTPUT))
+}
+
 async fn run<C: ServerProviderClient>(
     settings: Settings,
     client: C,
@@ -223,6 +274,16 @@ async fn run<C: ServerProviderClient>(
                 .wrap_err("Failed to destroy testbed")?,
         },
 
+        // Build the starfish binary via Docker (run before deploying machines).
+        Operation::Build => {
+            docker_build_and_extract().wrap_err("Docker build failed")?;
+            display::config(
+                "Binary ready",
+                format!("Set pre_built_binary: \"{DOCKER_BINARY_OUTPUT}\" in settings or it will be auto-detected"),
+            );
+            return Ok(());
+        }
+
         // Run benchmarks.
         Operation::Benchmark {
             committee,
@@ -236,6 +297,15 @@ async fn run<C: ServerProviderClient>(
             skip_testbed_configuration,
             enable_tracing,
         } => {
+            // Auto-detect binary from a previous `build` command.
+            let mut settings = settings;
+            if settings.pre_built_binary.is_none()
+                && std::path::Path::new(DOCKER_BINARY_OUTPUT).exists()
+            {
+                display::config("Auto-detected pre-built binary", DOCKER_BINARY_OUTPUT);
+                settings.pre_built_binary = Some(DOCKER_BINARY_OUTPUT.into());
+            }
+
             // Create a new orchestrator to instruct the testbed.
             let username = testbed.username();
             let private_key_file = settings.ssh_private_key_file.clone();

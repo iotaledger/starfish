@@ -169,15 +169,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let basic_commands: Vec<String> = if self.settings.pre_built_binary.is_some() {
             // Pre-built binary mode: minimal runtime dependencies only.
+            // Directory at $HOME/{repo_name} to match protocol commands (cd {repo_name}).
             vec![
                 "sudo apt-get update".into(),
                 "sudo apt-get -y upgrade".into(),
                 "sudo apt-get -y autoremove".into(),
                 "sudo apt-get -y remove needrestart".into(),
                 "sudo apt-get -y install sysstat iftop libssl3 ca-certificates curl".into(),
-                format!("mkdir -p {working_dir}"),
-                // Create the directory structure expected by protocol commands.
-                format!("mkdir -p {working_dir}/{repo_name}/target/release"),
+                format!("mkdir -p $HOME/{repo_name}/target/release"),
                 // Create empty cargo env so `source $HOME/.cargo/env` in protocol
                 // commands is a harmless no-op.
                 "mkdir -p $HOME/.cargo && touch $HOME/.cargo/env".into(),
@@ -617,7 +616,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         set_of_parameters: Vec<BenchmarkParameters>,
     ) -> TestbedResult<()> {
         display::header("Preparing testbed");
-        display::config("Commit", format!("'{}'", &self.settings.repository.commit));
+        if let Some(binary) = &self.settings.pre_built_binary {
+            display::config("Pre-built binary", binary);
+        } else {
+            display::config("Commit", format!("'{}'", &self.settings.repository.commit));
+        }
         display::newline();
 
         // Cleanup the testbed (in case the previous run was not completed).
