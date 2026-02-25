@@ -188,7 +188,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 "sudo apt-get -y upgrade".into(),
                 "sudo apt-get -y autoremove".into(),
                 "sudo apt-get -y remove needrestart".into(),
-                "sudo apt-get -y install build-essential sysstat iftop libssl-dev clang libclang-dev libclang1 llvm".into(),
+                "sudo apt-get -y install build-essential \
+                sysstat iftop libssl-dev clang libclang-dev \
+                libclang1 llvm"
+                    .into(),
                 "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config".into(),
                 "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y".into(),
                 "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc".into(),
@@ -232,10 +235,15 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let repo_name = self.settings.repository_name();
 
         match &self.settings.pre_built_binary {
-            Some(source) if source.starts_with("http://") || source.starts_with("https://") => {
+            Some(source)
+                if source.starts_with("http://")
+                    || source.starts_with("https://") =>
+            {
                 // Download pre-built binary from URL on each remote machine.
                 let command = format!(
-                    "curl -fSL -o target/release/starfish '{source}' && chmod +x target/release/starfish"
+                    "curl -fSL -o target/release/starfish \
+                    '{source}' && \
+                    chmod +x target/release/starfish"
                 );
                 let id = "update";
                 let context = CommandContext::new()
@@ -263,7 +271,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     "git fetch origin",
                     &format!("git checkout -B {commit} origin/{commit}"),
                     "source $HOME/.cargo/env",
-                    "RUSTFLAGS=-Ctarget-cpu=native cargo build --release --workspace --exclude orchestrator",
+                    "RUSTFLAGS=-Ctarget-cpu=native \
+                    cargo build --release --workspace \
+                    --exclude orchestrator",
                 ]
                 .join(" && ");
 

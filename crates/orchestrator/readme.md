@@ -35,7 +35,8 @@ repository:
 
 ### Pre-built binary (optional)
 
-By default the orchestrator clones the repository and builds from source on each remote machine. To skip compilation, set `pre_built_binary` in `settings.yml`:
+By default the orchestrator clones the repository and builds from source on each
+remote machine. To skip compilation, set `pre_built_binary` in `settings.yml`:
 
 ```yml
 # Download from URL (each remote machine fetches via curl):
@@ -45,7 +46,8 @@ pre_built_binary: "https://github.com/iotaledger/starfish/releases/download/nigh
 pre_built_binary: "./target/release/starfish"
 ```
 
-Nightly builds are published automatically from `main` and can be used as the URL source. See [Releases](https://github.com/iotaledger/starfish/releases/tag/nightly).
+Nightly builds are published automatically from `main` and can be used as the
+URL source. See [Releases](https://github.com/iotaledger/starfish/releases/tag/nightly).
 
 ## Step 3. Create a testbed
 

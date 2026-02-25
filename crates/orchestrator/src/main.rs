@@ -277,10 +277,11 @@ async fn run<C: ServerProviderClient>(
         // Build the starfish binary via Docker (run before deploying machines).
         Operation::Build => {
             docker_build_and_extract().wrap_err("Docker build failed")?;
-            display::config(
-                "Binary ready",
-                format!("Set pre_built_binary: \"{DOCKER_BINARY_OUTPUT}\" in settings or it will be auto-detected"),
+            let msg = format!(
+                "Set pre_built_binary: \"{DOCKER_BINARY_OUTPUT}\" \
+                in settings or it will be auto-detected"
             );
+            display::config("Binary ready", msg);
             return Ok(());
         }
 

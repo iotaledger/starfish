@@ -25,14 +25,14 @@ while IFS= read -r file; do
 
     # Pattern 1: Mysten Labs derivative (3 lines)
     if [[ "$line1" == "// Copyright (c) Mysten Labs, Inc." ]] &&
-       [[ "$line2" =~ ^//\ Modifications\ Copyright\ \(c\)\ [0-9]{4}\ IOTA\ Stiftung$ ]] &&
-       [[ "$line3" == "// SPDX-License-Identifier: Apache-2.0" ]]; then
+        [[ "$line2" =~ ^//\ Modifications\ Copyright\ \(c\)\ [0-9]{4}\ IOTA\ Stiftung$ ]] &&
+        [[ "$line3" == "// SPDX-License-Identifier: Apache-2.0" ]]; then
         continue
     fi
 
     # Pattern 2: IOTA original (2 lines)
     if [[ "$line1" =~ ^//\ Copyright\ \(c\)\ [0-9]{4}\ IOTA\ Stiftung$ ]] &&
-       [[ "$line2" == "// SPDX-License-Identifier: Apache-2.0" ]]; then
+        [[ "$line2" == "// SPDX-License-Identifier: Apache-2.0" ]]; then
         continue
     fi
 
@@ -42,7 +42,7 @@ done < <(git ls-files '*.rs')
 
 if [[ $failed -ne 0 ]]; then
     echo ""
-    echo "$failed file(s) with missing or invalid license header (out of $checked checked)."
+    echo "$failed file(s) with missing or invalid license header."
     echo ""
     echo "Expected one of:"
     echo "  // Copyright (c) Mysten Labs, Inc."

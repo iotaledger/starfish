@@ -184,7 +184,9 @@ docker run --rm starfish local-benchmark \
     --duration-secs 60
 ```
 
-Pre-built Linux binaries are published as [nightly releases](https://github.com/iotaledger/starfish/releases/tag/nightly) (extracted from the Docker image).
+Pre-built Linux binaries are published as
+[nightly releases](https://github.com/iotaledger/starfish/releases/tag/nightly)
+(extracted from the Docker image).
 
 ### Distributed Testing using Orchestrator
 
