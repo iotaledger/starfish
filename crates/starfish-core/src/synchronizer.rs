@@ -183,17 +183,17 @@ impl UpdaterMissingAuthorities {
     }
 }
 
-pub struct DataRequestor<H: BlockHandler, C: CommitObserver> {
+pub struct DataRequester<H: BlockHandler, C: CommitObserver> {
     to_whom_authority_index: AuthorityIndex,
     /// The sender to the network.
     sender: Sender<NetworkMessage>,
     inner: Arc<NetworkSyncerInner<H, C>>,
     /// The handle of the task disseminating our own blocks.
-    data_requestor: Option<JoinHandle<Option<()>>>,
+    data_requester: Option<JoinHandle<Option<()>>>,
     parameters: SynchronizerParameters,
 }
 
-impl<H, C> DataRequestor<H, C>
+impl<H, C> DataRequester<H, C>
 where
     H: BlockHandler + 'static,
     C: CommitObserver + 'static,
@@ -208,14 +208,14 @@ where
             to_whom_authority_index,
             sender,
             inner,
-            data_requestor: None,
+            data_requester: None,
             parameters,
         }
     }
 
     pub async fn shutdown(mut self) {
         let mut waiters = Vec::with_capacity(1);
-        if let Some(handle) = self.data_requestor.take() {
+        if let Some(handle) = self.data_requester.take() {
             handle.abort();
             waiters.push(handle);
         }
@@ -223,7 +223,7 @@ where
     }
 
     pub async fn start(&mut self) {
-        if let Some(existing) = self.data_requestor.take() {
+        if let Some(existing) = self.data_requester.take() {
             existing.abort();
             existing.await.ok();
         }
@@ -233,7 +233,7 @@ where
             self.inner.clone(),
             self.parameters.clone(),
         ));
-        self.data_requestor = Some(handle);
+        self.data_requester = Some(handle);
     }
 
     async fn request_missing_data_blocks(

@@ -8,7 +8,7 @@ use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
-use crate::synchronizer::{DataRequestor, UpdaterMissingAuthorities};
+use crate::synchronizer::{DataRequester, UpdaterMissingAuthorities};
 use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
@@ -200,7 +200,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     metrics: Arc<Metrics>,
     filter_for_blocks: Arc<FilterForBlocks>,
     disseminator: BlockDisseminator<H, C>,
-    data_requestor: DataRequestor<H, C>,
+    data_requester: DataRequester<H, C>,
     updater_missing_authorities: UpdaterMissingAuthorities,
     authorities_with_missing_blocks_by_myself_from_peer: Arc<RwLock<Vec<Instant>>>,
     authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
@@ -240,7 +240,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             metrics.clone(),
             authorities_with_missing_blocks_by_peer_from_me.clone(),
         );
-        let data_requestor = DataRequestor::new(
+        let data_requester = DataRequester::new(
             peer_id,
             connection.sender.clone(),
             inner.clone(),
@@ -263,7 +263,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             metrics,
             filter_for_blocks,
             disseminator,
-            data_requestor,
+            data_requester,
             updater_missing_authorities,
             authorities_with_missing_blocks_by_myself_from_peer,
             authorities_with_missing_blocks_by_peer_from_me,
@@ -277,7 +277,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn start(&mut self) {
-        // Data requestor is needed in theory only for StarfishPull. However, we enable it for
+        // Data requester is needed in theory only for StarfishPull. However, we enable it for
         // Starfish as well because of the practical way we update the DAG known by other validators
         if matches!(
             self.consensus_protocol,
@@ -285,7 +285,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
         ) {
-            self.data_requestor.start().await;
+            self.data_requester.start().await;
         }
         // To save some bandwidth, we start the updater about authorities with missing blocks for StarfishS
         if matches!(self.consensus_protocol, ConsensusProtocol::StarfishS) {
@@ -692,7 +692,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
     async fn shutdown(self) {
         self.disseminator.shutdown().await;
-        self.data_requestor.shutdown().await;
+        self.data_requester.shutdown().await;
         self.updater_missing_authorities.shutdown().await;
     }
 }
