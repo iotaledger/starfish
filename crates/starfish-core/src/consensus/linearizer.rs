@@ -233,7 +233,7 @@ impl Linearizer {
                 .map(|x| {
                     self.votes
                         .get(x.reference())
-                        .expect("After commiting expect a quorum in starfish")
+                        .expect("After committing expect a quorum in starfish")
                         .clone()
                 })
                 .collect();

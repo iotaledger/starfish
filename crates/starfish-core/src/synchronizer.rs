@@ -610,7 +610,7 @@ where
                 }
                 // Send a chain of own blocks to the next leader, after having sent no own blocks the last K rounds
                 Some(ByzantineStrategy::ChainBomb) => {
-                    // send own chain of blocks after becomming the leader and only to the leader in the next round
+                    // send own chain of blocks after becoming the leader and only to the leader in the next round
                     if current_round as usize % committee_size == own_authority_index as usize {
                         let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                         // Only send blocks if the next leader is the intended recipient
