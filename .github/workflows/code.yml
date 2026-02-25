@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1.6.3
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           # do not check advisories on PRs to prevent sudden failure due to new announcement
           command: check bans licenses sources
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1.6.3
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
   test-coverage:
     name: Run all Rust tests and report coverage
@@ -125,10 +125,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - run: cargo install cargo-sort@1.0.9
 
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
       - name: Check formatting with rustfmt
-        run: >
-          cargo fmt --all -- --check
-          --config group_imports=StdExternalCrate,imports_granularity=Crate,imports_layout=HorizontalVertical
+        run: cargo +nightly fmt --all --check
       - name: Check sorting of dependencies
         run: cargo sort -w -c
       - name: Lint using clippy (w/o tests)

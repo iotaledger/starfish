@@ -29,16 +29,6 @@ jobs:
       - run: pip install editorconfig-checker=="2.7.3"
       - run: ec
 
-  rustfmt:
-    runs-on: ubuntu-latest
-    name: Check Rust formatting
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - run: cargo +nightly fmt --all --check
-
   typos:
     runs-on: ubuntu-latest
     name: Check spelling
@@ -59,7 +49,6 @@ jobs:
     needs:
       - pr-title
       - editorconfig
-      - rustfmt
       - typos
       - license-headers
     runs-on: ubuntu-latest
