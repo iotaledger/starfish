@@ -33,6 +33,20 @@ repository:
   - commit: main
 ```
 
+### Pre-built binary (optional)
+
+By default the orchestrator clones the repository and builds from source on each remote machine. To skip compilation, set `pre_built_binary` in `settings.yml`:
+
+```yml
+# Download from URL (each remote machine fetches via curl):
+pre_built_binary: "https://github.com/iotaledger/starfish/releases/download/nightly/starfish-linux-amd64"
+
+# Or SCP a local binary to all machines:
+pre_built_binary: "./target/release/starfish"
+```
+
+Nightly builds are published automatically from `main` and can be used as the URL source. See [Releases](https://github.com/iotaledger/starfish/releases/tag/nightly).
+
 ## Step 3. Create a testbed
 
 The `orchestrator` binary provides various functionalities for creating, starting, stopping, and destroying instances. You can use the following command to boot 2 instances per region (if the settings file specifies 10 regions, as shown in the example above, a total of 20 instances will be created):
@@ -60,7 +74,7 @@ cargo run --bin orchestrator -- benchmark --consensus starfish-pull --committee 
 ```
 
 In a network of 10 validators, each with a corresponding load generator, each load generator submits a fixed load of 100 tx/s or more precisely 10 tx every 100ms. Performance measurements are collected by regularly scraping the Prometheus metrics exposed by the load generators.
-There are 4 options for consensus protocols: `starfish`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
+There are 5 options for consensus protocols: `starfish`, `starfish-s`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
 
 To run with Byzantine validators:
 
@@ -69,7 +83,7 @@ cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --
 ```
 
 In a network of 4 validators, each with a corresponding load generator, each load generator submits a fixed load of 50 tx/s. One node is Byzantine and follows `Chain-Bomb` Byzantine strategies. The available options for Byzantine strategies are
-`chain-bomb`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `equivocating-two-chains`.
+`chain-bomb`, `equivocating-chains`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `random-drop`.
 
 In case of running in a single region AWS VPC, it's possible to use internal IP addresses to avoid unnecessary costs for data transfer between validators. This option can be enabled by adding the `--use-internal-ip-addresses` flag to the `benchmark` command. In addition,
 since the latencies within one region are very small, one can _mimic_ extra latencies matching some geo-distributed setup using the flag `--mimic-extra-latency`. So, the command could be

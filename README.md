@@ -7,7 +7,7 @@
 
 The code in this repository is a prototype of Starfish, a partially synchronous BFT protocol in which validators employ an uncertified DAG. The theoretical description of Starfish is available at https://eprint.iacr.org/2025/567.
 
-Two versions of Starfish are available in this repository:
+Three versions of Starfish are available in this repository:
 
 - **`starfish`**: Theory-aligned version
   - Higher bandwidth usage (up to 4x)
@@ -16,6 +16,10 @@ Two versions of Starfish are available in this repository:
 - **`starfish-pull`**: More scalable version
   - Lower bandwidth usage in happy case
   - Better handling of higher throughput and larger number of validators
+
+- **`starfish-s`**: Strong-vote optimistic variant
+  - Uses strong votes for optimistic transaction sequencing
+  - Lower latency when validators hold full leader payloads
 
 The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
 
@@ -41,6 +45,7 @@ and has to be less than 1/3 of the total number of validators. The Byzantine str
 - `equivocating-two-chains`: Byzantine validators create two equivocating blocks and disseminate them to half of network, not allowing to directly skip their proposals
 - `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
 - `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks and send the chain just before the respected validator is elected as a leader. Recommend to use 1 Byzantine validator as they are not coordinated
+- `random-drop`: Byzantine validators randomly drop outgoing messages with probability `1/n` where `n` is the committee size
 
 ## Implementation Details
 
@@ -127,15 +132,63 @@ cargo run --release --bin starfish -- local-benchmark \
         --duration-secs 100
 ```
 
-### Local dryrun with availability to look at metrics
+### Local dryrun with monitoring
+
+The dryrun script launches a Docker-based local testbed with Prometheus and Grafana:
 
 ```bash
 ./scripts/dryrun.sh
 ```
 
+Configuration via environment variables:
+
+```bash
+NUM_VALIDATORS=10 DESIRED_TPS=100 CONSENSUS=starfish-s \
+  NUM_BYZANTINE_NODES=2 BYZANTINE_STRATEGY=random-drop \
+  TEST_TIME=300 ./scripts/dryrun.sh
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
+| `DESIRED_TPS` | 100 | Target transactions per second |
+| `CONSENSUS` | starfish | Protocol: `starfish`, `starfish-s`, `starfish-pull`, `cordial-miners`, `mysticeti` |
+| `NUM_BYZANTINE_NODES` | 2 | Must be < `NUM_VALIDATORS / 3` |
+| `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
+| `TEST_TIME` | 300 | Duration in seconds |
+| `UNIFORM_LATENCY_MS` | _(unset)_ | Uniform network latency in ms; overrides AWS RTT table |
+| `CLEAN_MONITORING` | 0 | Set to 1 to wipe Prometheus/Grafana data between runs |
+| `REMOVE_VOLUMES` | 1 | Set to 0 to preserve RocksDB volumes between runs |
+
+Grafana is available at `http://localhost:3000` (admin/admin). Ctrl+C stops validators but preserves the monitoring stack.
+
+### Docker
+
+Build locally:
+
+```bash
+docker build -t starfish .
+```
+
+Or pull the latest image from GHCR:
+
+```bash
+docker pull ghcr.io/iotaledger/starfish:latest
+```
+
+Run a local benchmark via Docker:
+
+```bash
+docker run --rm starfish local-benchmark \
+    --committee-size 7 --load 10000 --consensus starfish \
+    --duration-secs 60
+```
+
+Pre-built Linux binaries are published as [nightly releases](https://github.com/iotaledger/starfish/releases/tag/nightly) (extracted from the Docker image).
+
 ### Distributed Testing using Orchestrator
 
-To run tests on a geo-distributed network, look at instructions in [crates/orchestrator/readme.md](`./crates/orchestrator/readme.md`).
+To run tests on a geo-distributed network, look at instructions in [crates/orchestrator/readme.md](./crates/orchestrator/readme.md).
 
 ## License
 
