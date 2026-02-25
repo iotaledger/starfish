@@ -22,7 +22,6 @@ hyper = "0.14.26"
 libc = "0.2.146"
 memmap2 = "0.7.0"
 
-minibytes = { path = "../third-party/minibytes", default_features = false, features = ["frommmap"] }
 parking_lot = "0.12.1"
 prettytable-rs = "0.10"
 prometheus = "0.13.3"
