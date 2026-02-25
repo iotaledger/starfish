@@ -3,7 +3,6 @@ members = [
   "crates/orchestrator",
   "crates/starfish",
   "crates/starfish-core",
-  "crates/third-party/minibytes",
 ]
 resolver = "2"
 

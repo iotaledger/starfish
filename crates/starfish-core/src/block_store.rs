@@ -12,7 +12,7 @@ use std::{
 
 use ahash::{AHashMap, AHashSet};
 
-use minibytes::Bytes;
+use bytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 

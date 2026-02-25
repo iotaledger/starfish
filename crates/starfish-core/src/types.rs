@@ -20,8 +20,8 @@ pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
 pub type Decoder = ReedSolomonDecoder;
 
+use bytes::Bytes;
 use eyre::{bail, ensure};
-use minibytes::Bytes;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
