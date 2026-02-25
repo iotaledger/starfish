@@ -45,8 +45,17 @@ fi
 # Signal Handling
 #------------------------------------------------------------------------------
 cleanup() {
-    echo -e "\n${RED}Terminating experiment...${RESET}"
-    docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+    echo -e "\n${RED}Terminating validators...${RESET}"
+    # Build validator service names list
+    local validators=""
+    for ((i=0; i<NUM_VALIDATORS; i++)); do
+        validators="$validators validator-$i"
+    done
+    # Stop all validators at once with short timeout, keep monitoring running
+    docker compose -f "$COMPOSE_FILE" stop -t 1 $validators 2>/dev/null || true
+    docker compose -f "$COMPOSE_FILE" rm -f $validators 2>/dev/null || true
+    echo -e "${GREEN}Monitoring still running at: ${CYAN}http://localhost:3000${RESET}"
+    echo -e "${YELLOW}To stop everything: docker compose -f $COMPOSE_FILE down${RESET}"
 }
 
 cleanup_interrupt() {
@@ -110,12 +119,16 @@ scrape_configs:
       - targets: ['node-exporter:9100']
   - job_name: 'starfish-metrics'
     static_configs:
-      - targets:
 EOH
   for ((i=0; i<NUM_VALIDATORS; i++)); do
     LAST_OCTET=$((${BASE_IP##*.} + i))
     METRICS_PORT=$((1500 + NUM_VALIDATORS + i))
-    echo "          - '172.28.0.$LAST_OCTET:$METRICS_PORT'"
+    VALIDATOR_NAME="validator-$((i + 1))"
+    cat <<EOT
+      - targets: ['172.28.0.$LAST_OCTET:$METRICS_PORT']
+        labels:
+          validator: '$VALIDATOR_NAME'
+EOT
   done
 } > "$PROMETHEUS_CONFIG"
 
@@ -263,7 +276,7 @@ docker compose -f "$COMPOSE_FILE" up -d || {
 #------------------------------------------------------------------------------
 # Monitoring Dashboard
 #------------------------------------------------------------------------------
-DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/mysticeti?from=now-5m&to=now&refresh=5s"
+DASHBOARD_URL="http://localhost:3000/d/bdd54ee7-84de-4018-8bb7-92af2defc041/consensus?from=now-5m&to=now&refresh=5s"
 echo -e "${CYAN}Grafana dashboard: ${GREEN}$DASHBOARD_URL${RESET}"
 echo -e "${CYAN}Credentials: admin/admin${RESET}"
 

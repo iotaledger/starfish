@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 
 use minibytes::Bytes;
 use parking_lot::RwLock;
@@ -72,6 +72,9 @@ pub struct BlockStore {
     pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
+    /// Version-gated cache of round block snapshots (outside the RwLock).
+    round_block_cache:
+        Arc<parking_lot::Mutex<AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBlock>]>)>>>,
 }
 
 struct BlockStoreInner {
@@ -95,6 +98,8 @@ struct BlockStoreInner {
     >,
     // per-authority highest committed round, used as dag eviction threshold
     last_committed_round: Vec<RoundNumber>,
+    // per-round version counter, incremented on each add_block to that round
+    round_version: AHashMap<RoundNumber, u64>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
@@ -132,6 +137,7 @@ impl BlockStore {
             last_own_block: None,
             dag: BTreeMap::new(),
             pending_not_available: Vec::new(),
+            round_version: AHashMap::new(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -210,6 +216,7 @@ impl BlockStore {
             metrics,
             consensus_protocol,
             committee_size: committee.len(),
+            round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
         };
         builder.build(rocks_store, block_store)
     }
@@ -325,6 +332,29 @@ impl BlockStore {
         Self::extract_storage_blocks(entries)
     }
 
+    /// Version-gated cached variant of `get_blocks_by_round`.
+    /// Returns `Arc<[T]>` to avoid repeated Vec allocations for the same round.
+    pub fn get_blocks_by_round_cached(
+        &self,
+        round: RoundNumber,
+    ) -> Arc<[Data<VerifiedStatementBlock>]> {
+        let inner = self.inner.read();
+        let version = inner.round_version.get(&round).copied().unwrap_or(0);
+        {
+            let cache = self.round_block_cache.lock();
+            if let Some((ver, blocks)) = cache.get(&round) {
+                if *ver == version {
+                    return blocks.clone();
+                }
+            }
+        }
+        let blocks: Arc<[_]> = Self::extract_storage_blocks(inner.get_blocks_by_round(round)).into();
+        self.round_block_cache
+            .lock()
+            .insert(round, (version, blocks.clone()));
+        blocks
+    }
+
     pub fn get_blocks_at_authority_round(
         &self,
         authority: AuthorityIndex,
@@ -431,6 +461,12 @@ impl BlockStore {
         self.inner.read().highest_round
     }
 
+    /// Version counter for a round, incremented each time a block is added at that round.
+    /// Used as cache invalidation key.
+    pub fn round_version(&self, round: RoundNumber) -> u64 {
+        self.inner.read().round_version.get(&round).copied().unwrap_or(0)
+    }
+
     pub fn lowest_round(&self) -> RoundNumber {
         self.inner.read().dag.keys().next().copied().unwrap_or(0)
     }
@@ -452,6 +488,9 @@ impl BlockStore {
         let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
 
         self.inner.write().evict_below_round();
+        self.round_block_cache
+            .lock()
+            .retain(|&r, _| r >= threshold_round);
     }
 
     pub fn get_own_transmission_blocks(
@@ -577,6 +616,25 @@ impl BlockStore {
         }
         parents.contains(earlier_block)
     }
+
+    /// Compute all block references reachable from `later_block` at `target_round`.
+    /// Single BFS traversal replaces N separate `linked()` calls for the same anchor.
+    pub fn reachable_at_round(
+        &self,
+        later_block: &Data<VerifiedStatementBlock>,
+        target_round: RoundNumber,
+    ) -> AHashSet<BlockReference> {
+        let mut frontier = AHashSet::from([later_block.clone()]);
+        for _ in (target_round..later_block.round()).rev() {
+            frontier = frontier
+                .iter()
+                .flat_map(|block| block.includes())
+                .filter_map(|r| self.get_storage_block(*r))
+                .filter(|b| b.round() >= target_round)
+                .collect();
+        }
+        frontier.iter().map(|b| *b.reference()).collect()
+    }
 }
 
 impl BlockStoreInner {
@@ -631,60 +689,33 @@ impl BlockStoreInner {
         authority: AuthorityIndex,
         round: RoundNumber,
     ) -> Vec<IndexEntry> {
-        if let Some(blocks) = self.index.get(&round) {
-            return blocks
-                .iter()
-                .filter_map(|((a, _), entry)| {
-                    if *a == authority {
-                        Some(entry.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-        }
-        // Round evicted — try RocksDB, filter by authority
-        self.rocks_store
-            .get_blocks_by_round(round)
-            .expect("RocksDB read failed")
-            .into_iter()
-            .filter(|sb| sb.author() == authority)
-            .map(|sb| {
-                let tb = sb.from_storage_to_transmission(self.authority);
-                (sb, Data::new(tb))
+        let Some(blocks) = self.index.get(&round) else {
+            return vec![];
+        };
+        blocks
+            .iter()
+            .filter_map(|((a, _), entry)| {
+                if *a == authority {
+                    Some(entry.clone())
+                } else {
+                    None
+                }
             })
             .collect()
     }
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<IndexEntry> {
-        if let Some(blocks) = self.index.get(&round) {
-            return blocks.values().cloned().collect();
-        }
-        // Round evicted — try RocksDB
-        self.rocks_store
-            .get_blocks_by_round(round)
-            .expect("RocksDB read failed")
-            .into_iter()
-            .map(|sb| {
-                let tb = sb.from_storage_to_transmission(self.authority);
-                (sb, Data::new(tb))
-            })
-            .collect()
+        let Some(blocks) = self.index.get(&round) else {
+            return vec![];
+        };
+        blocks.values().cloned().collect()
     }
 
     pub fn get_block(&self, reference: BlockReference) -> Option<IndexEntry> {
-        if let Some(round_entries) = self.index.get(&reference.round) {
-            if let Some(entry) = round_entries.get(&(reference.authority, reference.digest)) {
-                return Some(entry.clone());
-            }
-        }
-        // RocksDB fallback for evicted blocks
-        let storage_block = self
-            .rocks_store
-            .get_block(&reference)
-            .expect("RocksDB read failed")?;
-        let transmission_block = storage_block.from_storage_to_transmission(self.authority);
-        Some((storage_block, Data::new(transmission_block)))
+        let round_entries = self.index.get(&reference.round)?;
+        round_entries
+            .get(&(reference.authority, reference.digest))
+            .cloned()
     }
 
     pub fn evict_below_round(&mut self) {
@@ -707,6 +738,7 @@ impl BlockStoreInner {
                 digest: BlockDigest::default(),
             };
             self.data_availability = self.data_availability.split_off(&split_ref);
+            self.round_version.retain(|&r, _| r >= dag_threshold);
         }
     }
 
@@ -725,6 +757,7 @@ impl BlockStoreInner {
         let map = self.index.entry(reference.round()).or_default();
         map.insert(reference.author_digest(), blocks.clone());
 
+        *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_dag(*reference, blocks.0.includes().clone());
         self.update_data_availability(&blocks.0);
     }

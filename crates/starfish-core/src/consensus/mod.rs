@@ -2,9 +2,11 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use ahash::{AHashMap, AHashSet};
+
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
-use crate::types::{format_authority_round, AuthorityIndex, RoundNumber};
+use crate::types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber};
 use std::fmt::Display;
 
 pub mod base_committer;
@@ -14,6 +16,15 @@ pub mod universal_committer;
 /// Default wave length for all committers. A longer wave_length increases the chance of committing the leader
 /// under asynchrony at the cost of latency in the common case.
 pub const WAVE_LENGTH: RoundNumber = 3;
+
+/// Cached per-leader voter information, built from scanning voting-round blocks.
+#[derive(Clone)]
+pub struct VoterInfo {
+    /// Set of (leader_block_ref, voter_block_ref) pairs at the voting round.
+    pub voters: AHashSet<(BlockReference, BlockReference)>,
+    /// strong_vote value for each voter block (populated for StarfishS, empty otherwise).
+    pub voter_strong_votes: AHashMap<BlockReference, Option<bool>>,
+}
 
 /// Metastate for Starfish-S committed leader slots.
 /// Determines the sequencing action for committed leaders.

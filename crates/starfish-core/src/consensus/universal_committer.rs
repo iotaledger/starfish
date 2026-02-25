@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{base_committer::BaseCommitter, CommitMetastate, LeaderStatus, WAVE_LENGTH};
+use super::{base_committer::BaseCommitter, CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH};
 use crate::block_store::ConsensusProtocol;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     metrics::Metrics,
     types::{format_authority_round, AuthorityIndex, BlockReference, RoundNumber},
 };
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use std::{collections::VecDeque, sync::Arc};
 
 /// A universal committer uses a collection of committers to commit a sequence of leaders.
@@ -23,6 +23,11 @@ pub struct UniversalCommitter {
     block_store: BlockStore,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
+    /// Cache of already-final leaders to avoid redundant recomputation.
+    decided: AHashMap<(AuthorityIndex, RoundNumber), LeaderStatus>,
+    /// Version-gated cache of voter info per (leader, leader_round).
+    /// Key: (leader, leader_round), Value: (voting_round_version, VoterInfo).
+    voters_cache: AHashMap<(AuthorityIndex, RoundNumber), (u64, VoterInfo)>,
 }
 
 impl UniversalCommitter {
@@ -48,30 +53,60 @@ impl UniversalCommitter {
                     continue;
                 };
 
+                // Use cached finalized decision if available.
+                if let Some(cached) = self.decided.get(&(leader, round)).cloned() {
+                    if cached.is_final() {
+                        leaders.push_front(cached);
+                        continue;
+                    }
+                    self.decided.remove(&(leader, round));
+                }
+
                 tracing::debug!(
                     "Trying to decide {} with {committer}",
                     format_authority_round(leader, round)
                 );
-                let mut voters_for_leaders: AHashSet<(BlockReference, BlockReference)> =
-                    AHashSet::new();
-                // this logic is only correct for wave of length 3
+                // Build or retrieve cached voter info for this (leader, round).
                 let voting_round = round + 1 as RoundNumber;
-                let potential_voting_blocks = self.block_store.get_blocks_by_round(voting_round);
-                for potential_voting_block in potential_voting_blocks {
-                    for reference in potential_voting_block.includes() {
-                        if reference.round == round && reference.authority == leader {
-                            voters_for_leaders
-                                .insert((*reference, *potential_voting_block.reference()));
-                            break;
+                let voting_round_version = self.block_store.round_version(voting_round);
+                let needs_rebuild = match self.voters_cache.get(&(leader, round)) {
+                    Some((ver, _)) if *ver == voting_round_version => false,
+                    _ => true,
+                };
+                if needs_rebuild {
+                    let potential_voting_blocks =
+                        self.block_store.get_blocks_by_round_cached(voting_round);
+                    let mut voters = AHashSet::new();
+                    let mut voter_strong_votes = AHashMap::new();
+                    for vb in potential_voting_blocks.iter() {
+                        let vb_ref = *vb.reference();
+                        for reference in vb.includes() {
+                            if reference.round == round && reference.authority == leader {
+                                voters.insert((*reference, vb_ref));
+                                voter_strong_votes.insert(vb_ref, vb.strong_vote());
+                                break;
+                            }
                         }
                     }
+                    self.voters_cache.insert(
+                        (leader, round),
+                        (
+                            voting_round_version,
+                            VoterInfo {
+                                voters,
+                                voter_strong_votes,
+                            },
+                        ),
+                    );
                 }
+                let voter_info = &self.voters_cache[&(leader, round)].1;
+
                 // Try to directly decide the leader.
                 let timer_direct_decide = self
                     .metrics
                     .utilization_timer
                     .utilization_timer("Committer::direct_decide");
-                let mut status = committer.try_direct_decide(leader, round, &voters_for_leaders);
+                let mut status = committer.try_direct_decide(leader, round, voter_info);
                 drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
@@ -86,7 +121,7 @@ impl UniversalCommitter {
                         leader,
                         round,
                         leaders.iter(),
-                        &voters_for_leaders,
+                        voter_info,
                     );
                     if status.is_decided() {
                         indirect_decided.insert((leader, round));
@@ -94,6 +129,12 @@ impl UniversalCommitter {
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
                 drop(timer_indirect_decide);
+
+                if status.is_final() {
+                    self.decided.insert((leader, round), status.clone());
+                } else {
+                    self.decided.remove(&(leader, round));
+                }
 
                 leaders.push_front(status);
             }
@@ -127,6 +168,13 @@ impl UniversalCommitter {
             .iter()
             .filter_map(|committer| committer.elect_leader(round))
             .collect()
+    }
+
+    /// Evict cached decisions below the given threshold round.
+    pub fn cleanup(&mut self, threshold_round: RoundNumber) {
+        self.decided.retain(|&(_, round), _| round >= threshold_round);
+        self.voters_cache
+            .retain(|&(_, round), _| round >= threshold_round);
     }
 
     /// Update metrics.
@@ -202,6 +250,8 @@ impl UniversalCommitterBuilder {
             block_store: self.block_store,
             committers,
             metrics: self.metrics,
+            decided: AHashMap::new(),
+            voters_cache: AHashMap::new(),
         }
     }
 }

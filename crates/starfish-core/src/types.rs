@@ -59,8 +59,8 @@ pub enum InternalEpochStatus {
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct BlockReference {
-    pub authority: AuthorityIndex,
     pub round: RoundNumber,
+    pub authority: AuthorityIndex,
     pub digest: BlockDigest,
 }
 

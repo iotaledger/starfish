@@ -604,12 +604,13 @@ impl<H: BlockHandler> Core<H> {
         sequence
     }
 
-    pub fn cleanup(&self) -> RoundNumber {
+    pub fn cleanup(&mut self) -> RoundNumber {
         let threshold = self
             .last_commit_leader
             .round()
             .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
         self.block_store.cleanup(threshold);
+        self.committer.cleanup(threshold);
         threshold
     }
 

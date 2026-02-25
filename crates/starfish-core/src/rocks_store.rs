@@ -3,11 +3,11 @@
 
 use crate::block_store::CommitData;
 use crate::data::Data;
+use crate::crypto::BlockDigest;
 use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
 use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamilyDescriptor, Options, ReadOptions, WriteOptions, DB};
-use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
 use tokio::sync::watch;
@@ -309,34 +309,37 @@ impl RocksStore {
             .cf_handle(CF_BLOCKS)
             .ok_or_else(|| io::Error::other("Column family not found"))?;
 
-        // Collect all matching blocks from DB
+        // Seek directly to the target round (keys sorted by round after field reorder)
         {
+            let seek_key = serialize(&BlockReference {
+                round,
+                authority: 0,
+                digest: BlockDigest::default(),
+            })
+            .map_err(io::Error::other)?;
+
             let mut iter = self
                 .db
                 .raw_iterator_cf_opt(&cf_blocks, Self::get_read_opts());
-            iter.seek_to_first();
+            iter.seek(&seek_key);
 
             while iter.valid() {
                 let key_bytes = iter
                     .key()
-                    .ok_or_else(|| io::Error::other("Invalid key"))?
-                    .to_vec();
+                    .ok_or_else(|| io::Error::other("Invalid key"))?;
                 let value = iter
                     .value()
-                    .ok_or_else(|| io::Error::other("Invalid value"))?
-                    .to_vec();
+                    .ok_or_else(|| io::Error::other("Invalid value"))?;
 
                 let reference: BlockReference =
-                    deserialize(&key_bytes).map_err(io::Error::other)?;
+                    deserialize(key_bytes).map_err(io::Error::other)?;
 
-                match reference.round.cmp(&round) {
-                    Ordering::Equal => {
-                        let block = Data::from_bytes(value.into()).map_err(io::Error::other)?;
-                        blocks.push(block);
-                    }
-                    Ordering::Greater => break,
-                    Ordering::Less => {}
+                if reference.round > round {
+                    break;
                 }
+
+                let block = Data::from_bytes(value.to_vec().into()).map_err(io::Error::other)?;
+                blocks.push(block);
 
                 iter.next();
             }
