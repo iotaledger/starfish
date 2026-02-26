@@ -324,6 +324,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn handle_subscribe(&mut self, round: RoundNumber) {
+        self.inner
+            .dag_state
+            .reset_peer_known_by_after_round(self.peer_id, round);
         if self.inner.dag_state.byzantine_strategy.is_some() {
             let round = 0;
             self.disseminator.disseminate_own_blocks(round).await;

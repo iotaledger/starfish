@@ -1563,14 +1563,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_block_refs{v=\"p50\"}",
+          "expr": "rate(proposed_block_refs_sum[1m]) / rate(proposed_block_refs_count[1m])",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Proposed block refs p50",
+      "title": "Block references per block",
       "type": "timeseries"
     },
     {
@@ -1660,14 +1660,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_block_acks{v=\"p50\"}",
+          "expr": "rate(proposed_block_acks_sum[1m]) / rate(proposed_block_acks_count[1m])",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Proposed block acks p50",
+      "title": "Acknowledgment references per block",
       "type": "timeseries"
     },
     {

@@ -444,6 +444,15 @@ impl DagState {
         self.inner.read().block_exists(reference)
     }
 
+    /// A peer reports it has only synced up to `round`.
+    /// Clear its known-by bit for newer blocks so they become eligible for
+    /// re-dissemination.
+    pub fn reset_peer_known_by_after_round(&self, peer: AuthorityIndex, round: RoundNumber) {
+        self.inner
+            .write()
+            .reset_peer_known_by_after_round(peer, round);
+    }
+
     pub fn is_data_available(&self, reference: &BlockReference) -> bool {
         self.inner.read().is_data_available(reference)
     }
@@ -793,6 +802,15 @@ impl DagStateInner {
             .entry(r.round)
             .or_default()
             .insert((r.authority, r.digest), val);
+    }
+
+    fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
+        let bit = !(1u128 << peer);
+        for (_, entries) in self.dag.range_mut((round.saturating_add(1))..) {
+            for (_, (_, known_by)) in entries.iter_mut() {
+                *known_by &= bit;
+            }
+        }
     }
 
     /// Insert a block into the DAG and propagate "known-by" bits along the
