@@ -87,8 +87,6 @@ pub enum NetworkMessage {
     /// Request a tx data for a few specific block references (only shards are
     /// sent).
     MissingTxDataRequest(Vec<BlockReference>),
-    /// Send authorities with missing blocks
-    AuthoritiesWithMissingBlocks(Vec<AuthorityIndex>),
 }
 
 pub struct Network {
