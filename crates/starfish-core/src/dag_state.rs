@@ -315,14 +315,26 @@ impl DagState {
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        self.inner.read().get_block(reference).map(|(s, _)| s)
+        if let Some((storage, _)) = self.inner.read().get_block(reference) {
+            return Some(storage);
+        }
+        self.rocks_store
+            .get_block(&reference)
+            .expect("RocksDB read failed")
     }
 
     pub fn get_transmission_block(
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        self.inner.read().get_block(reference).map(|(_, t)| t)
+        if let Some((_, transmission)) = self.inner.read().get_block(reference) {
+            return Some(transmission);
+        }
+        let own_id = self.inner.read().authority;
+        self.rocks_store
+            .get_block(&reference)
+            .expect("RocksDB read failed")
+            .map(|storage| Data::new(storage.from_storage_to_transmission(own_id)))
     }
 
     pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {

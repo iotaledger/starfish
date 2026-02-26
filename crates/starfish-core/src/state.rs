@@ -23,6 +23,7 @@ pub struct RecoveredState {
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: AHashSet<BlockReference>,
+    pub committed_leaders_count: usize,
 }
 
 #[derive(Default)]
@@ -31,6 +32,7 @@ pub struct RecoveredStateBuilder {
     unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: AHashSet<BlockReference>,
+    committed_leaders_count: usize,
 }
 
 impl RecoveredStateBuilder {
@@ -63,6 +65,7 @@ impl RecoveredStateBuilder {
         {
             self.last_committed_leader = Some(leader);
         }
+        self.committed_leaders_count += 1;
         self.committed_blocks.extend(commit_data.sub_dag);
     }
 
@@ -73,6 +76,7 @@ impl RecoveredStateBuilder {
             unprocessed_blocks: self.unprocessed_blocks,
             last_committed_leader: self.last_committed_leader,
             committed_blocks: self.committed_blocks,
+            committed_leaders_count: self.committed_leaders_count,
         }
     }
 }

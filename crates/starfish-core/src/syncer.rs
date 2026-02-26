@@ -36,7 +36,11 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
-    fn recover_committed(&mut self, committed: AHashSet<BlockReference>);
+    fn recover_committed(
+        &mut self,
+        committed: AHashSet<BlockReference>,
+        committed_leaders_count: usize,
+    );
 
     fn cleanup(&mut self, threshold_round: RoundNumber);
 }

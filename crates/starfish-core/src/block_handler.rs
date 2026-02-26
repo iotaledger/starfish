@@ -331,10 +331,14 @@ impl CommitObserver for RealCommitHandler {
         resulted_committed
     }
 
-    fn recover_committed(&mut self, committed: AHashSet<BlockReference>) {
+    fn recover_committed(
+        &mut self,
+        committed: AHashSet<BlockReference>,
+        committed_leaders_count: usize,
+    ) {
         assert!(self.commit_interpreter.committed.is_empty());
-        self.committed_count = committed.len();
-        self.sequenced_commit_count = committed.len();
+        self.committed_count = committed_leaders_count;
+        self.sequenced_commit_count = committed_leaders_count;
         self.metrics.commit_index.set(self.committed_count as i64);
         self.commit_interpreter.committed_slots =
             committed.iter().map(|r| (r.round, r.authority)).collect();

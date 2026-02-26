@@ -600,7 +600,7 @@ mod smoke_tests {
 
         let running2: Vec<_> = all_metrics_addrs
             .iter()
-            .filter(|(i, _)| *i != node_b)
+            .filter(|(i, _)| *i != node_b && *i != node_a)
             .cloned()
             .collect();
         let phase3a =
