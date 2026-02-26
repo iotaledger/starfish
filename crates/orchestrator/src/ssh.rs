@@ -471,6 +471,30 @@ impl SshConnection {
         Err(error.unwrap())
     }
 
+    /// Download a file from the remote machine as raw bytes through scp.
+    pub fn download_bytes<P: AsRef<Path>>(&self, path: P) -> SshResult<Vec<u8>> {
+        let mut error = None;
+        for _ in 0..self.retries + 1 {
+            let (mut channel, _stats) = match self.session.scp_recv(path.as_ref()) {
+                Ok(x) => x,
+                Err(e) => {
+                    error = Some(self.make_session_error(e));
+                    continue;
+                }
+            };
+
+            let mut content = Vec::new();
+            match channel
+                .read_to_end(&mut content)
+                .map_err(|e| self.make_connection_error(e))
+            {
+                Ok(..) => return Ok(content),
+                Err(e) => error = Some(e),
+            }
+        }
+        Err(error.unwrap())
+    }
+
     /// Upload bytes to a remote file through scp.
     pub fn upload_bytes<P: AsRef<Path>>(&self, data: &[u8], remote_path: P) -> SshResult<()> {
         let mut error = None;

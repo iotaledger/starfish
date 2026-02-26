@@ -170,6 +170,25 @@ impl<C: ServerProviderClient> Testbed<C> {
         Ok(())
     }
 
+    /// Destroy a single instance and refresh the instance list.
+    pub async fn destroy_instance(&mut self, instance: Instance) -> TestbedResult<()> {
+        self.client.delete_instance(instance).await?;
+        self.instances = self.client.list_instances().await?;
+        Ok(())
+    }
+
+    /// Destroy the given instances, keeping others alive.
+    pub async fn destroy_instances(&mut self, instances: Vec<Instance>) -> TestbedResult<()> {
+        try_join_all(
+            instances
+                .into_iter()
+                .map(|instance| self.client.delete_instance(instance)),
+        )
+        .await?;
+        self.instances = self.client.list_instances().await?;
+        Ok(())
+    }
+
     /// Start the specified number of instances in each region. Returns an error
     /// if there are not enough available instances.
     pub async fn start(&mut self, quantity: usize) -> TestbedResult<()> {
