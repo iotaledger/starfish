@@ -55,6 +55,10 @@ pub struct Metrics {
     pub block_store_entries: IntCounter,
     pub block_store_cleanup_util: IntCounter,
 
+    pub dag_highest_round: IntGauge,
+    pub dag_lowest_round: IntGauge,
+    pub dag_blocks_in_memory: IntGauge,
+
     pub wal_mappings: IntGauge,
 
     pub core_lock_util: IntCounter,
@@ -323,6 +327,25 @@ impl Metrics {
             block_store_cleanup_util: register_int_counter_with_registry!(
                 "block_store_cleanup_util",
                 "block_store_cleanup_util",
+                registry,
+            )
+            .unwrap(),
+
+            dag_highest_round: register_int_gauge_with_registry!(
+                "dag_highest_round",
+                "Highest round in the in-memory DAG",
+                registry,
+            )
+            .unwrap(),
+            dag_lowest_round: register_int_gauge_with_registry!(
+                "dag_lowest_round",
+                "Lowest round retained in the in-memory DAG",
+                registry,
+            )
+            .unwrap(),
+            dag_blocks_in_memory: register_int_gauge_with_registry!(
+                "dag_blocks_in_memory",
+                "Number of block entries in the in-memory DAG",
                 registry,
             )
             .unwrap(),

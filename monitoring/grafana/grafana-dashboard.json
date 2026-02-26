@@ -1678,6 +1678,310 @@
         "x": 0,
         "y": 61
       },
+      "id": 206,
+      "panels": [],
+      "title": "DAG State",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 62
+      },
+      "id": 207,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "dag_highest_round",
+          "legendFormat": "{{validator}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "DAG highest round",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 62
+      },
+      "id": 208,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "dag_lowest_round",
+          "legendFormat": "{{validator}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "DAG lowest round",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 62
+      },
+      "id": 209,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "dag_blocks_in_memory",
+          "legendFormat": "{{validator}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "DAG blocks in memory",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
       "id": 202,
       "panels": [],
       "title": "Block Processing & Shard Reconstruction",
@@ -1747,7 +2051,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 71
       },
       "id": 14,
       "options": {
@@ -1844,7 +2148,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 71
       },
       "id": 13,
       "options": {
@@ -1941,7 +2245,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 70
+        "y": 79
       },
       "id": 16,
       "options": {
@@ -2034,7 +2338,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 70
+        "y": 79
       },
       "id": 25,
       "options": {
@@ -2138,7 +2442,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 87
       },
       "id": 26,
       "options": {
@@ -2182,7 +2486,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 86
+        "y": 95
       },
       "id": 203,
       "panels": [],
@@ -2253,7 +2557,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 87
+        "y": 96
       },
       "id": 12,
       "options": {
@@ -2354,7 +2658,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 87
+        "y": 96
       },
       "id": 5,
       "options": {
@@ -2455,7 +2759,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 104
       },
       "id": 9,
       "options": {
@@ -2535,7 +2839,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 112
       },
       "id": 21,
       "options": {
@@ -2625,7 +2929,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 112
       },
       "id": 22,
       "options": {

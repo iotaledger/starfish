@@ -513,6 +513,21 @@ impl DagState {
         self.round_block_cache
             .lock()
             .retain(|&r, _| r >= threshold_round);
+
+        let inner = self.inner.read();
+        self.metrics
+            .dag_highest_round
+            .set(inner.highest_round as i64);
+        self.metrics
+            .dag_lowest_round
+            .set(inner.dag.keys().next().copied().unwrap_or(0) as i64);
+        self.metrics.dag_blocks_in_memory.set(
+            inner
+                .index
+                .values()
+                .map(|m| m.len() as i64)
+                .sum::<i64>(),
+        );
     }
 
     pub fn get_own_transmission_blocks(

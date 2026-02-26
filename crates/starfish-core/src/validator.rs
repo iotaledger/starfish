@@ -590,7 +590,7 @@ mod smoke_tests {
         validators[node_a] = Some(v);
 
         let node_a_addr = &[all_metrics_addrs[node_a]];
-        await_min_commit_index(node_a_addr, phase1_min, Duration::from_secs(60)).await;
+        await_min_commit_index(node_a_addr, phase2a_min, Duration::from_secs(60)).await;
 
         // ─── Phase 3: Stop node 1, wait 10s, restart, wait 10s ───
         let node_b = 1usize;
@@ -600,7 +600,7 @@ mod smoke_tests {
 
         let running2: Vec<_> = all_metrics_addrs
             .iter()
-            .filter(|(i, _)| *i != node_b && *i != node_a)
+            .filter(|(i, _)| *i != node_b)
             .cloned()
             .collect();
         let phase3a =
