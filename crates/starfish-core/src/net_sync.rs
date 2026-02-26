@@ -8,7 +8,7 @@ use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
 use crate::runtime::sleep;
-use crate::synchronizer::{DataRequester, UpdaterMissingAuthorities};
+use crate::synchronizer::DataRequester;
 use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
@@ -23,9 +23,7 @@ use crate::{
     synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
     types::{AuthorityIndex, format_authority_index},
 };
-use ahash::AHashSet;
 use futures::future::join_all;
-use parking_lot::RwLock;
 use reed_solomon_simd::ReedSolomonEncoder;
 use std::collections::VecDeque;
 use std::{
@@ -36,7 +34,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio::time::Instant;
 use tokio::{
     select,
     sync::{Notify, mpsc, oneshot},
@@ -203,9 +200,6 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     filter_for_blocks: Arc<FilterForBlocks>,
     disseminator: BlockDisseminator<H, C>,
     data_requester: DataRequester<H, C>,
-    updater_missing_authorities: UpdaterMissingAuthorities,
-    authorities_with_missing_blocks_by_myself_from_peer: Arc<RwLock<Vec<Instant>>>,
-    authorities_with_missing_blocks_by_peer_from_me: Arc<RwLock<Vec<Instant>>>,
     encoder: ReedSolomonEncoder,
     peer_id: AuthorityIndex,
     peer_usize: usize,
@@ -224,11 +218,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
-        let now = Instant::now();
-        let authorities_with_missing_blocks_by_myself_from_peer =
-            Arc::new(RwLock::new(vec![now; committee_size]));
-        let authorities_with_missing_blocks_by_peer_from_me =
-            Arc::new(RwLock::new(vec![now; committee_size]));
         let synchronizer_parameters =
             SynchronizerParameters::new(committee_size, consensus_protocol);
         let peer_id = connection.peer_id as AuthorityIndex;
@@ -240,19 +229,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             inner.clone(),
             synchronizer_parameters.clone(),
             metrics.clone(),
-            authorities_with_missing_blocks_by_peer_from_me.clone(),
         );
         let data_requester = DataRequester::new(
             peer_id,
             connection.sender.clone(),
             inner.clone(),
-            synchronizer_parameters.clone(),
-        );
-        let updater_missing_authorities = UpdaterMissingAuthorities::new(
-            peer_id,
-            connection.sender.clone(),
             synchronizer_parameters,
-            authorities_with_missing_blocks_by_myself_from_peer.clone(),
         );
 
         let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
@@ -266,9 +248,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             filter_for_blocks,
             disseminator,
             data_requester,
-            updater_missing_authorities,
-            authorities_with_missing_blocks_by_myself_from_peer,
-            authorities_with_missing_blocks_by_peer_from_me,
             encoder,
             peer_id,
             peer_usize: peer_id as usize,
@@ -290,11 +269,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         ) {
             self.data_requester.start().await;
         }
-        // To save some bandwidth, we start the updater about
-        // authorities with missing blocks for StarfishS
-        if matches!(self.consensus_protocol, ConsensusProtocol::StarfishS) {
-            self.updater_missing_authorities.start().await;
-        }
     }
 
     /// Dispatch a single message. Returns `true` to continue, `false` to break
@@ -309,9 +283,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::MissingHistoryRequest(block_ref) => {
                 self.handle_missing_history_request(block_ref).await;
-            }
-            NetworkMessage::AuthoritiesWithMissingBlocks(authorities) => {
-                self.handle_authorities_missing_blocks(authorities).await;
             }
             NetworkMessage::MissingParentsRequest(refs) => {
                 return self.handle_missing_parents_request(refs).await;
@@ -365,8 +336,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 blocks_without_statements.push(block);
             }
         }
-        let mut authorities_to_be_updated: AHashSet<AuthorityIndex> = AHashSet::new();
-
         // First process blocks without statements (causal history shards)
         if matches!(
             self.consensus_protocol,
@@ -374,15 +343,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
         ) {
-            self.process_blocks_without_statements(
-                blocks_without_statements,
-                &mut authorities_to_be_updated,
-            )
+            self.process_blocks_without_statements(blocks_without_statements)
             .await;
         }
 
         // Then process blocks with statements
-        self.process_blocks_with_statements(blocks_with_statements, authorities_to_be_updated)
+        self.process_blocks_with_statements(blocks_with_statements)
             .await;
 
         drop(timer);
@@ -391,7 +357,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     async fn process_blocks_without_statements(
         &mut self,
         blocks: Vec<Data<VerifiedStatementBlock>>,
-        authorities_to_be_updated: &mut AHashSet<AuthorityIndex>,
     ) {
         use crate::shard_reconstructor::ShardMessage;
 
@@ -474,18 +439,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             self.metrics
                 .used_additional_blocks_total
                 .inc_by(processed_additional_blocks_without_statements.len() as u64);
-            authorities_to_be_updated.extend(
-                processed_additional_blocks_without_statements
-                    .iter()
-                    .map(|b| b.authority),
-            );
         }
     }
 
     async fn process_blocks_with_statements(
         &mut self,
         blocks: Vec<Data<VerifiedStatementBlock>>,
-        mut authorities_to_be_updated: AHashSet<AuthorityIndex>,
     ) {
         let mut verified_data_blocks = Vec::new();
         for data_block in blocks {
@@ -552,7 +511,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             let (pending_block_references, missing_parents, _processed_additional_blocks) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
             if !missing_parents.is_empty() {
-                authorities_to_be_updated.extend(missing_parents.iter().map(|b| b.authority));
                 tracing::debug!(
                     "Missing parents when processing block from peer {:?}: {:?}",
                     self.peer,
@@ -590,24 +548,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
                 ConsensusProtocol::CordialMiners => {}
-                ConsensusProtocol::Starfish => {}
-                ConsensusProtocol::StarfishS => {
-                    if !authorities_to_be_updated.is_empty() {
-                        let now = Instant::now();
-                        let mut authorities_with_missing_blocks = self
-                            .authorities_with_missing_blocks_by_myself_from_peer
-                            .write();
-                        tracing::debug!(
-                            "Authorities updates for peer {:?} are {:?}",
-                            self.peer,
-                            authorities_to_be_updated
-                        );
-                        for authority in authorities_to_be_updated {
-                            authorities_with_missing_blocks[authority as usize] = now;
-                        }
-                        drop(authorities_with_missing_blocks);
-                    }
-                }
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {}
             }
         }
     }
@@ -624,22 +565,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .push_block_history_with_shards(block_reference)
                     .await;
             }
-        }
-    }
-
-    async fn handle_authorities_missing_blocks(&self, authorities: Vec<AuthorityIndex>) {
-        let now = Instant::now();
-        tracing::debug!(
-            "Received authorities with missing blocks {:?} from peer {:?}",
-            authorities
-                .iter()
-                .map(|a| format_authority_index(*a))
-                .collect::<Vec<_>>(),
-            self.peer
-        );
-        let mut guard = self.authorities_with_missing_blocks_by_peer_from_me.write();
-        for authority in authorities {
-            guard[authority as usize] = now;
         }
     }
 
@@ -699,7 +624,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     async fn shutdown(self) {
         self.disseminator.shutdown().await;
         self.data_requester.shutdown().await;
-        self.updater_missing_authorities.shutdown().await;
     }
 }
 
@@ -907,9 +831,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
-        let last_seen = inner
-            .dag_state
-            .last_seen_by_authority(connection.peer_id as AuthorityIndex);
+        let last_seen = inner.dag_state.min_last_seen_round();
         connection
             .sender
             .send(NetworkMessage::SubscribeBroadcastRequest(last_seen))
