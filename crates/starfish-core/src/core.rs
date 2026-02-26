@@ -59,6 +59,7 @@ pub struct Core<H: BlockHandler> {
     signer: Signer,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
+    recovered_committed_leaders_count: Option<usize>,
     epoch_manager: EpochManager,
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
@@ -93,6 +94,7 @@ impl<H: BlockHandler> Core<H> {
             unprocessed_blocks,
             last_committed_leader,
             committed_blocks,
+            committed_leaders_count,
         } = recovered;
 
         let mut threshold_clock = ThresholdClockAggregator::new(0);
@@ -189,6 +191,7 @@ impl<H: BlockHandler> Core<H> {
             options,
             signer: private_config.keypair,
             recovered_committed_blocks: Some(committed_blocks),
+            recovered_committed_leaders_count: Some(committed_leaders_count),
             epoch_manager,
             rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
@@ -497,11 +500,7 @@ impl<H: BlockHandler> Core<H> {
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
-        for ack_ref in leader_block
-            .acknowledgment_references()
-            .iter()
-            .chain(leader_block.block_references().iter())
-        {
+        for ack_ref in leader_block.acknowledgment_references() {
             if !self.dag_state.is_data_available(ack_ref) {
                 return Some(false);
             }
@@ -536,20 +535,12 @@ impl<H: BlockHandler> Core<H> {
             .previous_round_refs
             .observe(prev_round_ref_count as f64);
 
-        // Compress: remove ack refs already present in block_references
-        let block_ref_set: AHashSet<BlockReference> = block_references.iter().copied().collect();
-        let compressed_acks: Vec<BlockReference> = acknowledgment_references
-            .iter()
-            .filter(|r| !block_ref_set.contains(r))
-            .copied()
-            .collect();
-
         self.metrics
             .proposed_block_refs
             .observe(block_references.len() as f64);
         self.metrics
             .proposed_block_acks
-            .observe(compressed_acks.len() as f64);
+            .observe(acknowledgment_references.len() as f64);
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
@@ -557,7 +548,7 @@ impl<H: BlockHandler> Core<H> {
             self.authority,
             clock_round,
             block_references,
-            compressed_acks,
+            acknowledgment_references.to_vec(),
             time_ns,
             self.epoch_changing(),
             &self.signer,
@@ -772,10 +763,16 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
 
-    pub fn take_recovered_committed_blocks(&mut self) -> AHashSet<BlockReference> {
-        self.recovered_committed_blocks
+    pub fn take_recovered_committed(&mut self) -> (AHashSet<BlockReference>, usize) {
+        let committed_blocks = self
+            .recovered_committed_blocks
             .take()
-            .expect("take_recovered_committed_blocks called twice")
+            .expect("take_recovered_committed called twice");
+        let committed_leaders_count = self
+            .recovered_committed_leaders_count
+            .take()
+            .expect("take_recovered_committed called twice");
+        (committed_blocks, committed_leaders_count)
     }
 
     pub fn dag_state(&self) -> &DagState {

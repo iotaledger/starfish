@@ -130,11 +130,7 @@ impl Linearizer {
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
-            for ack_ref in x
-                .acknowledgment_references()
-                .iter()
-                .chain(x.block_references().iter())
-            {
+            for ack_ref in x.acknowledgment_references() {
                 if ack_ref.round < min_round {
                     continue;
                 }
@@ -210,12 +206,7 @@ impl Linearizer {
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            let leader_acks: Vec<BlockReference> = leader_block
-                .acknowledgment_references()
-                .iter()
-                .chain(leader_block.block_references().iter())
-                .copied()
-                .collect();
+            let leader_acks = leader_block.acknowledgment_references().clone();
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishPull
