@@ -22,7 +22,10 @@ DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
-CLEAN_MONITORING=${CLEAN_MONITORING:-0}
+CLEAN_MONITORING=${CLEAN_MONITORING:-1}
+# Host ports for monitoring (offset from orchestrator's 9090/3000)
+PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
+GRAFANA_PORT=${GRAFANA_PORT:-3001}
 
 # Docker network
 BASE_IP="172.28.0.10"
@@ -83,7 +86,7 @@ cleanup() {
         rm -f $validators 2>/dev/null || true
     echo -e \
         "${GREEN}Monitoring still running at:" \
-        "${CYAN}http://localhost:3000${RESET}"
+        "${CYAN}http://localhost:${GRAFANA_PORT}${RESET}"
     echo -e \
         "${YELLOW}To stop everything:" \
         "docker compose -f $COMPOSE_FILE down${RESET}"
@@ -98,20 +101,6 @@ cleanup_interrupt() {
 trap cleanup_interrupt INT
 
 #----------------------------------------------------------------------
-# Persistent Monitoring Volumes
-#----------------------------------------------------------------------
-docker volume create prometheus_data 2>/dev/null || true
-docker volume create grafana_data 2>/dev/null || true
-
-if [ "$CLEAN_MONITORING" = 1 ]; then
-    echo -e "${YELLOW}Wiping monitoring data...${RESET}"
-    docker volume rm prometheus_data grafana_data \
-        2>/dev/null || true
-    docker volume create prometheus_data
-    docker volume create grafana_data
-fi
-
-#----------------------------------------------------------------------
 # Cleanup Previous Run
 #----------------------------------------------------------------------
 if [ -f "$COMPOSE_FILE" ]; then
@@ -123,6 +112,17 @@ if [ -f "$COMPOSE_FILE" ]; then
             2>/dev/null || true
     fi
 fi
+
+#----------------------------------------------------------------------
+# Persistent Monitoring Volumes
+#----------------------------------------------------------------------
+if [ "$CLEAN_MONITORING" = 1 ]; then
+    echo -e "${YELLOW}Wiping monitoring data...${RESET}"
+    docker volume rm prometheus_data grafana_data \
+        2>/dev/null || true
+fi
+docker volume create prometheus_data 2>/dev/null || true
+docker volume create grafana_data 2>/dev/null || true
 echo -e "${CYAN}Cleaning up previous run data...${RESET}"
 rm -f "$DATA_DIR"/*.log \
     "$DATA_DIR"/docker-compose.yml \
@@ -217,7 +217,7 @@ services:
   prometheus:
     image: prom/prometheus
     ports:
-      - "9090:9090"
+      - "$PROMETHEUS_PORT:9090"
     volumes:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -229,7 +229,7 @@ services:
   grafana:
     image: grafana/grafana
     ports:
-      - "3000:3000"
+      - "$GRAFANA_PORT:3000"
     depends_on:
       - prometheus
     environment:
@@ -348,7 +348,7 @@ docker compose -f "$COMPOSE_FILE" up -d || {
 DASH_ID="bdd54ee7-84de-4018-8bb7-92af2defc041"
 DASH_PATH="d/$DASH_ID/consensus"
 DASH_QUERY="from=now-5m&to=now&refresh=5s"
-DASHBOARD_URL="http://localhost:3000/${DASH_PATH}?${DASH_QUERY}"
+DASHBOARD_URL="http://localhost:${GRAFANA_PORT}/${DASH_PATH}?${DASH_QUERY}"
 echo -e \
     "${CYAN}Grafana dashboard:" \
     "${GREEN}$DASHBOARD_URL${RESET}"

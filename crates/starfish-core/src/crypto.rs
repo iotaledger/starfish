@@ -123,8 +123,8 @@ impl BlockDigest {
     pub fn new_without_statements(
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: &[BlockReference],
-        acknowledgement_statements: &Vec<BlockReference>,
+        block_references: &[BlockReference],
+        acknowledgment_references: &Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
@@ -136,8 +136,8 @@ impl BlockDigest {
             &mut hasher,
             authority,
             round,
-            includes,
-            acknowledgement_statements,
+            block_references,
+            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             merkle_root,
@@ -150,8 +150,8 @@ impl BlockDigest {
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: &[BlockReference],
-        acknowledgement_statements: &Vec<BlockReference>,
+        block_references: &[BlockReference],
+        acknowledgment_references: &Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
@@ -163,8 +163,8 @@ impl BlockDigest {
             &mut hasher,
             authority,
             round,
-            includes,
-            acknowledgement_statements,
+            block_references,
+            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
@@ -178,8 +178,8 @@ impl BlockDigest {
         hasher: &mut Blake3Hasher,
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: &[BlockReference],
-        acknowledgement_statements: &Vec<BlockReference>,
+        block_references: &[BlockReference],
+        acknowledgment_references: &Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
@@ -187,10 +187,10 @@ impl BlockDigest {
     ) {
         authority.crypto_hash(hasher);
         round.crypto_hash(hasher);
-        for include in includes {
-            include.crypto_hash(hasher);
+        for block_ref in block_references {
+            block_ref.crypto_hash(hasher);
         }
-        for block_ref in acknowledgement_statements {
+        for block_ref in acknowledgment_references {
             block_ref.crypto_hash(hasher);
         }
         meta_creation_time_ns.crypto_hash(hasher);
@@ -264,8 +264,8 @@ impl PublicKey {
             &mut hasher,
             block.author(),
             block.round(),
-            block.includes(),
-            block.acknowledgement_statements(),
+            block.block_references(),
+            block.acknowledgment_references(),
             block.meta_creation_time_ns(),
             block.epoch_changed(),
             block.merkle_root(),
@@ -288,8 +288,8 @@ impl Signer {
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: &[BlockReference],
-        acknowledgement_statements: &Vec<BlockReference>,
+        block_references: &[BlockReference],
+        acknowledgment_references: &Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
@@ -300,8 +300,8 @@ impl Signer {
             &mut hasher,
             authority,
             round,
-            includes,
-            acknowledgement_statements,
+            block_references,
+            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,

@@ -74,6 +74,8 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
+    pub proposed_block_refs: Histogram,
+    pub proposed_block_acks: Histogram,
     pub previous_round_refs: Histogram,
     pub commit_gap: Histogram,
 
@@ -400,6 +402,30 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
+            proposed_block_refs: {
+                let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "proposed_block_refs",
+                        "Number of block references in proposed blocks",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
+            proposed_block_acks: {
+                let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "proposed_block_acks",
+                        "Number of acknowledgment references in proposed blocks (after compression)",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
             previous_round_refs: {
                 let mut buckets: Vec<f64> = (1..=100).map(|i| i as f64).collect();
                 let mut v = 200.0;

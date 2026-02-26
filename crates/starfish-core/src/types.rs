@@ -105,10 +105,10 @@ pub struct VerifiedStatementBlock {
     //  from the same round and same authority are included, then
     //  the first reference is the one that this block
     //  conceptually votes for.
-    includes: Vec<BlockReference>,
+    block_references: Vec<BlockReference>,
 
-    // Transaction data acknowledgment
-    acknowledgement_statements: Vec<BlockReference>,
+    // Transaction data acknowledgment (compressed: excludes refs already in block_references)
+    acknowledgment_references: Vec<BlockReference>,
 
     // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
@@ -141,10 +141,10 @@ pub struct CachedStatementBlock {
     //  from the same round and same authority are included, then
     //  the first reference is the one that this block
     //  conceptually votes for.
-    includes: Vec<BlockReference>,
+    block_references: Vec<BlockReference>,
 
-    // Transaction data acknowledgment
-    acknowledgement_statements: Vec<BlockReference>,
+    // Transaction data acknowledgment (compressed: excludes refs already in block_references)
+    acknowledgment_references: Vec<BlockReference>,
 
     // Creation time of the block as reported by creator, currently not enforced
     meta_creation_time_ns: TimestampNs,
@@ -186,8 +186,8 @@ impl CachedStatementBlock {
         });
         VerifiedStatementBlock {
             reference: self.reference,
-            includes: self.includes.clone(),
-            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            block_references: self.block_references.clone(),
+            acknowledgment_references: self.acknowledgment_references.clone(),
             meta_creation_time_ns: self.meta_creation_time_ns,
             epoch_marker: self.epoch_marker,
             signature: self.signature,
@@ -270,8 +270,8 @@ impl VerifiedStatementBlock {
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: Vec<BlockReference>,
-        acknowledgement_statements: Vec<BlockReference>,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
@@ -288,8 +288,8 @@ impl VerifiedStatementBlock {
                 digest: BlockDigest::new_without_statements(
                     authority,
                     round,
-                    &includes,
-                    &acknowledgement_statements,
+                    &block_references,
+                    &acknowledgment_references,
                     meta_creation_time_ns,
                     epoch_marker,
                     &signature,
@@ -297,8 +297,8 @@ impl VerifiedStatementBlock {
                     strong_vote,
                 ),
             },
-            includes,
-            acknowledgement_statements,
+            block_references,
+            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             signature,
@@ -318,8 +318,8 @@ impl VerifiedStatementBlock {
         }
         CachedStatementBlock {
             reference: self.reference,
-            includes: self.includes.clone(),
-            acknowledgement_statements: self.acknowledgement_statements.clone(),
+            block_references: self.block_references.clone(),
+            acknowledgment_references: self.acknowledgment_references.clone(),
             meta_creation_time_ns: self.meta_creation_time_ns,
             epoch_marker: self.epoch_marker,
             signature: self.signature,
@@ -337,8 +337,8 @@ impl VerifiedStatementBlock {
                 if *position != own_id as usize {
                     return Self {
                         reference: self.reference,
-                        includes: self.includes.clone(),
-                        acknowledgement_statements: self.acknowledgement_statements.clone(),
+                        block_references: self.block_references.clone(),
+                        acknowledgment_references: self.acknowledgment_references.clone(),
                         meta_creation_time_ns: self.meta_creation_time_ns,
                         epoch_marker: self.epoch_marker,
                         signature: self.signature,
@@ -352,8 +352,8 @@ impl VerifiedStatementBlock {
             }
             Self {
                 reference: self.reference,
-                includes: self.includes.clone(),
-                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                block_references: self.block_references.clone(),
+                acknowledgment_references: self.acknowledgment_references.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
                 epoch_marker: self.epoch_marker,
                 signature: self.signature,
@@ -366,8 +366,8 @@ impl VerifiedStatementBlock {
         } else {
             Self {
                 reference: self.reference,
-                includes: self.includes.clone(),
-                acknowledgement_statements: self.acknowledgement_statements.clone(),
+                block_references: self.block_references.clone(),
+                acknowledgment_references: self.acknowledgment_references.clone(),
                 meta_creation_time_ns: self.meta_creation_time_ns,
                 epoch_marker: self.epoch_marker,
                 signature: self.signature,
@@ -401,16 +401,16 @@ impl VerifiedStatementBlock {
         self.transactions_commitment
     }
 
-    pub fn acknowledgement_statements(&self) -> &Vec<BlockReference> {
-        &self.acknowledgement_statements
+    pub fn acknowledgment_references(&self) -> &Vec<BlockReference> {
+        &self.acknowledgment_references
     }
 
     pub fn reference(&self) -> &BlockReference {
         &self.reference
     }
 
-    pub fn includes(&self) -> &Vec<BlockReference> {
-        &self.includes
+    pub fn block_references(&self) -> &Vec<BlockReference> {
+        &self.block_references
     }
 
     pub fn encoded_shard(&self) -> &Option<(Shard, usize)> {
@@ -481,8 +481,8 @@ impl VerifiedStatementBlock {
     pub fn new_with_signer(
         authority: AuthorityIndex,
         round: RoundNumber,
-        includes: Vec<BlockReference>,
-        acknowledgement_statements: Vec<BlockReference>,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
@@ -508,8 +508,8 @@ impl VerifiedStatementBlock {
         let signature = signer.sign_block(
             authority,
             round,
-            &includes,
-            &acknowledgement_statements,
+            &block_references,
+            &acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
@@ -519,8 +519,8 @@ impl VerifiedStatementBlock {
         Self::new(
             authority,
             round,
-            includes,
-            acknowledgement_statements,
+            block_references,
+            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             signature,
@@ -560,12 +560,9 @@ impl VerifiedStatementBlock {
                 let committee_size = committee.len();
                 let info_length = committee.info_length();
                 let parity_length = committee_size - info_length;
-                if self.statements.is_some() {
-                    let encoded_statements = encoder.encode_statements(
-                        self.statements.clone().unwrap(),
-                        info_length,
-                        parity_length,
-                    );
+                if let Some(statements) = self.statements.as_ref() {
+                    let encoded_statements =
+                        encoder.encode_statements(statements, info_length, parity_length);
                     let (transactions_commitment, merkle_proof_bytes) =
                         TransactionsCommitment::new_from_encoded_statements(
                             &encoded_statements,
@@ -622,8 +619,8 @@ impl VerifiedStatementBlock {
         let digest = BlockDigest::new(
             self.author(),
             round,
-            &self.includes,
-            &self.acknowledgement_statements,
+            &self.block_references,
+            &self.acknowledgment_references,
             self.meta_creation_time_ns,
             self.epoch_marker,
             &self.signature,
@@ -646,7 +643,7 @@ impl VerifiedStatementBlock {
         if let Err(e) = pub_key.verify_signature_in_block(self) {
             bail!("Block signature verification has failed: {:?}", e);
         }
-        for include in &self.includes {
+        for include in &self.block_references {
             // Also check duplicate includes?
             ensure!(
                 committee.known_authority(include.authority),
@@ -770,7 +767,7 @@ impl fmt::Debug for VerifiedStatementBlock {
 impl fmt::Display for VerifiedStatementBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:[", self.reference)?;
-        for include in self.includes() {
+        for include in self.block_references() {
             write!(f, "{include},")?;
         }
         write!(f, "](")?;
@@ -911,11 +908,11 @@ mod test {
                 let includes = includes.split(',');
                 includes.map(Self::parse_name).collect()
             };
-            let acknowledgement_statements = includes.clone();
+            let acknowledgment_references = includes.clone();
             VerifiedStatementBlock {
                 reference,
-                includes,
-                acknowledgement_statements,
+                block_references: includes,
+                acknowledgment_references,
                 meta_creation_time_ns: 0,
                 epoch_marker: false,
                 signature: Default::default(),
@@ -967,7 +964,7 @@ mod test {
             let mut authorities = HashSet::new();
             for (k, v) in &self.0 {
                 authorities.insert(k.authority);
-                for include in v.includes() {
+                for include in v.block_references() {
                     authorities.insert(include.authority);
                 }
             }
@@ -998,7 +995,7 @@ mod test {
         let b2: BlockReference = BlockReference::new_test(1, 2);
         assert_eq!(&d.get(&a0).unwrap().reference, &a0);
         assert_eq!(
-            &d.get(&a0).unwrap().includes,
+            &d.get(&a0).unwrap().block_references,
             &vec![
                 BlockReference::new_test(0, 0),
                 BlockReference::new_test(1, 1)
@@ -1006,7 +1003,7 @@ mod test {
         );
         assert_eq!(&d.get(&b2).unwrap().reference, &b2);
         assert_eq!(
-            &d.get(&b2).unwrap().includes,
+            &d.get(&b2).unwrap().block_references,
             &vec![BlockReference::new_test(1, 1)]
         );
     }

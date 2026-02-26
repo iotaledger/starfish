@@ -411,7 +411,7 @@ impl DagState {
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for (storage_block, _) in &blocks {
             let votes_for_leader = storage_block
-                .includes()
+                .block_references()
                 .iter()
                 .any(|r| r.authority == leader && r.round == leader_round);
             if votes_for_leader && aggregator.add(storage_block.author(), committee) {
@@ -619,7 +619,7 @@ impl DagState {
             // Collect parents from the current set of blocks.
             parents = parents
                 .iter()
-                .flat_map(|block| block.includes()) // Get included blocks.
+                .flat_map(|block| block.block_references()) // Get included blocks.
                 .map(|block_reference| {
                     self.get_storage_block(*block_reference)
                         .expect("Block should be in DagState")
@@ -643,7 +643,7 @@ impl DagState {
         for _ in (target_round..later_block.round()).rev() {
             frontier = frontier
                 .iter()
-                .flat_map(|block| block.includes())
+                .flat_map(|block| block.block_references())
                 .filter_map(|r| self.get_storage_block(*r))
                 .filter(|b| b.round() >= target_round)
                 .collect();
@@ -767,7 +767,7 @@ impl DagStateInner {
         map.insert(reference.author_digest(), blocks.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(*reference, blocks.0.includes().clone());
+        self.update_dag(*reference, blocks.0.block_references().clone());
         self.update_data_availability(&blocks.0);
     }
 

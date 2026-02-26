@@ -120,7 +120,7 @@ impl BaseCommitter {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
             potential_certificate
-                .includes()
+                .block_references()
                 .iter()
                 .filter(|r| voter_info.voters.contains(&(leader_ref, **r)))
                 .map(|r| r.authority),
@@ -253,7 +253,11 @@ impl BaseCommitter {
         self.has_quorum_support(
             voting_blocks
                 .iter()
-                .filter(|b| b.includes().iter().all(|inc| inc.authority != leader))
+                .filter(|b| {
+                    b.block_references()
+                        .iter()
+                        .all(|inc| inc.authority != leader)
+                })
                 .map(|b| b.author()),
         )
     }
@@ -308,7 +312,7 @@ impl BaseCommitter {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
             decision_block
-                .includes()
+                .block_references()
                 .iter()
                 .filter(|r| {
                     voter_info.voters.contains(&(leader_ref, **r))

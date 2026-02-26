@@ -16,7 +16,7 @@ pub trait ShardEncoder {
 
     fn encode_statements(
         &mut self,
-        block: Vec<BaseStatement>,
+        block: &[BaseStatement],
         info_length: usize,
         parity_length: usize,
     ) -> Vec<Shard>;
@@ -43,7 +43,7 @@ impl ShardEncoder for Encoder {
 
     fn encode_statements(
         &mut self,
-        block: Vec<BaseStatement>,
+        block: &[BaseStatement],
         info_length: usize,
         parity_length: usize,
     ) -> Vec<Shard> {
@@ -118,8 +118,7 @@ mod tests {
                 let tx_size = rng.gen_range(1..200);
                 let statements = random_statements(&mut rng, num_tx, tx_size);
 
-                let shards =
-                    encoder.encode_statements(statements.clone(), info_length, parity_length);
+                let shards = encoder.encode_statements(&statements, info_length, parity_length);
                 assert_eq!(shards.len(), committee_size);
 
                 // Verify alignment: every shard must be a multiple of 2

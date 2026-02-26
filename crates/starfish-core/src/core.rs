@@ -103,25 +103,67 @@ impl<H: BlockHandler> Core<H> {
 
         // Pending references for inclusion
         let mut pending = Vec::new();
-        // Store genesis blocks if necessary
-        for block in other_genesis_blocks {
-            let reference = *block.reference();
-            threshold_clock.add_block(reference, &committee);
-            dag_state.insert_block_bounds(
-                (block.clone(), block.clone()),
-                0,
-                committee.len() as AuthorityIndex,
-            );
-            pending.push(MetaStatement::Include(*block.reference()));
-        }
+        let committee_len = committee.len() as AuthorityIndex;
+        let mut last_own_block = OwnBlockData {
+            storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
+            authority_index_start: 0,
+            authority_index_end: committee_len,
+        };
 
-        threshold_clock.add_block(*own_genesis_block.reference(), &committee);
-        dag_state.insert_block_bounds(
-            (own_genesis_block.clone(), own_genesis_block.clone()),
-            0,
-            committee.len() as AuthorityIndex,
-        );
-        pending.push(MetaStatement::Include(*own_genesis_block.reference()));
+        if unprocessed_blocks.is_empty() {
+            // Store genesis blocks if necessary on clean start.
+            for block in other_genesis_blocks {
+                let reference = *block.reference();
+                threshold_clock.add_block(reference, &committee);
+                dag_state.insert_block_bounds((block.clone(), block.clone()), 0, committee_len);
+                pending.push(MetaStatement::Include(reference));
+            }
+
+            threshold_clock.add_block(*own_genesis_block.reference(), &committee);
+            dag_state.insert_block_bounds(
+                (own_genesis_block.clone(), own_genesis_block.clone()),
+                0,
+                committee_len,
+            );
+            pending.push(MetaStatement::Include(*own_genesis_block.reference()));
+        } else {
+            // Rebuild runtime-only state (pending frontier, threshold clock, and
+            // last own block) from recovered DAG blocks.
+            let mut recovered_last_own_round = None;
+            for (storage_block, transmission_block) in &unprocessed_blocks {
+                let reference = *storage_block.reference();
+                threshold_clock.add_block(reference, &committee);
+                if reference.authority == authority
+                    && recovered_last_own_round
+                        .map(|round| reference.round > round)
+                        .unwrap_or(true)
+                {
+                    recovered_last_own_round = Some(reference.round);
+                    last_own_block = OwnBlockData {
+                        storage_transmission_blocks: (
+                            storage_block.clone(),
+                            transmission_block.clone(),
+                        ),
+                        authority_index_start: 0,
+                        authority_index_end: committee_len,
+                    };
+                }
+            }
+
+            let pending_start_round = recovered_last_own_round
+                .unwrap_or_default()
+                .max(threshold_clock.get_round().saturating_sub(1));
+            for (storage_block, _) in &unprocessed_blocks {
+                if storage_block.round() >= pending_start_round {
+                    pending.push(MetaStatement::Include(*storage_block.reference()));
+                }
+            }
+            if pending.is_empty() {
+                pending.push(MetaStatement::Include(
+                    *last_own_block.storage_transmission_blocks.0.reference(),
+                ));
+            }
+        }
 
         let block_manager = BlockManager::new(dag_state.clone(), &committee);
 
@@ -136,11 +178,7 @@ impl<H: BlockHandler> Core<H> {
             block_manager,
             rocks_store,
             pending,
-            last_own_block: vec![OwnBlockData {
-                storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
-                authority_index_start: 0,
-                authority_index_end: committee.len() as AuthorityIndex,
-            }],
+            last_own_block: vec![last_own_block],
             block_handler,
             authority,
             threshold_clock,
@@ -159,7 +197,7 @@ impl<H: BlockHandler> Core<H> {
 
         if !unprocessed_blocks.is_empty() {
             tracing::info!(
-                "Replaying {} blocks for transaction aggregator",
+                "Recovered {} blocks from storage; rebuilt pending and clock",
                 unprocessed_blocks.len()
             );
         }
@@ -213,16 +251,15 @@ impl<H: BlockHandler> Core<H> {
             "BlockManager::add_blocks",
             self.block_manager.add_blocks(blocks)
         );
-        let processed_references_with_statements: Vec<BlockReference> = processed
-            .iter()
-            .filter(|b| b.statements().is_some())
-            .map(|b| *b.reference())
-            .collect();
-        let processed_references_without_statements: Vec<BlockReference> = processed
-            .iter()
-            .filter(|b| b.statements().is_none())
-            .map(|b| *b.reference())
-            .collect();
+        let mut processed_references_with_statements = AHashSet::new();
+        let mut processed_references_without_statements = Vec::new();
+        for block in &processed {
+            if block.statements().is_some() {
+                processed_references_with_statements.insert(*block.reference());
+            } else {
+                processed_references_without_statements.push(*block.reference());
+            }
+        }
         let not_processed_block_references_with_statements: Vec<_> =
             block_references_with_statements
                 .iter()
@@ -304,7 +341,7 @@ impl<H: BlockHandler> Core<H> {
         let (mut statements, block_references) = timed!(
             self.metrics,
             "Core::new_block::collect_statements_and_references",
-            self.collect_statements_and_references(&pending_statements)
+            self.collect_statements_and_references(pending_statements)
         );
         timed!(
             self.metrics,
@@ -316,7 +353,7 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::prepare_encoded_statements",
             self.prepare_encoded_statements(&statements)
         );
-        let acknowledgments = timed!(
+        let acknowledgment_references = timed!(
             self.metrics,
             "Core::new_block::get_pending_acknowledgment",
             self.dag_state.get_pending_acknowledgment(clock_round)
@@ -329,7 +366,7 @@ impl<H: BlockHandler> Core<H> {
         );
 
         // Create and store blocks
-        let mut return_blocks = Vec::new();
+        let mut first_block = None;
         for block_id in 0..number_of_blocks_to_create {
             // Equivocators include their transactions only in first block, but leave other
             // empty to not overload the bandwidth
@@ -344,24 +381,25 @@ impl<H: BlockHandler> Core<H> {
                     &block_references,
                     &statements,
                     &encoded_statements,
-                    &acknowledgments,
+                    &acknowledgment_references,
                     clock_round,
                     block_id,
                 )
             );
             tracing::debug!("Created block {:?}", block_data.0);
+            if first_block.is_none() {
+                first_block = Some(block_data.0.clone());
+            }
             timed!(
                 self.metrics,
                 "Core::new_block::store_block",
-                self.store_block(block_data.clone(), &authority_bounds, block_id)
+                self.store_block(block_data, &authority_bounds, block_id)
             );
-
-            return_blocks.push(block_data);
         }
 
         self.persist_to_storage("Core::new_block");
 
-        Some(return_blocks[0].0.clone())
+        first_block
     }
 
     fn get_pending_statements(&mut self, clock_round: RoundNumber) -> Vec<MetaStatement> {
@@ -383,17 +421,22 @@ impl<H: BlockHandler> Core<H> {
 
     fn collect_statements_and_references(
         &self,
-        pending: &[MetaStatement],
+        pending: Vec<MetaStatement>,
     ) -> (Vec<BaseStatement>, Vec<BlockReference>) {
         let mut statements = Vec::new();
+        let mut pending_refs = Vec::new();
+        let epoch_changing = self.epoch_changing();
         for meta_statement in pending {
-            if let MetaStatement::Payload(payload) = meta_statement {
-                if !self.epoch_changing() {
-                    statements.extend(payload.clone());
+            match meta_statement {
+                MetaStatement::Payload(payload) => {
+                    if !epoch_changing {
+                        statements.extend(payload);
+                    }
                 }
+                MetaStatement::Include(include) => pending_refs.push(include),
             }
         }
-        let block_references = self.compress_pending_block_references(pending);
+        let block_references = self.compress_pending_block_references(&pending_refs);
         (statements, block_references)
     }
 
@@ -405,7 +448,7 @@ impl<H: BlockHandler> Core<H> {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS => Some(self.encoder.encode_statements(
-                statements.to_owned(),
+                statements,
                 info_length,
                 parity_length,
             )),
@@ -416,7 +459,7 @@ impl<H: BlockHandler> Core<H> {
     /// For StarfishS, compute whether this block carries a strong vote for the
     /// current leader. A strong vote is true when the party votes for the
     /// leader AND has data available for the leader block and all blocks in
-    /// the leader's acknowledgement_statements.
+    /// the leader's acknowledgment_references.
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
@@ -444,7 +487,7 @@ impl<H: BlockHandler> Core<H> {
         };
 
         // We vote for the leader. Check data availability for the leader block
-        // and all blocks in the leader's acknowledgement_statements.
+        // and all blocks in the leader's acknowledgment_references.
         if !self.dag_state.is_data_available(leader_ref) {
             return Some(false);
         }
@@ -454,7 +497,11 @@ impl<H: BlockHandler> Core<H> {
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
-        for ack_ref in leader_block.acknowledgement_statements() {
+        for ack_ref in leader_block
+            .acknowledgment_references()
+            .iter()
+            .chain(leader_block.block_references().iter())
+        {
             if !self.dag_state.is_data_available(ack_ref) {
                 return Some(false);
             }
@@ -468,7 +515,7 @@ impl<H: BlockHandler> Core<H> {
         block_references_without_own: &[BlockReference],
         statements: &[BaseStatement],
         encoded_statements: &Option<Vec<Shard>>,
-        acknowledgments: &[BlockReference],
+        acknowledgment_references: &[BlockReference],
         clock_round: RoundNumber,
         block_id_in_round: usize,
     ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
@@ -489,13 +536,28 @@ impl<H: BlockHandler> Core<H> {
             .previous_round_refs
             .observe(prev_round_ref_count as f64);
 
+        // Compress: remove ack refs already present in block_references
+        let block_ref_set: AHashSet<BlockReference> = block_references.iter().copied().collect();
+        let compressed_acks: Vec<BlockReference> = acknowledgment_references
+            .iter()
+            .filter(|r| !block_ref_set.contains(r))
+            .copied()
+            .collect();
+
+        self.metrics
+            .proposed_block_refs
+            .observe(block_references.len() as f64);
+        self.metrics
+            .proposed_block_acks
+            .observe(compressed_acks.len() as f64);
+
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
         let block = VerifiedStatementBlock::new_with_signer(
             self.authority,
             clock_round,
             block_references,
-            acknowledgments.to_vec(),
+            compressed_acks,
             time_ns,
             self.epoch_changing(),
             &self.signer,
@@ -539,29 +601,28 @@ impl<H: BlockHandler> Core<H> {
         bounds
     }
 
-    fn compress_pending_block_references(&self, pending: &[MetaStatement]) -> Vec<BlockReference> {
+    fn compress_pending_block_references(
+        &self,
+        pending_refs: &[BlockReference],
+    ) -> Vec<BlockReference> {
         let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();
 
-        for statement in pending {
-            if let MetaStatement::Include(block_ref) = statement {
-                if let Some(block) = self.dag_state.get_storage_block(*block_ref) {
-                    references_in_block.extend(block.includes());
-                }
+        for block_ref in pending_refs {
+            if let Some(block) = self.dag_state.get_storage_block(*block_ref) {
+                references_in_block.extend(block.block_references());
             }
         }
 
-        let mut includes = vec![];
+        let mut compressed = vec![];
 
-        for statement in pending {
-            if let MetaStatement::Include(include) = statement {
-                if !references_in_block.contains(include) && include.authority != self.authority {
-                    includes.push(*include);
-                }
+        for r in pending_refs {
+            if !references_in_block.contains(r) && r.authority != self.authority {
+                compressed.push(*r);
             }
         }
 
-        assert!(!includes.is_empty());
-        includes
+        assert!(!compressed.is_empty());
+        compressed
     }
 
     fn store_block(
@@ -577,7 +638,7 @@ impl<H: BlockHandler> Core<H> {
         self.proposed_block_stats(&block_data.0);
 
         let own_block = OwnBlockData {
-            storage_transmission_blocks: block_data.clone(),
+            storage_transmission_blocks: block_data,
             authority_index_start: authority_bounds[block_id] as AuthorityIndex,
             authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
         };

@@ -80,7 +80,7 @@ impl UniversalCommitter {
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
-                        for reference in vb.includes() {
+                        for reference in vb.block_references() {
                             if reference.round == round && reference.authority == leader {
                                 voters.insert((*reference, vb_ref));
                                 voter_strong_votes.insert(vb_ref, vb.strong_vote());
