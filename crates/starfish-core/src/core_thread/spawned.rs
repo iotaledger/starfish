@@ -47,11 +47,11 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     CoreThreadDispatcher<H, S, C>
 {
     pub fn start(syncer: Syncer<H, S, C>) -> Self {
-        let (sender, receiver) = mpsc::channel(32);
+        let (sender, receiver) = mpsc::channel(10_000);
         let metrics = syncer.core().metrics.clone();
         let core_thread = CoreThread { syncer, receiver };
         let join_handle = thread::Builder::new()
-            .name("starfish-core".to_string())
+            .name("core_thread".to_string())
             .spawn(move || core_thread.run())
             .unwrap();
         Self {

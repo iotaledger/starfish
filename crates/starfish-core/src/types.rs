@@ -33,8 +33,8 @@ use std::{
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::block_store::ConsensusProtocol;
 use crate::crypto::TransactionsCommitment;
+use crate::dag_state::ConsensusProtocol;
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
 use crate::encoder::ShardEncoder;
 use crate::threshold_clock::threshold_clock_valid_verified_block;

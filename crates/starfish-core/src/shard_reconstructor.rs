@@ -413,8 +413,8 @@ impl ShardReconstructor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_store::ConsensusProtocol;
     use crate::crypto::Signer;
+    use crate::dag_state::ConsensusProtocol;
     use crate::encoder::ShardEncoder;
     use crate::types::{BaseStatement, Transaction};
     use prometheus::Registry;

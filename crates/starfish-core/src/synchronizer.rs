@@ -2,8 +2,8 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::block_store::{ByzantineStrategy, ConsensusProtocol};
 use crate::consensus::universal_committer::UniversalCommitter;
+use crate::dag_state::{ByzantineStrategy, ConsensusProtocol};
 use crate::metrics::UtilizationTimerVecExt;
 use crate::types::format_authority_index;
 use crate::{
@@ -246,11 +246,11 @@ where
         parameters: SynchronizerParameters,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
-        let own_id = inner.block_store.get_own_authority_index();
+        let own_id = inner.dag_state.get_own_authority_index();
         let sample_timeout = parameters.sample_timeout;
         let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
-            let committed_dags = inner.block_store.read_pending_unavailable();
+            let committed_dags = inner.dag_state.read_pending_unavailable();
             let mut to_request = Vec::new();
             'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
@@ -258,7 +258,7 @@ where
                         let mut aggregator = commit.1[i].clone();
                         if aggregator.votes.insert(own_id)
                             && !aggregator.votes.insert(peer_id)
-                            && !inner.block_store.is_data_available(block.reference())
+                            && !inner.dag_state.is_data_available(block.reference())
                         {
                             tracing::debug!("Data in block {block:?} is missing");
                             to_request.push(*block.reference());
@@ -354,17 +354,14 @@ where
         block_references: Vec<BlockReference>,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
-        let own_index = self.inner.block_store.get_own_authority_index();
+        let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size = self.parameters.batch_other_block_size;
         let mut blocks = Vec::new();
         let mut own_block_counter = 0;
         let mut other_block_counter = 0;
         for block_reference in block_references {
-            let block = self
-                .inner
-                .block_store
-                .get_transmission_block(block_reference);
+            let block = self.inner.dag_state.get_transmission_block(block_reference);
             if let Some(block) = block {
                 if block.author() == own_index {
                     own_block_counter += 1;
@@ -398,12 +395,12 @@ where
         block_references: Vec<BlockReference>,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
-        let own_index = self.inner.block_store.get_own_authority_index();
+        let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
         let mut blocks = Vec::new();
         let mut block_counter = 0;
         for block_reference in block_references {
-            let block = self.inner.block_store.get_storage_block(block_reference);
+            let block = self.inner.dag_state.get_storage_block(block_reference);
             if let Some(block) = block {
                 block_counter += 1;
                 blocks.push(block);
@@ -432,15 +429,15 @@ where
         block_references: Vec<BlockReference>,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
-        let own_index = self.inner.block_store.get_own_authority_index();
+        let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
         let mut blocks = Vec::new();
         let mut block_counter = 0;
         for block_reference in block_references {
-            let block = self.inner.block_store.get_storage_block(block_reference);
+            let block = self.inner.dag_state.get_storage_block(block_reference);
             if let Some(block) = block {
                 for parent_reference in block.includes() {
-                    let parent = self.inner.block_store.get_storage_block(*parent_reference);
+                    let parent = self.inner.dag_state.get_storage_block(*parent_reference);
                     if let Some(parent) = parent {
                         block_counter += 1;
                         if block_counter >= batch_block_size {
@@ -518,7 +515,7 @@ where
             let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
             let blocks = {
                 let sent = sent_to_peer.read();
-                inner.block_store.get_unsent_past_cone(
+                inner.dag_state.get_unsent_past_cone(
                     &sent,
                     peer_id,
                     block_reference,
@@ -556,10 +553,10 @@ where
         let mut rng = StdRng::from_entropy();
         let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
         let batch_byzantine_own_block_size = 50 * batch_own_block_size;
-        let byzantine_strategy = inner.block_store.byzantine_strategy;
-        let own_authority_index = inner.block_store.get_own_authority_index();
+        let byzantine_strategy = inner.dag_state.byzantine_strategy;
+        let own_authority_index = inner.dag_state.get_own_authority_index();
         let mut current_round = inner
-            .block_store
+            .dag_state
             .last_own_block_ref()
             .unwrap_or_default()
             .round();
@@ -715,7 +712,7 @@ where
                 }
             }
             current_round = inner
-                .block_store
+                .dag_state
                 .last_own_block_ref()
                 .unwrap_or_default()
                 .round();
@@ -802,7 +799,7 @@ where
     let peer = format_authority_index(to_whom_authority_index);
     let blocks =
         inner
-            .block_store
+            .dag_state
             .get_own_transmission_blocks(to_whom_authority_index, *round, batch_size);
     {
         let mut sent = sent_to_peer.write();
@@ -829,9 +826,9 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let protocol = inner.block_store.consensus_protocol;
+    let protocol = inner.dag_state.consensus_protocol;
     let committee_size = inner.committee.len();
-    let own_index = inner.block_store.get_own_authority_index();
+    let own_index = inner.dag_state.get_own_authority_index();
     let max_missing_blocks_age = synchronizer_parameters.max_missing_blocks_age;
     let mut authorities_with_missing_blocks = AHashSet::new();
     if protocol == ConsensusProtocol::StarfishS {
@@ -856,7 +853,7 @@ where
     let peer = format_authority_index(to_whom_authority_index);
     let blocks = {
         let sent = sent_to_peer.read();
-        inner.block_store.get_unsent_causal_history(
+        inner.dag_state.get_unsent_causal_history(
             &sent,
             to_whom_authority_index,
             batch_own_block_size,
@@ -869,7 +866,7 @@ where
         for block in &blocks {
             sent.insert(*block.reference());
         }
-        let lowest_round = inner.block_store.lowest_round();
+        let lowest_round = inner.dag_state.lowest_round();
         sent.retain(|r| r.round >= lowest_round);
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
@@ -892,10 +889,10 @@ where
 {
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-    let own_index = inner.block_store.get_own_authority_index();
+    let own_index = inner.dag_state.get_own_authority_index();
     let blocks = {
         let sent = sent_to_peer.read();
-        inner.block_store.get_unsent_past_cone(
+        inner.dag_state.get_unsent_past_cone(
             &sent,
             to_whom_authority_index,
             block_reference,

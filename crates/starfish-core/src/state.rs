@@ -6,19 +6,19 @@ use ahash::AHashSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::block_store::CommitData;
 use crate::core::MetaStatement;
 use crate::core::MetaStatement::Include;
+use crate::dag_state::CommitData;
 use crate::rocks_store::RocksStore;
 use crate::types::VerifiedStatementBlock;
 use crate::{
-    block_store::BlockStore, // Remove OwnBlockData
+    dag_state::DagState, // Remove OwnBlockData
     data::Data,
     types::BlockReference,
 };
 
 pub struct RecoveredState {
-    pub block_store: BlockStore,
+    pub dag_state: DagState,
     pub rocks_store: Arc<RocksStore>,
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     pub last_committed_leader: Option<BlockReference>,
@@ -66,9 +66,9 @@ impl RecoveredStateBuilder {
         self.committed_blocks.extend(commit_data.sub_dag);
     }
 
-    pub fn build(self, rocks_store: Arc<RocksStore>, block_store: BlockStore) -> RecoveredState {
+    pub fn build(self, rocks_store: Arc<RocksStore>, dag_state: DagState) -> RecoveredState {
         RecoveredState {
-            block_store,
+            dag_state,
             rocks_store,
             unprocessed_blocks: self.unprocessed_blocks,
             last_committed_leader: self.last_committed_leader,

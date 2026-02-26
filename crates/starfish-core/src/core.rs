@@ -10,14 +10,13 @@ use std::{
 
 use ahash::AHashSet;
 
-use crate::block_store::ConsensusProtocol;
+use crate::dag_state::ConsensusProtocol;
 use crate::encoder::ShardEncoder;
 use crate::rocks_store::RocksStore;
 use crate::types::{Encoder, Shard, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
-    block_store::{BlockStore, ByzantineStrategy, CommitData, OwnBlockData},
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
@@ -26,6 +25,7 @@ use crate::{
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
     crypto::Signer,
+    dag_state::{ByzantineStrategy, CommitData, DagState, OwnBlockData},
     data::Data,
     epoch_close::EpochManager,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -53,7 +53,7 @@ pub struct Core<H: BlockHandler> {
     threshold_clock: ThresholdClockAggregator,
     pub(crate) committee: Arc<Committee>,
     last_commit_leader: BlockReference,
-    block_store: BlockStore,
+    dag_state: DagState,
     pub(crate) metrics: Arc<Metrics>,
     options: CoreOptions,
     signer: Signer,
@@ -88,7 +88,7 @@ impl<H: BlockHandler> Core<H> {
         options: CoreOptions,
     ) -> Self {
         let RecoveredState {
-            block_store,
+            dag_state,
             rocks_store,
             unprocessed_blocks,
             last_committed_leader,
@@ -107,7 +107,7 @@ impl<H: BlockHandler> Core<H> {
         for block in other_genesis_blocks {
             let reference = *block.reference();
             threshold_clock.add_block(reference, &committee);
-            block_store.insert_block_bounds(
+            dag_state.insert_block_bounds(
                 (block.clone(), block.clone()),
                 0,
                 committee.len() as AuthorityIndex,
@@ -116,19 +116,19 @@ impl<H: BlockHandler> Core<H> {
         }
 
         threshold_clock.add_block(*own_genesis_block.reference(), &committee);
-        block_store.insert_block_bounds(
+        dag_state.insert_block_bounds(
             (own_genesis_block.clone(), own_genesis_block.clone()),
             0,
             committee.len() as AuthorityIndex,
         );
         pending.push(MetaStatement::Include(*own_genesis_block.reference()));
 
-        let block_manager = BlockManager::new(block_store.clone(), &committee);
+        let block_manager = BlockManager::new(dag_state.clone(), &committee);
 
         let epoch_manager = EpochManager::new();
 
         let committer =
-            UniversalCommitterBuilder::new(committee.clone(), block_store.clone(), metrics.clone())
+            UniversalCommitterBuilder::new(committee.clone(), dag_state.clone(), metrics.clone())
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
@@ -146,7 +146,7 @@ impl<H: BlockHandler> Core<H> {
             threshold_clock,
             committee,
             last_commit_leader: last_committed_leader.unwrap_or_default(),
-            block_store,
+            dag_state,
             metrics,
             options,
             signer: private_config.keypair,
@@ -319,7 +319,7 @@ impl<H: BlockHandler> Core<H> {
         let acknowledgments = timed!(
             self.metrics,
             "Core::new_block::get_pending_acknowledgment",
-            self.block_store.get_pending_acknowledgment(clock_round)
+            self.dag_state.get_pending_acknowledgment(clock_round)
         );
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = timed!(
@@ -401,7 +401,7 @@ impl<H: BlockHandler> Core<H> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
-        match self.block_store.consensus_protocol {
+        match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS => Some(self.encoder.encode_statements(
@@ -422,7 +422,7 @@ impl<H: BlockHandler> Core<H> {
         clock_round: RoundNumber,
         block_references: &[BlockReference],
     ) -> Option<bool> {
-        if self.block_store.consensus_protocol != ConsensusProtocol::StarfishS {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS {
             return None;
         }
 
@@ -445,17 +445,17 @@ impl<H: BlockHandler> Core<H> {
 
         // We vote for the leader. Check data availability for the leader block
         // and all blocks in the leader's acknowledgement_statements.
-        if !self.block_store.is_data_available(leader_ref) {
+        if !self.dag_state.is_data_available(leader_ref) {
             return Some(false);
         }
 
         let leader_block = self
-            .block_store
+            .dag_state
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
         for ack_ref in leader_block.acknowledgement_statements() {
-            if !self.block_store.is_data_available(ack_ref) {
+            if !self.dag_state.is_data_available(ack_ref) {
                 return Some(false);
             }
         }
@@ -501,7 +501,7 @@ impl<H: BlockHandler> Core<H> {
             &self.signer,
             statements.to_vec(),
             encoded_statements.clone(),
-            self.block_store.consensus_protocol,
+            self.dag_state.consensus_protocol,
             strong_vote,
         );
 
@@ -510,7 +510,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn prepare_last_blocks(&mut self) {
-        let target = match self.block_store.byzantine_strategy {
+        let target = match self.dag_state.byzantine_strategy {
             Some(
                 ByzantineStrategy::EquivocatingChains | ByzantineStrategy::EquivocatingChainsBomb,
             ) => self.committee.len(),
@@ -526,7 +526,7 @@ impl<H: BlockHandler> Core<H> {
         let len = self.committee.len();
         let mut bounds = vec![0];
         if matches!(
-            self.block_store.byzantine_strategy,
+            self.dag_state.byzantine_strategy,
             Some(ByzantineStrategy::EquivocatingTwoChains)
         ) {
             bounds.push(len.div_ceil(2));
@@ -544,7 +544,7 @@ impl<H: BlockHandler> Core<H> {
 
         for statement in pending {
             if let MetaStatement::Include(block_ref) = statement {
-                if let Some(block) = self.block_store.get_storage_block(*block_ref) {
+                if let Some(block) = self.dag_state.get_storage_block(*block_ref) {
                     references_in_block.extend(block.includes());
                 }
             }
@@ -582,7 +582,7 @@ impl<H: BlockHandler> Core<H> {
             authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
         };
         self.last_own_block[block_id] = own_block.clone();
-        self.block_store.insert_own_block(own_block);
+        self.dag_state.insert_own_block(own_block);
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
@@ -612,11 +612,11 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn cleanup(&mut self) -> RoundNumber {
+        self.dag_state.cleanup();
         let threshold = self
-            .last_commit_leader
-            .round()
+            .dag_state
+            .last_available_commit()
             .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
-        self.block_store.cleanup(threshold);
         self.committer.cleanup(threshold);
         threshold
     }
@@ -642,7 +642,7 @@ impl<H: BlockHandler> Core<H> {
             quorum_round
         );
         if !self
-            .block_store
+            .dag_state
             .all_blocks_exists_at_authority_round(&leaders, leader_round)
         {
             return false;
@@ -652,7 +652,7 @@ impl<H: BlockHandler> Core<H> {
         // the leader of leader_round - 1.
         if leader_round >= 2 {
             let prev_leader = self.committee.elect_leader(leader_round - 1);
-            if !self.block_store.has_votes_quorum_at_round(
+            if !self.dag_state.has_votes_quorum_at_round(
                 leader_round,
                 prev_leader,
                 leader_round - 1,
@@ -662,9 +662,9 @@ impl<H: BlockHandler> Core<H> {
             }
 
             // StarfishS: also require a quorum of strong votes at leader_round.
-            if self.block_store.consensus_protocol == ConsensusProtocol::StarfishS
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishS
                 && !self
-                    .block_store
+                    .dag_state
                     .has_strong_votes_quorum_at_round(leader_round, &self.committee)
             {
                 return false;
@@ -677,7 +677,8 @@ impl<H: BlockHandler> Core<H> {
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
         let mut commit_data = vec![];
         for commit in &committed {
-            self.block_store.update_committed_rounds(&commit.blocks);
+            self.dag_state
+                .update_last_available_commit(commit.anchor.round);
             for block in &commit.blocks {
                 self.epoch_manager
                     .observe_committed_block(block, &self.committee);
@@ -716,8 +717,8 @@ impl<H: BlockHandler> Core<H> {
             .expect("take_recovered_committed_blocks called twice")
     }
 
-    pub fn block_store(&self) -> &BlockStore {
-        &self.block_store
+    pub fn dag_state(&self) -> &DagState {
+        &self.dag_state
     }
     pub fn rocks_store(&self) -> Arc<RocksStore> {
         self.rocks_store.clone()

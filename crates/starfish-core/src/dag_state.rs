@@ -66,8 +66,8 @@ pub enum ByzantineStrategy {
     EquivocatingChainsBomb, // Equivocation fork bomb: send different chains to each validator
 }
 #[derive(Clone)]
-pub struct BlockStore {
-    inner: Arc<RwLock<BlockStoreInner>>,
+pub struct DagState {
+    inner: Arc<RwLock<DagStateInner>>,
     rocks_store: Arc<RocksStore>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
@@ -79,7 +79,7 @@ pub struct BlockStore {
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBlock>]>)>;
 
-struct BlockStoreInner {
+struct DagStateInner {
     rocks_store: Arc<RocksStore>,
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
@@ -95,8 +95,9 @@ struct BlockStoreInner {
     last_own_block: Option<BlockReference>,
     // this dag structure store for each block its predecessors and who knows the block
     dag: BTreeMap<RoundNumber, DagRoundEntries>,
-    // per-authority highest committed round, used as dag eviction threshold
-    last_committed_round: Vec<RoundNumber>,
+    // Round of the latest committed leader whose sub-dag was fully sequenced
+    // (all data available). Used as the single eviction threshold source.
+    last_available_commit: RoundNumber,
     // per-round version counter, incremented on each add_block to that round
     round_version: AHashMap<RoundNumber, u64>,
     // committed subdag which contains blocks with at least one unavailable transaction data
@@ -107,7 +108,7 @@ type IndexEntry = (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>);
 type DagRoundEntries =
     HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>;
 
-impl BlockStore {
+impl DagState {
     pub fn open(
         authority: AuthorityIndex,
         path: impl AsRef<Path>,
@@ -123,12 +124,11 @@ impl BlockStore {
         );
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
-        let last_committed_round = committee.authorities().map(|_| 0).collect();
-        let mut inner = BlockStoreInner {
+        let mut inner = DagStateInner {
             rocks_store: rocks_store.clone(),
             authority,
             last_seen_by_authority,
-            last_committed_round,
+            last_available_commit: 0,
             committee_size: committee.len(),
             index: BTreeMap::new(),
             data_availability: BTreeSet::new(),
@@ -210,7 +210,7 @@ impl BlockStore {
             ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
-        let block_store = Self {
+        let dag_state = Self {
             rocks_store: rocks_store.clone(),
             byzantine_strategy,
             inner: Arc::new(RwLock::new(inner)),
@@ -219,7 +219,7 @@ impl BlockStore {
             committee_size: committee.len(),
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
         };
-        builder.build(rocks_store, block_store)
+        builder.build(rocks_store, dag_state)
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
@@ -480,17 +480,21 @@ impl BlockStore {
         self.inner.read().dag.keys().next().copied().unwrap_or(0)
     }
 
-    pub fn update_committed_rounds(&self, committed_blocks: &[Data<VerifiedStatementBlock>]) {
+    pub fn update_last_available_commit(&self, round: RoundNumber) {
         let mut inner = self.inner.write();
-        for block in committed_blocks {
-            let authority = block.author() as usize;
-            if let Some(slot) = inner.last_committed_round.get_mut(authority) {
-                *slot = (*slot).max(block.round());
-            }
-        }
+        inner.last_available_commit = inner.last_available_commit.max(round);
     }
 
-    pub fn cleanup(&self, threshold_round: RoundNumber) {
+    pub fn last_available_commit(&self) -> RoundNumber {
+        self.inner.read().last_available_commit
+    }
+
+    pub fn cleanup(&self) {
+        let threshold_round = self
+            .inner
+            .read()
+            .last_available_commit
+            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
         if threshold_round == 0 {
             return;
         }
@@ -618,7 +622,7 @@ impl BlockStore {
                 .flat_map(|block| block.includes()) // Get included blocks.
                 .map(|block_reference| {
                     self.get_storage_block(*block_reference)
-                        .expect("Block should be in Block Store")
+                        .expect("Block should be in DagState")
                 })
                 // Filter by round.
                 .filter(|included_block| included_block.round() >= earlier_block.round())
@@ -648,7 +652,7 @@ impl BlockStore {
     }
 }
 
-impl BlockStoreInner {
+impl DagStateInner {
     pub fn block_exists(&self, reference: BlockReference) -> bool {
         if let Some(blocks) = self.index.get(&reference.round) {
             if blocks.contains_key(&(reference.authority, reference.digest)) {
@@ -730,14 +734,8 @@ impl BlockStoreInner {
     }
 
     pub fn evict_below_round(&mut self) {
-        // Evict metadata below the min committed round across all authorities,
-        // with a safety margin of 2 * MAX_TRAVERSAL_DEPTH
         let dag_threshold = self
-            .last_committed_round
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(0)
+            .last_available_commit
             .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
         if dag_threshold > 0 {
             self.dag = self.dag.split_off(&dag_threshold);

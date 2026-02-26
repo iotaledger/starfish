@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::CommitMetastate;
-use crate::block_store::ConsensusProtocol;
 use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
+use crate::dag_state::ConsensusProtocol;
 use crate::data::Data;
 use crate::types::VerifiedStatementBlock;
 use crate::types::{AuthorityIndex, RoundNumber};
 use crate::{
-    block_store::BlockStore,
+    dag_state::DagState,
     types::{BlockDigest, BlockReference},
 };
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,7 @@ impl Linearizer {
     /// blocks that have already been committed (within previous sub-dags).
     fn collect_subdag_mysticeti(
         &mut self,
-        block_store: &BlockStore,
+        dag_state: &DagState,
         leader_block: Data<VerifiedStatementBlock>,
     ) -> CommittedSubDag {
         let mut to_commit = Vec::new();
@@ -102,7 +102,7 @@ impl Linearizer {
                 }
                 // The block manager may have cleaned up blocks passed the latest committed
                 // rounds.
-                let block = block_store
+                let block = dag_state
                     .get_storage_block(*reference)
                     .expect("We should have the whole sub-dag by now");
 
@@ -119,7 +119,7 @@ impl Linearizer {
     // blocks acknowledging them.
     fn collect_subdag_starfish(
         &mut self,
-        block_store: &BlockStore,
+        dag_state: &DagState,
         leader_block: Data<VerifiedStatementBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
@@ -147,7 +147,7 @@ impl Linearizer {
                 if self.traversed_blocks.contains(reference) {
                     continue;
                 }
-                let block = block_store
+                let block = dag_state
                     .get_storage_block(*reference)
                     .expect("We should have the whole sub-dag by now");
                 buffer.push(block);
@@ -156,7 +156,7 @@ impl Linearizer {
         let mut to_commit = Vec::new();
         for x in blocks_transaction_data_quorum {
             if self.committed.insert(x) {
-                let block = block_store
+                let block = dag_state
                     .get_storage_block(x)
                     .expect("We should have the whole sub-dag by now");
                 to_commit.push(block);
@@ -199,10 +199,10 @@ impl Linearizer {
 
     pub fn handle_commit(
         &mut self,
-        block_store: &BlockStore,
+        dag_state: &DagState,
         committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
-        let consensus_protocol = block_store.consensus_protocol;
+        let consensus_protocol = dag_state.consensus_protocol;
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
@@ -211,10 +211,10 @@ impl Linearizer {
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::StarfishS => {
-                    self.collect_subdag_starfish(block_store, leader_block)
+                    self.collect_subdag_starfish(dag_state, leader_block)
                 }
                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                    self.collect_subdag_mysticeti(block_store, leader_block)
+                    self.collect_subdag_mysticeti(dag_state, leader_block)
                 }
             };
 
@@ -224,7 +224,7 @@ impl Linearizer {
             if metastate == Some(CommitMetastate::Opt) {
                 for ack_ref in &leader_acks {
                     if self.committed.insert(*ack_ref) {
-                        if let Some(block) = block_store.get_storage_block(*ack_ref) {
+                        if let Some(block) = dag_state.get_storage_block(*ack_ref) {
                             if self.committed_slots.insert((block.round(), block.author())) {
                                 sub_dag.blocks.push(block);
                             }

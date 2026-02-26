@@ -1,8 +1,8 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::block_store::CommitData;
 use crate::crypto::BlockDigest;
+use crate::dag_state::CommitData;
 use crate::data::Data;
 use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
 use bincode::{deserialize, serialize};

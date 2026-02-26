@@ -97,8 +97,8 @@ impl CachedStatementBlockDecoder for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_store::ConsensusProtocol;
     use crate::crypto::Signer;
+    use crate::dag_state::ConsensusProtocol;
     use crate::types::{BaseStatement, Transaction};
 
     fn make_test_block(

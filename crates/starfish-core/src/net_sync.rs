@@ -2,8 +2,8 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::block_store::ConsensusProtocol;
 use crate::consensus::universal_committer::UniversalCommitter;
+use crate::dag_state::ConsensusProtocol;
 use crate::data::Data;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::rocks_store::RocksStore;
@@ -12,10 +12,10 @@ use crate::synchronizer::{DataRequester, UpdaterMissingAuthorities};
 use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
-    block_store::BlockStore,
     committee::Committee,
     core::Core,
     core_thread::CoreThreadDispatcher,
+    dag_state::DagState,
     metrics::Metrics,
     network::{Connection, Network, NetworkMessage},
     runtime::{Handle, JoinError, JoinHandle, timestamp_utc},
@@ -222,8 +222,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Self {
-        let consensus_protocol = inner.block_store.consensus_protocol;
-        let committee_size = inner.block_store.committee_size;
+        let consensus_protocol = inner.dag_state.consensus_protocol;
+        let committee_size = inner.dag_state.committee_size;
         let now = Instant::now();
         let authorities_with_missing_blocks_by_myself_from_peer =
             Arc::new(RwLock::new(vec![now; committee_size]));
@@ -256,7 +256,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         );
 
         let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
-        let own_id = inner.block_store.get_own_authority_index();
+        let own_id = inner.dag_state.get_own_authority_index();
         let peer = format_authority_index(peer_id);
 
         Self {
@@ -324,7 +324,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn handle_subscribe(&mut self, round: RoundNumber) {
-        if self.inner.block_store.byzantine_strategy.is_some() {
+        if self.inner.dag_state.byzantine_strategy.is_some() {
             let round = 0;
             self.disseminator.disseminate_own_blocks(round).await;
         } else {
@@ -616,7 +616,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_reference,
                 self.peer
             );
-            if self.inner.block_store.byzantine_strategy.is_none() {
+            if self.inner.dag_state.byzantine_strategy.is_none() {
                 self.disseminator
                     .push_block_history_with_shards(block_reference)
                     .await;
@@ -651,7 +651,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.block_store.byzantine_strategy.is_none()
+            if self.inner.dag_state.byzantine_strategy.is_none()
                 && self
                     .disseminator
                     .send_storage_blocks(self.peer_id, block_references)
@@ -680,7 +680,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.block_store.byzantine_strategy.is_none()
+            if self.inner.dag_state.byzantine_strategy.is_none()
                 && self
                     .disseminator
                     .send_transmission_blocks(self.peer_id, block_references)
@@ -711,7 +711,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
 
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub syncer: CoreThreadDispatcher<H, Arc<Notify>, C>,
-    pub block_store: BlockStore,
+    pub dag_state: DagState,
     pub notify: Arc<Notify>,
     pub committee: Arc<Committee>,
     stop: mpsc::Sender<()>,
@@ -734,7 +734,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let committed = core.take_recovered_committed_blocks();
         commit_observer.recover_committed(committed);
         let committee = core.committee().clone();
-        let block_store = core.block_store().clone();
+        let dag_state = core.dag_state().clone();
         let rocks_store = core.rocks_store();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
@@ -752,7 +752,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         // Conditionally prepare shard reconstructor channels for Starfish protocols
         let is_starfish = matches!(
-            block_store.consensus_protocol,
+            dag_state.consensus_protocol,
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishPull
@@ -763,7 +763,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 mpsc::channel::<crate::shard_reconstructor::DecodedBlocks>(1000);
             let reconstructor_handle = crate::shard_reconstructor::start_shard_reconstructor(
                 committee.clone(),
-                block_store.get_own_authority_index(),
+                dag_state.get_own_authority_index(),
                 metrics.clone(),
                 decoded_tx,
                 gc_round,
@@ -779,7 +779,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let inner = Arc::new(NetworkSyncerInner {
             notify,
             syncer,
-            block_store,
+            dag_state,
             committee,
             stop: stop_sender.clone(),
             epoch_close_signal: epoch_sender.clone(),
@@ -905,7 +905,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
         let last_seen = inner
-            .block_store
+            .dag_state
             .last_seen_by_authority(connection.peer_id as AuthorityIndex);
         connection
             .sender
@@ -953,7 +953,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         loop {
             let notified = inner.notify.notified();
             let round = inner
-                .block_store
+                .dag_state
                 .last_own_block_ref()
                 .map(|b| b.round())
                 .unwrap_or_default();
@@ -997,7 +997,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         loop {
             let notified = inner.notify.notified();
             let round = inner
-                .block_store
+                .dag_state
                 .last_own_block_ref()
                 .map(|b| b.round())
                 .unwrap_or_default();

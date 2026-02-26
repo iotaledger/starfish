@@ -10,7 +10,7 @@ use std::{
 use ahash::AHashSet;
 
 use crate::types::VerifiedStatementBlock;
-use crate::{block_store::BlockStore, committee::Committee, data::Data, types::BlockReference};
+use crate::{committee::Committee, dag_state::DagState, data::Data, types::BlockReference};
 
 /// Block manager suspends incoming blocks until they are connected to the
 /// existing graph, returning newly connected blocks
@@ -25,16 +25,16 @@ pub struct BlockManager {
     /// processing of other pending blocks. The indices of the vector
     /// correspond the authority indices.
     missing: Vec<AHashSet<BlockReference>>,
-    block_store: BlockStore,
+    dag_state: DagState,
 }
 
 impl BlockManager {
-    pub fn new(block_store: BlockStore, committee: &Arc<Committee>) -> Self {
+    pub fn new(dag_state: DagState, committee: &Arc<Committee>) -> Self {
         Self {
             blocks_pending: Default::default(),
             block_references_waiting: Default::default(),
             missing: (0..committee.len()).map(|_| AHashSet::new()).collect(),
-            block_store,
+            dag_state,
         }
     }
 
@@ -46,7 +46,7 @@ impl BlockManager {
         bool,
         AHashSet<BlockReference>,
     ) {
-        let block_store = self.block_store.clone();
+        let dag_state = self.dag_state.clone();
         let mut updated_statements = false;
         let mut blocks: VecDeque<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)> =
             blocks.into();
@@ -57,15 +57,15 @@ impl BlockManager {
             // check whether we have already processed this block and skip it if so.
             let block_reference = storage_and_transmission_blocks.0.reference();
 
-            let block_exists = self.block_store.block_exists(*block_reference);
+            let block_exists = self.dag_state.block_exists(*block_reference);
             if block_exists {
                 // Block already in store — check if this version brings new statement data
                 if self
-                    .block_store
+                    .dag_state
                     .contains_new_statements(&storage_and_transmission_blocks.0)
                 {
                     tracing::debug!("Block has new statements: {:?}", block_reference);
-                    block_store.insert_general_block(storage_and_transmission_blocks.clone());
+                    dag_state.insert_general_block(storage_and_transmission_blocks.clone());
                     newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
                     updated_statements = true;
                 }
@@ -85,7 +85,7 @@ impl BlockManager {
             for included_reference in storage_and_transmission_blocks.0.includes() {
                 // If we are missing a reference then we insert
                 // into pending and update the waiting index
-                if !self.block_store.block_exists(*included_reference) {
+                if !self.dag_state.block_exists(*included_reference) {
                     processed = false;
 
                     self.block_references_waiting
@@ -110,7 +110,7 @@ impl BlockManager {
                 let block_reference = *block_reference;
 
                 // Block can be processed. So need to update indexes etc
-                block_store.insert_general_block(storage_and_transmission_blocks.clone());
+                dag_state.insert_general_block(storage_and_transmission_blocks.clone());
                 newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
 
                 // Now unlock any pending blocks, and process them if ready.
