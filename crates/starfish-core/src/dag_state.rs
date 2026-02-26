@@ -632,6 +632,10 @@ impl DagState {
         self.inner.read().last_seen_by_authority(authority)
     }
 
+    pub fn min_last_seen_round(&self) -> RoundNumber {
+        self.inner.read().min_last_seen_round()
+    }
+
     pub fn last_own_block_ref(&self) -> Option<BlockReference> {
         self.inner.read().last_own_block()
     }
@@ -897,6 +901,10 @@ impl DagStateInner {
             .last_seen_by_authority
             .get(authority as usize)
             .expect("last_seen_by_authority not found")
+    }
+
+    pub fn min_last_seen_round(&self) -> RoundNumber {
+        self.last_seen_by_authority.iter().copied().min().unwrap_or(0)
     }
 
     fn update_last_seen_by_authority(&mut self, reference: &BlockReference) {
