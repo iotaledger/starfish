@@ -146,10 +146,7 @@ impl Metrics {
             .map(|peer| {
                 let (hist, sender) = histogram();
                 (
-                    (
-                        hist,
-                        format_authority_index(peer as AuthorityIndex).to_string(),
-                    ),
+                    (hist, format!("validator-{peer}")),
                     sender,
                 )
             })

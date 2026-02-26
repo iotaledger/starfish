@@ -153,13 +153,16 @@ scrape_configs:
   - job_name: 'node-exporter'
     static_configs:
       - targets: ['node-exporter:9100']
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
   - job_name: 'starfish-metrics'
     static_configs:
 EOH
     for ((i=0; i<NUM_VALIDATORS; i++)); do
         LAST_OCTET=$((${BASE_IP##*.} + i))
         METRICS_PORT=$((1500 + NUM_VALIDATORS + i))
-        VALIDATOR_NAME="validator-$((i + 1))"
+        VALIDATOR_NAME="validator-$i"
         cat <<EOT
       - targets: ['172.28.0.$LAST_OCTET:$METRICS_PORT']
         labels:
@@ -261,6 +264,17 @@ services:
       starfish-net:
         ipv4_address: 172.28.0.4
     restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      starfish-net:
+        ipv4_address: 172.28.0.5
+    restart: unless-stopped
 EOH
 
     # Validator services
@@ -287,6 +301,7 @@ EOH
         cat <<EOV
 
   validator-$i:
+    container_name: validator-$i
     image: starfish
     command: >
       dry-run

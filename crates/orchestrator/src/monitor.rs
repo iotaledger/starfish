@@ -2,11 +2,17 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fs, net::SocketAddr, path::PathBuf};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crate::{
     benchmark::BenchmarkParameters,
     client::Instance,
+    display,
     error::{MonitorError, MonitorResult},
     protocol::ProtocolMetrics,
     ssh::{CommandContext, SshConnectionManager},
@@ -144,7 +150,7 @@ impl Prometheus {
 
         let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
         for (i, (_, nodes_metrics_path)) in nodes_metrics_path.into_iter().enumerate() {
-            let id = format!("node-{i}");
+            let id = format!("validator-{i}");
             let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
             config.push(scrape_config);
         }
@@ -192,10 +198,14 @@ impl Prometheus {
             "    static_configs:",
             "      - targets:",
             &format!("        - {ip}:{port}"),
+            "        labels:",
+            &format!("          validator: {id}"),
             &format!("  - job_name: instance-node-exporter-{id}"),
             "    static_configs:",
             "      - targets:",
             &format!("        - {ip}:9200"),
+            "        labels:",
+            &format!("          validator: {id}"),
         ]
         .join("\n")
     }
@@ -292,81 +302,252 @@ impl Grafana {
     }
 }
 
-#[allow(dead_code)] // TODO: Will be used to observe local testbeds (#8)
-/// Bootstrap the grafana with datasource to connect to the given instances.
-/// NOTE: Only for macOS. Grafana must be installed through homebrew (and not
-/// from source). Deeper grafana configuration can be done through the
-/// grafana.ini file (/opt/homebrew/etc/grafana/grafana.ini) or the plist file
-/// (~/Library/LaunchAgents/homebrew.mxcl.grafana.plist).
-pub struct LocalGrafana;
+/// Collects monitoring data from a remote instance and runs it locally via
+/// docker-compose.
+pub struct MonitoringCollector {
+    ssh_manager: SshConnectionManager,
+    monitoring_instance: Instance,
+}
 
-#[allow(dead_code)] // TODO: Will be used to observe local testbeds (#8)
-impl LocalGrafana {
-    /// The default grafana home directory (macOS, homebrew install).
-    const DEFAULT_GRAFANA_HOME: &'static str = "/opt/homebrew/opt/grafana/share/grafana/";
-    /// The path to the datasources directory.
-    const DATASOURCES_PATH: &'static str = "conf/provisioning/datasources/";
-    /// The default grafana port.
-    pub const DEFAULT_PORT: u16 = 3000;
+impl MonitoringCollector {
+    pub fn new(ssh_manager: SshConnectionManager, monitoring_instance: Instance) -> Self {
+        Self {
+            ssh_manager,
+            monitoring_instance,
+        }
+    }
 
-    /// Configure grafana to connect to the given instances. Only for macOS.
-    pub fn run<I>(instances: I) -> MonitorResult<()>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        let path: PathBuf = [Self::DEFAULT_GRAFANA_HOME, Self::DATASOURCES_PATH]
-            .iter()
-            .collect();
+    /// Stop Prometheus on the remote instance, archive the TSDB data, and
+    /// download it locally.
+    pub async fn download_prometheus_data(&self, local_dir: &Path) -> MonitorResult<()> {
+        let instance = std::iter::once(self.monitoring_instance.clone());
 
-        // Remove the old datasources.
-        fs::remove_dir_all(&path).unwrap();
-        fs::create_dir(&path).unwrap();
+        // Stop prometheus for a clean TSDB snapshot.
+        self.ssh_manager
+            .execute(
+                instance.clone(),
+                "sudo service prometheus stop",
+                CommandContext::default(),
+            )
+            .await?;
 
-        // Create the new datasources.
-        for (i, instance) in instances.into_iter().enumerate() {
-            let mut file = path.clone();
-            file.push(format!("instance-{}.yml", i));
-            fs::write(&file, Self::datasource(&instance, i)).map_err(|e| {
-                MonitorError::GrafanaError(format!("Failed to write grafana datasource ({e})"))
-            })?;
+        // Tar the data directory.
+        self.ssh_manager
+            .execute(
+                instance,
+                "tar -czf /tmp/prometheus-data.tar.gz -C /var/lib/prometheus .",
+                CommandContext::default(),
+            )
+            .await?;
+
+        // Download via SCP.
+        let connection = self
+            .ssh_manager
+            .connect(self.monitoring_instance.ssh_address())
+            .await?;
+        let data = tokio::runtime::Handle::current()
+            .spawn_blocking(move || connection.download_bytes("/tmp/prometheus-data.tar.gz"))
+            .await
+            .unwrap()?;
+
+        // Write and extract locally.
+        let archive_path = local_dir.join("prometheus-data.tar.gz");
+        fs::write(&archive_path, &data)
+            .map_err(|e| MonitorError::Prometheus(format!("Failed to write archive: {e}")))?;
+
+        let prometheus_dir = local_dir.join("prometheus-data");
+        fs::create_dir_all(&prometheus_dir).map_err(|e| {
+            MonitorError::Prometheus(format!("Failed to create prometheus-data dir: {e}"))
+        })?;
+
+        let status = Command::new("tar")
+            .args(["xzf"])
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&prometheus_dir)
+            .status()
+            .map_err(|e| MonitorError::Prometheus(format!("Failed to run tar: {e}")))?;
+        if !status.success() {
+            return Err(MonitorError::Prometheus("tar extraction failed".into()));
         }
 
-        // Restart grafana.
-        std::process::Command::new("brew")
-            .arg("services")
-            .arg("restart")
-            .arg("grafana")
-            .arg("-q")
-            .spawn()
-            .map_err(|e| MonitorError::GrafanaError(e.to_string()))?;
+        // Clean up the archive.
+        let _ = fs::remove_file(&archive_path);
 
         Ok(())
     }
 
-    /// Generate the content of the datasource file for the given instance. This
-    /// grafana instance takes one datasource per instance and assumes one
-    /// prometheus server runs per instance. NOTE: The datasource file is a
-    /// yaml file so spaces are important.
-    fn datasource(instance: &Instance, index: usize) -> String {
-        [
-            "apiVersion: 1",
-            "deleteDatasources:",
-            &format!("  - name: instance-{index}"),
-            "    orgId: 1",
-            "datasources:",
-            &format!("  - name: instance-{index}"),
-            "    type: prometheus",
-            "    access: proxy",
-            "    orgId: 1",
-            &format!(
-                "    url: http://{}:{}",
-                instance.main_ip,
-                Prometheus::DEFAULT_PORT
-            ),
-            "    editable: true",
-            &format!("    uid: UID-{index}"),
+    /// Generate docker-compose.yml, prometheus.yml, and datasource.yaml in the
+    /// given directory for local monitoring.
+    pub fn generate_local_config(local_dir: &Path) -> MonitorResult<()> {
+        let grafana_dir = Self::grafana_dir();
+        let grafana_dir = grafana_dir.canonicalize().map_err(|e| {
+            MonitorError::GrafanaError(format!(
+                "Cannot resolve grafana dir {}: {e}",
+                grafana_dir.display()
+            ))
+        })?;
+
+        let dashboard_provider = grafana_dir.join("dashboard.yaml");
+        let dashboard_json = grafana_dir.join("grafana-dashboard.json");
+
+        // Minimal prometheus config — no scrape targets (remote IPs are gone),
+        // the TSDB data is already on disk and fully queryable.
+        let prometheus_yml = "\
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+";
+        fs::write(local_dir.join("prometheus.yml"), prometheus_yml).map_err(|e| {
+            MonitorError::Prometheus(format!("Failed to write prometheus.yml: {e}"))
+        })?;
+
+        // Datasource pointing to the docker prometheus service with the UID
+        // that the dashboard JSON references.
+        let datasource_yml = format!(
+            "\
+apiVersion: 1
+datasources:
+  - name: testbed
+    type: prometheus
+    access: proxy
+    orgId: 1
+    url: http://prometheus:{}
+    editable: true
+    uid: Fixed-UID-testbed
+",
+            Prometheus::DEFAULT_PORT
+        );
+        fs::write(local_dir.join("datasource.yaml"), datasource_yml).map_err(|e| {
+            MonitorError::GrafanaError(format!("Failed to write datasource.yaml: {e}"))
+        })?;
+
+        let compose = format!(
+            "\
+services:
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - \"{prom_port}:{prom_port}\"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-data:/var/lib/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/var/lib/prometheus/metrics2'
+      - '--storage.tsdb.retention.time=90d'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - \"{grafana_port}:{grafana_port}\"
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./datasource.yaml:/etc/grafana/provisioning/datasources/main.yaml:ro
+      - {dashboard_provider}:/etc/grafana/provisioning/dashboards/main.yaml:ro
+      - {dashboard_json}:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
+    restart: unless-stopped
+",
+            prom_port = Prometheus::DEFAULT_PORT,
+            grafana_port = Grafana::DEFAULT_PORT,
+            dashboard_provider = dashboard_provider.display(),
+            dashboard_json = dashboard_json.display(),
+        );
+        fs::write(local_dir.join("docker-compose.yml"), compose).map_err(|e| {
+            MonitorError::GrafanaError(format!("Failed to write docker-compose.yml: {e}"))
+        })?;
+
+        Ok(())
+    }
+
+    /// Stop any local docker-compose stacks that may conflict on ports
+    /// 3000/9090 (previous collect-monitoring runs or the dry-run stack).
+    pub fn stop_conflicting_stacks() {
+        // Stop the dry-run stack if running.
+        let dryrun_compose: PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "..",
+            "scripts",
+            "data",
+            "docker-compose.yml",
         ]
-        .join("\n")
+        .iter()
+        .collect();
+        if dryrun_compose.exists() {
+            let _ = Command::new("docker")
+                .args(["compose", "-f"])
+                .arg(&dryrun_compose)
+                .arg("down")
+                .status();
+        }
+
+        // Stop previous collect-monitoring stacks.
+        let monitoring_data = PathBuf::from("monitoring-data");
+        if monitoring_data.is_dir() {
+            if let Ok(entries) = fs::read_dir(&monitoring_data) {
+                for entry in entries.flatten() {
+                    let compose = entry.path().join("docker-compose.yml");
+                    if compose.exists() {
+                        let _ = Command::new("docker")
+                            .args(["compose", "-f"])
+                            .arg(&compose)
+                            .arg("down")
+                            .status();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start the local docker-compose stack.
+    pub fn start_local_stack(local_dir: &Path) -> MonitorResult<()> {
+        let status = Command::new("docker")
+            .args(["compose", "up", "-d"])
+            .current_dir(local_dir)
+            .status()
+            .map_err(|e| {
+                MonitorError::GrafanaError(format!("Failed to run docker compose: {e}"))
+            })?;
+        if !status.success() {
+            return Err(MonitorError::GrafanaError(
+                "docker compose up -d failed".into(),
+            ));
+        }
+
+        display::newline();
+        display::config(
+            "Grafana",
+            format!("http://localhost:{}", Grafana::DEFAULT_PORT),
+        );
+        display::config(
+            "Prometheus",
+            format!("http://localhost:{}", Prometheus::DEFAULT_PORT),
+        );
+        display::config("Data directory", local_dir.display());
+        display::newline();
+
+        Ok(())
+    }
+
+    /// Path to the monitoring/grafana directory in the repo.
+    fn grafana_dir() -> PathBuf {
+        [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "..",
+            "monitoring",
+            "grafana",
+        ]
+        .iter()
+        .collect()
     }
 }
 

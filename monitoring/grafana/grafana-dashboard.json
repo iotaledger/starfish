@@ -2284,8 +2284,8 @@
                         "uid": "Fixed-UID-testbed"
                     },
                     "editorMode": "code",
-                    "expr": "avg(connection_latency{v=\"p50\"} / 1000) by (peer)",
-                    "legendFormat": "{{peer}}",
+                    "expr": "label_replace(avg by (peer) (connection_latency{v=\"p50\"} / 1000), \"validator\", \"$1\", \"peer\", \"(.*)\")",
+                    "legendFormat": "{{validator}}",
                     "instant": false,
                     "range": true,
                     "refId": "A"
@@ -2364,13 +2364,24 @@
                         "uid": "Fixed-UID-testbed"
                     },
                     "editorMode": "code",
-                    "expr": "1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))",
-                    "legendFormat": "cpu busy",
+                    "expr": "label_replace(rate(container_cpu_usage_seconds_total{name=~\"validator-.*\"}[1m]), \"validator\", \"$1\", \"name\", \"(.*)\")",
+                    "legendFormat": "{{validator}}",
                     "range": true,
                     "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Fixed-UID-testbed"
+                    },
+                    "editorMode": "code",
+                    "expr": "1 - avg by (validator) (rate(node_cpu_seconds_total{validator=~\"validator-.*\", mode=\"idle\"}[1m]))",
+                    "legendFormat": "{{validator}}",
+                    "range": true,
+                    "refId": "B"
                 }
             ],
-            "title": "CPU usage",
+            "title": "CPU usage (per validator)",
             "type": "timeseries"
         },
         {
@@ -2443,13 +2454,24 @@
                         "uid": "Fixed-UID-testbed"
                     },
                     "editorMode": "code",
-                    "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1048576",
-                    "legendFormat": "used",
+                    "expr": "label_replace(container_memory_usage_bytes{name=~\"validator-.*\"} / 1048576, \"validator\", \"$1\", \"name\", \"(.*)\")",
+                    "legendFormat": "{{validator}}",
                     "range": true,
                     "refId": "A"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Fixed-UID-testbed"
+                    },
+                    "editorMode": "code",
+                    "expr": "(node_memory_MemTotal_bytes{validator=~\"validator-.*\"} - node_memory_MemAvailable_bytes{validator=~\"validator-.*\"}) / 1048576",
+                    "legendFormat": "{{validator}}",
+                    "range": true,
+                    "refId": "B"
                 }
             ],
-            "title": "Memory usage (RSS)",
+            "title": "Memory usage (per validator)",
             "type": "timeseries"
         }
     ],

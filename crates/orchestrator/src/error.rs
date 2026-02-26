@@ -77,6 +77,9 @@ pub enum MonitorError {
 
     #[error("Failed to start Grafana: {0}")]
     GrafanaError(String),
+
+    #[error("Prometheus: {0}")]
+    Prometheus(String),
 }
 
 pub type TestbedResult<T> = Result<T, TestbedError>;

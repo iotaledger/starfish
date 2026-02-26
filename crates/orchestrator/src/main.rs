@@ -6,13 +6,15 @@
 
 use benchmark::BenchmarkParameters;
 use clap::Parser;
-use client::{ServerProviderClient, aws::AwsClient, vultr::VultrClient};
+use client::{Instance, ServerProviderClient, aws::AwsClient, vultr::VultrClient};
 use eyre::Context;
 use measurements::MeasurementsCollection;
+use monitor::MonitoringCollector;
 use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
-use ssh::SshConnectionManager;
+use ssh::{CommandContext, SshConnectionManager};
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use testbed::Testbed;
@@ -138,6 +140,9 @@ pub enum Operation {
         #[clap(long, value_name = "FILE")]
         path: PathBuf,
     },
+    /// Download monitoring data from the remote testbed, start a local
+    /// Prometheus + Grafana stack, and destroy the remote monitoring instance.
+    CollectMonitoring,
 }
 
 /// The action to perform on the testbed.
@@ -173,7 +178,12 @@ pub enum TestbedAction {
     Stop,
 
     /// Destroy the testbed and terminate all instances.
-    Destroy,
+    Destroy {
+        /// Download monitoring data locally before destroying the monitoring
+        /// instance. Validators are destroyed in parallel with the download.
+        #[clap(long, action, default_value_t = false)]
+        collect_monitoring: bool,
+    },
 }
 
 #[tokio::main]
@@ -255,6 +265,17 @@ fn docker_build_and_extract() -> eyre::Result<PathBuf> {
     Ok(PathBuf::from(DOCKER_BINARY_OUTPUT))
 }
 
+fn select_monitoring_instance(instances: &[Instance], settings: &Settings) -> Option<Instance> {
+    let region = settings.regions.first()?;
+    let mut candidates: Vec<_> = instances
+        .iter()
+        .filter(|instance| instance.is_active() && &instance.region == region)
+        .cloned()
+        .collect();
+    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+    candidates.into_iter().next()
+}
+
 async fn run<C: ServerProviderClient>(
     settings: Settings,
     client: C,
@@ -285,11 +306,106 @@ async fn run<C: ServerProviderClient>(
             // Stop an existing testbed.
             TestbedAction::Stop => testbed.stop().await.wrap_err("Failed to stop testbed")?,
 
-            // Destroy the testbed and terminal all instances.
-            TestbedAction::Destroy => testbed
-                .destroy()
-                .await
-                .wrap_err("Failed to destroy testbed")?,
+            // Destroy the testbed and terminate all instances.
+            TestbedAction::Destroy { collect_monitoring } => {
+                if collect_monitoring && settings.monitoring {
+                    // Stop conflicting local stacks first.
+                    display::action("Stopping conflicting local monitoring stacks");
+                    MonitoringCollector::stop_conflicting_stacks();
+                    display::done();
+
+                    // Separate monitoring instance from the rest.
+                    let instances = testbed.instances();
+                    let monitoring_instance = select_monitoring_instance(&instances, &settings);
+
+                    if let Some(monitoring_instance) = monitoring_instance {
+                        let username = testbed.username();
+                        let private_key_file = settings.ssh_private_key_file.clone();
+                        let ssh_manager =
+                            SshConnectionManager::new(username.into(), private_key_file)
+                                .with_timeout(settings.ssh_timeout)
+                                .with_retries(settings.ssh_retries);
+
+                        // Kill all remote processes.
+                        display::action("Stopping all remote processes");
+                        let all_active = instances.iter().filter(|x| x.is_active()).cloned();
+                        ssh_manager
+                            .execute(
+                                all_active,
+                                "(tmux kill-server || true)",
+                                CommandContext::default(),
+                            )
+                            .await
+                            .wrap_err("Failed to stop remote processes")?;
+                        display::done();
+
+                        // Prepare local directory for monitoring data.
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let local_dir = PathBuf::from(format!("monitoring-data/{timestamp}"));
+                        fs::create_dir_all(&local_dir)
+                            .wrap_err("Failed to create monitoring data directory")?;
+
+                        // Parallel: destroy non-monitoring instances + download
+                        // monitoring data.
+                        let non_monitoring: Vec<_> = instances
+                            .into_iter()
+                            .filter(|i| i.id != monitoring_instance.id)
+                            .collect();
+                        let collector =
+                            MonitoringCollector::new(ssh_manager, monitoring_instance.clone());
+
+                        display::action("Destroying validators and downloading monitoring data");
+                        tokio::try_join!(
+                            async {
+                                testbed
+                                    .destroy_instances(non_monitoring)
+                                    .await
+                                    .map_err(|e| eyre::eyre!(e))
+                            },
+                            async {
+                                collector
+                                    .download_prometheus_data(&local_dir)
+                                    .await
+                                    .map_err(|e| eyre::eyre!(e))
+                            },
+                        )?;
+                        display::done();
+
+                        // Generate config and start local stack.
+                        display::action("Generating local monitoring configuration");
+                        MonitoringCollector::generate_local_config(&local_dir)
+                            .wrap_err("Failed to generate local monitoring config")?;
+                        display::done();
+
+                        display::action("Starting local Prometheus + Grafana");
+                        MonitoringCollector::start_local_stack(&local_dir)
+                            .wrap_err("Failed to start local monitoring stack")?;
+                        display::done();
+
+                        // Destroy the monitoring instance last.
+                        display::action("Destroying remote monitoring instance");
+                        testbed
+                            .destroy_instance(monitoring_instance)
+                            .await
+                            .wrap_err("Failed to destroy monitoring instance")?;
+                        display::done();
+                    } else {
+                        // No monitoring instance found, just destroy everything.
+                        testbed
+                            .destroy()
+                            .await
+                            .wrap_err("Failed to destroy testbed")?;
+                    }
+                } else {
+                    testbed
+                        .destroy()
+                        .await
+                        .wrap_err("Failed to destroy testbed")?;
+                }
+            }
         },
 
         // Build the starfish binary via Docker (run before deploying machines).
@@ -382,6 +498,90 @@ async fn run<C: ServerProviderClient>(
 
         // Print a summary of the specified measurements collection.
         Operation::Summarize { path } => MeasurementsCollection::load(path)?.display_summary(),
+
+        // Collect monitoring data and run it locally.
+        Operation::CollectMonitoring => {
+            eyre::ensure!(
+                settings.monitoring,
+                "Monitoring is not enabled in settings (set monitoring: true)"
+            );
+
+            // Stop any conflicting local monitoring stacks.
+            display::action("Stopping conflicting local monitoring stacks");
+            MonitoringCollector::stop_conflicting_stacks();
+            display::done();
+
+            // Identify the monitoring instance (first active in regions[0]).
+            let instances = testbed.instances();
+            let monitoring_region = settings
+                .regions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "<none>".to_string());
+            let monitoring_instance =
+                select_monitoring_instance(&instances, &settings).ok_or_else(|| {
+                    eyre::eyre!(
+                        "No active instance found in region '{}' for monitoring",
+                        monitoring_region
+                    )
+                })?;
+
+            let username = testbed.username();
+            let private_key_file = settings.ssh_private_key_file.clone();
+            let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+                .with_timeout(settings.ssh_timeout)
+                .with_retries(settings.ssh_retries);
+
+            // Kill all remote processes (validators, clients, etc.).
+            display::action("Stopping all remote processes");
+            let all_active = instances.iter().filter(|x| x.is_active()).cloned();
+            ssh_manager
+                .execute(
+                    all_active,
+                    "(tmux kill-server || true)",
+                    CommandContext::default(),
+                )
+                .await
+                .wrap_err("Failed to stop remote processes")?;
+            display::done();
+
+            // Download Prometheus data.
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let local_dir = PathBuf::from(format!("monitoring-data/{timestamp}"));
+            fs::create_dir_all(&local_dir)
+                .wrap_err("Failed to create monitoring data directory")?;
+
+            display::action("Downloading Prometheus data from monitoring instance");
+            let collector = MonitoringCollector::new(ssh_manager, monitoring_instance.clone());
+            collector
+                .download_prometheus_data(&local_dir)
+                .await
+                .wrap_err("Failed to download Prometheus data")?;
+            display::done();
+
+            // Generate local docker-compose configuration.
+            display::action("Generating local monitoring configuration");
+            MonitoringCollector::generate_local_config(&local_dir)
+                .wrap_err("Failed to generate local monitoring config")?;
+            display::done();
+
+            // Start the local stack.
+            display::action("Starting local Prometheus + Grafana");
+            MonitoringCollector::start_local_stack(&local_dir)
+                .wrap_err("Failed to start local monitoring stack")?;
+            display::done();
+
+            // Destroy the remote monitoring instance.
+            display::action("Destroying remote monitoring instance");
+            testbed
+                .destroy_instance(monitoring_instance)
+                .await
+                .wrap_err("Failed to destroy monitoring instance")?;
+            display::done();
+        }
     }
     Ok(())
 }

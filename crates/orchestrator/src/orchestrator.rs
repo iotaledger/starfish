@@ -96,7 +96,9 @@ impl<P> Orchestrator<P> {
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<(Vec<Instance>, Vec<Instance>, Option<Instance>)> {
         // Ensure there are enough active instances.
-        let available_instances: Vec<_> = self.instances.iter().filter(|x| x.is_active()).collect();
+        let mut available_instances: Vec<_> =
+            self.instances.iter().filter(|x| x.is_active()).collect();
+        available_instances.sort_by(|a, b| a.region.cmp(&b.region).then(a.id.cmp(&b.id)));
         let minimum_instances = parameters.nodes
             + self.settings.dedicated_clients
             + if self.settings.monitoring { 1 } else { 0 };

@@ -143,3 +143,44 @@ both set to `admin`. You can either create a
 [new dashboard](https://grafana.com/docs/grafana/latest/getting-started/build-first-dashboard/)
 or [import](https://grafana.com/docs/grafana/latest/dashboards/manage-dashboards/#import-a-dashboard)
 the example dashboard located in the `./assets` folder.
+
+### Collecting monitoring data locally
+
+After a benchmark completes, the remote monitoring instance keeps running
+(and costing money). The `collect-monitoring` command downloads the Prometheus
+TSDB data, starts a local monitoring stack via Docker Compose, and destroys the
+remote monitoring instance so that all historical metrics remain accessible
+locally.
+
+```bash
+cargo run --bin orchestrator -- collect-monitoring
+```
+
+This will:
+
+1. Stop any conflicting local monitoring stacks (previous `collect-monitoring`
+   runs or a dry-run stack on the same ports).
+2. Kill all remote processes (validators and clients) via `tmux kill-server`.
+3. Download Prometheus TSDB data from the remote monitoring instance.
+4. Generate a local `docker-compose.yml` and `prometheus.yml` under
+   `./monitoring-data/<timestamp>/`.
+5. Start Prometheus and Grafana containers locally.
+6. Print the local Grafana (`http://localhost:3000`) and Prometheus
+   (`http://localhost:9090`) URLs.
+7. Destroy the remote monitoring instance.
+
+**Prerequisites**: Docker must be installed and running on the local machine,
+and `monitoring` must be enabled in `settings.yml`.
+
+#### Collecting monitoring data during testbed destruction
+
+The `testbed destroy` command accepts an optional `--collect-monitoring` flag
+that downloads monitoring data in parallel with destroying the validator
+instances, then destroys the monitoring instance last:
+
+```bash
+cargo run --bin orchestrator -- testbed destroy --collect-monitoring
+```
+
+This is useful when you want to tear down the entire testbed while preserving
+monitoring data in a single command.
