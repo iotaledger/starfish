@@ -4,8 +4,9 @@
 
 use std::net::SocketAddr;
 
-use axum::{Extension, Router, Server, http::StatusCode, routing::get};
+use axum::{Extension, Router, http::StatusCode, routing::get};
 use prometheus::{Registry, TextEncoder};
+use tokio::net::TcpListener;
 
 use crate::runtime::{Handle, JoinHandle};
 
@@ -14,14 +15,16 @@ pub const METRICS_ROUTE: &str = "/metrics";
 pub fn start_prometheus_server(
     address: SocketAddr,
     registry: &Registry,
-) -> JoinHandle<Result<(), hyper::Error>> {
+) -> JoinHandle<Result<(), std::io::Error>> {
     let app = Router::new()
         .route(METRICS_ROUTE, get(metrics))
         .layer(Extension(registry.clone()));
 
     tracing::info!("Prometheus server booted on {address}");
-    Handle::current()
-        .spawn(async move { Server::bind(&address).serve(app.into_make_service()).await })
+    Handle::current().spawn(async move {
+        let listener = TcpListener::bind(&address).await?;
+        axum::serve(listener, app).await
+    })
 }
 
 async fn metrics(registry: Extension<Registry>) -> (StatusCode, String) {

@@ -4,14 +4,12 @@
 [advisories]
 version = 2
 ignore = [
-  "RUSTSEC-2023-0071",
-  # difference 2.0.0 is unmaintained
-  "RUSTSEC-2020-0095",
-  # rust-yaml is not maintained, but is a dependency in many of our packages.
-  "RUSTSEC-2024-0320",
-  # We have a vulnerable version of `rustls` in our dependency tree through the old version of
-  # jsonrpsee used by sui.
-  "RUSTSEC-2024-0336",
+  # bincode 1.3.3 is unmaintained but works; no drop-in replacement
+  "RUSTSEC-2025-0141",
+  # proc-macro-error is unmaintained, transitive via tabled_derive
+  "RUSTSEC-2024-0370",
+  # protobuf 2.x recursion crash, transitive via prometheus 0.13 (can't upgrade)
+  "RUSTSEC-2024-0437",
 ]
 
 # This section is considered when running `cargo deny check licenses`
@@ -61,13 +59,23 @@ ignore = true
 multiple-versions = "deny"
 skip = [
   { name = "itertools", version = "<=12.1" },
-  # transitive windows-sys 0.52/0.53 duplicates
-  { name = "windows_x86_64_msvc", version = "<=0.52" },
-  { name = "windows_x86_64_gnullvm", version = "<=0.52" },
+  # transitive bindgen duplicates from librocksdb-sys, zstd-sys build deps
+  { name = "bindgen", version = "<=0.71" },
+  # crossterm 0.27 uses old mio 0.8
+  { name = "mio", version = "0.8" },
+  # tabled_derive uses heck 0.4, clap_derive uses 0.5
+  { name = "heck", version = "0.4" },
+  # bindgen 0.69 (from rocksdb) uses rustc-hash 1.x
+  { name = "rustc-hash", version = "1" },
 ]
 skip-tree = [
-  # several crates depend on an older version of windows-sys
-  { name = "windows-sys", depth = 3, version = "0.48" },
+  # aws-smithy-http-client depends on both hyper 0.14 and 1.x,
+  # pulling old http/http-body/h2/rustls/tokio-rustls/socket2/core-foundation stacks
+  { name = "aws-smithy-http-client" },
+  # ed25519-consensus uses old sha2/digest/block-buffer chain
+  { name = "ed25519-consensus", version = "2" },
+  # windows-sys 0.48/0.52 duplicates from various transitive deps
+  { name = "windows-sys", version = "<=0.52" },
 ]
 
 # This section is considered when running `cargo deny check sources`.

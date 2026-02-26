@@ -533,13 +533,9 @@ impl DagState {
         self.metrics
             .dag_lowest_round
             .set(inner.dag.keys().next().copied().unwrap_or(0) as i64);
-        self.metrics.dag_blocks_in_memory.set(
-            inner
-                .index
-                .values()
-                .map(|m| m.len() as i64)
-                .sum::<i64>(),
-        );
+        self.metrics
+            .dag_blocks_in_memory
+            .set(inner.index.values().map(|m| m.len() as i64).sum::<i64>());
     }
 
     pub fn get_own_transmission_blocks(
@@ -904,7 +900,11 @@ impl DagStateInner {
     }
 
     pub fn min_last_seen_round(&self) -> RoundNumber {
-        self.last_seen_by_authority.iter().copied().min().unwrap_or(0)
+        self.last_seen_by_authority
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
     }
 
     fn update_last_seen_by_authority(&mut self, reference: &BlockReference) {

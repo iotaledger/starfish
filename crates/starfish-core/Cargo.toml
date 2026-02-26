@@ -8,7 +8,7 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.8"
-axum = "0.6.18"
+axum = "0.7"
 bincode = "1.3.3"
 
 blake3 = "1.5.5"
@@ -18,7 +18,6 @@ eyre = { workspace = true }
 futures = { workspace = true }
 gettid = "0.1.2"
 hex = "0.4.3"
-hyper = "0.14.26"
 libc = "0.2.146"
 memmap2 = "0.7.0"
 
@@ -41,7 +40,6 @@ zstd = { version = "0.13.3", default-features = false }
 [dev-dependencies]
 reqwest = { workspace = true }
 seahash = "4.1.0"
-tempdir = "0.3.7"
 
 [build-dependencies]
 bindgen = { workspace = true }

@@ -344,7 +344,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishS
         ) {
             self.process_blocks_without_statements(blocks_without_statements)
-            .await;
+                .await;
         }
 
         // Then process blocks with statements
@@ -442,10 +442,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_with_statements(
-        &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
-    ) {
+    async fn process_blocks_with_statements(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
         let mut verified_data_blocks = Vec::new();
         for data_block in blocks {
             let mut block: VerifiedStatementBlock = (*data_block).clone();

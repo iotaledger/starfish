@@ -28,7 +28,7 @@ use crate::{
 
 pub struct Validator {
     network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
-    metrics_handle: JoinHandle<Result<(), hyper::Error>>,
+    metrics_handle: JoinHandle<Result<(), std::io::Error>>,
     metrics: Arc<Metrics>,
     reporter: Arc<MetricReporter>,
 }
@@ -142,7 +142,7 @@ impl Validator {
         self,
     ) -> (
         Result<(), JoinError>,
-        Result<Result<(), hyper::Error>, JoinError>,
+        Result<Result<(), std::io::Error>, JoinError>,
     ) {
         tokio::join!(
             self.network_synchronizer.await_completion(),
@@ -168,7 +168,7 @@ mod smoke_tests {
         time::Duration,
     };
 
-    use tempdir::TempDir;
+    use tempfile::TempDir;
     use tokio::time;
 
     use super::Validator;
@@ -217,7 +217,7 @@ mod smoke_tests {
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let dir = TempDir::new("commit").unwrap();
+        let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
         for pc in &private_configs {
             fs::create_dir_all(&pc.storage_path).unwrap();
@@ -273,7 +273,7 @@ mod smoke_tests {
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let dir = TempDir::new("sync").unwrap();
+        let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
         for pc in &private_configs {
             fs::create_dir_all(&pc.storage_path).unwrap();
@@ -362,7 +362,7 @@ mod smoke_tests {
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
 
-        let dir = TempDir::new("crash_faults").unwrap();
+        let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
         for pc in &private_configs {
             fs::create_dir_all(&pc.storage_path).unwrap();
@@ -527,7 +527,7 @@ mod smoke_tests {
         let public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         let client_parameters = ClientParameters::default();
-        let dir = TempDir::new("lifecycle").unwrap();
+        let dir = TempDir::new().unwrap();
 
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
         for pc in &private_configs {

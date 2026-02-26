@@ -60,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remove rust-toolchain to avoid conflict in cargo-deny container
+        run: rm -f rust-toolchain
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           # do not check advisories on PRs to prevent sudden failure due to new announcement
@@ -72,6 +74,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remove rust-toolchain to avoid conflict in cargo-deny container
+        run: rm -f rust-toolchain
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: "1.85.0"
