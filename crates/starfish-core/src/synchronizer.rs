@@ -436,7 +436,7 @@ where
         for block_reference in block_references {
             let block = self.inner.dag_state.get_storage_block(block_reference);
             if let Some(block) = block {
-                for parent_reference in block.includes() {
+                for parent_reference in block.block_references() {
                     let parent = self.inner.dag_state.get_storage_block(*parent_reference);
                     if let Some(parent) = parent {
                         block_counter += 1;

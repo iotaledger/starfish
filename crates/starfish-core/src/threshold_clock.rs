@@ -19,7 +19,7 @@ pub fn threshold_clock_valid_verified_block(
     assert!(round_number > 0);
 
     // Ensure all includes have a round number smaller than the block round number
-    for include in block.includes() {
+    for include in block.block_references() {
         if include.round >= block.reference().round {
             return false;
         }
@@ -28,7 +28,7 @@ pub fn threshold_clock_valid_verified_block(
     let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
     let mut is_quorum = false;
     // Collect the authorities with included blocks at round_number  - 1
-    for include in block.includes() {
+    for include in block.block_references() {
         if include.round == round_number - 1 {
             is_quorum = aggregator.add(include.authority, committee);
         }

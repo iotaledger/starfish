@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 
 use crate::types::VerifiedStatementBlock;
 use crate::{committee::Committee, dag_state::DagState, data::Data, types::BlockReference};
@@ -53,11 +53,20 @@ impl BlockManager {
         let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
+        let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
         while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
-            // check whether we have already processed this block and skip it if so.
             let block_reference = storage_and_transmission_blocks.0.reference();
 
-            let block_exists = self.dag_state.block_exists(*block_reference);
+            if let Some(existing_pending_block) = self.blocks_pending.get_mut(block_reference) {
+                if storage_and_transmission_blocks.0.statements().is_some() {
+                    *existing_pending_block = storage_and_transmission_blocks;
+                }
+                continue;
+            }
+
+            let block_exists = *block_exists_cache
+                .entry(*block_reference)
+                .or_insert_with(|| self.dag_state.block_exists(*block_reference));
             if block_exists {
                 // Block already in store — check if this version brings new statement data
                 if self
@@ -72,20 +81,23 @@ impl BlockManager {
                 continue;
             }
 
-            if self.blocks_pending.contains_key(block_reference) {
-                if storage_and_transmission_blocks.0.statements().is_some() {
-                    self.blocks_pending
-                        .insert(*block_reference, storage_and_transmission_blocks);
+            let mut processed = true;
+            for included_reference in storage_and_transmission_blocks.0.block_references() {
+                if self.blocks_pending.contains_key(included_reference) {
+                    processed = false;
+                    self.block_references_waiting
+                        .entry(*included_reference)
+                        .or_default()
+                        .insert(*block_reference);
+                    continue;
                 }
 
-                continue;
-            }
-
-            let mut processed = true;
-            for included_reference in storage_and_transmission_blocks.0.includes() {
                 // If we are missing a reference then we insert
                 // into pending and update the waiting index
-                if !self.dag_state.block_exists(*included_reference) {
+                if !*block_exists_cache
+                    .entry(*included_reference)
+                    .or_insert_with(|| self.dag_state.block_exists(*included_reference))
+                {
                     processed = false;
 
                     self.block_references_waiting
@@ -111,6 +123,7 @@ impl BlockManager {
 
                 // Block can be processed. So need to update indexes etc
                 dag_state.insert_general_block(storage_and_transmission_blocks.clone());
+                block_exists_cache.insert(block_reference, true);
                 newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
 
                 // Now unlock any pending blocks, and process them if ready.
@@ -128,7 +141,7 @@ impl BlockManager {
 
                         if block_pointer
                             .0
-                            .includes()
+                            .block_references()
                             .iter()
                             .all(|item_ref| !self.block_references_waiting.contains_key(item_ref))
                         {

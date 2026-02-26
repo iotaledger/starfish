@@ -96,7 +96,7 @@ impl Linearizer {
             to_commit.push(x.clone());
             let s = self.votes.entry(*x.reference()).or_default();
             s.add(leader_block_ref.authority, &self.committee);
-            for reference in x.includes() {
+            for reference in x.block_references() {
                 if reference.round < min_round {
                     continue;
                 }
@@ -130,17 +130,17 @@ impl Linearizer {
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
-            for acknowledgement_statement in x.acknowledgement_statements() {
-                if acknowledgement_statement.round < min_round {
+            for ack_ref in x.acknowledgment_references() {
+                if ack_ref.round < min_round {
                     continue;
                 }
-                let s = self.votes.entry(*acknowledgement_statement).or_default();
+                let s = self.votes.entry(*ack_ref).or_default();
                 if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
-                    blocks_transaction_data_quorum.push(*acknowledgement_statement);
+                    blocks_transaction_data_quorum.push(*ack_ref);
                 }
             }
             self.traversed_blocks.insert(*x.reference());
-            for reference in x.includes() {
+            for reference in x.block_references() {
                 if reference.round < min_round {
                     continue;
                 }
@@ -206,7 +206,7 @@ impl Linearizer {
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            let leader_acks = leader_block.acknowledgement_statements().clone();
+            let leader_acks = leader_block.acknowledgment_references().clone();
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishPull
@@ -219,7 +219,7 @@ impl Linearizer {
             };
 
             // For StarfishS Opt: additionally include blocks from the leader's
-            // acknowledgement_statements. The strong vote quorum guarantees data
+            // acknowledgment_references. The strong vote quorum guarantees data
             // availability.
             if metastate == Some(CommitMetastate::Opt) {
                 for ack_ref in &leader_acks {

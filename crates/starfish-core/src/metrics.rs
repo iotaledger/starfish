@@ -50,10 +50,14 @@ pub struct Metrics {
     pub shard_reconstruction_pending_decoded_blocks: IntGauge,
     pub used_additional_blocks_total: IntCounter,
 
-    pub block_store_unloaded_blocks: IntCounter,
-    pub block_store_loaded_blocks: IntCounter,
-    pub block_store_entries: IntCounter,
-    pub block_store_cleanup_util: IntCounter,
+    pub dag_state_unloaded_blocks: IntCounter,
+    pub dag_state_loaded_blocks: IntCounter,
+    pub dag_state_entries: IntCounter,
+    pub dag_state_cleanup_util: IntCounter,
+
+    pub dag_highest_round: IntGauge,
+    pub dag_lowest_round: IntGauge,
+    pub dag_blocks_in_memory: IntGauge,
 
     pub wal_mappings: IntGauge,
 
@@ -74,6 +78,8 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
+    pub proposed_block_refs: Histogram,
+    pub proposed_block_acks: Histogram,
     pub previous_round_refs: Histogram,
     pub commit_gap: Histogram,
 
@@ -300,27 +306,46 @@ impl Metrics {
             )
             .unwrap(),
 
-            block_store_loaded_blocks: register_int_counter_with_registry!(
-                "block_store_loaded_blocks",
-                "Blocks loaded from wal position in the block store",
+            dag_state_loaded_blocks: register_int_counter_with_registry!(
+                "dag_state_loaded_blocks",
+                "Blocks loaded from wal position in the DAG state",
                 registry,
             )
             .unwrap(),
-            block_store_unloaded_blocks: register_int_counter_with_registry!(
-                "block_store_unloaded_blocks",
+            dag_state_unloaded_blocks: register_int_counter_with_registry!(
+                "dag_state_unloaded_blocks",
                 "Blocks unloaded from wal position during cleanup",
                 registry,
             )
             .unwrap(),
-            block_store_entries: register_int_counter_with_registry!(
-                "block_store_entries",
-                "Number of entries in block store",
+            dag_state_entries: register_int_counter_with_registry!(
+                "dag_state_entries",
+                "Number of entries in DAG state",
                 registry,
             )
             .unwrap(),
-            block_store_cleanup_util: register_int_counter_with_registry!(
-                "block_store_cleanup_util",
-                "block_store_cleanup_util",
+            dag_state_cleanup_util: register_int_counter_with_registry!(
+                "dag_state_cleanup_util",
+                "dag_state_cleanup_util",
+                registry,
+            )
+            .unwrap(),
+
+            dag_highest_round: register_int_gauge_with_registry!(
+                "dag_highest_round",
+                "Highest round in the in-memory DAG",
+                registry,
+            )
+            .unwrap(),
+            dag_lowest_round: register_int_gauge_with_registry!(
+                "dag_lowest_round",
+                "Lowest round retained in the in-memory DAG",
+                registry,
+            )
+            .unwrap(),
+            dag_blocks_in_memory: register_int_gauge_with_registry!(
+                "dag_blocks_in_memory",
+                "Number of block entries in the in-memory DAG",
                 registry,
             )
             .unwrap(),
@@ -400,6 +425,30 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
+            proposed_block_refs: {
+                let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "proposed_block_refs",
+                        "Number of block references in proposed blocks",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
+            proposed_block_acks: {
+                let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "proposed_block_acks",
+                        "Number of acknowledgment references in proposed blocks (after compression)",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
             previous_round_refs: {
                 let mut buckets: Vec<f64> = (1..=100).map(|i| i as f64).collect();
                 let mut v = 200.0;
@@ -481,7 +530,7 @@ impl Metrics {
 
         let average_blocks_submitted = metrics
             .iter()
-            .map(|m| m.block_store_entries.get())
+            .map(|m| m.dag_state_entries.get())
             .sum::<u64>()
             / num_validators;
         let average_bps = average_blocks_submitted as f64 / duration_secs as f64;

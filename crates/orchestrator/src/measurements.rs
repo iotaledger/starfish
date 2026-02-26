@@ -684,18 +684,18 @@ block_committed_latency_squared_micros 13465046685909033000
 # HELP block_handler_cleanup_util block_handler_cleanup_util
 # TYPE block_handler_cleanup_util counter
 block_handler_cleanup_util 0
-# HELP block_store_cleanup_util block_store_cleanup_util
-# TYPE block_store_cleanup_util counter
-block_store_cleanup_util 451078
-# HELP block_store_entries Number of entries in block store
-# TYPE block_store_entries counter
-block_store_entries 33238
-# HELP block_store_loaded_blocks Blocks loaded from wal
-# TYPE block_store_loaded_blocks counter
-block_store_loaded_blocks 0
-# HELP block_store_unloaded_blocks Blocks unloaded during cleanup
-# TYPE block_store_unloaded_blocks counter
-block_store_unloaded_blocks 31228
+# HELP dag_state_cleanup_util dag_state_cleanup_util
+# TYPE dag_state_cleanup_util counter
+dag_state_cleanup_util 451078
+# HELP dag_state_entries Number of entries in DAG state
+# TYPE dag_state_entries counter
+dag_state_entries 33238
+# HELP dag_state_loaded_blocks Blocks loaded from wal
+# TYPE dag_state_loaded_blocks counter
+dag_state_loaded_blocks 0
+# HELP dag_state_unloaded_blocks Blocks unloaded during cleanup
+# TYPE dag_state_unloaded_blocks counter
+dag_state_unloaded_blocks 31228
 # HELP committed_leaders_total Total committed leaders
 # TYPE committed_leaders_total counter
 committed_leaders_total{authority="0",commit_type="direct-commit"} 1

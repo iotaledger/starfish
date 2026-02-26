@@ -181,7 +181,7 @@ impl DagState {
             current_round += 1;
         }
 
-        metrics.block_store_entries.inc_by(block_count);
+        metrics.dag_state_entries.inc_by(block_count);
         tracing::debug!(
             "authority={} RocksDB replay: {} blocks in {:?}, highest_round={}",
             authority,
@@ -271,7 +271,7 @@ impl DagState {
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        self.metrics.block_store_entries.inc();
+        self.metrics.dag_state_entries.inc();
 
         // Store in RocksDB
         self.rocks_store
@@ -315,14 +315,26 @@ impl DagState {
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        self.inner.read().get_block(reference).map(|(s, _)| s)
+        if let Some((storage, _)) = self.inner.read().get_block(reference) {
+            return Some(storage);
+        }
+        self.rocks_store
+            .get_block(&reference)
+            .expect("RocksDB read failed")
     }
 
     pub fn get_transmission_block(
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        self.inner.read().get_block(reference).map(|(_, t)| t)
+        if let Some((_, transmission)) = self.inner.read().get_block(reference) {
+            return Some(transmission);
+        }
+        let own_id = self.inner.read().authority;
+        self.rocks_store
+            .get_block(&reference)
+            .expect("RocksDB read failed")
+            .map(|storage| Data::new(storage.from_storage_to_transmission(own_id)))
     }
 
     pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {
@@ -411,7 +423,7 @@ impl DagState {
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for (storage_block, _) in &blocks {
             let votes_for_leader = storage_block
-                .includes()
+                .block_references()
                 .iter()
                 .any(|r| r.authority == leader && r.round == leader_round);
             if votes_for_leader && aggregator.add(storage_block.author(), committee) {
@@ -442,6 +454,15 @@ impl DagState {
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {
         self.inner.read().block_exists(reference)
+    }
+
+    /// A peer reports it has only synced up to `round`.
+    /// Clear its known-by bit for newer blocks so they become eligible for
+    /// re-dissemination.
+    pub fn reset_peer_known_by_after_round(&self, peer: AuthorityIndex, round: RoundNumber) {
+        self.inner
+            .write()
+            .reset_peer_known_by_after_round(peer, round);
     }
 
     pub fn is_data_available(&self, reference: &BlockReference) -> bool {
@@ -498,12 +519,27 @@ impl DagState {
         if threshold_round == 0 {
             return;
         }
-        let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
+        let _timer = self.metrics.dag_state_cleanup_util.utilization_timer();
 
         self.inner.write().evict_below_round();
         self.round_block_cache
             .lock()
             .retain(|&r, _| r >= threshold_round);
+
+        let inner = self.inner.read();
+        self.metrics
+            .dag_highest_round
+            .set(inner.highest_round as i64);
+        self.metrics
+            .dag_lowest_round
+            .set(inner.dag.keys().next().copied().unwrap_or(0) as i64);
+        self.metrics.dag_blocks_in_memory.set(
+            inner
+                .index
+                .values()
+                .map(|m| m.len() as i64)
+                .sum::<i64>(),
+        );
     }
 
     pub fn get_own_transmission_blocks(
@@ -619,7 +655,7 @@ impl DagState {
             // Collect parents from the current set of blocks.
             parents = parents
                 .iter()
-                .flat_map(|block| block.includes()) // Get included blocks.
+                .flat_map(|block| block.block_references()) // Get included blocks.
                 .map(|block_reference| {
                     self.get_storage_block(*block_reference)
                         .expect("Block should be in DagState")
@@ -643,7 +679,7 @@ impl DagState {
         for _ in (target_round..later_block.round()).rev() {
             frontier = frontier
                 .iter()
-                .flat_map(|block| block.includes())
+                .flat_map(|block| block.block_references())
                 .filter_map(|r| self.get_storage_block(*r))
                 .filter(|b| b.round() >= target_round)
                 .collect();
@@ -767,7 +803,7 @@ impl DagStateInner {
         map.insert(reference.author_digest(), blocks.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(*reference, blocks.0.includes().clone());
+        self.update_dag(*reference, blocks.0.block_references().clone());
         self.update_data_availability(&blocks.0);
     }
 
@@ -793,6 +829,15 @@ impl DagStateInner {
             .entry(r.round)
             .or_default()
             .insert((r.authority, r.digest), val);
+    }
+
+    fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
+        let bit = !(1u128 << peer);
+        for (_, entries) in self.dag.range_mut((round.saturating_add(1))..) {
+            for (_, (_, known_by)) in entries.iter_mut() {
+                *known_by &= bit;
+            }
+        }
     }
 
     /// Insert a block into the DAG and propagate "known-by" bits along the

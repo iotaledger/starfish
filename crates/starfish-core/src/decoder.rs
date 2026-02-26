@@ -110,7 +110,7 @@ mod tests {
     ) -> (VerifiedStatementBlock, Vec<Shard>) {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
-        let encoded = encoder.encode_statements(statements.clone(), info_length, parity_length);
+        let encoded = encoder.encode_statements(&statements, info_length, parity_length);
         let block = VerifiedStatementBlock::new_with_signer(
             authority,
             1,

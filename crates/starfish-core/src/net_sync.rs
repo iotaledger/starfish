@@ -324,6 +324,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn handle_subscribe(&mut self, round: RoundNumber) {
+        self.inner
+            .dag_state
+            .reset_peer_known_by_after_round(self.peer_id, round);
         if self.inner.dag_state.byzantine_strategy.is_some() {
             let round = 0;
             self.disseminator.disseminate_own_blocks(round).await;
@@ -731,8 +734,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     ) -> Self {
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
-        let committed = core.take_recovered_committed_blocks();
-        commit_observer.recover_committed(committed);
+        let (committed, committed_leaders_count) = core.take_recovered_committed();
+        commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
         let dag_state = core.dag_state().clone();
         let rocks_store = core.rocks_store();
