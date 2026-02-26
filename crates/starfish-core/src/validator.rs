@@ -65,7 +65,7 @@ impl Validator {
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
-        // Open the block store with RocksDB
+        // Open the DAG state with RocksDB
         let rocks_path = private_config.rocksdb(); // You'll need to add this to NodePrivateConfig
         let recovered = DagState::open(
             authority,

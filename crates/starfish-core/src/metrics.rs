@@ -50,10 +50,10 @@ pub struct Metrics {
     pub shard_reconstruction_pending_decoded_blocks: IntGauge,
     pub used_additional_blocks_total: IntCounter,
 
-    pub block_store_unloaded_blocks: IntCounter,
-    pub block_store_loaded_blocks: IntCounter,
-    pub block_store_entries: IntCounter,
-    pub block_store_cleanup_util: IntCounter,
+    pub dag_state_unloaded_blocks: IntCounter,
+    pub dag_state_loaded_blocks: IntCounter,
+    pub dag_state_entries: IntCounter,
+    pub dag_state_cleanup_util: IntCounter,
 
     pub dag_highest_round: IntGauge,
     pub dag_lowest_round: IntGauge,
@@ -306,27 +306,27 @@ impl Metrics {
             )
             .unwrap(),
 
-            block_store_loaded_blocks: register_int_counter_with_registry!(
-                "block_store_loaded_blocks",
-                "Blocks loaded from wal position in the block store",
+            dag_state_loaded_blocks: register_int_counter_with_registry!(
+                "dag_state_loaded_blocks",
+                "Blocks loaded from wal position in the DAG state",
                 registry,
             )
             .unwrap(),
-            block_store_unloaded_blocks: register_int_counter_with_registry!(
-                "block_store_unloaded_blocks",
+            dag_state_unloaded_blocks: register_int_counter_with_registry!(
+                "dag_state_unloaded_blocks",
                 "Blocks unloaded from wal position during cleanup",
                 registry,
             )
             .unwrap(),
-            block_store_entries: register_int_counter_with_registry!(
-                "block_store_entries",
-                "Number of entries in block store",
+            dag_state_entries: register_int_counter_with_registry!(
+                "dag_state_entries",
+                "Number of entries in DAG state",
                 registry,
             )
             .unwrap(),
-            block_store_cleanup_util: register_int_counter_with_registry!(
-                "block_store_cleanup_util",
-                "block_store_cleanup_util",
+            dag_state_cleanup_util: register_int_counter_with_registry!(
+                "dag_state_cleanup_util",
+                "dag_state_cleanup_util",
                 registry,
             )
             .unwrap(),
@@ -530,7 +530,7 @@ impl Metrics {
 
         let average_blocks_submitted = metrics
             .iter()
-            .map(|m| m.block_store_entries.get())
+            .map(|m| m.dag_state_entries.get())
             .sum::<u64>()
             / num_validators;
         let average_bps = average_blocks_submitted as f64 / duration_secs as f64;

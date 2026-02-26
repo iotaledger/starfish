@@ -188,7 +188,7 @@ RUST_LOG+=",starfish_core::synchronizer=DEBUG"
 RUST_LOG+=",starfish_core::transactions_generator=DEBUG"
 RUST_LOG+=",starfish_core::validator=trace"
 RUST_LOG+=",starfish_core::network=trace"
-RUST_LOG+=",starfish_core::block_store=trace"
+RUST_LOG+=",starfish_core::dag_state=trace"
 RUST_LOG+=",starfish_core::threshold_core=trace"
 RUST_LOG+=",starfish_core::syncer=trace"
 

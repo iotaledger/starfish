@@ -181,7 +181,7 @@ impl DagState {
             current_round += 1;
         }
 
-        metrics.block_store_entries.inc_by(block_count);
+        metrics.dag_state_entries.inc_by(block_count);
         tracing::debug!(
             "authority={} RocksDB replay: {} blocks in {:?}, highest_round={}",
             authority,
@@ -271,7 +271,7 @@ impl DagState {
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        self.metrics.block_store_entries.inc();
+        self.metrics.dag_state_entries.inc();
 
         // Store in RocksDB
         self.rocks_store
@@ -507,7 +507,7 @@ impl DagState {
         if threshold_round == 0 {
             return;
         }
-        let _timer = self.metrics.block_store_cleanup_util.utilization_timer();
+        let _timer = self.metrics.dag_state_cleanup_util.utilization_timer();
 
         self.inner.write().evict_below_round();
         self.round_block_cache
