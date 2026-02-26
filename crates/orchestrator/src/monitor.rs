@@ -150,7 +150,7 @@ impl Prometheus {
 
         let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
         for (i, (_, nodes_metrics_path)) in nodes_metrics_path.into_iter().enumerate() {
-            let id = format!("node-{i}");
+            let id = format!("validator-{i}");
             let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
             config.push(scrape_config);
         }
@@ -198,10 +198,14 @@ impl Prometheus {
             "    static_configs:",
             "      - targets:",
             &format!("        - {ip}:{port}"),
+            "        labels:",
+            &format!("          validator: {id}"),
             &format!("  - job_name: instance-node-exporter-{id}"),
             "    static_configs:",
             "      - targets:",
             &format!("        - {ip}:9200"),
+            "        labels:",
+            &format!("          validator: {id}"),
         ]
         .join("\n")
     }
