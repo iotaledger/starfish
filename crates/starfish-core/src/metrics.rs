@@ -145,10 +145,7 @@ impl Metrics {
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
             .map(|peer| {
                 let (hist, sender) = histogram();
-                (
-                    (hist, format!("validator-{peer}")),
-                    sender,
-                )
+                ((hist, format!("validator-{peer}")), sender)
             })
             .unzip();
         let reporter = MetricReporter {

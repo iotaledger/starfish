@@ -13,10 +13,10 @@ use eyre::{Context, Result, eyre};
 use crate::metrics::MetricReporter;
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
-    block_store::BlockStore,
     committee::Committee,
     config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
     core::{Core, CoreOptions},
+    dag_state::DagState,
     metrics::Metrics,
     net_sync::NetworkSyncer,
     network::Network,
@@ -67,7 +67,7 @@ impl Validator {
 
         // Open the block store with RocksDB
         let rocks_path = private_config.rocksdb(); // You'll need to add this to NodePrivateConfig
-        let recovered = BlockStore::open(
+        let recovered = DagState::open(
             authority,
             rocks_path,
             metrics.clone(),

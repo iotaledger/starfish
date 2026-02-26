@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH, base_committer::BaseCommitter};
-use crate::block_store::ConsensusProtocol;
+use crate::dag_state::ConsensusProtocol;
 use crate::metrics::UtilizationTimerVecExt;
 use crate::{
-    block_store::BlockStore,
     committee::Committee,
     consensus::base_committer::BaseCommitterOptions,
+    dag_state::DagState,
     metrics::Metrics,
     types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round},
 };
@@ -20,7 +20,7 @@ use std::{collections::VecDeque, sync::Arc};
 /// strategies, including multi-leaders, backup leaders, and pipelines.
 #[derive(Clone)]
 pub struct UniversalCommitter {
-    block_store: BlockStore,
+    dag_state: DagState,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
     /// Cache of already-final leaders to avoid redundant recomputation.
@@ -35,7 +35,7 @@ impl UniversalCommitter {
     /// list of ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
-        let highest_known_round = self.block_store.highest_round();
+        let highest_known_round = self.dag_state.highest_round();
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
 
@@ -68,14 +68,14 @@ impl UniversalCommitter {
                 );
                 // Build or retrieve cached voter info for this (leader, round).
                 let voting_round = round + 1 as RoundNumber;
-                let voting_round_version = self.block_store.round_version(voting_round);
+                let voting_round_version = self.dag_state.round_version(voting_round);
                 let needs_rebuild = !matches!(
                     self.voters_cache.get(&(leader, round)),
                     Some((ver, _)) if *ver == voting_round_version
                 );
                 if needs_rebuild {
                     let potential_voting_blocks =
-                        self.block_store.get_blocks_by_round_cached(voting_round);
+                        self.dag_state.get_blocks_by_round_cached(voting_round);
                     let mut voters = AHashSet::new();
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
@@ -202,28 +202,28 @@ impl UniversalCommitter {
 /// single base committer, that is, a single leader and no pipeline.
 pub struct UniversalCommitterBuilder {
     committee: Arc<Committee>,
-    block_store: BlockStore,
+    dag_state: DagState,
     metrics: Arc<Metrics>,
     wave_length: RoundNumber,
     pipeline: bool,
 }
 
 impl UniversalCommitterBuilder {
-    pub fn new(committee: Arc<Committee>, block_store: BlockStore, metrics: Arc<Metrics>) -> Self {
-        match block_store.consensus_protocol {
+    pub fn new(committee: Arc<Committee>, dag_state: DagState, metrics: Arc<Metrics>) -> Self {
+        match dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS => Self {
                 committee,
-                block_store,
+                dag_state,
                 metrics,
                 wave_length: WAVE_LENGTH,
                 pipeline: true,
             },
             ConsensusProtocol::CordialMiners => Self {
                 committee,
-                block_store,
+                dag_state,
                 metrics,
                 wave_length: WAVE_LENGTH,
                 pipeline: false,
@@ -239,13 +239,13 @@ impl UniversalCommitterBuilder {
                 wave_length: self.wave_length,
                 round_offset,
             };
-            let committer = BaseCommitter::new(self.committee.clone(), self.block_store.clone())
+            let committer = BaseCommitter::new(self.committee.clone(), self.dag_state.clone())
                 .with_options(options);
             committers.push(committer);
         }
 
         UniversalCommitter {
-            block_store: self.block_store,
+            dag_state: self.dag_state,
             committers,
             metrics: self.metrics,
             decided: AHashMap::new(),

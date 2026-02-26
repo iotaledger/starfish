@@ -4,13 +4,13 @@
 
 pub mod block_handler;
 mod block_manager;
-mod block_store;
 pub mod committee;
 pub mod config;
 pub mod consensus;
 pub mod core;
 mod core_thread;
 mod crypto;
+mod dag_state;
 mod data;
 mod decoder;
 mod encoder;

@@ -9,12 +9,12 @@ use crate::data::Data;
 use crate::transactions_generator::TransactionGenerator;
 use crate::types::{BaseStatement, VerifiedStatementBlock};
 use crate::{
-    block_store::BlockStore,
     committee::Committee,
     consensus::{
         CommitMetastate,
         linearizer::{CommittedSubDag, Linearizer},
     },
+    dag_state::DagState,
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
@@ -218,12 +218,12 @@ impl RealCommitHandler {
 impl CommitObserver for RealCommitHandler {
     fn handle_commit(
         &mut self,
-        block_store: &BlockStore,
+        dag_state: &DagState,
         committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = self
             .commit_interpreter
-            .handle_commit(block_store, committed_leaders);
+            .handle_commit(dag_state, committed_leaders);
         let current_timestamp = runtime::timestamp_utc();
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
@@ -285,7 +285,7 @@ impl CommitObserver for RealCommitHandler {
         }
         // Compute transaction end-to-end latency
         // First read for which subdags there is not enough transaction data
-        let mut pending = block_store.read_pending_unavailable();
+        let mut pending = dag_state.read_pending_unavailable();
         pending.append(&mut committed);
         let committed = pending;
         let mut slice_index = 0;
@@ -293,7 +293,7 @@ impl CommitObserver for RealCommitHandler {
         for commit in committed.iter() {
             let mut check_availability = true;
             for block in &commit.0.blocks {
-                if block.round() > 0 && !block_store.is_data_available(block.reference()) {
+                if block.round() > 0 && !dag_state.is_data_available(block.reference()) {
                     tracing::debug!("Block {} is not available", block.reference());
                     check_availability = false;
                     break;
@@ -301,7 +301,7 @@ impl CommitObserver for RealCommitHandler {
             }
             if check_availability {
                 for block in &commit.0.blocks {
-                    let updated_block = block_store
+                    let updated_block = dag_state
                         .get_storage_block(*block.reference())
                         .expect("We should have the whole sub-dag by now");
                     if updated_block.round() > 0 {
@@ -323,7 +323,7 @@ impl CommitObserver for RealCommitHandler {
             // self.committed_dags.push(commit);
             slice_index += 1;
         }
-        block_store.update_pending_unavailable(committed[slice_index..].to_vec());
+        dag_state.update_pending_unavailable(committed[slice_index..].to_vec());
         self.sequenced_commit_count += slice_index;
         self.metrics
             .commit_availability_gap

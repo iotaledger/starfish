@@ -5,9 +5,9 @@
 use crate::types::VerifiedStatementBlock;
 use crate::{
     block_handler::BlockHandler,
-    block_store::BlockStore,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
+    dag_state::DagState,
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
@@ -32,7 +32,7 @@ pub trait SyncerSignals: Send + Sync {
 pub trait CommitObserver: Send + Sync {
     fn handle_commit(
         &mut self,
-        block_store: &BlockStore,
+        dag_state: &DagState,
         committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
@@ -130,7 +130,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
         let committed_subdag = self
             .commit_observer
-            .handle_commit(self.core.block_store(), newly_committed);
+            .handle_commit(self.core.dag_state(), newly_committed);
 
         self.core.handle_committed_subdag(committed_subdag);
     }

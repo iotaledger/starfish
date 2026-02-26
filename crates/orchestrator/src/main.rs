@@ -518,8 +518,8 @@ async fn run<C: ServerProviderClient>(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "<none>".to_string());
-            let monitoring_instance =
-                select_monitoring_instance(&instances, &settings).ok_or_else(|| {
+            let monitoring_instance = select_monitoring_instance(&instances, &settings)
+                .ok_or_else(|| {
                     eyre::eyre!(
                         "No active instance found in region '{}' for monitoring",
                         monitoring_region
