@@ -151,6 +151,10 @@ pub struct Settings {
     /// orchestrator treats it as a local path and SCPs it to each machine.
     #[serde(default)]
     pub pre_built_binary: Option<String>,
+    /// Whether to use EC2 Spot Instances instead of On-Demand. Spot
+    /// instances are significantly cheaper but may be interrupted.
+    #[serde(default)]
+    pub spot: bool,
 }
 
 mod defaults {

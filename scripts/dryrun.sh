@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-s, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish}
+CONSENSUS=${CONSENSUS:-starfish-s}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-2}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -22,7 +22,7 @@ DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
-CLEAN_MONITORING=${CLEAN_MONITORING:-1}
+CLEAN_MONITORING=${CLEAN_MONITORING:-0}
 # Host ports for monitoring (offset from orchestrator's 9090/3000)
 PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
 GRAFANA_PORT=${GRAFANA_PORT:-3001}

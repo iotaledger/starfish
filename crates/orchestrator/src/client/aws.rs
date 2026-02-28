@@ -9,9 +9,11 @@ use aws_sdk_ec2::{
     meta::PKG_VERSION,
     primitives::Blob,
     types::{
-        EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType,
+        EphemeralNvmeSupport, Instance as AwsInstance, MarketType, ResourceType, SpotInstanceType,
+        VolumeType,
         builders::{
-            BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder, TagBuilder,
+            BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder,
+            InstanceMarketOptionsRequestBuilder, SpotMarketOptionsBuilder, TagBuilder,
             TagSpecificationBuilder,
         },
     },
@@ -372,7 +374,7 @@ impl ServerProviderClient for AwsClient {
             )
             .build();
 
-        let request = client
+        let mut request = client
             .run_instances()
             .image_id(image_id)
             .instance_type(self.settings.specs.as_str().into())
@@ -382,6 +384,17 @@ impl ServerProviderClient for AwsClient {
             .security_groups(&self.settings.testbed_id)
             .block_device_mappings(storage)
             .tag_specifications(tags);
+
+        if self.settings.spot {
+            let spot_options = SpotMarketOptionsBuilder::default()
+                .spot_instance_type(SpotInstanceType::OneTime)
+                .build();
+            let market_options = InstanceMarketOptionsRequestBuilder::default()
+                .market_type(MarketType::Spot)
+                .spot_options(spot_options)
+                .build();
+            request = request.instance_market_options(market_options);
+        }
 
         let response = request.send().await?;
         let instance = &response

@@ -157,24 +157,33 @@ where
         let upper_limit_request_size = parameters.batch_other_block_size;
         loop {
             let committed_dags = inner.dag_state.read_pending_unavailable();
-            let mut to_request = Vec::new();
+            // Collect candidates that pass the aggregator filter.
+            let mut candidates = Vec::new();
             'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
                         let mut aggregator = commit.1[i].clone();
-                        if aggregator.votes.insert(own_id)
-                            && !aggregator.votes.insert(peer_id)
-                            && !inner.dag_state.is_data_available(block.reference())
-                        {
-                            tracing::debug!("Data in block {block:?} is missing");
-                            to_request.push(*block.reference());
+                        if aggregator.votes.insert(own_id) && !aggregator.votes.insert(peer_id) {
+                            candidates.push(*block.reference());
                         }
                     }
                 }
-                if to_request.len() >= upper_limit_request_size {
+                if candidates.len() >= upper_limit_request_size {
+                    candidates.truncate(upper_limit_request_size);
                     break 'commit_loop;
                 }
             }
+            // Batch availability check — single lock for all candidates.
+            let availability = inner.dag_state.are_data_available(&candidates);
+            let to_request: Vec<_> = candidates
+                .into_iter()
+                .zip(availability)
+                .filter(|(_, available)| !available)
+                .map(|(r, _)| {
+                    tracing::debug!("Data in block {r:?} is missing");
+                    r
+                })
+                .collect();
             if !to_request.is_empty() {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
                 to.send(NetworkMessage::MissingTxDataRequest(to_request))
@@ -261,30 +270,33 @@ where
         let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_own_block_size = self.parameters.batch_own_block_size;
         let batch_other_block_size = self.parameters.batch_other_block_size;
+
+        let all_blocks = self
+            .inner
+            .dag_state
+            .get_transmission_blocks(&block_references);
+
         let mut blocks = Vec::new();
         let mut own_block_counter = 0;
         let mut other_block_counter = 0;
-        for block_reference in block_references {
-            let block = self.inner.dag_state.get_transmission_block(block_reference);
-            if let Some(block) = block {
-                if block.author() == own_index {
-                    own_block_counter += 1;
-                } else {
-                    other_block_counter += 1;
-                }
-                if own_block_counter >= batch_own_block_size
-                    && other_block_counter >= batch_other_block_size
-                {
-                    break;
-                }
-                if own_block_counter >= batch_own_block_size {
-                    continue;
-                }
-                if other_block_counter >= batch_other_block_size {
-                    continue;
-                }
-                blocks.push(block);
+        for block in all_blocks.into_iter().flatten() {
+            if block.author() == own_index {
+                own_block_counter += 1;
+            } else {
+                other_block_counter += 1;
             }
+            if own_block_counter >= batch_own_block_size
+                && other_block_counter >= batch_other_block_size
+            {
+                break;
+            }
+            if own_block_counter >= batch_own_block_size {
+                continue;
+            }
+            if other_block_counter >= batch_other_block_size {
+                continue;
+            }
+            blocks.push(block);
         }
         tracing::debug!(
             "Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}"
@@ -301,16 +313,14 @@ where
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
+
+        let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
+
         let mut blocks = Vec::new();
-        let mut block_counter = 0;
-        for block_reference in block_references {
-            let block = self.inner.dag_state.get_storage_block(block_reference);
-            if let Some(block) = block {
-                block_counter += 1;
-                blocks.push(block);
-                if block_counter >= batch_block_size {
-                    break;
-                }
+        for block in all_blocks.into_iter().flatten() {
+            blocks.push(block);
+            if blocks.len() >= batch_block_size {
+                break;
             }
         }
         {

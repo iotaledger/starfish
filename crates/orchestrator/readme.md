@@ -64,6 +64,28 @@ pre_built_binary: "./target/release/starfish"
 Nightly builds are published automatically from `main` and can be used as the
 URL source. See [Releases](https://github.com/iotaledger/starfish/releases/tag/nightly).
 
+### Spot Instances (optional)
+
+To use EC2 Spot Instances instead of On-Demand, add `spot: true` to
+`settings.yml`:
+
+```yml
+spot: true
+```
+
+Spot instances use spare EC2 capacity at a significant discount (typically
+40-60% cheaper) but may be interrupted with 2 minutes notice. This is
+acceptable for benchmark workloads since experiments can simply be restarted.
+The orchestrator requests one-time spot instances that are not automatically
+re-provisioned after interruption.
+
+**Tips for running 100+ spot instances:**
+- `us-east-2` (Ohio) and `us-west-2` (Oregon) tend to have the deepest spare
+  capacity and lowest spot prices for `m5d` instances.
+- AWS spot vCPU limits are per-region. Verify your limit covers your needs
+  (e.g., 100 × `m5d.4xlarge` = 1600 vCPUs). Request a limit increase via the
+  AWS Service Quotas console if needed.
+
 ## Step 3. Create a testbed
 
 The `orchestrator` binary provides various functionalities for creating,
