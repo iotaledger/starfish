@@ -7,7 +7,9 @@ use crate::data::Data;
 use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
 use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
-use rocksdb::{ColumnFamilyDescriptor, DB, Options, ReadOptions, WriteOptions};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options, ReadOptions, WriteOptions,
+};
 use std::collections::VecDeque;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
 use tokio::sync::watch;
@@ -64,40 +66,77 @@ impl RocksStore {
         ReadOptions::default()
     }
 
+    /// Creates block-based table options with bloom filter and LRU cache.
+    fn block_options(block_cache_size_mb: usize, block_size_bytes: usize) -> BlockBasedOptions {
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_size(block_size_bytes);
+        block_opts.set_block_cache(&Cache::new_lru_cache(block_cache_size_mb << 20));
+        // 10-bit bloom filter = ~1% false positive rate
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        block_opts
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Optimize for frequent syncs
-        opts.set_write_buffer_size(512 * 1024 * 1024);
-        opts.set_max_write_buffer_number(8);
-        opts.set_min_write_buffer_number_to_merge(4);
-        opts.set_level_zero_file_num_compaction_trigger(8);
-        opts.set_max_background_jobs(16);
+        // Raise fd limit and cap open files to avoid "too many open files" errors
+        if let Ok(fdlimit::Outcome::LimitRaised { to, .. }) = fdlimit::raise_fd_limit() {
+            opts.set_max_open_files((to / 8) as i32);
+        }
+
+        // Table cache sharding to reduce lock contention
+        opts.set_table_cache_num_shard_bits(10);
+
+        // Compression: LZ4 for hot levels (fast), Zstd for bottommost (compact)
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+        opts.set_bottommost_zstd_max_train_bytes(1024 * 1024, true);
+
+        // Write buffer settings
+        opts.set_db_write_buffer_size(2 * 1024 * 1024 * 1024); // 2 GB global limit
+        opts.set_write_buffer_size(256 * 1024 * 1024); // 256 MB per CF
+        opts.set_max_write_buffer_number(6);
+
+        // L0 compaction triggers with backpressure
+        let l0_trigger = 8;
+        opts.set_level_zero_file_num_compaction_trigger(l0_trigger);
+        opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 12);
+        opts.set_level_zero_stop_writes_trigger(l0_trigger * 16);
+
+        // WAL limit
+        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1 GB
+
+        // Parallelism
+        opts.increase_parallelism(8);
+        opts.set_max_subcompactions(4);
+
+        // Sync and I/O settings
         opts.set_bytes_per_sync(32 * 1048576);
-
-        // Add these settings for sync optimization
-        opts.set_use_fsync(false); // Use fdatasync instead of fsync
-        opts.set_writable_file_max_buffer_size(64 * 1048576); // 64MB buffer
-        // Use direct I/O for background ops
+        opts.set_use_fsync(false); // fdatasync is sufficient
+        opts.set_writable_file_max_buffer_size(64 * 1048576);
         opts.set_use_direct_io_for_flush_and_compaction(true);
-        // Dynamically change the level of compaction
+
+        // Compaction tuning
         opts.set_level_compaction_dynamic_level_bytes(true);
-        // Additional optimizations for high write throughput
-        opts.set_min_level_to_compress(2);
-        opts.set_compression_type(rocksdb::DBCompressionType::Zlib);
-        opts.set_max_subcompactions(4); // Allow parallel compactions
-        opts.set_enable_write_thread_adaptive_yield(true); // Better CPU utilization
+        opts.set_target_file_size_base(128 * 1024 * 1024);
 
-        // Additional performance optimizations
+        // Write performance
+        opts.set_enable_pipelined_write(true);
         opts.set_allow_concurrent_memtable_write(true);
-        opts.optimize_for_point_lookup(1024);
-        opts.increase_parallelism(8); // Adjust based on CPU cores (NumCpu - 1)
+        opts.set_enable_write_thread_adaptive_yield(true);
 
+        // Explicit block options instead of optimize_for_point_lookup
+        // (optimize_for_point_lookup silently overwrites block settings)
+        opts.set_block_based_table_factory(&Self::block_options(128, 16 << 10));
+        opts.set_memtable_prefix_bloom_ratio(0.02);
+
+        // Per-CF options
         let mut cf_opts = Options::default();
         cf_opts.set_target_file_size_base(128 * 1024 * 1024);
-        cf_opts.set_write_buffer_size(512 * 1024 * 1024); // 256MB per CF
+        cf_opts.set_write_buffer_size(256 * 1024 * 1024);
 
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(CF_BLOCKS, cf_opts.clone()),
