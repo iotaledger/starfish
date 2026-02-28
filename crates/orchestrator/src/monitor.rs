@@ -195,6 +195,7 @@ impl Prometheus {
         [
             &format!("  - job_name: instance-{id}"),
             &format!("    metrics_path: /{path}"),
+            "    honor_labels: true",
             "    static_configs:",
             "      - targets:",
             &format!("        - {ip}:{port}"),

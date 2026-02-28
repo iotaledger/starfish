@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr},
     sync::Arc,
 };
@@ -59,7 +60,14 @@ impl Validator {
         binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
         // Boot the prometheus server.
-        let registry = Registry::new();
+        let registry = Registry::new_custom(
+            None,
+            Some(HashMap::from([(
+                "validator".to_string(),
+                format!("validator-{authority}"),
+            )])),
+        )
+        .wrap_err("Failed to create prometheus registry")?;
         let (metrics, reporter) = Metrics::new(&registry, Some(&committee), Some(&consensus));
         reporter.clone().start();
         let metrics_handle =
@@ -429,10 +437,17 @@ mod smoke_tests {
         let mut index = None;
         let mut digest = None;
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("commit_index ") {
-                index = rest.trim().parse::<i64>().ok();
-            } else if let Some(rest) = line.strip_prefix("commit_digest ") {
-                digest = rest.trim().parse::<i64>().ok();
+            // Handle both "metric VALUE" and "metric{labels} VALUE" formats.
+            if line.starts_with("commit_index") {
+                index = line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|v| v.parse::<i64>().ok());
+            } else if line.starts_with("commit_digest") {
+                digest = line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|v| v.parse::<i64>().ok());
             }
         }
         Some((index?, digest?))

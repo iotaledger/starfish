@@ -4,16 +4,36 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['prometheus:9090']
-  - job_name: 'mysticeti-metrics'
+  - job_name: 'consensus-metrics'
+    honor_labels: true
     static_configs:
-      - targets:
-          - 'host.docker.internal:1510'
-          - 'host.docker.internal:1511'
-          - 'host.docker.internal:1512'
-          - 'host.docker.internal:1513'
-          - 'host.docker.internal:1514'
-          - 'host.docker.internal:1515'
-          - 'host.docker.internal:1516'
-          - 'host.docker.internal:1517'
-          - 'host.docker.internal:1518'
-          - 'host.docker.internal:1519'
+      - targets: ['host.docker.internal:1510']
+        labels:
+          validator: 'validator-0'
+      - targets: ['host.docker.internal:1511']
+        labels:
+          validator: 'validator-1'
+      - targets: ['host.docker.internal:1512']
+        labels:
+          validator: 'validator-2'
+      - targets: ['host.docker.internal:1513']
+        labels:
+          validator: 'validator-3'
+      - targets: ['host.docker.internal:1514']
+        labels:
+          validator: 'validator-4'
+      - targets: ['host.docker.internal:1515']
+        labels:
+          validator: 'validator-5'
+      - targets: ['host.docker.internal:1516']
+        labels:
+          validator: 'validator-6'
+      - targets: ['host.docker.internal:1517']
+        labels:
+          validator: 'validator-7'
+      - targets: ['host.docker.internal:1518']
+        labels:
+          validator: 'validator-8'
+      - targets: ['host.docker.internal:1519']
+        labels:
+          validator: 'validator-9'

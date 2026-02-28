@@ -72,7 +72,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, committee_size)",
+          "expr": "quantile(0.5, committee_size{validator=~\"$validator\"})",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -131,7 +131,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "max by (protocol) (consensus_protocol_info)",
+          "expr": "max by (protocol) (consensus_protocol_info{validator=~\"$validator\"})",
           "legendFormat": "{{protocol}}",
           "refId": "A",
           "instant": true
@@ -187,7 +187,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, rate(sequenced_transactions_total[1m]))",
+          "expr": "quantile(0.5, rate(sequenced_transactions_total{validator=~\"$validator\"}[1m]))",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -242,7 +242,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, block_committed_latency{v=\"p50\"}) / 1000",
+          "expr": "quantile(0.5, block_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -297,7 +297,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, transaction_committed_latency{v=\"p50\"}) / 1000",
+          "expr": "quantile(0.5, transaction_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -405,7 +405,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(sequenced_transactions_total[1m])",
+          "expr": "rate(sequenced_transactions_total{validator=~\"$validator\"}[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -510,7 +510,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(block_committed_latency{v=\"p50\"}) / 1000",
+          "expr": "avg(block_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -526,7 +526,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(transaction_committed_latency{v=\"p50\"}) / 1000",
+          "expr": "avg(transaction_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -627,7 +627,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(committed_blocks[1m])",
+          "expr": "rate(committed_blocks{validator=~\"$validator\"}[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -728,7 +728,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "commit_index",
+          "expr": "commit_index{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "range": true,
           "refId": "A"
@@ -820,7 +820,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(committed_leaders_total[1m])) by (commit_type)",
+          "expr": "sum(rate(committed_leaders_total{validator=~\"$validator\"}[1m])) by (commit_type)",
           "legendFormat": "{{commit_type}}",
           "range": true,
           "refId": "A"
@@ -906,7 +906,7 @@
       },
       "targets": [
         {
-          "expr": "commit_availability_gap",
+          "expr": "commit_availability_gap{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "range": true,
           "refId": "A"
@@ -982,7 +982,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(commit_gap_bucket[1m])) by (le)",
+          "expr": "sum(rate(commit_gap_bucket{validator=~\"$validator\"}[1m])) by (le)",
           "format": "heatmap",
           "instant": false,
           "legendFormat": "{{le}}",
@@ -1080,7 +1080,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "commit_digest",
+          "expr": "commit_digest{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "range": true,
           "refId": "A"
@@ -1173,7 +1173,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg by(proc) (rate(utilization_timer[1m]) / 1000)",
+          "expr": "avg by(proc) (rate(utilization_timer{validator=~\"$validator\"}[1m]) / 1000)",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -1272,7 +1272,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(core_lock_util[1m]) / 1000000 * 100",
+          "expr": "rate(core_lock_util{validator=~\"$validator\"}[1m]) / 1000000 * 100",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1369,7 +1369,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "core_lock_enqueued - core_lock_dequeued",
+          "expr": "core_lock_enqueued{validator=~\"$validator\"} - core_lock_dequeued{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1466,7 +1466,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_block_size_bytes{v=\"p50\"} / 1024",
+          "expr": "proposed_block_size_bytes{v=\"p50\", validator=~\"$validator\"} / 1024",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1563,7 +1563,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(proposed_block_refs_sum[1m]) / rate(proposed_block_refs_count[1m])",
+          "expr": "rate(proposed_block_refs_sum{validator=~\"$validator\"}[1m]) / rate(proposed_block_refs_count{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1660,7 +1660,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(proposed_block_acks_sum[1m]) / rate(proposed_block_acks_count[1m])",
+          "expr": "rate(proposed_block_acks_sum{validator=~\"$validator\"}[1m]) / rate(proposed_block_acks_count{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1770,7 +1770,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_highest_round",
+          "expr": "dag_highest_round{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1867,7 +1867,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_lowest_round",
+          "expr": "dag_lowest_round{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1964,7 +1964,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_blocks_in_memory",
+          "expr": "dag_blocks_in_memory{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -2074,7 +2074,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(filtered_blocks_total[1m])",
+          "expr": "rate(filtered_blocks_total{validator=~\"$validator\"}[1m])",
           "instant": false,
           "legendFormat": "{{validator}}",
           "range": true,
@@ -2171,7 +2171,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(used_additional_blocks_total[1m])",
+          "expr": "rate(used_additional_blocks_total{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -2268,7 +2268,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(processed_after_filtering_total[1m])",
+          "expr": "rate(processed_after_filtering_total{validator=~\"$validator\"}[1m])",
           "instant": false,
           "legendFormat": "{{validator}}",
           "range": true,
@@ -2355,25 +2355,25 @@
       },
       "targets": [
         {
-          "expr": "rate(shard_reconstruction_jobs_total[1m])",
+          "expr": "rate(shard_reconstruction_jobs_total{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}} jobs",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(shard_reconstruction_success_total[1m])",
+          "expr": "rate(shard_reconstruction_success_total{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}} success",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "rate(shard_reconstruction_failed_total[1m])",
+          "expr": "rate(shard_reconstruction_failed_total{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}} failed",
           "range": true,
           "refId": "C"
         },
         {
-          "expr": "rate(shard_reconstruction_cancelled_total[1m])",
+          "expr": "rate(shard_reconstruction_cancelled_total{validator=~\"$validator\"}[1m])",
           "legendFormat": "{{validator}} cancelled",
           "range": true,
           "refId": "D"
@@ -2459,19 +2459,19 @@
       },
       "targets": [
         {
-          "expr": "shard_reconstruction_pending_accumulators",
+          "expr": "shard_reconstruction_pending_accumulators{validator=~\"$validator\"}",
           "legendFormat": "{{validator}} pending accumulators",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "shard_reconstruction_queued_jobs",
+          "expr": "shard_reconstruction_queued_jobs{validator=~\"$validator\"}",
           "legendFormat": "{{validator}} queued jobs",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "shard_reconstruction_pending_decoded_blocks",
+          "expr": "shard_reconstruction_pending_decoded_blocks{validator=~\"$validator\"}",
           "legendFormat": "{{validator}} pending decoded blocks",
           "range": true,
           "refId": "C"
@@ -2581,7 +2581,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_sent_total[1m])*8/1024/1024",
+          "expr": "rate(bytes_sent_total{validator=~\"$validator\"}[1m])*8/1024/1024",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -2682,7 +2682,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_received_total[1m])*8/1024/1024",
+          "expr": "rate(bytes_received_total{validator=~\"$validator\"}[1m])*8/1024/1024",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -2782,7 +2782,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "label_replace(avg by (peer) (connection_latency{v=\"p50\"} / 1000), \"validator\", \"$1\", \"peer\", \"(.*)\")",
+          "expr": "label_replace(avg by (peer) (connection_latency{v=\"p50\", validator=~\"$validator\"} / 1000), \"validator\", \"$1\", \"peer\", \"(.*)\")",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -2978,7 +2978,31 @@
   "schemaVersion": 40,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "Fixed-UID-testbed"
+        },
+        "definition": "label_values(committee_size, validator)",
+        "includeAll": true,
+        "multi": true,
+        "name": "validator",
+        "label": "Validator",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(committee_size, validator)"
+        },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-5m",
