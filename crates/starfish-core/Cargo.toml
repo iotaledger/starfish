@@ -15,6 +15,7 @@ blake3 = "1.5.5"
 bytes = "1.4.0"
 ed25519-consensus = "2.1.0"
 eyre = { workspace = true }
+fdlimit = "0.3.0"
 futures = { workspace = true }
 gettid = "0.1.2"
 hex = "0.4.3"
@@ -26,7 +27,7 @@ prettytable-rs = "0.10"
 prometheus = "0.13.3"
 rand = { version = "0.8.5", features = ["small_rng"] }
 reed-solomon-simd = { version = "3.0.1" }
-rocksdb = { version = "0.22.0", features = ["snappy", "lz4", "zlib", "multi-threaded-cf"] }
+rocksdb = { version = "0.22.0", features = ["snappy", "lz4", "zlib", "zstd", "multi-threaded-cf"] }
 rs_merkle = "1.4.2"
 serde = { workspace = true }
 serde_yaml = "0.9.21"
