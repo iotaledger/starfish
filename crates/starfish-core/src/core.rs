@@ -21,7 +21,7 @@ use crate::{
     config::{NodePrivateConfig, NodePublicConfig},
     consensus::{
         CommitMetastate,
-        linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
+        linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
     crypto::Signer,
@@ -598,10 +598,9 @@ impl<H: BlockHandler> Core<H> {
     ) -> Vec<BlockReference> {
         let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();
 
-        for block_ref in pending_refs {
-            if let Some(block) = self.dag_state.get_storage_block(*block_ref) {
-                references_in_block.extend(block.block_references());
-            }
+        let blocks = self.dag_state.get_storage_blocks(pending_refs);
+        for block in blocks.into_iter().flatten() {
+            references_in_block.extend(block.block_references());
         }
 
         let mut compressed = vec![];
@@ -665,10 +664,7 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn cleanup(&mut self) -> RoundNumber {
         self.dag_state.cleanup();
-        let threshold = self
-            .dag_state
-            .last_available_commit()
-            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH);
+        let threshold = self.dag_state.gc_round();
         self.committer.cleanup(threshold);
         threshold
     }

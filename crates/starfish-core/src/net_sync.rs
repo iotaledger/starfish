@@ -641,6 +641,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     stop: mpsc::Sender<()>,
     epoch_close_signal: mpsc::Sender<()>,
     pub epoch_closing_time: Arc<AtomicU64>,
+    pub gc_round: Arc<AtomicU64>,
     pub shard_tx:
         parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
 }
@@ -681,8 +682,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishPull
         );
+        let gc_round = Arc::new(AtomicU64::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
-            let gc_round = Arc::new(AtomicU64::new(0));
             let (decoded_tx, decoded_rx) =
                 mpsc::channel::<crate::shard_reconstructor::DecodedBlocks>(1000);
             let reconstructor_handle = crate::shard_reconstructor::start_shard_reconstructor(
@@ -690,7 +691,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 dag_state.get_own_authority_index(),
                 metrics.clone(),
                 decoded_tx,
-                gc_round,
+                gc_round.clone(),
             );
             (
                 Some(reconstructor_handle.shard_message_sender()),
@@ -708,6 +709,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             stop: stop_sender.clone(),
             epoch_close_signal: epoch_sender.clone(),
             epoch_closing_time,
+            gc_round,
             shard_tx: parking_lot::Mutex::new(shard_tx),
         });
 
@@ -828,10 +830,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
     ) -> Option<()> {
-        let last_seen = inner.dag_state.min_last_seen_round();
+        let gc_round = inner.dag_state.gc_round();
         connection
             .sender
-            .send(NetworkMessage::SubscribeBroadcastRequest(last_seen))
+            .send(NetworkMessage::SubscribeBroadcastRequest(gc_round))
             .await
             .ok()?;
 
@@ -958,6 +960,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             select! {
                 _sleep = sleep(cleanup_interval) => {
                     // Keep read lock for everything else
+                    let gc_round = inner.dag_state.gc_round();
+                    inner.gc_round.store(gc_round, Ordering::Relaxed);
                     inner.syncer.cleanup().await;
                 }
                 _stopped = inner.stopped() => {
