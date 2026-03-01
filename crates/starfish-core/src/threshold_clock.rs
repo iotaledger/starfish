@@ -4,10 +4,9 @@
 
 use std::cmp::Ordering;
 
-use crate::types::VerifiedStatementBlock;
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    types::{BlockReference, RoundNumber},
+    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 pub fn threshold_clock_valid_verified_block(
@@ -85,10 +84,8 @@ impl ThresholdClockAggregator {
 #[cfg(test)]
 mod tests {
 
-    use crate::crypto::TransactionsCommitment;
-    use crate::types::VerifiedStatementBlock;
-
     use super::*;
+    use crate::{crypto::TransactionsCommitment, types::VerifiedStatementBlock};
 
     fn make_block(authority: u64, round: u64, refs: &[(u64, u64)]) -> VerifiedStatementBlock {
         let block_references: Vec<_> = refs

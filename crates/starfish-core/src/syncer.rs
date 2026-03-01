@@ -2,7 +2,10 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::VerifiedStatementBlock;
+use std::sync::Arc;
+
+use ahash::AHashSet;
+
 use crate::{
     block_handler::BlockHandler,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
@@ -11,10 +14,8 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
-    types::{AuthorityIndex, BlockReference, RoundNumber},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
-use ahash::AHashSet;
-use std::sync::Arc;
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,

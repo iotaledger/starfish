@@ -7,12 +7,11 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
+    data::Data,
     runtime::timestamp_utc,
-    types::InternalEpochStatus,
+    types::{InternalEpochStatus, VerifiedStatementBlock},
 };
 
 pub struct EpochManager {

@@ -2,10 +2,6 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use itertools::Itertools;
-use prettytable::{Table, row};
-use prometheus_parse::Scrape;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -14,6 +10,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+use itertools::Itertools;
+use prettytable::{Table, row};
+use prometheus_parse::Scrape;
+use serde::{Deserialize, Serialize};
 
 use crate::{benchmark::BenchmarkParameters, display, protocol::ProtocolMetrics};
 

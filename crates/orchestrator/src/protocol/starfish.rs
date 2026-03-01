@@ -9,13 +9,14 @@ use std::{
     path::PathBuf,
 };
 
-use super::{BINARY_PATH, ProtocolCommands, ProtocolMetrics, ProtocolParameters};
-use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 use serde::{Deserialize, Serialize};
 use starfish_core::{
     config::{self, ClientParameters, NodeParameters},
     types::AuthorityIndex,
 };
+
+use super::{BINARY_PATH, ProtocolCommands, ProtocolMetrics, ProtocolParameters};
+use crate::{benchmark::BenchmarkParameters, client::Instance, settings::Settings};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]

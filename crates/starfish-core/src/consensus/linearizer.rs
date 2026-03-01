@@ -2,19 +2,20 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::CommitMetastate;
-use crate::committee::{Committee, QuorumThreshold, StakeAggregator};
-use crate::dag_state::ConsensusProtocol;
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
-use crate::types::{AuthorityIndex, RoundNumber};
-use crate::{
-    dag_state::DagState,
-    types::{BlockDigest, BlockReference},
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
 };
+
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+
+use super::CommitMetastate;
+use crate::{
+    committee::{Committee, QuorumThreshold, StakeAggregator},
+    dag_state::{ConsensusProtocol, DagState},
+    data::Data,
+    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock},
+};
 
 pub const MAX_TRAVERSAL_DEPTH: RoundNumber = 50;
 

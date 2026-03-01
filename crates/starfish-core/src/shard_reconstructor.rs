@@ -12,7 +12,6 @@ use std::{
 };
 
 use ahash::AHashSet;
-
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     sync::{
@@ -412,14 +411,18 @@ impl ShardReconstructor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::crypto::Signer;
-    use crate::dag_state::ConsensusProtocol;
-    use crate::encoder::ShardEncoder;
-    use crate::types::{BaseStatement, Transaction};
+    use std::time::Duration;
+
     use prometheus::Registry;
     use reed_solomon_simd::ReedSolomonEncoder;
-    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        crypto::Signer,
+        dag_state::ConsensusProtocol,
+        encoder::ShardEncoder,
+        types::{BaseStatement, Transaction},
+    };
 
     fn make_test_block_and_shards(
         statements: Vec<BaseStatement>,

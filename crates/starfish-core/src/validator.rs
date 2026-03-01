@@ -67,6 +67,13 @@ impl Validator {
             )])),
         )
         .wrap_err("Failed to create prometheus registry")?;
+        #[cfg(target_os = "linux")]
+        {
+            let pc = ::prometheus::process_collector::ProcessCollector::for_self();
+            registry
+                .register(Box::new(pc))
+                .wrap_err("Failed to register ProcessCollector")?;
+        }
         let (metrics, reporter) = Metrics::new(&registry, Some(&committee), Some(&consensus));
         reporter.clone().start();
         let metrics_handle =

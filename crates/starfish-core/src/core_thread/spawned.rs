@@ -2,8 +2,9 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use ahash::AHashSet;
 use std::{sync::Arc, thread};
+
+use ahash::AHashSet;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{

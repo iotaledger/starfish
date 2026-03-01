@@ -2,16 +2,15 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{fmt::Display, sync::Arc};
+
 use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH};
-use crate::dag_state::ConsensusProtocol;
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    dag_state::DagState,
-    types::{AuthorityIndex, RoundNumber, format_authority_round},
+    dag_state::{ConsensusProtocol, DagState},
+    data::Data,
+    types::{AuthorityIndex, RoundNumber, VerifiedStatementBlock, format_authority_round},
 };
-use std::{fmt::Display, sync::Arc};
 
 /// The consensus protocol operates in 'waves'. Each wave is
 /// composed of a leader round, at least one voting round,

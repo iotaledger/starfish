@@ -38,6 +38,9 @@ tracing = { workspace = true }
 zeroize = "1.6.0"
 zstd = { version = "0.13.3", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+prometheus = { version = "0.13.3", features = ["process"] }
+
 [dev-dependencies]
 reqwest = { workspace = true }
 seahash = "4.1.0"

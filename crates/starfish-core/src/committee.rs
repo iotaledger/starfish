@@ -2,10 +2,11 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{borrow::Borrow, marker::PhantomData, ops::Range, sync::Arc};
+
 use ahash::AHashSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Borrow, marker::PhantomData, ops::Range, sync::Arc};
 
 use crate::{
     config::ImportExport,
