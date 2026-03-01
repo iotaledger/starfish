@@ -130,6 +130,9 @@ impl<C: ServerProviderClient> Testbed<C> {
     pub async fn deploy(&mut self, quantity: usize, region: Option<String>) -> TestbedResult<()> {
         display::action(format!("Deploying instances ({quantity} per region)"));
 
+        // Run one-time per-region setup (security groups, image IDs, etc.)
+        self.client.prepare_deploy().await?;
+
         let futures: FuturesUnordered<_> = match region {
             Some(x) => (0..quantity)
                 .map(|_| self.client.create_instance(x.clone(), quantity))

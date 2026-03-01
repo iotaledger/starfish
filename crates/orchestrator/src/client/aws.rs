@@ -47,6 +47,8 @@ pub struct AwsClient {
     settings: Settings,
     /// A list of clients, one per AWS region.
     clients: HashMap<String, aws_sdk_ec2::Client>,
+    /// Cached image IDs per region (populated by `prepare_deploy`).
+    image_ids: HashMap<String, String>,
 }
 
 impl Display for AwsClient {
@@ -80,7 +82,11 @@ impl AwsClient {
             clients.insert(region, client);
         }
 
-        Self { settings, clients }
+        Self {
+            settings,
+            clients,
+            image_ids: HashMap::new(),
+        }
     }
 
     /// Parse an AWS response and ignore errors if they mean a request is a
@@ -345,11 +351,14 @@ impl ServerProviderClient for AwsClient {
             CloudProviderError::RequestError(format!("Undefined region {region:?}"))
         })?;
 
-        // Create a security group (if needed).
-        self.create_security_group(client).await?;
-
-        // Query the image id.
-        let image_id = self.find_image_id(client).await?;
+        // Use cached image ID from prepare_deploy, or fetch on demand.
+        let image_id = match self.image_ids.get(&region) {
+            Some(id) => id.clone(),
+            None => {
+                self.create_security_group(client).await?;
+                self.find_image_id(client).await?
+            }
+        };
 
         // Create a new instance.
         let tags = TagSpecificationBuilder::default()
@@ -432,5 +441,14 @@ impl ServerProviderClient for AwsClient {
         } else {
             Ok(self.nvme_unmount_command())
         }
+    }
+
+    async fn prepare_deploy(&mut self) -> CloudProviderResult<()> {
+        for (region, client) in &self.clients {
+            self.create_security_group(client).await?;
+            let image_id = self.find_image_id(client).await?;
+            self.image_ids.insert(region.clone(), image_id);
+        }
+        Ok(())
     }
 }
