@@ -6,7 +6,7 @@ use std::{
     env,
     fmt::Display,
     fs,
-    net::ToSocketAddrs,
+    net::{SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -252,23 +252,52 @@ impl Settings {
         self.parse_monitoring_server().and_then(|(user, _)| user)
     }
 
+    /// Return the isolated working directory for monitoring assets on the
+    /// remote monitoring host. This is a relative path under the SSH user's
+    /// home so SCP uploads remain isolated from any existing repository clone.
+    pub fn monitoring_working_dir(&self) -> PathBuf {
+        let mut path = PathBuf::from(".orchestrator-monitoring");
+        path.push(&self.testbed_id);
+        path
+    }
+
+    /// Resolve the configured external monitoring server to an IPv4 socket
+    /// address.
+    fn resolve_external_monitoring_address(&self) -> SettingsResult<Option<SocketAddr>> {
+        let Some((_, host)) = self.parse_monitoring_server() else {
+            return Ok(None);
+        };
+        if host.is_empty() {
+            return Err(SettingsError::MonitoringServerError {
+                message: "host is empty".into(),
+            });
+        }
+
+        let addr = (host, 22u16)
+            .to_socket_addrs()
+            .map_err(|e| SettingsError::MonitoringServerError {
+                message: format!("Failed to resolve '{host}': {e}"),
+            })?
+            .find(|a| a.is_ipv4())
+            .ok_or_else(|| SettingsError::MonitoringServerError {
+                message: format!("'{host}' did not resolve to an IPv4 address"),
+            })?;
+
+        Ok(Some(addr))
+    }
+
     /// Build a synthetic [`Instance`] representing the external monitoring
     /// server. Returns `None` if `monitoring_server` is not set. Resolves
     /// hostnames via DNS.
-    pub fn external_monitoring_instance(&self) -> Option<Instance> {
-        let (_, host) = self.parse_monitoring_server()?;
-        let addr = (host, 22u16)
-            .to_socket_addrs()
-            .unwrap_or_else(|e| panic!("Failed to resolve monitoring_server '{host}': {e}"))
-            .find(|a| a.is_ipv4())
-            .unwrap_or_else(|| {
-                panic!("monitoring_server '{host}' did not resolve to an IPv4 address")
-            });
+    pub fn external_monitoring_instance(&self) -> SettingsResult<Option<Instance>> {
+        let Some(addr) = self.resolve_external_monitoring_address()? else {
+            return Ok(None);
+        };
         let ip = match addr.ip() {
             std::net::IpAddr::V4(v4) => v4,
             _ => unreachable!(),
         };
-        Some(Instance {
+        Ok(Some(Instance {
             id: EXTERNAL_MONITORING_ID.into(),
             region: "external".into(),
             main_ip: ip,
@@ -276,7 +305,7 @@ impl Settings {
             tags: vec!["monitoring".into()],
             specs: "external".into(),
             status: InstanceStatus::Active,
-        })
+        }))
     }
 
     /// Load the settings from a json file.
@@ -284,21 +313,24 @@ impl Settings {
     where
         P: AsRef<Path> + Display + Clone,
     {
-        let reader = || -> Result<Self, Box<dyn std::error::Error>> {
-            let data = fs::read(path.clone())?;
-            let data = Self::resolve_env(&path, std::str::from_utf8(&data)?)?;
-            let settings: Settings = serde_yaml::from_slice(data.as_bytes())?;
-
-            fs::create_dir_all(&settings.results_dir)?;
-            fs::create_dir_all(&settings.logs_dir)?;
-
-            Ok(settings)
+        let invalid = |message: String| SettingsError::InvalidSettings {
+            file: path.to_string(),
+            message,
         };
 
-        reader().map_err(|e| SettingsError::InvalidSettings {
-            file: path.to_string(),
-            message: e.to_string(),
-        })
+        let data = fs::read(path.clone()).map_err(|e| invalid(e.to_string()))?;
+        let data = std::str::from_utf8(&data).map_err(|e| invalid(e.to_string()))?;
+        let data = Self::resolve_env(&path, data)?;
+        let settings: Settings =
+            serde_yaml::from_slice(data.as_bytes()).map_err(|e| invalid(e.to_string()))?;
+
+        fs::create_dir_all(&settings.results_dir).map_err(|e| invalid(e.to_string()))?;
+        fs::create_dir_all(&settings.logs_dir).map_err(|e| invalid(e.to_string()))?;
+        settings
+            .resolve_external_monitoring_address()
+            .map_err(|e| invalid(e.to_string()))?;
+
+        Ok(settings)
     }
 
     // Resolves ${ENV} into it's value for each env variable.
@@ -396,9 +428,11 @@ impl Settings {
 
 #[cfg(test)]
 mod test {
+    use std::path::PathBuf;
+
     use reqwest::Url;
 
-    use crate::settings::Settings;
+    use crate::settings::{EXTERNAL_MONITORING_ID, Settings};
 
     #[test]
     fn load_ssh_public_key() {
@@ -423,5 +457,28 @@ mod test {
             settings.repository.url,
             Url::parse("https://example.com/author/name").unwrap()
         );
+    }
+
+    #[test]
+    fn monitoring_working_dir() {
+        let settings = Settings::new_for_test();
+        assert_eq!(
+            settings.monitoring_working_dir(),
+            PathBuf::from(".orchestrator-monitoring/testbed")
+        );
+    }
+
+    #[test]
+    fn external_monitoring_instance() {
+        let mut settings = Settings::new_for_test();
+        settings.monitoring_server = Some("root@127.0.0.1".into());
+
+        let instance = settings
+            .external_monitoring_instance()
+            .unwrap()
+            .expect("The external monitoring instance is configured");
+        assert_eq!(instance.id, EXTERNAL_MONITORING_ID);
+        assert_eq!(instance.main_ip.to_string(), "127.0.0.1");
+        assert_eq!(settings.monitoring_ssh_user(), Some("root"));
     }
 }

@@ -122,7 +122,7 @@ impl<P> Orchestrator<P> {
 
         // Select the instance to host the monitoring stack.
         let monitoring_instance =
-            if let Some(instance) = self.settings.external_monitoring_instance() {
+            if let Some(instance) = self.settings.external_monitoring_instance()? {
                 Some(instance)
             } else if self.settings.monitoring {
                 let region = &self.settings.regions[0];
@@ -395,11 +395,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::action("Configuring monitoring instance");
 
             let ssh_manager = self.monitoring_ssh_manager();
-            let monitor = Monitor::new(instance, clients, nodes, ssh_manager);
+            let monitor = Monitor::new(
+                instance,
+                clients,
+                nodes,
+                ssh_manager,
+                self.settings.monitoring_working_dir(),
+            );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
-            let repo_name = self.settings.repository_name();
-            monitor.start_grafana(&repo_name).await?;
+            monitor.start_grafana().await?;
 
             display::done();
             display::config("Grafana address", monitor.grafana_address());
@@ -410,11 +415,18 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Install monitoring dependencies on the external monitoring server.
     async fn install_external_monitoring(&self) -> TestbedResult<()> {
-        if let Some(instance) = self.settings.external_monitoring_instance() {
+        if let Some(instance) = self.settings.external_monitoring_instance()? {
             display::action("Installing monitoring dependencies on external server");
 
             let ssh_manager = self.monitoring_ssh_manager();
-            let command = Monitor::dependencies().join(" && ");
+            let command = [
+                Monitor::dependencies().join(" && "),
+                format!(
+                    "mkdir -p {}",
+                    self.settings.monitoring_working_dir().display()
+                ),
+            ]
+            .join(" && ");
             let context = CommandContext::default();
             ssh_manager
                 .execute(std::iter::once(instance), command, context)

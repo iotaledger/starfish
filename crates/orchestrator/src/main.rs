@@ -264,20 +264,25 @@ fn docker_build_and_extract() -> eyre::Result<PathBuf> {
     Ok(PathBuf::from(DOCKER_BINARY_OUTPUT))
 }
 
-fn select_monitoring_instance(instances: &[Instance], settings: &Settings) -> Option<Instance> {
+fn select_monitoring_instance(
+    instances: &[Instance],
+    settings: &Settings,
+) -> eyre::Result<Option<Instance>> {
     // Prefer external monitoring server if configured.
-    if let Some(instance) = settings.external_monitoring_instance() {
-        return Some(instance);
+    if let Some(instance) = settings.external_monitoring_instance()? {
+        return Ok(Some(instance));
     }
 
-    let region = settings.regions.first()?;
+    let Some(region) = settings.regions.first() else {
+        return Ok(None);
+    };
     let mut candidates: Vec<_> = instances
         .iter()
         .filter(|instance| instance.is_active() && &instance.region == region)
         .cloned()
         .collect();
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
-    candidates.into_iter().next()
+    Ok(candidates.into_iter().next())
 }
 
 async fn run<C: ServerProviderClient>(
@@ -320,7 +325,7 @@ async fn run<C: ServerProviderClient>(
 
                     // Separate monitoring instance from the rest.
                     let instances = testbed.instances();
-                    let monitoring_instance = select_monitoring_instance(&instances, &settings);
+                    let monitoring_instance = select_monitoring_instance(&instances, &settings)?;
 
                     if let Some(monitoring_instance) = monitoring_instance {
                         let username = testbed.username();
@@ -538,7 +543,7 @@ async fn run<C: ServerProviderClient>(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "<none>".to_string());
-            let monitoring_instance = select_monitoring_instance(&instances, &settings)
+            let monitoring_instance = select_monitoring_instance(&instances, &settings)?
                 .ok_or_else(|| {
                     eyre::eyre!(
                         "No active instance found in region '{}' for monitoring",
