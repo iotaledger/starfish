@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use futures::{StreamExt, future::try_join_all, stream::FuturesUnordered};
+use futures::future::try_join_all;
 use prettytable::{Table, row};
 use tokio::time::{self, Instant};
 
@@ -133,32 +133,39 @@ impl<C: ServerProviderClient> Testbed<C> {
         // Run one-time per-region setup (security groups, image IDs, etc.)
         self.client.prepare_deploy().await?;
 
-        let futures: FuturesUnordered<_> = match region {
-            Some(x) => (0..quantity)
-                .map(|_| self.client.create_instance(x.clone(), quantity))
-                .collect(),
+        // AWS RunInstances has a request token bucket of 5 (refill 2/s).
+        // Cap concurrency to avoid RequestLimitExceeded throttling.
+        const MAX_CONCURRENT_CREATES: usize = 5;
+
+        let regions: Vec<String> = match region {
+            Some(x) => std::iter::repeat_n(x, quantity).collect(),
             None => self
                 .settings
                 .regions
                 .iter()
-                .flat_map(|region| {
-                    (0..quantity).map(|_| self.client.create_instance(region.clone(), quantity))
-                })
+                .flat_map(|region| std::iter::repeat_n(region.clone(), quantity))
                 .collect(),
         };
 
-        let total = futures.len();
+        let total = regions.len();
         let start = Instant::now();
         let mut instances = Vec::with_capacity(total);
         let mut completed = 0usize;
         display::status(format!("{completed}/{total}"));
 
-        futures::pin_mut!(futures);
-        while let Some(result) = futures.next().await {
-            instances.push(result?);
-            completed += 1;
-            let elapsed = start.elapsed().as_secs();
-            display::status(format!("{completed}/{total} {elapsed}s"));
+        // Process in batches to respect AWS API rate limits while keeping
+        // progress tracking.
+        for chunk in regions.chunks(MAX_CONCURRENT_CREATES) {
+            let batch: Vec<_> = chunk
+                .iter()
+                .map(|region| self.client.create_instance(region.clone(), quantity))
+                .collect();
+            for result in try_join_all(batch).await? {
+                instances.push(result);
+                completed += 1;
+                let elapsed = start.elapsed().as_secs();
+                display::status(format!("{completed}/{total} {elapsed}s"));
+            }
         }
 
         // Wait until the instances are booted.
@@ -175,12 +182,9 @@ impl<C: ServerProviderClient> Testbed<C> {
     pub async fn destroy(&mut self) -> TestbedResult<()> {
         display::action("Destroying testbed");
 
-        try_join_all(
-            self.instances
-                .drain(..)
-                .map(|instance| self.client.delete_instance(instance)),
-        )
-        .await?;
+        self.client
+            .delete_instances(self.instances.drain(..).collect())
+            .await?;
 
         display::done();
         Ok(())
@@ -195,12 +199,7 @@ impl<C: ServerProviderClient> Testbed<C> {
 
     /// Destroy the given instances, keeping others alive.
     pub async fn destroy_instances(&mut self, instances: Vec<Instance>) -> TestbedResult<()> {
-        try_join_all(
-            instances
-                .into_iter()
-                .map(|instance| self.client.delete_instance(instance)),
-        )
-        .await?;
+        self.client.delete_instances(instances).await?;
         self.instances = self.client.list_instances().await?;
         Ok(())
     }

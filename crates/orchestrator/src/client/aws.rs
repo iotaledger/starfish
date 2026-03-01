@@ -422,6 +422,29 @@ impl ServerProviderClient for AwsClient {
         Ok(())
     }
 
+    async fn delete_instances(&self, instances: Vec<Instance>) -> CloudProviderResult<()> {
+        // Group instance IDs by region for batched API calls.
+        let mut ids_by_region: HashMap<String, Vec<String>> = HashMap::new();
+        for instance in instances {
+            ids_by_region
+                .entry(instance.region)
+                .or_default()
+                .push(instance.id);
+        }
+
+        for (region, ids) in ids_by_region {
+            let client = self.clients.get(&region).ok_or_else(|| {
+                CloudProviderError::RequestError(format!("Undefined region {region:?}"))
+            })?;
+            client
+                .terminate_instances()
+                .set_instance_ids(Some(ids))
+                .send()
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn register_ssh_public_key(&self, public_key: String) -> CloudProviderResult<()> {
         for client in self.clients.values() {
             let request = client

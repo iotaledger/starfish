@@ -113,6 +113,16 @@ pub trait ServerProviderClient: Display {
     /// longer billed for the specified instance.
     async fn delete_instance(&self, instance: Instance) -> CloudProviderResult<()>;
 
+    /// Delete multiple instances in bulk. Default implementation calls
+    /// `delete_instance` sequentially; providers should override to batch
+    /// by region.
+    async fn delete_instances(&self, instances: Vec<Instance>) -> CloudProviderResult<()> {
+        for instance in instances {
+            self.delete_instance(instance).await?;
+        }
+        Ok(())
+    }
+
     /// Authorize the provided ssh public key to access machines.
     async fn register_ssh_public_key(&self, public_key: String) -> CloudProviderResult<()>;
 
