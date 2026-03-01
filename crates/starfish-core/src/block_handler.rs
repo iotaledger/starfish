@@ -2,12 +2,11 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use ahash::AHashSet;
 use std::sync::Arc;
 
-use crate::data::Data;
-use crate::transactions_generator::TransactionGenerator;
-use crate::types::{BaseStatement, VerifiedStatementBlock};
+use ahash::AHashSet;
+use tokio::sync::mpsc;
+
 use crate::{
     committee::Committee,
     consensus::{
@@ -15,12 +14,20 @@ use crate::{
         linearizer::{CommittedSubDag, Linearizer},
     },
     dag_state::DagState,
+    data::Data,
     metrics::Metrics,
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, RoundNumber, Transaction},
+    transactions_generator::TransactionGenerator,
+    types::{
+        AuthorityIndex,
+        BaseStatement,
+        BlockReference,
+        RoundNumber,
+        Transaction,
+        VerifiedStatementBlock,
+    },
 };
-use tokio::sync::mpsc;
 
 pub trait BlockHandler: Send + Sync {
     fn handle_proposal(&mut self, number_transactions: usize);

@@ -2,11 +2,6 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use bytes::Bytes;
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
-    de::{DeserializeOwned, Error},
-};
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -15,6 +10,15 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+};
+
+use bytes::Bytes;
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
+    de::{DeserializeOwned, Error},
 };
 
 /// Data<T> carries both the value and it's serialized bytes.

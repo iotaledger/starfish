@@ -9,8 +9,12 @@ use std::{
 
 use ahash::{AHashMap, AHashSet};
 
-use crate::types::VerifiedStatementBlock;
-use crate::{committee::Committee, dag_state::DagState, data::Data, types::BlockReference};
+use crate::{
+    committee::Committee,
+    dag_state::DagState,
+    data::Data,
+    types::{BlockReference, VerifiedStatementBlock},
+};
 
 /// Block manager suspends incoming blocks until they are connected to the
 /// existing graph, returning newly connected blocks

@@ -2,24 +2,27 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::Parser;
-use eyre::{Context, Result, eyre};
-use prettytable::format;
-use starfish_core::metrics::Metrics;
-use starfish_core::{
-    committee::Committee,
-    config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
-    types::AuthorityIndex,
-    validator::Validator,
-};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
+    time::Duration,
+};
+
+use clap::Parser;
+use eyre::{Context, Result, eyre};
+use prettytable::format;
+use starfish_core::{
+    committee::Committee,
+    config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
+    metrics::Metrics,
+    types::AuthorityIndex,
+    validator::Validator,
 };
 use tokio::time::Instant;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};

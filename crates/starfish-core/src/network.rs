@@ -2,6 +2,17 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::HashMap,
+    fs::File,
+    io,
+    io::Write,
+    net::SocketAddr,
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
+
 use futures::{
     FutureExt,
     future::{Either, select, select_all},
@@ -9,30 +20,27 @@ use futures::{
 use prometheus::IntCounter;
 use rand::{Rng, prelude::ThreadRng};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::Write;
-use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
-        TcpListener, TcpSocket, TcpStream,
+        TcpListener,
+        TcpSocket,
+        TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     runtime::Handle,
-    sync::mpsc,
+    sync::{Mutex, mpsc},
     time::Instant,
 };
 
-use crate::data::Data;
-use crate::runtime::JoinHandle;
-use crate::types::VerifiedStatementBlock;
 use crate::{
     config::NodePublicConfig,
+    data::Data,
     metrics::{Metrics, print_network_address_table},
     runtime,
+    runtime::JoinHandle,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, RoundNumber},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);

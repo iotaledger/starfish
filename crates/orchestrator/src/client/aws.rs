@@ -2,6 +2,12 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+    time::Duration,
+};
+
 use aws_config::{BehaviorVersion, Region};
 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
 use aws_sdk_ec2::{
@@ -9,20 +15,21 @@ use aws_sdk_ec2::{
     meta::PKG_VERSION,
     primitives::Blob,
     types::{
-        EphemeralNvmeSupport, Instance as AwsInstance, ResourceType, VolumeType,
+        EphemeralNvmeSupport,
+        Instance as AwsInstance,
+        ResourceType,
+        VolumeType,
         builders::{
-            BlockDeviceMappingBuilder, EbsBlockDeviceBuilder, FilterBuilder, TagBuilder,
+            BlockDeviceMappingBuilder,
+            EbsBlockDeviceBuilder,
+            FilterBuilder,
+            TagBuilder,
             TagSpecificationBuilder,
         },
     },
 };
 use rand::Rng;
 use serde::Serialize;
-use std::time::Duration;
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Display},
-};
 
 use super::{Instance, ServerProviderClient};
 use crate::{

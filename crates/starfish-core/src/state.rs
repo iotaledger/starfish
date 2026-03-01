@@ -2,15 +2,16 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use ahash::AHashSet;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::core::MetaStatement;
-use crate::core::MetaStatement::Include;
-use crate::dag_state::CommitData;
-use crate::rocks_store::RocksStore;
-use crate::types::VerifiedStatementBlock;
+use ahash::AHashSet;
+
+use crate::{
+    core::{MetaStatement, MetaStatement::Include},
+    dag_state::CommitData,
+    rocks_store::RocksStore,
+    types::VerifiedStatementBlock,
+};
 use crate::{
     dag_state::DagState, // Remove OwnBlockData
     data::Data,

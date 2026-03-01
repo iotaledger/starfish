@@ -2,29 +2,28 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::consensus::universal_committer::UniversalCommitter;
-use crate::dag_state::{ByzantineStrategy, ConsensusProtocol};
-use crate::metrics::UtilizationTimerVecExt;
-use crate::types::format_authority_index;
+use std::{cmp::max, collections::HashMap, sync::Arc, time::Duration};
+
+use ahash::AHashSet;
+use futures::future::join_all;
+use rand::{Rng, SeedableRng, prelude::StdRng};
+use tokio::{
+    select,
+    sync::{mpsc, mpsc::Sender},
+    task::JoinHandle,
+};
+
 use crate::{
     block_handler::BlockHandler,
-    metrics::Metrics,
+    consensus::universal_committer::UniversalCommitter,
+    dag_state::{ByzantineStrategy, ConsensusProtocol},
+    metrics::{Metrics, UtilizationTimerVecExt},
     net_sync::NetworkSyncerInner,
     network::NetworkMessage,
     runtime::{Handle, sleep},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, RoundNumber},
+    types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_index},
 };
-use ahash::AHashSet;
-use futures::future::join_all;
-use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
-use std::cmp::max;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::select;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
 
 #[derive(Clone)]
 pub struct SynchronizerParameters {

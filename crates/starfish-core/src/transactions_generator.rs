@@ -7,9 +7,9 @@ use std::{cmp::min, sync::Arc, time::Duration};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc;
 
-use crate::crypto::AsBytes;
 use crate::{
     config::{ClientParameters, NodePublicConfig},
+    crypto::AsBytes,
     metrics::Metrics,
     runtime::{self, timestamp_utc},
     types::{AuthorityIndex, Transaction},

@@ -2,18 +2,18 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{collections::VecDeque, sync::Arc};
+
+use ahash::{AHashMap, AHashSet};
+
 use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH, base_committer::BaseCommitter};
-use crate::dag_state::ConsensusProtocol;
-use crate::metrics::UtilizationTimerVecExt;
 use crate::{
     committee::Committee,
     consensus::base_committer::BaseCommitterOptions,
-    dag_state::DagState,
-    metrics::Metrics,
+    dag_state::{ConsensusProtocol, DagState},
+    metrics::{Metrics, UtilizationTimerVecExt},
     types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round},
 };
-use ahash::{AHashMap, AHashSet};
-use std::{collections::VecDeque, sync::Arc};
 
 /// A universal committer uses a collection of committers to commit a sequence
 /// of leaders. It can be configured to use a combination of different commit

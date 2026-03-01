@@ -2,19 +2,28 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::{BaseStatement, Shard, VerifiedStatementBlock};
+use std::fmt;
+
+use ed25519_consensus::Signature;
+use rand::{SeedableRng, rngs::StdRng};
+use rs_merkle::{Hasher, MerkleProof, MerkleTree};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use zeroize::Zeroize;
+
 use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
-    types::{AuthorityIndex, BlockReference, EpochStatus, RoundNumber, TimestampNs},
+    types::{
+        AuthorityIndex,
+        BaseStatement,
+        BlockReference,
+        EpochStatus,
+        RoundNumber,
+        Shard,
+        TimestampNs,
+        VerifiedStatementBlock,
+    },
 };
-use ed25519_consensus::Signature;
-use rand::{SeedableRng, rngs::StdRng};
-use rs_merkle::Hasher;
-use rs_merkle::{MerkleProof, MerkleTree};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::fmt;
-use zeroize::Zeroize;
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
