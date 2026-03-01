@@ -61,12 +61,13 @@ skip = [
   { name = "itertools", version = "<=12.1" },
   # transitive bindgen duplicates from librocksdb-sys, zstd-sys build deps
   { name = "bindgen", version = "<=0.71" },
-  # crossterm 0.27 uses old mio 0.8
-  { name = "mio", version = "0.8" },
-  # tabled_derive uses heck 0.4, clap_derive uses 0.5
+# tabled_derive uses heck 0.4, clap_derive uses 0.5
   { name = "heck", version = "0.4" },
   # bindgen 0.69 (from rocksdb) uses rustc-hash 1.x
   { name = "rustc-hash", version = "1" },
+  # procfs (from prometheus process feature) uses older rustix/linux-raw-sys
+  { name = "linux-raw-sys", version = "0.4" },
+  { name = "rustix", version = "0.38" },
 ]
 skip-tree = [
   # aws-smithy-http-client depends on both hyper 0.14 and 1.x,
