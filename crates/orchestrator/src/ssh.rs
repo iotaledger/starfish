@@ -220,12 +220,35 @@ impl SshConnectionManager {
                 let context = context.clone();
 
                 tokio::spawn(async move {
-                    let connection = ssh_manager.connect(instance.ssh_address()).await?;
-                    // SshConnection::execute is a blocking call, needs to go to blocking pool
-                    Handle::current()
-                        .spawn_blocking(move || connection.execute(context.apply(command)))
-                        .await
-                        .unwrap()
+                    let address = instance.ssh_address();
+                    let command = context.apply(command);
+                    let mut error = None;
+
+                    // Retry with a fresh connection on session-level failures
+                    // (e.g. Session(-34) "Unable to send channel request").
+                    for _ in 0..ssh_manager.retries + 1 {
+                        let connection = match ssh_manager.connect(address).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                error = Some(e);
+                                sleep(Self::RETRY_DELAY).await;
+                                continue;
+                            }
+                        };
+                        let cmd = command.clone();
+                        match Handle::current()
+                            .spawn_blocking(move || connection.execute(cmd))
+                            .await
+                            .unwrap()
+                        {
+                            Ok(result) => return Ok(result),
+                            Err(e) => {
+                                error = Some(e);
+                                sleep(Self::RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                    Err(error.unwrap())
                 })
             })
             .collect::<Vec<_>>()
@@ -317,11 +340,33 @@ impl SshConnectionManager {
                 let data = data.clone();
                 let remote = remote.clone();
                 tokio::spawn(async move {
-                    let connection = ssh_manager.connect(instance.ssh_address()).await?;
-                    Handle::current()
-                        .spawn_blocking(move || connection.upload_bytes(&data, &remote))
-                        .await
-                        .unwrap()
+                    let address = instance.ssh_address();
+                    let mut error = None;
+
+                    for _ in 0..ssh_manager.retries + 1 {
+                        let connection = match ssh_manager.connect(address).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                error = Some(e);
+                                sleep(Self::RETRY_DELAY).await;
+                                continue;
+                            }
+                        };
+                        let d = data.clone();
+                        let r = remote.clone();
+                        match Handle::current()
+                            .spawn_blocking(move || connection.upload_bytes(&d, &r))
+                            .await
+                            .unwrap()
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(e) => {
+                                error = Some(e);
+                                sleep(Self::RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                    Err(error.unwrap())
                 })
             })
             .collect();
