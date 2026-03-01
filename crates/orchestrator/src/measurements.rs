@@ -56,6 +56,14 @@ impl Measurement {
                 .sorted()
                 .collect::<Vec<_>>()
                 .join(",");
+            let histogram_bucket = sample.labels.get("v").unwrap_or(label.as_str());
+            let count_bucket_label = match (
+                sample.labels.get("authority"),
+                sample.labels.get("commit_type"),
+            ) {
+                (Some(authority), Some(commit_type)) => format!("{authority},{commit_type}"),
+                _ => label.clone(),
+            };
 
             let measurement = measurements
                 .entry(
@@ -80,7 +88,7 @@ impl Measurement {
                         _ => panic!("Unexpected scraped value: '{x}'"),
                     }
                 }
-                x if x == "transaction_committed_latency" => match label.as_str() {
+                x if x == "transaction_committed_latency" => match histogram_bucket {
                     "count" => {
                         measurement.count = match sample.value {
                             prometheus_parse::Value::Gauge(value) => value as usize,
@@ -112,7 +120,7 @@ impl Measurement {
                         _ => panic!("Unexpected scraped value: '{x}'"),
                     };
                 }
-                x if x == "block_committed_latency" => match label.as_str() {
+                x if x == "block_committed_latency" => match histogram_bucket {
                     "count" => {
                         measurement.count = match sample.value {
                             prometheus_parse::Value::Gauge(value) => value as usize,
@@ -140,7 +148,9 @@ impl Measurement {
                 },
                 x if x == "committed_leaders_total" => match sample.value {
                     prometheus_parse::Value::Counter(value) => {
-                        measurement.count_buckets.insert(label, value as usize);
+                        measurement
+                            .count_buckets
+                            .insert(count_bucket_label, value as usize);
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
@@ -664,6 +674,64 @@ bytes_sent_total 6284648
         let data = &bytes_sent_total[0];
         assert_eq!(data.count, 6284648);
         assert_eq!(data.timestamp.as_secs(), 300);
+    }
+
+    #[test]
+    fn prometheus_parse_with_validator_label() {
+        let report = r#"
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration{validator="validator-44"} 300
+# HELP block_committed_latency block_committed_latency
+# TYPE block_committed_latency gauge
+block_committed_latency{validator="validator-44",v="count"} 28547
+block_committed_latency{v="p50",validator="validator-44"} 487770
+block_committed_latency{validator="validator-44",v="sum"} 17374616335344112
+# HELP block_committed_latency_squared_micros Squared latency
+# TYPE block_committed_latency_squared_micros counter
+block_committed_latency_squared_micros{validator="validator-44"} 13465046685909033000
+# HELP committed_leaders_total Total committed leaders
+# TYPE committed_leaders_total counter
+committed_leaders_total{commit_type="direct-commit",validator="validator-44",authority="0"} 1
+        "#;
+
+        let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+        let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
+        let scraper_id = 44;
+        for (label, measurement) in measurements {
+            aggregator.add(scraper_id, label, measurement);
+        }
+
+        let block_committed_latency = aggregator
+            .data
+            .get("block_committed_latency")
+            .expect("The `block_committed_latency` label is defined above")
+            .get(&scraper_id)
+            .unwrap();
+        assert_eq!(block_committed_latency.len(), 1);
+
+        let data = &block_committed_latency[0];
+        assert_eq!(data.count, 28547);
+        assert_eq!(data.sum, Duration::from_micros(17374616335344112));
+        assert_eq!(data.timestamp.as_secs(), 300);
+        assert_eq!(
+            data.buckets.get("p50"),
+            Some(&Duration::from_micros(487770))
+        );
+
+        let committed_leaders_total = aggregator
+            .data
+            .get("committed_leaders_total")
+            .expect("The `committed_leaders_total` label is defined above")
+            .get(&scraper_id)
+            .unwrap();
+        assert_eq!(committed_leaders_total.len(), 1);
+        assert_eq!(
+            committed_leaders_total[0]
+                .count_buckets
+                .get("0,direct-commit"),
+            Some(&1)
+        );
     }
 
     #[test]

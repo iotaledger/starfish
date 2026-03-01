@@ -6,6 +6,7 @@ use std::{
     env,
     fmt::Display,
     fs,
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, DurationSeconds, serde_as};
 
 use crate::{
-    client::Instance,
+    client::{Instance, InstanceStatus},
     error::{SettingsError, SettingsResult},
     faults::FaultsType,
 };
@@ -138,6 +139,13 @@ pub struct Settings {
     /// machine.
     #[serde(default = "defaults::default_monitoring")]
     pub monitoring: bool,
+    /// External monitoring server in `[user@]host` format (e.g.,
+    /// `root@10.0.1.50` or `monitor.example.com`). When set, the
+    /// orchestrator uses this server for Prometheus and Grafana instead
+    /// of allocating a cloud instance. The server must be reachable via
+    /// SSH with the configured private key.
+    #[serde(default)]
+    pub monitoring_server: Option<String>,
     /// The timeout duration for ssh commands (in seconds).
     #[serde(default = "defaults::default_ssh_timeout")]
     #[serde_as(as = "DurationSeconds")]
@@ -211,7 +219,66 @@ mod defaults {
     }
 }
 
+/// Sentinel instance ID for external monitoring servers.
+pub const EXTERNAL_MONITORING_ID: &str = "external-monitoring-server";
+
 impl Settings {
+    /// Whether monitoring is enabled (either via a cloud instance or an
+    /// external server).
+    pub fn monitoring_enabled(&self) -> bool {
+        self.monitoring || self.monitoring_server.is_some()
+    }
+
+    /// Whether the monitoring server is externally managed (not a cloud
+    /// instance).
+    pub fn is_external_monitoring(&self) -> bool {
+        self.monitoring_server.is_some()
+    }
+
+    /// Parse `monitoring_server` into `(optional_user, host)`.
+    fn parse_monitoring_server(&self) -> Option<(Option<&str>, &str)> {
+        self.monitoring_server.as_ref().map(|s| {
+            if let Some((user, host)) = s.split_once('@') {
+                (Some(user), host)
+            } else {
+                (None, s.as_str())
+            }
+        })
+    }
+
+    /// Return the SSH username for the external monitoring server, if one
+    /// was specified in the `user@host` format.
+    pub fn monitoring_ssh_user(&self) -> Option<&str> {
+        self.parse_monitoring_server().and_then(|(user, _)| user)
+    }
+
+    /// Build a synthetic [`Instance`] representing the external monitoring
+    /// server. Returns `None` if `monitoring_server` is not set. Resolves
+    /// hostnames via DNS.
+    pub fn external_monitoring_instance(&self) -> Option<Instance> {
+        let (_, host) = self.parse_monitoring_server()?;
+        let addr = (host, 22u16)
+            .to_socket_addrs()
+            .unwrap_or_else(|e| panic!("Failed to resolve monitoring_server '{host}': {e}"))
+            .find(|a| a.is_ipv4())
+            .unwrap_or_else(|| {
+                panic!("monitoring_server '{host}' did not resolve to an IPv4 address")
+            });
+        let ip = match addr.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            _ => unreachable!(),
+        };
+        Some(Instance {
+            id: EXTERNAL_MONITORING_ID.into(),
+            region: "external".into(),
+            main_ip: ip,
+            private_ip: ip,
+            tags: vec!["monitoring".into()],
+            specs: "external".into(),
+            status: InstanceStatus::Active,
+        })
+    }
+
     /// Load the settings from a json file.
     pub fn load<P>(path: P) -> SettingsResult<Self>
     where

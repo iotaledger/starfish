@@ -56,16 +56,31 @@ impl Monitor {
         protocol_commands: &P,
         parameters: &BenchmarkParameters,
     ) -> MonitorResult<()> {
-        // Configure and reload prometheus.
-        let instance = [self.instance.clone()];
-        let commands = Prometheus::setup_commands(
+        let config = Prometheus::configuration(
             self.nodes.clone(),
             self.clients.clone(),
             protocol_commands,
             parameters,
         );
+        let remote_config: PathBuf = "prometheus.yml".into();
+
+        // Upload the config separately so large committees do not overflow the
+        // SSH exec request size.
         self.ssh_manager
-            .execute(instance, commands, CommandContext::default())
+            .upload_bytes_to_all(
+                std::iter::once(self.instance.clone()),
+                config.into_bytes(),
+                &remote_config,
+            )
+            .await?;
+
+        let commands = Prometheus::reload_commands(&remote_config);
+        self.ssh_manager
+            .execute(
+                std::iter::once(self.instance.clone()),
+                commands,
+                CommandContext::default(),
+            )
             .await?;
 
         Ok(())
@@ -133,9 +148,8 @@ impl Prometheus {
         ]
     }
 
-    /// Generate the commands to update the prometheus configuration and restart
-    /// prometheus.
-    pub fn setup_commands<I, P>(
+    /// Generate the prometheus configuration.
+    pub fn configuration<I, P>(
         nodes: I,
         _clients: I,
         protocol: &P,
@@ -163,10 +177,15 @@ impl Prometheus {
         // Self::scrape_configuration(&id, &client_metrics_path);     config.
         // push(scrape_config); }
 
-        // Make the command to configure and restart prometheus.
+        config.join("\n")
+    }
+
+    /// Generate the commands to install the uploaded configuration and restart
+    /// prometheus.
+    pub fn reload_commands<P: AsRef<Path>>(remote_config_path: P) -> String {
         format!(
-            "sudo echo \"{}\" > {} && sudo service prometheus restart",
-            config.join("\n"),
+            "sudo cp {} {} && sudo service prometheus restart",
+            remote_config_path.as_ref().display(),
             Self::DEFAULT_PROMETHEUS_CONFIG_PATH
         )
     }
