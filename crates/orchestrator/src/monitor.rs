@@ -394,6 +394,7 @@ impl MonitoringCollector {
 
         // Minimal prometheus config — no scrape targets (remote IPs are gone),
         // the TSDB data is already on disk and fully queryable.
+        // editorconfig-checker-disable
         let prometheus_yml = "\
 global:
   scrape_interval: 15s
@@ -461,6 +462,7 @@ services:
             dashboard_provider = dashboard_provider.display(),
             dashboard_json = dashboard_json.display(),
         );
+        // editorconfig-checker-enable
         fs::write(local_dir.join("docker-compose.yml"), compose).map_err(|e| {
             MonitorError::GrafanaError(format!("Failed to write docker-compose.yml: {e}"))
         })?;

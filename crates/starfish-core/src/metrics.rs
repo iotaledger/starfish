@@ -2,13 +2,13 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    committee::Committee,
-    data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
-    runtime,
-    stat::{DivUsize, HistogramSender, PreciseHistogram, histogram},
-    types::{AuthorityIndex, format_authority_index},
+use std::{
+    net::SocketAddr,
+    ops::AddAssign,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
+
 use prettytable::{Table as PrettyTable, format, row};
 use prometheus::{
     Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
@@ -16,14 +16,16 @@ use prometheus::{
     register_int_counter_with_registry, register_int_gauge_vec_with_registry,
     register_int_gauge_with_registry,
 };
-use std::{
-    net::SocketAddr,
-    ops::AddAssign,
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
 use tabled::{Table, Tabled};
 use tokio::time::Instant;
+
+use crate::{
+    committee::Committee,
+    data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
+    runtime,
+    stat::{DivUsize, HistogramSender, PreciseHistogram, histogram},
+    types::{AuthorityIndex, format_authority_index},
+};
 
 /// Metrics collected by the benchmark.
 pub const BENCHMARK_DURATION: &str = "benchmark_duration";
@@ -476,7 +478,8 @@ impl Metrics {
                 register_histogram_with_registry!(
                     HistogramOpts::new(
                         "proposed_block_acks",
-                        "Number of acknowledgment references in proposed blocks (after compression)",
+                        "Number of acknowledgment references in proposed blocks \
+                         (after compression)", // editorconfig-checker-disable-line
                     )
                     .buckets(buckets),
                     registry,

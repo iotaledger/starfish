@@ -11,14 +11,13 @@ use std::{
 use ::prometheus::Registry;
 use eyre::{Context, Result, eyre};
 
-use crate::metrics::MetricReporter;
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
     config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
     core::{Core, CoreOptions},
     dag_state::DagState,
-    metrics::Metrics,
+    metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
@@ -177,9 +176,8 @@ mod smoke_tests {
     };
 
     use tempfile::TempDir;
-    use tokio::time;
-
     use test_case::test_case;
+    use tokio::time;
 
     use super::Validator;
     use crate::{
@@ -602,7 +600,7 @@ mod smoke_tests {
         assert!(
             max_idx - min_idx <= 20,
             "Commit index spread too large for {consensus}: \
-             min={min_idx}, max={max_idx}, spread={}, metrics={metrics:?}",
+             min={min_idx}, max={max_idx}, spread={}, metrics={metrics:?}", /* editorconfig-checker-disable-line */
             max_idx - min_idx
         );
 
