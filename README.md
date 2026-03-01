@@ -1,6 +1,6 @@
 # Starfish
 
-[![rustc](https://img.shields.io/badge/rustc-1.78+-blue?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![rustc](https://img.shields.io/badge/rustc-1.85+-blue?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![license](https://img.shields.io/badge/license-Apache-blue.svg?style=flat-square)](LICENSE)
 
 ## Overview
@@ -84,7 +84,7 @@ Like other consensus testbed, our prototype focuses solely on consensus performa
 
 Starfish requires the following core dependencies:
 
-- **Rust 1.78+**: For building and running the project
+- **Rust 1.85+**: For building and running the project
 - **Build essentials**: `build-essential`, `libssl-dev`, `pkg-config`
 - **Clang tools**: `clang`, `libclang-dev` (for compiling RocksDB and other native dependencies)
 
@@ -165,15 +165,17 @@ NUM_VALIDATORS=10 DESIRED_TPS=100 CONSENSUS=starfish-s \
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
 | `DESIRED_TPS` | 100 | Target transactions per second |
-| `CONSENSUS` | starfish | Protocol: `starfish`, `starfish-s`, `starfish-pull`, `cordial-miners`, `mysticeti` |
-| `NUM_BYZANTINE_NODES` | 2 | Must be < `NUM_VALIDATORS / 3` |
+| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-pull`, `cordial-miners`, `mysticeti` |
+| `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
 | `TEST_TIME` | 300 | Duration in seconds |
 | `UNIFORM_LATENCY_MS` | _(unset)_ | Uniform network latency in ms; overrides AWS RTT table |
 | `CLEAN_MONITORING` | 0 | Set to 1 to wipe Prometheus/Grafana data between runs |
 | `REMOVE_VOLUMES` | 1 | Set to 0 to preserve RocksDB volumes between runs |
+| `PROMETHEUS_PORT` | 9091 | Host port for Prometheus UI |
+| `GRAFANA_PORT` | 3001 | Host port for Grafana UI |
 
-Grafana is available at `http://localhost:3000` (admin/admin). Ctrl+C stops validators but preserves the monitoring stack.
+Grafana is available at `http://localhost:3001` (admin/admin). Ctrl+C stops validators but preserves the monitoring stack.
 
 ### Docker
 

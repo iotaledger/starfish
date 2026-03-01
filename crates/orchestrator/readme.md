@@ -105,7 +105,7 @@ one needs to run 11 instances.
 To check the current status of the testbed instances, use the following command:
 
 ```bash
-cargo run --bin orchestrator testbed status
+cargo run --bin orchestrator -- testbed status
 ```
 
 Instances listed with a green number are available and ready for use, while instances listed with a red number are stopped.
@@ -164,7 +164,7 @@ Grafana is then available on the address printed on stdout
 both set to `admin`. You can either create a
 [new dashboard](https://grafana.com/docs/grafana/latest/getting-started/build-first-dashboard/)
 or [import](https://grafana.com/docs/grafana/latest/dashboards/manage-dashboards/#import-a-dashboard)
-the example dashboard located in the `./assets` folder.
+the example dashboard located in the `monitoring/grafana/` folder.
 
 ### Collecting monitoring data locally
 
