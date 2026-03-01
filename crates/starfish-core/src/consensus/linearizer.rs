@@ -169,8 +169,8 @@ impl Linearizer {
             .map(|block| {
                 // Assuming block has `round`, `author`, and `digest` methods/properties
                 let round = block.round();
-                let author = block.author(); // Adjust if `author` is not clonable
-                let digest = block.digest(); // Adjust if `digest` is not clonable
+                let author = block.author(); // Adjust if `author` is not cloneable
+                let digest = block.digest(); // Adjust if `digest` is not cloneable
                 (round, author, digest, block) // Store the original block as part of the tuple
             })
             .collect();

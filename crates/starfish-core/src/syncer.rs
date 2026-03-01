@@ -22,7 +22,8 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
-    metrics: Arc<Metrics>,
+    pub(crate) subscribed_by_authorities: AHashSet<AuthorityIndex>,
+    pub(crate) metrics: Arc<Metrics>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -54,6 +55,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             signals,
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
+            subscribed_by_authorities: AHashSet::with_capacity(committee_size),
             metrics,
         }
     }
@@ -94,6 +96,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self) -> bool {
+        let committee = self.core.committee();
+        let own_authority = self.core.authority();
+        let mut subscriber_stake = committee.get_total_stake(&self.subscribed_by_authorities);
+        if !self.subscribed_by_authorities.contains(&own_authority) {
+            subscriber_stake += committee
+                .get_stake(own_authority)
+                .expect("Own authority should exist in committee");
+        }
+        if !committee.is_quorum(subscriber_stake) {
+            return false;
+        }
         if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
             tracing::debug!("Attempt to create new block in syncer after one trigger");
             if self.core.try_new_block().is_some() {

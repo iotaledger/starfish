@@ -100,6 +100,10 @@ pub struct Metrics {
     // per-request-type network message counters
     pub network_requests_sent_total: IntCounterVec,
     pub network_requests_received_total: IntCounterVec,
+
+    // subscription tracking
+    pub subscribed_to_peers: IntGauge,
+    pub subscribed_by_peers: IntGauge,
 }
 
 pub struct MetricReporter {
@@ -308,6 +312,18 @@ impl Metrics {
                 "network_requests_received_total",
                 "Total network requests received, by type",
                 &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            subscribed_to_peers: register_int_gauge_with_registry!(
+                "subscribed_to_peers",
+                "Number of peers this validator is subscribed to",
+                registry,
+            )
+            .unwrap(),
+            subscribed_by_peers: register_int_gauge_with_registry!(
+                "subscribed_by_peers",
+                "Number of peers subscribed to this validator",
                 registry,
             )
             .unwrap(),

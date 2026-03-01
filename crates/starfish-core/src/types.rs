@@ -20,19 +20,6 @@ pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
 pub type Decoder = ReedSolomonDecoder;
 
-use bytes::Bytes;
-use eyre::{bail, ensure};
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
-use std::{
-    fmt,
-    hash::{Hash, Hasher},
-    time::Duration,
-};
-#[cfg(test)]
-pub use test::Dag;
-
 use crate::crypto::TransactionsCommitment;
 use crate::dag_state::ConsensusProtocol;
 use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
@@ -43,6 +30,16 @@ use crate::{
     crypto,
     crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
     data::Data,
+};
+use bytes::Bytes;
+use eyre::{bail, ensure};
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    time::Duration,
 };
 
 pub type EpochStatus = bool;
@@ -865,148 +862,7 @@ impl AsBytes for Transaction {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
-
-    use rand::{Rng, prelude::SliceRandom};
-
     use super::*;
-
-    pub struct Dag(HashMap<BlockReference, Data<VerifiedStatementBlock>>);
-
-    #[cfg(test)]
-    impl Dag {
-        /// Takes a string in form "Block:[Dependencies, ...]; ..."
-        /// Where Block is one letter denoting a node and a number denoting a
-        /// round For example B3 is a block for round 3 made by
-        /// validator index 2 Note that blocks are separated with
-        /// semicolon(;) and dependencies within block are separated
-        /// with coma(,)
-        pub fn draw(s: &str) -> Self {
-            let mut blocks = HashMap::new();
-            for block in s.split(";") {
-                let block = Self::draw_block(block);
-                blocks.insert(*block.reference(), Data::new(block));
-            }
-            Self(blocks)
-        }
-
-        pub fn draw_block(block: &str) -> VerifiedStatementBlock {
-            let block = block.trim();
-            assert!(block.ends_with(']'), "Invalid block definition: {}", block);
-            let block = &block[..block.len() - 1];
-            let Some((name, includes)) = block.split_once(":[") else {
-                panic!("Invalid block definition: {}", block);
-            };
-            let reference = Self::parse_name(name);
-            let includes = includes.trim();
-            let includes = if includes.is_empty() {
-                vec![]
-            } else {
-                let includes = includes.split(',');
-                includes.map(Self::parse_name).collect()
-            };
-            let acknowledgment_references = includes.clone();
-            VerifiedStatementBlock {
-                reference,
-                block_references: includes,
-                acknowledgment_references,
-                meta_creation_time_ns: 0,
-                epoch_marker: false,
-                signature: Default::default(),
-                statements: None,
-                encoded_shard: None,
-                merkle_proof_encoded_shard: None,
-                transactions_commitment: TransactionsCommitment::default(),
-                strong_vote: None,
-            }
-        }
-
-        fn parse_name(s: &str) -> BlockReference {
-            let s = s.trim();
-            assert!(s.len() >= 2, "Invalid block: {}", s);
-            let authority = s.as_bytes()[0];
-            let authority = authority.wrapping_sub(b'A');
-            assert!(authority < 26, "Invalid block: {}", s);
-            let Ok(round): Result<u64, _> = s[1..].parse() else {
-                panic!("Invalid block: {}", s);
-            };
-            BlockReference::new_test(authority as u64, round)
-        }
-
-        /// For each authority add a 0 round block if not present
-        pub fn add_genesis_blocks(mut self) -> Self {
-            for authority in self.authorities() {
-                let block = VerifiedStatementBlock::new_genesis(authority);
-                let entry = self.0.entry(*block.reference());
-                entry.or_insert_with(move || block);
-            }
-            self
-        }
-
-        pub fn random_iter(&self, rng: &mut impl Rng) -> RandomDagIter<'_> {
-            let mut v: Vec<_> = self.0.keys().cloned().collect();
-            v.shuffle(rng);
-            RandomDagIter(self, v.into_iter())
-        }
-
-        pub fn len(&self) -> usize {
-            self.0.len()
-        }
-
-        pub fn is_empty(&self) -> bool {
-            self.0.is_empty()
-        }
-
-        fn authorities(&self) -> HashSet<AuthorityIndex> {
-            let mut authorities = HashSet::new();
-            for (k, v) in &self.0 {
-                authorities.insert(k.authority);
-                for include in v.block_references() {
-                    authorities.insert(include.authority);
-                }
-            }
-            authorities
-        }
-
-        pub fn committee(&self) -> Arc<Committee> {
-            Committee::new_test(vec![1; self.authorities().len()])
-        }
-    }
-
-    pub struct RandomDagIter<'a>(&'a Dag, std::vec::IntoIter<BlockReference>);
-
-    impl<'a> Iterator for RandomDagIter<'a> {
-        type Item = &'a Data<VerifiedStatementBlock>;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            let next = self.1.next()?;
-            Some(self.0.0.get(&next).unwrap())
-        }
-    }
-
-    #[test]
-    fn test_draw_dag() {
-        let d = Dag::draw("A1:[A0, B1]; B2:[B1]").0;
-        assert_eq!(d.len(), 2);
-        let a0: BlockReference = BlockReference::new_test(0, 1);
-        let b2: BlockReference = BlockReference::new_test(1, 2);
-        assert_eq!(&d.get(&a0).unwrap().reference, &a0);
-        assert_eq!(
-            &d.get(&a0).unwrap().block_references,
-            &vec![
-                BlockReference::new_test(0, 0),
-                BlockReference::new_test(1, 1)
-            ]
-        );
-        assert_eq!(&d.get(&b2).unwrap().reference, &b2);
-        assert_eq!(
-            &d.get(&b2).unwrap().block_references,
-            &vec![BlockReference::new_test(1, 1)]
-        );
-    }
 
     #[test]
     fn authority_set_test() {

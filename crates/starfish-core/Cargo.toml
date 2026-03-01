@@ -41,6 +41,7 @@ zstd = { version = "0.13.3", default-features = false }
 [dev-dependencies]
 reqwest = { workspace = true }
 seahash = "4.1.0"
+test-case = "3"
 
 [build-dependencies]
 bindgen = { workspace = true }

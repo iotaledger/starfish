@@ -295,6 +295,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn handle_subscribe(&mut self, round: RoundNumber) {
+        self.inner.syncer.peer_subscribed(self.peer_id).await;
         self.inner
             .dag_state
             .reset_peer_known_by_after_round(self.peer_id, round);

@@ -85,39 +85,63 @@ impl ThresholdClockAggregator {
 #[cfg(test)]
 mod tests {
 
-    use super::*;
-    use crate::types::Dag;
+    use crate::crypto::TransactionsCommitment;
+    use crate::types::VerifiedStatementBlock;
 
-    // Make a committee with 4 authorities each with Stake 1,
-    // and a block with 3 includes at round number zero.
-    // Check that if the includes are blocks the
-    // threshold_clock_valid returns false, but if it is only
-    // base statements it succeeds.
+    use super::*;
+
+    fn make_block(authority: u64, round: u64, refs: &[(u64, u64)]) -> VerifiedStatementBlock {
+        let block_references: Vec<_> = refs
+            .iter()
+            .map(|&(a, r)| BlockReference::new_test(a, r))
+            .collect();
+        VerifiedStatementBlock::new(
+            authority,
+            round,
+            block_references.clone(),
+            block_references,
+            0,
+            false,
+            Default::default(),
+            vec![],
+            None,
+            None,
+            TransactionsCommitment::default(),
+            None,
+        )
+    }
+
     #[test]
     fn test_threshold_clock_valid() {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);
+        // No includes — not a quorum
         assert!(!threshold_clock_valid_verified_block(
-            &Dag::draw_block("A1:[]"),
+            &make_block(0, 1, &[]),
             &committee
         ));
+        // 2 includes at round 0 — below quorum (need 3 of 4)
         assert!(!threshold_clock_valid_verified_block(
-            &Dag::draw_block("A1:[A0, B0]"),
+            &make_block(0, 1, &[(0, 0), (1, 0)]),
             &committee
         ));
+        // 3 includes at round 0 — quorum
         assert!(threshold_clock_valid_verified_block(
-            &Dag::draw_block("A1:[A0, B0, C0]"),
+            &make_block(0, 1, &[(0, 0), (1, 0), (2, 0)]),
             &committee
         ));
+        // 4 includes at round 0 — quorum
         assert!(threshold_clock_valid_verified_block(
-            &Dag::draw_block("A1:[A0, B0, C0, D0]"),
+            &make_block(0, 1, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
             &committee
         ));
+        // Round 2 block: only 2 includes at round 1 — below quorum
         assert!(!threshold_clock_valid_verified_block(
-            &Dag::draw_block("A2:[A1, B1, C0, D0]"),
+            &make_block(0, 2, &[(0, 1), (1, 1), (2, 0), (3, 0)]),
             &committee
         ));
+        // Round 2 block: 3 includes at round 1 — quorum
         assert!(threshold_clock_valid_verified_block(
-            &Dag::draw_block("A2:[A1, B1, C1, D0]"),
+            &make_block(0, 2, &[(0, 1), (1, 1), (2, 1), (3, 0)]),
             &committee
         ));
     }

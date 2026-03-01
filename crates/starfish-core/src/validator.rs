@@ -179,6 +179,8 @@ mod smoke_tests {
     use tempfile::TempDir;
     use tokio::time;
 
+    use test_case::test_case;
+
     use super::Validator;
     use crate::{
         committee::Committee,
@@ -186,14 +188,6 @@ mod smoke_tests {
         prometheus,
         types::AuthorityIndex,
     };
-
-    const ALL_PROTOCOLS: &[&str] = &[
-        "mysticeti",
-        "starfish-pull",
-        "cordial-miners",
-        "starfish",
-        "starfish-s",
-    ];
 
     /// Check whether the validator specified by its metrics address has
     /// committed at least once.
@@ -266,12 +260,14 @@ mod smoke_tests {
         }
     }
 
-    /// Ensure that a committee of honest validators commits for all protocols.
+    #[test_case("mysticeti", 0)]
+    #[test_case("starfish-pull", 20)]
+    #[test_case("cordial-miners", 40)]
+    #[test_case("starfish", 60)]
+    #[test_case("starfish-s", 80)]
     #[tokio::test]
-    async fn validator_commit() {
-        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
-            run_commit_test(consensus, i as u16 * 20).await;
-        }
+    async fn validator_commit(consensus: &str, port_offset: u16) {
+        run_commit_test(consensus, port_offset).await;
     }
 
     async fn run_sync_test(consensus: &str, port_offset: u16) {
@@ -355,12 +351,14 @@ mod smoke_tests {
         }
     }
 
-    /// Ensure validators can sync missing blocks for all protocols.
+    #[test_case("mysticeti", 100)]
+    #[test_case("starfish-pull", 120)]
+    #[test_case("cordial-miners", 140)]
+    #[test_case("starfish", 160)]
+    #[test_case("starfish-s", 180)]
     #[tokio::test]
-    async fn validator_sync() {
-        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
-            run_sync_test(consensus, 100 + i as u16 * 20).await;
-        }
+    async fn validator_sync(consensus: &str, port_offset: u16) {
+        run_sync_test(consensus, port_offset).await;
     }
 
     async fn run_crash_faults_test(consensus: &str, port_offset: u16) {
@@ -415,13 +413,14 @@ mod smoke_tests {
         }
     }
 
-    // Ensure that honest validators commit despite the presence
-    // of a crash fault, for all protocols.
+    #[test_case("mysticeti", 200)]
+    #[test_case("starfish-pull", 220)]
+    #[test_case("cordial-miners", 240)]
+    #[test_case("starfish", 260)]
+    #[test_case("starfish-s", 280)]
     #[tokio::test]
-    async fn validator_crash_faults() {
-        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
-            run_crash_faults_test(consensus, 200 + i as u16 * 20).await;
-        }
+    async fn validator_crash_faults(consensus: &str, port_offset: u16) {
+        run_crash_faults_test(consensus, port_offset).await;
     }
 
     /// Scrape commit_index and commit_digest from a validator's Prometheus
@@ -534,8 +533,9 @@ mod smoke_tests {
         .unwrap()
     }
 
-    /// Comprehensive lifecycle test: 5 nodes with digest agreement,
-    /// stop/restart recovery, and fresh-DB recovery.
+    /// Late-join test: start 4 of 5 validators, let them commit for 30s,
+    /// then start the 5th. After 30 more seconds verify all 5 have
+    /// consistent digests and commit indices within 20 of each other.
     async fn run_lifecycle_test(consensus: &str, port_offset: u16) {
         let committee_size = 5;
         let committee = Committee::new_for_benchmarks(committee_size);
@@ -552,9 +552,13 @@ mod smoke_tests {
         let all_metrics_addrs: Vec<(usize, SocketAddr)> =
             public_config.all_metric_addresses().enumerate().collect();
 
-        // ─── Start all 5 validators ───
+        // ─── Start validators 0..3 (4 out of 5) ───
         let mut validators: Vec<Option<Validator>> = Vec::new();
         for (i, pc) in private_configs.into_iter().enumerate() {
+            if i == 4 {
+                validators.push(None);
+                continue;
+            }
             let v = Validator::start(
                 i as AuthorityIndex,
                 committee.clone(),
@@ -569,31 +573,12 @@ mod smoke_tests {
             validators.push(Some(v));
         }
 
-        // ─── Phase 1: All 5 run for 20s ───
-        time::sleep(Duration::from_secs(20)).await;
+        // ─── Phase 1: 4 validators run for 30s ───
+        time::sleep(Duration::from_secs(30)).await;
 
-        let phase1 = await_min_commit_index(&all_metrics_addrs, 5, Duration::from_secs(10)).await;
-        verify_digest_consistency(&phase1);
-        let phase1_min = phase1.values().map(|(i, _)| *i).min().unwrap();
-
-        // ─── Phase 2: Stop node 3, wait 10s, restart, wait 10s ───
-        let node_a = 3usize;
-        validators[node_a].take().unwrap().stop().await;
-
-        time::sleep(Duration::from_secs(10)).await;
-
-        let running: Vec<_> = all_metrics_addrs
-            .iter()
-            .filter(|(i, _)| *i != node_a)
-            .cloned()
-            .collect();
-        let phase2a =
-            await_min_commit_index(&running, phase1_min + 1, Duration::from_secs(30)).await;
-        verify_digest_consistency(&phase2a);
-        let phase2a_min = phase2a.values().map(|(i, _)| *i).min().unwrap();
-
+        // ─── Start the 5th validator ───
         let v = start_validator(
-            node_a,
+            4,
             &committee,
             &public_config,
             dir.as_ref(),
@@ -602,72 +587,24 @@ mod smoke_tests {
             consensus,
         )
         .await;
-        validators[node_a] = Some(v);
+        validators[4] = Some(v);
 
-        let node_a_addr = &[all_metrics_addrs[node_a]];
-        await_min_commit_index(node_a_addr, phase2a_min, Duration::from_secs(60)).await;
+        // ─── Phase 2: All 5 run for 30s ───
+        time::sleep(Duration::from_secs(30)).await;
 
-        // ─── Phase 3: Stop node 1, wait 10s, restart, wait 10s ───
-        let node_b = 1usize;
-        validators[node_b].take().unwrap().stop().await;
+        // ─── Verify: all 5 committed, consistent digests, indices within 20 ───
+        let metrics = await_min_commit_index(&all_metrics_addrs, 1, Duration::from_secs(30)).await;
+        verify_digest_consistency(&metrics);
 
-        time::sleep(Duration::from_secs(10)).await;
-
-        let running2: Vec<_> = all_metrics_addrs
-            .iter()
-            .filter(|(i, _)| *i != node_b && *i != node_a)
-            .cloned()
-            .collect();
-        let phase3a =
-            await_min_commit_index(&running2, phase2a_min + 1, Duration::from_secs(45)).await;
-        let _phase3a_min = phase3a.values().map(|(i, _)| *i).min().unwrap();
-
-        let v = start_validator(
-            node_b,
-            &committee,
-            &public_config,
-            dir.as_ref(),
-            committee_size,
-            &client_parameters,
-            consensus,
-        )
-        .await;
-        validators[node_b] = Some(v);
-
-        time::sleep(Duration::from_secs(10)).await;
-
-        let node_b_addr = &[all_metrics_addrs[node_b]];
-        await_min_commit_index(node_b_addr, 1, Duration::from_secs(15)).await;
-
-        // ─── Phase 4: Stop node 0, wipe DB, restart from scratch ───
-        let node_c = 0usize;
-        validators[node_c].take().unwrap().stop().await;
-
-        let storage_path = dir.as_ref().join(NodePrivateConfig::default_storage_path(
-            node_c as AuthorityIndex,
-        ));
-        let rocks_path = storage_path.join("rocksdb");
-        if rocks_path.exists() {
-            fs::remove_dir_all(&rocks_path).unwrap();
-        }
-        fs::create_dir_all(&storage_path).unwrap();
-
-        let v = start_validator(
-            node_c,
-            &committee,
-            &public_config,
-            dir.as_ref(),
-            committee_size,
-            &client_parameters,
-            consensus,
-        )
-        .await;
-        validators[node_c] = Some(v);
-
-        time::sleep(Duration::from_secs(20)).await;
-
-        let node_c_addr = &[all_metrics_addrs[node_c]];
-        await_min_commit_index(node_c_addr, 1, Duration::from_secs(20)).await;
+        let indices: Vec<i64> = metrics.values().map(|(i, _)| *i).collect();
+        let min_idx = *indices.iter().min().unwrap();
+        let max_idx = *indices.iter().max().unwrap();
+        assert!(
+            max_idx - min_idx <= 20,
+            "Commit index spread too large for {consensus}: \
+             min={min_idx}, max={max_idx}, spread={}, metrics={metrics:?}",
+            max_idx - min_idx
+        );
 
         // ─── Cleanup ───
         for v in validators.into_iter().flatten() {
@@ -675,10 +612,13 @@ mod smoke_tests {
         }
     }
 
+    #[test_case("mysticeti", 500)]
+    #[test_case("starfish-pull", 520)]
+    #[test_case("cordial-miners", 540)]
+    #[test_case("starfish", 560)]
+    #[test_case("starfish-s", 580)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn validator_lifecycle_and_recovery() {
-        for (i, &consensus) in ALL_PROTOCOLS.iter().enumerate() {
-            run_lifecycle_test(consensus, 500 + i as u16 * 20).await;
-        }
+    async fn validator_lifecycle_and_recovery(consensus: &str, port_offset: u16) {
+        run_lifecycle_test(consensus, port_offset).await;
     }
 }

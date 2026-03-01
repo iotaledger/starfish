@@ -41,6 +41,8 @@ enum CoreThreadCommand {
     ConnectionEstablished(AuthorityIndex, oneshot::Sender<()>),
     /// Indicate that a connection to an authority was dropped.
     ConnectionDropped(AuthorityIndex, oneshot::Sender<()>),
+    /// A peer has subscribed to us (sent us SubscribeBroadcastRequest).
+    PeerSubscribed(AuthorityIndex, oneshot::Sender<()>),
 }
 
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
@@ -113,6 +115,14 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         receiver.await.expect("core thread is not expected to stop")
     }
 
+    /// Record that a peer has sent us a SubscribeBroadcastRequest.
+    pub async fn peer_subscribed(&self, authority: AuthorityIndex) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::PeerSubscribed(authority, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
     async fn send(&self, command: CoreThreadCommand) {
         self.metrics.core_lock_enqueued.inc();
         if self.sender.send(command).await.is_err() {
@@ -157,10 +167,31 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                 }
                 CoreThreadCommand::ConnectionEstablished(authority, sender) => {
                     self.syncer.connected_authorities.insert(authority);
+                    self.syncer
+                        .metrics
+                        .subscribed_to_peers
+                        .set(self.syncer.connected_authorities.len() as i64);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ConnectionDropped(authority, sender) => {
                     self.syncer.connected_authorities.remove(&authority);
+                    self.syncer.subscribed_by_authorities.remove(&authority);
+                    self.syncer
+                        .metrics
+                        .subscribed_to_peers
+                        .set(self.syncer.connected_authorities.len() as i64);
+                    self.syncer
+                        .metrics
+                        .subscribed_by_peers
+                        .set(self.syncer.subscribed_by_authorities.len() as i64);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::PeerSubscribed(authority, sender) => {
+                    self.syncer.subscribed_by_authorities.insert(authority);
+                    self.syncer
+                        .metrics
+                        .subscribed_by_peers
+                        .set(self.syncer.subscribed_by_authorities.len() as i64);
                     sender.send(()).ok();
                 }
             }

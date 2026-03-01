@@ -91,6 +91,7 @@ struct DagStateInner {
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     committee_size: usize,
+    consensus_protocol: ConsensusProtocol,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     // this dag structure store for each block its predecessors and who knows the block
@@ -123,6 +124,7 @@ impl DagState {
             committee.len()
         );
         let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
+        let consensus_protocol = ConsensusProtocol::from_str(&consensus);
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let mut inner = DagStateInner {
             rocks_store: rocks_store.clone(),
@@ -130,6 +132,7 @@ impl DagState {
             last_seen_by_authority,
             last_available_commit: 0,
             committee_size: committee.len(),
+            consensus_protocol,
             index: BTreeMap::new(),
             data_availability: BTreeSet::new(),
             pending_acknowledgment: Vec::new(),
@@ -203,8 +206,6 @@ impl DagState {
             "random-drop" => Some(ByzantineStrategy::RandomDrop),
             _ => None, // Default to honest behavior
         };
-        let consensus_protocol = ConsensusProtocol::from_str(&consensus);
-
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::StarfishPull => {
@@ -895,7 +896,11 @@ impl DagStateInner {
         map.insert(reference.author_digest(), blocks.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(*reference, blocks.0.block_references().clone());
+        self.update_dag(
+            *reference,
+            blocks.0.block_references().clone(),
+            blocks.0.acknowledgment_references().clone(),
+        );
         self.update_data_availability(&blocks.0);
     }
 
@@ -934,7 +939,17 @@ impl DagStateInner {
 
     /// Insert a block into the DAG and propagate "known-by" bits along the
     /// causal history.
-    pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+    ///
+    /// For StarfishS, `known_by` is propagated starting from `ack_refs`
+    /// (acknowledgment references) rather than `block_reference` itself.
+    /// Acknowledgment references prove data availability, whereas block
+    /// references only prove header knowledge.
+    pub fn update_dag(
+        &mut self,
+        block_reference: BlockReference,
+        parents: Vec<BlockReference>,
+        ack_refs: Vec<BlockReference>,
+    ) {
         if block_reference.round == 0 {
             return;
         }
@@ -943,26 +958,35 @@ impl DagStateInner {
         }
         let known_by = (1u128 << block_reference.authority) | (1u128 << self.authority);
         self.dag_insert(block_reference, (parents, known_by));
-        // Traverse the DAG from block_reference and update the
-        // blocks known by block_reference.authority
-        let authority = block_reference.authority;
-        let mut buffer = vec![block_reference];
 
-        while let Some(block_reference) = buffer.pop() {
-            let Some((parents, _)) = self.dag_get(&block_reference).cloned() else {
-                continue; // evicted
-            };
-            for parent in parents {
-                if parent.round == 0 {
-                    continue;
-                }
-                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
+        let authority = block_reference.authority;
+
+        // For StarfishS: propagate known_by starting from acknowledged blocks
+        // (which prove data availability), not from the block itself (which
+        // only proves header knowledge via block_references).
+        let seeds = match self.consensus_protocol {
+            ConsensusProtocol::StarfishS => ack_refs,
+            _ => vec![block_reference],
+        };
+
+        for seed in seeds {
+            let mut buffer = vec![seed];
+            while let Some(r) = buffer.pop() {
+                let Some((parents, _)) = self.dag_get(&r).cloned() else {
                     continue; // evicted
                 };
-                let bit = 1u128 << authority;
-                if *known_by & bit == 0 {
-                    *known_by |= bit;
-                    buffer.push(parent);
+                for parent in parents {
+                    if parent.round == 0 {
+                        continue;
+                    }
+                    let Some((_, known_by)) = self.dag_get_mut(&parent) else {
+                        continue; // evicted
+                    };
+                    let bit = 1u128 << authority;
+                    if *known_by & bit == 0 {
+                        *known_by |= bit;
+                        buffer.push(parent);
+                    }
                 }
             }
         }
