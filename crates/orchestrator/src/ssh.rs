@@ -6,7 +6,6 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -15,7 +14,6 @@ use ssh2::{Channel, Session};
 use tokio::{
     net::TcpStream,
     runtime::Handle,
-    sync::Semaphore,
     task::JoinHandle,
     time::{Instant, sleep},
 };
@@ -111,16 +109,11 @@ pub struct SshConnectionManager {
     timeout: Option<Duration>,
     /// The number of retries before giving up to execute the command.
     retries: usize,
-    /// Limits the number of concurrent SSH connections.
-    semaphore: Arc<Semaphore>,
 }
 
 impl SshConnectionManager {
     /// Delay before re-attempting an ssh execution.
     const RETRY_DELAY: Duration = Duration::from_secs(5);
-
-    /// Maximum number of concurrent SSH connections.
-    const MAX_CONCURRENT_CONNECTIONS: usize = 20;
 
     /// Create a new ssh manager from the instances username and private keys.
     pub fn new(username: String, private_key_file: PathBuf) -> Self {
@@ -129,7 +122,6 @@ impl SshConnectionManager {
             private_key_file,
             timeout: None,
             retries: 0,
-            semaphore: Arc::new(Semaphore::new(Self::MAX_CONCURRENT_CONNECTIONS)),
         }
     }
 
@@ -228,7 +220,6 @@ impl SshConnectionManager {
                 let context = context.clone();
 
                 tokio::spawn(async move {
-                    let _permit = ssh_manager.semaphore.acquire().await.unwrap();
                     let connection = ssh_manager.connect(instance.ssh_address()).await?;
                     // SshConnection::execute is a blocking call, needs to go to blocking pool
                     Handle::current()
@@ -326,7 +317,6 @@ impl SshConnectionManager {
                 let data = data.clone();
                 let remote = remote.clone();
                 tokio::spawn(async move {
-                    let _permit = ssh_manager.semaphore.acquire().await.unwrap();
                     let connection = ssh_manager.connect(instance.ssh_address()).await?;
                     Handle::current()
                         .spawn_blocking(move || connection.upload_bytes(&data, &remote))
