@@ -331,6 +331,20 @@ impl SshConnectionManager {
                 address: SocketAddr::from(([0, 0, 0, 0], 0)),
                 error,
             })?;
+        self.upload_bytes_to_all(instances, data, remote_path).await
+    }
+
+    /// Upload raw bytes to all provided instances in parallel via SCP.
+    pub async fn upload_bytes_to_all<I, Q>(
+        &self,
+        instances: I,
+        data: Vec<u8>,
+        remote_path: Q,
+    ) -> SshResult<()>
+    where
+        I: IntoIterator<Item = Instance>,
+        Q: AsRef<Path>,
+    {
         let remote = remote_path.as_ref().to_path_buf();
 
         let handles: Vec<_> = instances

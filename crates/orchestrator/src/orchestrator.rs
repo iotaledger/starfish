@@ -99,9 +99,12 @@ impl<P> Orchestrator<P> {
         let mut available_instances: Vec<_> =
             self.instances.iter().filter(|x| x.is_active()).collect();
         available_instances.sort_by(|a, b| a.region.cmp(&b.region).then(a.id.cmp(&b.id)));
+        // An external monitoring server does not consume a cloud instance.
+        let needs_cloud_monitoring =
+            self.settings.monitoring && !self.settings.is_external_monitoring();
         let minimum_instances = parameters.nodes
             + self.settings.dedicated_clients
-            + if self.settings.monitoring { 1 } else { 0 };
+            + if needs_cloud_monitoring { 1 } else { 0 };
         ensure!(
             available_instances.len() >= minimum_instances,
             TestbedError::InsufficientCapacity(minimum_instances - available_instances.len())
@@ -118,13 +121,17 @@ impl<P> Orchestrator<P> {
         }
 
         // Select the instance to host the monitoring stack.
-        let mut monitoring_instance = None;
-        if self.settings.monitoring {
-            let region = &self.settings.regions[0];
-            monitoring_instance = instances_by_regions
-                .get_mut(region)
-                .map(|instances| instances.pop_front().unwrap().clone());
-        }
+        let monitoring_instance =
+            if let Some(instance) = self.settings.external_monitoring_instance()? {
+                Some(instance)
+            } else if self.settings.monitoring {
+                let region = &self.settings.regions[0];
+                instances_by_regions
+                    .get_mut(region)
+                    .map(|instances| instances.pop_front().unwrap().clone())
+            } else {
+                None
+            };
 
         // Select the instances to host exclusively load generators.
         let mut client_instances = Vec::new();
@@ -368,21 +375,64 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(())
     }
 
+    /// Return the SSH manager for the monitoring server. Uses a custom
+    /// username when the external `monitoring_server` specifies one
+    /// (e.g. `root@host`), otherwise falls back to the default manager.
+    fn monitoring_ssh_manager(&self) -> SshConnectionManager {
+        if let Some(user) = self.settings.monitoring_ssh_user() {
+            SshConnectionManager::new(user.into(), self.settings.ssh_private_key_file.clone())
+                .with_timeout(self.settings.ssh_timeout)
+                .with_retries(self.settings.ssh_retries)
+        } else {
+            self.ssh_manager.clone()
+        }
+    }
+
     /// Reload prometheus and grafana.
     pub async fn start_monitoring(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         let (clients, nodes, instance) = self.select_instances(parameters)?;
         if let Some(instance) = instance {
             display::action("Configuring monitoring instance");
 
-            let monitor = Monitor::new(instance, clients, nodes, self.ssh_manager.clone());
+            let ssh_manager = self.monitoring_ssh_manager();
+            let monitor = Monitor::new(
+                instance,
+                clients,
+                nodes,
+                ssh_manager,
+                self.settings.monitoring_working_dir(),
+            );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
-            let repo_name = self.settings.repository_name();
-            monitor.start_grafana(&repo_name).await?;
+            monitor.start_grafana().await?;
 
             display::done();
             display::config("Grafana address", monitor.grafana_address());
             display::newline();
+        }
+        Ok(())
+    }
+
+    /// Install monitoring dependencies on the external monitoring server.
+    async fn install_external_monitoring(&self) -> TestbedResult<()> {
+        if let Some(instance) = self.settings.external_monitoring_instance()? {
+            display::action("Installing monitoring dependencies on external server");
+
+            let ssh_manager = self.monitoring_ssh_manager();
+            let command = [
+                Monitor::dependencies().join(" && "),
+                format!(
+                    "mkdir -p {}",
+                    self.settings.monitoring_working_dir().display()
+                ),
+            ]
+            .join(" && ");
+            let context = CommandContext::default();
+            ssh_manager
+                .execute(std::iter::once(instance), command, context)
+                .await?;
+
+            display::done();
         }
         Ok(())
     }
@@ -651,6 +701,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Update the software on all instances.
         if !self.skip_testbed_update {
             self.install().await?;
+            self.install_external_monitoring().await?;
             self.update().await?;
         }
 

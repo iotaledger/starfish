@@ -20,6 +20,9 @@ pub enum SettingsError {
     #[error("Failed to read settings file '{file:?}': {message}")]
     InvalidSettings { file: String, message: String },
 
+    #[error("Invalid monitoring_server setting: {message}")]
+    MonitoringServerError { message: String },
+
     #[error("Failed to read token file '{file:?}': {message}")]
     TokenFileError { file: String, message: String },
 

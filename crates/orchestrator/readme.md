@@ -99,8 +99,9 @@ cargo run --bin orchestrator -- testbed deploy --instances 2
 ```
 
 Note that one instance is used for collecting metrics and representing them
-in Grafana. This means that for a committee of 10 validators
-one needs to run 11 instances.
+in Grafana (unless an [external monitoring server](#external-monitoring-server-optional)
+is configured). This means that for a committee of 10 validators
+one needs to run 11 instances (or 10 with an external monitoring server).
 
 To check the current status of the testbed instances, use the following command:
 
@@ -165,6 +166,28 @@ both set to `admin`. You can either create a
 [new dashboard](https://grafana.com/docs/grafana/latest/getting-started/build-first-dashboard/)
 or [import](https://grafana.com/docs/grafana/latest/dashboards/manage-dashboards/#import-a-dashboard)
 the example dashboard located in the `monitoring/grafana/` folder.
+
+### External monitoring server (optional)
+
+By default the orchestrator allocates one cloud instance for monitoring,
+which means a committee of 10 validators requires 11 instances. To use a
+pre-existing server instead, set `monitoring_server` in `settings.yml`:
+
+```yml
+monitoring_server: root@monitor.example.com
+```
+
+The value accepts `[user@]host` format. When set, the orchestrator:
+
+- Installs Prometheus and Grafana on the server during setup.
+- Does **not** consume a cloud instance for monitoring (10 validators = 10 instances).
+- Uses the specified SSH user (or falls back to the cloud instance user).
+- Never destroys the external server on `testbed destroy`.
+
+The server must be reachable via SSH with the same private key configured in
+`ssh_private_key_file`. Hostnames are resolved via DNS. When running with
+`--use-internal-ip-addresses`, the server must be able to reach the validators'
+private IPs (e.g., it should be in the same VPC).
 
 ### Collecting monitoring data locally
 

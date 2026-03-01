@@ -23,6 +23,7 @@ pub struct Monitor {
     clients: Vec<Instance>,
     nodes: Vec<Instance>,
     ssh_manager: SshConnectionManager,
+    working_dir: PathBuf,
 }
 
 impl Monitor {
@@ -32,13 +33,27 @@ impl Monitor {
         clients: Vec<Instance>,
         nodes: Vec<Instance>,
         ssh_manager: SshConnectionManager,
+        working_dir: PathBuf,
     ) -> Self {
         Self {
             instance,
             clients,
             nodes,
             ssh_manager,
+            working_dir,
         }
+    }
+
+    async fn ensure_working_dir(&self) -> MonitorResult<()> {
+        let command = format!("mkdir -p {}", self.working_dir.display());
+        self.ssh_manager
+            .execute(
+                std::iter::once(self.instance.clone()),
+                command,
+                CommandContext::default(),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Dependencies to install.
@@ -56,23 +71,40 @@ impl Monitor {
         protocol_commands: &P,
         parameters: &BenchmarkParameters,
     ) -> MonitorResult<()> {
-        // Configure and reload prometheus.
-        let instance = [self.instance.clone()];
-        let commands = Prometheus::setup_commands(
+        self.ensure_working_dir().await?;
+
+        let config = Prometheus::configuration(
             self.nodes.clone(),
             self.clients.clone(),
             protocol_commands,
             parameters,
         );
+        let remote_config: PathBuf = "prometheus.yml".into();
+        let remote_config_path = self.working_dir.join(&remote_config);
+
+        // Upload the config separately so large committees do not overflow the
+        // SSH exec request size.
         self.ssh_manager
-            .execute(instance, commands, CommandContext::default())
+            .upload_bytes_to_all(
+                std::iter::once(self.instance.clone()),
+                config.into_bytes(),
+                &remote_config_path,
+            )
+            .await?;
+
+        let commands = Prometheus::reload_commands(&remote_config);
+        let context = CommandContext::new().with_execute_from_path(self.working_dir.clone());
+        self.ssh_manager
+            .execute(std::iter::once(self.instance.clone()), commands, context)
             .await?;
 
         Ok(())
     }
 
     /// Start grafana on the dedicated motoring machine.
-    pub async fn start_grafana(&self, repo_name: &str) -> MonitorResult<()> {
+    pub async fn start_grafana(&self) -> MonitorResult<()> {
+        self.ensure_working_dir().await?;
+
         let local_dashboard: PathBuf = [
             env!("CARGO_MANIFEST_DIR"),
             "..",
@@ -90,7 +122,8 @@ impl Monitor {
             )));
         }
 
-        let remote_dashboard: PathBuf = format!("{repo_name}/grafana-dashboard.json").into();
+        let remote_dashboard_file: PathBuf = "grafana-dashboard.json".into();
+        let remote_dashboard = self.working_dir.join(&remote_dashboard_file);
         self.ssh_manager
             .upload_to_all(
                 std::iter::once(self.instance.clone()),
@@ -102,7 +135,7 @@ impl Monitor {
         // Configure and reload grafana.
         let instance = std::iter::once(self.instance.clone());
         let commands = Grafana::setup_commands();
-        let context = CommandContext::new().with_execute_from_path(PathBuf::from(repo_name));
+        let context = CommandContext::new().with_execute_from_path(self.working_dir.clone());
         self.ssh_manager
             .execute(instance, commands, context)
             .await?;
@@ -133,9 +166,8 @@ impl Prometheus {
         ]
     }
 
-    /// Generate the commands to update the prometheus configuration and restart
-    /// prometheus.
-    pub fn setup_commands<I, P>(
+    /// Generate the prometheus configuration.
+    pub fn configuration<I, P>(
         nodes: I,
         _clients: I,
         protocol: &P,
@@ -163,11 +195,17 @@ impl Prometheus {
         // Self::scrape_configuration(&id, &client_metrics_path);     config.
         // push(scrape_config); }
 
-        // Make the command to configure and restart prometheus.
+        config.join("\n")
+    }
+
+    /// Generate the commands to install the uploaded configuration and restart
+    /// prometheus.
+    pub fn reload_commands<P: AsRef<Path>>(remote_config_path: P) -> String {
         format!(
-            "sudo echo \"{}\" > {} && sudo service prometheus restart",
-            config.join("\n"),
-            Self::DEFAULT_PROMETHEUS_CONFIG_PATH
+            "sudo cp {} {} && (sudo fuser -k {}/tcp || true) && sudo service prometheus restart",
+            remote_config_path.as_ref().display(),
+            Self::DEFAULT_PROMETHEUS_CONFIG_PATH,
+            Self::DEFAULT_PORT
         )
     }
 
@@ -260,6 +298,8 @@ impl Grafana {
             ),
             // copy your default dashboard yaml/json
             &format!("sudo cp grafana-dashboard.json {}", Self::DASHBOARDS_PATH),
+            // Free the port in case another process occupies it.
+            &format!("(sudo fuser -k {}/tcp || true)", Self::DEFAULT_PORT),
             "sudo service grafana-server restart",
         ]
         .join(" && ")

@@ -264,15 +264,25 @@ fn docker_build_and_extract() -> eyre::Result<PathBuf> {
     Ok(PathBuf::from(DOCKER_BINARY_OUTPUT))
 }
 
-fn select_monitoring_instance(instances: &[Instance], settings: &Settings) -> Option<Instance> {
-    let region = settings.regions.first()?;
+fn select_monitoring_instance(
+    instances: &[Instance],
+    settings: &Settings,
+) -> eyre::Result<Option<Instance>> {
+    // Prefer external monitoring server if configured.
+    if let Some(instance) = settings.external_monitoring_instance()? {
+        return Ok(Some(instance));
+    }
+
+    let Some(region) = settings.regions.first() else {
+        return Ok(None);
+    };
     let mut candidates: Vec<_> = instances
         .iter()
         .filter(|instance| instance.is_active() && &instance.region == region)
         .cloned()
         .collect();
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
-    candidates.into_iter().next()
+    Ok(candidates.into_iter().next())
 }
 
 async fn run<C: ServerProviderClient>(
@@ -307,7 +317,7 @@ async fn run<C: ServerProviderClient>(
 
             // Destroy the testbed and terminate all instances.
             TestbedAction::Destroy { collect_monitoring } => {
-                if collect_monitoring && settings.monitoring {
+                if collect_monitoring && settings.monitoring_enabled() {
                     // Stop conflicting local stacks first.
                     display::action("Stopping conflicting local monitoring stacks");
                     MonitoringCollector::stop_conflicting_stacks();
@@ -315,7 +325,7 @@ async fn run<C: ServerProviderClient>(
 
                     // Separate monitoring instance from the rest.
                     let instances = testbed.instances();
-                    let monitoring_instance = select_monitoring_instance(&instances, &settings);
+                    let monitoring_instance = select_monitoring_instance(&instances, &settings)?;
 
                     if let Some(monitoring_instance) = monitoring_instance {
                         let username = testbed.username();
@@ -353,8 +363,20 @@ async fn run<C: ServerProviderClient>(
                             .into_iter()
                             .filter(|i| i.id != monitoring_instance.id)
                             .collect();
+                        // Use a dedicated SSH manager for the monitoring server
+                        // when it specifies a custom user (e.g. root@host).
+                        let monitoring_ssh = if let Some(user) = settings.monitoring_ssh_user() {
+                            SshConnectionManager::new(
+                                user.into(),
+                                settings.ssh_private_key_file.clone(),
+                            )
+                            .with_timeout(settings.ssh_timeout)
+                            .with_retries(settings.ssh_retries)
+                        } else {
+                            ssh_manager
+                        };
                         let collector =
-                            MonitoringCollector::new(ssh_manager, monitoring_instance.clone());
+                            MonitoringCollector::new(monitoring_ssh, monitoring_instance.clone());
 
                         display::action("Destroying validators and downloading monitoring data");
                         tokio::try_join!(
@@ -384,13 +406,16 @@ async fn run<C: ServerProviderClient>(
                             .wrap_err("Failed to start local monitoring stack")?;
                         display::done();
 
-                        // Destroy the monitoring instance last.
-                        display::action("Destroying remote monitoring instance");
-                        testbed
-                            .destroy_instance(monitoring_instance)
-                            .await
-                            .wrap_err("Failed to destroy monitoring instance")?;
-                        display::done();
+                        // Destroy the monitoring instance last (skip for
+                        // external servers).
+                        if !settings.is_external_monitoring() {
+                            display::action("Destroying remote monitoring instance");
+                            testbed
+                                .destroy_instance(monitoring_instance)
+                                .await
+                                .wrap_err("Failed to destroy monitoring instance")?;
+                            display::done();
+                        }
                     } else {
                         // No monitoring instance found, just destroy everything.
                         testbed
@@ -501,8 +526,9 @@ async fn run<C: ServerProviderClient>(
         // Collect monitoring data and run it locally.
         Operation::CollectMonitoring => {
             eyre::ensure!(
-                settings.monitoring,
-                "Monitoring is not enabled in settings (set monitoring: true)"
+                settings.monitoring_enabled(),
+                "Monitoring is not enabled in settings \
+                 (set monitoring: true or monitoring_server: <ip>)"
             );
 
             // Stop any conflicting local monitoring stacks.
@@ -517,7 +543,7 @@ async fn run<C: ServerProviderClient>(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "<none>".to_string());
-            let monitoring_instance = select_monitoring_instance(&instances, &settings)
+            let monitoring_instance = select_monitoring_instance(&instances, &settings)?
                 .ok_or_else(|| {
                     eyre::eyre!(
                         "No active instance found in region '{}' for monitoring",
@@ -553,8 +579,18 @@ async fn run<C: ServerProviderClient>(
             fs::create_dir_all(&local_dir)
                 .wrap_err("Failed to create monitoring data directory")?;
 
+            // Use a dedicated SSH manager for the monitoring server when it
+            // specifies a custom user (e.g. root@host).
+            let monitoring_ssh = if let Some(user) = settings.monitoring_ssh_user() {
+                SshConnectionManager::new(user.into(), settings.ssh_private_key_file.clone())
+                    .with_timeout(settings.ssh_timeout)
+                    .with_retries(settings.ssh_retries)
+            } else {
+                ssh_manager
+            };
+
             display::action("Downloading Prometheus data from monitoring instance");
-            let collector = MonitoringCollector::new(ssh_manager, monitoring_instance.clone());
+            let collector = MonitoringCollector::new(monitoring_ssh, monitoring_instance.clone());
             collector
                 .download_prometheus_data(&local_dir)
                 .await
@@ -573,13 +609,16 @@ async fn run<C: ServerProviderClient>(
                 .wrap_err("Failed to start local monitoring stack")?;
             display::done();
 
-            // Destroy the remote monitoring instance.
-            display::action("Destroying remote monitoring instance");
-            testbed
-                .destroy_instance(monitoring_instance)
-                .await
-                .wrap_err("Failed to destroy monitoring instance")?;
-            display::done();
+            // Destroy the remote monitoring instance (skip for external
+            // servers).
+            if !settings.is_external_monitoring() {
+                display::action("Destroying remote monitoring instance");
+                testbed
+                    .destroy_instance(monitoring_instance)
+                    .await
+                    .wrap_err("Failed to destroy monitoring instance")?;
+                display::done();
+            }
         }
     }
     Ok(())

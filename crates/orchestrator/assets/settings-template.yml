@@ -11,6 +11,10 @@ repository:
   commit: main
 # Use EC2 Spot Instances (cheaper, but may be interrupted).
 # spot: true
+# External monitoring server (optional). Uses this server for Prometheus +
+# Grafana instead of allocating a cloud instance. Accepts [user@]host format.
+# The server must be reachable via SSH with the configured private key.
+# monitoring_server: root@monitor.example.com
 # Pre-built binary (optional). Skips source compilation on remote machines.
 # URL downloads via curl; local path SCPs to all machines.
 # pre_built_binary: "https://github.com/iotaledger/starfish/releases/download/nightly/starfish-linux-amd64"
