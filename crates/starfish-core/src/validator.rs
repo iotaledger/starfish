@@ -10,14 +10,13 @@ use std::{
 use ::prometheus::Registry;
 use eyre::{Context, Result, eyre};
 
-use crate::metrics::MetricReporter;
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
     config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
     core::{Core, CoreOptions},
     dag_state::DagState,
-    metrics::Metrics,
+    metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,

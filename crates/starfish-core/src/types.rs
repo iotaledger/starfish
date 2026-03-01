@@ -20,29 +20,28 @@ pub type Shard = Vec<u8>;
 pub type Encoder = ReedSolomonEncoder;
 pub type Decoder = ReedSolomonDecoder;
 
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    sync::atomic::Ordering,
+    time::Duration,
+};
+
 use bytes::Bytes;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
-use std::{
-    fmt,
-    hash::{Hash, Hasher},
-    time::Duration,
-};
 #[cfg(test)]
 pub use test::Dag;
 
-use crate::crypto::TransactionsCommitment;
-use crate::dag_state::ConsensusProtocol;
-use crate::data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES};
-use crate::encoder::ShardEncoder;
-use crate::threshold_clock::threshold_clock_valid_verified_block;
 use crate::{
     committee::Committee,
     crypto,
-    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer},
-    data::Data,
+    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer, TransactionsCommitment},
+    dag_state::ConsensusProtocol,
+    data::{Data, IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
+    encoder::ShardEncoder,
+    threshold_clock::threshold_clock_valid_verified_block,
 };
 
 pub type EpochStatus = bool;

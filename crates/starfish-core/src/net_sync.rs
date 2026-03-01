@@ -2,41 +2,44 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::consensus::universal_committer::UniversalCommitter;
-use crate::dag_state::ConsensusProtocol;
-use crate::data::Data;
-use crate::metrics::UtilizationTimerVecExt;
-use crate::rocks_store::RocksStore;
-use crate::runtime::sleep;
-use crate::synchronizer::DataRequester;
-use crate::types::{BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock};
-use crate::{
-    block_handler::BlockHandler,
-    committee::Committee,
-    core::Core,
-    core_thread::CoreThreadDispatcher,
-    dag_state::DagState,
-    metrics::Metrics,
-    network::{Connection, Network, NetworkMessage},
-    runtime::{Handle, JoinError, JoinHandle, timestamp_utc},
-    syncer::{CommitObserver, Syncer, SyncerSignals},
-    synchronizer::{BlockDisseminator, BlockFetcher, SynchronizerParameters},
-    types::{AuthorityIndex, format_authority_index},
-};
-use futures::future::join_all;
-use reed_solomon_simd::ReedSolomonEncoder;
-use std::collections::VecDeque;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
+
+use futures::future::join_all;
+use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::{
     select,
     sync::{Notify, mpsc, oneshot},
+};
+
+use crate::{
+    block_handler::BlockHandler,
+    committee::Committee,
+    consensus::universal_committer::UniversalCommitter,
+    core::Core,
+    core_thread::CoreThreadDispatcher,
+    dag_state::{ConsensusProtocol, DagState},
+    data::Data,
+    metrics::{Metrics, UtilizationTimerVecExt},
+    network::{Connection, Network, NetworkMessage},
+    rocks_store::RocksStore,
+    runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
+    syncer::{CommitObserver, Syncer, SyncerSignals},
+    synchronizer::{BlockDisseminator, BlockFetcher, DataRequester, SynchronizerParameters},
+    types::{
+        AuthorityIndex,
+        BlockDigest,
+        BlockReference,
+        RoundNumber,
+        VerifiedStatementBlock,
+        format_authority_index,
+    },
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;

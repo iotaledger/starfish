@@ -1,12 +1,16 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::committee::Committee;
-use crate::crypto::TransactionsCommitment;
-use crate::encoder::{Encoder, ShardEncoder};
-use crate::types::{AuthorityIndex, CachedStatementBlock, Shard, VerifiedStatementBlock};
-use reed_solomon_simd::ReedSolomonDecoder;
 use std::collections::HashMap;
+
+use reed_solomon_simd::ReedSolomonDecoder;
+
+use crate::{
+    committee::Committee,
+    crypto::TransactionsCommitment,
+    encoder::{Encoder, ShardEncoder},
+    types::{AuthorityIndex, CachedStatementBlock, Shard, VerifiedStatementBlock},
+};
 
 pub type Decoder = ReedSolomonDecoder;
 
@@ -97,9 +101,11 @@ impl CachedStatementBlockDecoder for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::Signer;
-    use crate::dag_state::ConsensusProtocol;
-    use crate::types::{BaseStatement, Transaction};
+    use crate::{
+        crypto::Signer,
+        dag_state::ConsensusProtocol,
+        types::{BaseStatement, Transaction},
+    };
 
     fn make_test_block(
         statements: Vec<BaseStatement>,

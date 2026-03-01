@@ -4,6 +4,8 @@
 
 //! Orchestrator entry point.
 
+use std::{fs, path::PathBuf, process::Command};
+
 use benchmark::BenchmarkParameters;
 use clap::Parser;
 use client::{Instance, ServerProviderClient, aws::AwsClient, vultr::VultrClient};
@@ -14,9 +16,6 @@ use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::{CommandContext, SshConnectionManager};
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
 use testbed::Testbed;
 
 mod benchmark;

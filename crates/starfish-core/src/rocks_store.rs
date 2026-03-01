@@ -1,19 +1,32 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::crypto::BlockDigest;
-use crate::dag_state::CommitData;
-use crate::data::Data;
-use crate::types::{BlockReference, RoundNumber, VerifiedStatementBlock};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    path::Path,
+    sync::Arc,
+};
+
 use bincode::{deserialize, serialize};
 use parking_lot::RwLock;
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options, ReadOptions, WriteOptions,
+    BlockBasedOptions,
+    Cache,
+    ColumnFamilyDescriptor,
+    DB,
+    Options,
+    ReadOptions,
+    WriteOptions,
 };
-use std::collections::VecDeque;
-use std::{collections::HashMap, io, path::Path, sync::Arc};
-use tokio::sync::watch;
-use tokio::time::Instant;
+use tokio::{sync::watch, time::Instant};
+
+use crate::{
+    crypto::BlockDigest,
+    dag_state::CommitData,
+    data::Data,
+    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
+};
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
 const CF_COMMITS: &str = "commits";

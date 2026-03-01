@@ -2,18 +2,14 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use reed_solomon_simd::ReedSolomonEncoder;
 use std::{
     mem,
     sync::{Arc, atomic::AtomicU64},
 };
 
 use ahash::AHashSet;
+use reed_solomon_simd::ReedSolomonEncoder;
 
-use crate::dag_state::ConsensusProtocol;
-use crate::encoder::ShardEncoder;
-use crate::rocks_store::RocksStore;
-use crate::types::{Encoder, Shard, VerifiedStatementBlock};
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
@@ -25,14 +21,24 @@ use crate::{
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
     crypto::Signer,
-    dag_state::{ByzantineStrategy, CommitData, DagState, OwnBlockData},
+    dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
+    encoder::ShardEncoder,
     epoch_close::EpochManager,
     metrics::{Metrics, UtilizationTimerVecExt},
+    rocks_store::RocksStore,
     runtime::timestamp_utc,
     state::RecoveredState,
     threshold_clock::ThresholdClockAggregator,
-    types::{AuthorityIndex, BaseStatement, BlockReference, RoundNumber},
+    types::{
+        AuthorityIndex,
+        BaseStatement,
+        BlockReference,
+        Encoder,
+        RoundNumber,
+        Shard,
+        VerifiedStatementBlock,
+    },
 };
 
 macro_rules! timed {

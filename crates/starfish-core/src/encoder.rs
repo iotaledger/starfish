@@ -1,8 +1,9 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::{BaseStatement, Shard};
 use reed_solomon_simd::ReedSolomonEncoder;
+
+use crate::types::{BaseStatement, Shard};
 
 pub type Encoder = ReedSolomonEncoder;
 
@@ -74,14 +75,16 @@ impl ShardEncoder for Encoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::committee::Committee;
-    use crate::types::{BaseStatement, Transaction};
-    use rand::prelude::SliceRandom;
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use reed_solomon_simd::ReedSolomonDecoder;
     use std::collections::HashMap;
+
+    use rand::{Rng, SeedableRng, prelude::SliceRandom, rngs::StdRng};
+    use reed_solomon_simd::ReedSolomonDecoder;
+
+    use super::*;
+    use crate::{
+        committee::Committee,
+        types::{BaseStatement, Transaction},
+    };
 
     fn random_statements(rng: &mut impl Rng, count: usize, tx_size: usize) -> Vec<BaseStatement> {
         (0..count)

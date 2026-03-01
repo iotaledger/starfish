@@ -11,21 +11,18 @@ use std::{
 };
 
 use ahash::{AHashMap, AHashSet};
-
 use bytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::committee::{QuorumThreshold, StakeAggregator};
-use crate::rocks_store::RocksStore;
-use crate::types::VerifiedStatementBlock;
 use crate::{
-    committee::Committee,
+    committee::{Committee, QuorumThreshold, StakeAggregator},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
+    rocks_store::RocksStore,
     state::{RecoveredState, RecoveredStateBuilder},
-    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber},
+    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 /// Bitmask tracking which authorities know about a block. Supports up to 128

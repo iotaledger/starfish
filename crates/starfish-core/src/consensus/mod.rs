@@ -2,12 +2,20 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Display;
+
 use ahash::{AHashMap, AHashSet};
 
-use crate::data::Data;
-use crate::types::VerifiedStatementBlock;
-use crate::types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round};
-use std::fmt::Display;
+use crate::{
+    data::Data,
+    types::{
+        AuthorityIndex,
+        BlockReference,
+        RoundNumber,
+        VerifiedStatementBlock,
+        format_authority_round,
+    },
+};
 
 pub mod base_committer;
 pub mod linearizer;

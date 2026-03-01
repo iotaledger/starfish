@@ -4,10 +4,9 @@
 
 use std::cmp::Ordering;
 
-use crate::types::VerifiedStatementBlock;
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    types::{BlockReference, RoundNumber},
+    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
 pub fn threshold_clock_valid_verified_block(
