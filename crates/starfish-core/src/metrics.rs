@@ -96,6 +96,10 @@ pub struct Metrics {
     // tracking total bytes sent and received
     pub bytes_sent_total: IntCounter,
     pub bytes_received_total: IntCounter,
+
+    // per-request-type network message counters
+    pub network_requests_sent_total: IntCounterVec,
+    pub network_requests_received_total: IntCounterVec,
 }
 
 pub struct MetricReporter {
@@ -289,7 +293,21 @@ impl Metrics {
             .unwrap(),
             bytes_received_total: register_int_counter_with_registry!(
                 "bytes_received_total",
-                "Total number of bytes sent",
+                "Total number of bytes received",
+                registry,
+            )
+            .unwrap(),
+            network_requests_sent_total: register_int_counter_vec_with_registry!(
+                "network_requests_sent_total",
+                "Total network requests sent, by type",
+                &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            network_requests_received_total: register_int_counter_vec_with_registry!(
+                "network_requests_received_total",
+                "Total network requests received, by type",
+                &["request_type"],
                 registry,
             )
             .unwrap(),

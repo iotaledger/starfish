@@ -6,7 +6,6 @@ use futures::{
     FutureExt,
     future::{Either, select, select_all},
 };
-use prometheus::IntCounter;
 use rand::{Rng, prelude::ThreadRng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -87,6 +86,18 @@ pub enum NetworkMessage {
     /// Request a tx data for a few specific block references (only shards are
     /// sent).
     MissingTxDataRequest(Vec<BlockReference>),
+}
+
+impl NetworkMessage {
+    fn request_type(&self) -> &'static str {
+        match self {
+            Self::SubscribeBroadcastRequest(_) => "subscribe_broadcast",
+            Self::Batch(_) => "batch",
+            Self::MissingHistoryRequest(_) => "missing_history",
+            Self::MissingParentsRequest(_) => "missing_parents",
+            Self::MissingTxDataRequest(_) => "missing_tx_data",
+        }
+    }
 }
 
 pub struct Network {
@@ -368,30 +379,25 @@ impl Worker {
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
         let (pong_sender, pong_receiver) = mpsc::channel(16);
+        let latency_sender = metrics
+            .connection_latency_sender
+            .get(peer_id)
+            .expect(
+                "Can not locate connection_latency_sender \
+                metric - did you initialize metrics with \
+                correct committee?",
+            )
+            .clone();
         let write_fut = Self::handle_write_stream(
             writer,
             receiver,
             pong_receiver,
-            metrics
-                .connection_latency_sender
-                .get(peer_id)
-                .expect(
-                    "Can not locate connection_latency_sender \
-                    metric - did you initialize metrics with \
-                    correct committee?",
-                )
-                .clone(),
-            metrics.bytes_sent_total.clone(),
+            latency_sender,
+            metrics.clone(),
             extra_connection_latency,
         )
         .boxed();
-        let read_fut = Self::handle_read_stream(
-            reader,
-            sender,
-            pong_sender,
-            metrics.bytes_received_total.clone(),
-        )
-        .boxed();
+        let read_fut = Self::handle_read_stream(reader, sender, pong_sender, metrics).boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
         r
@@ -402,12 +408,14 @@ impl Worker {
         mut receiver: mpsc::Receiver<NetworkMessage>,
         mut pong_receiver: mpsc::Receiver<i64>,
         latency_sender: HistogramSender<Duration>,
-        bytes_sent_total: IntCounter,
+        metrics: Arc<Metrics>,
         connection_latency: f64,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
         let writer = Arc::new(Mutex::new(writer));
         let start = Instant::now();
+        let bytes_sent_total = metrics.bytes_sent_total.clone();
+        let network_requests_sent_total = metrics.network_requests_sent_total.clone();
 
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
@@ -489,14 +497,16 @@ impl Worker {
             while let Some(message) = receiver.recv().await {
                 let writer = writer.clone();
                 let bytes_sent_total_clone = bytes_sent_total.clone();
+                let network_requests_sent_total = network_requests_sent_total.clone();
                 let latency = generate_latency(connection_latency);
+                let request_type = message.request_type();
 
                 // Spawn an inner task and collect its handle
                 let handle = tokio::spawn(async move {
                     let serialized = bincode::serialize(&message).expect("Serialization failed");
                     tokio::time::sleep(latency).await;
 
-                    if let Err(e) = async {
+                    match async {
                         let mut writer_guard = writer.lock().await;
                         // Write the length
                         writer_guard.write_u32(serialized.len() as u32).await?;
@@ -507,7 +517,14 @@ impl Worker {
                     }
                     .await
                     {
-                        tracing::error!("Failed to write message: {e}");
+                        Ok(()) => {
+                            network_requests_sent_total
+                                .with_label_values(&[request_type])
+                                .inc();
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to write message: {e}");
+                        }
                     }
                 });
 
@@ -532,13 +549,14 @@ impl Worker {
         mut stream: OwnedReadHalf,
         sender: mpsc::Sender<NetworkMessage>,
         pong_sender: mpsc::Sender<i64>,
-        bytes_received_total: IntCounter,
+        metrics: Arc<Metrics>,
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
         // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]);
         // does not work with large MAX_BUFFER_SIZE
         let mut buf = vec![0u8; Self::MAX_BUFFER_SIZE as usize].into_boxed_slice();
+        let bytes_received_total = metrics.bytes_received_total.clone();
         loop {
             let size = stream.read_u32().await?;
             if size > Self::MAX_BUFFER_SIZE {
@@ -561,12 +579,17 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match bincode::deserialize(buf).ok() {
+            match bincode::deserialize::<NetworkMessage>(buf).ok() {
                 Some(message) => {
+                    let request_type = message.request_type();
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
                         return Ok(());
                     }
+                    metrics
+                        .network_requests_received_total
+                        .with_label_values(&[request_type])
+                        .inc();
                 }
                 None => {
                     tracing::warn!("Failed to decompress and/or deserialize");
