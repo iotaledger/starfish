@@ -15,7 +15,7 @@ use std::{fmt::Display, sync::Arc};
 
 /// The consensus protocol operates in 'waves'. Each wave is
 /// composed of a leader round, at least one voting round,
-/// and one decision round.
+/// and one certifying round.
 type WaveNumber = u64;
 
 #[derive(Clone)]
@@ -89,9 +89,9 @@ impl BaseCommitter {
         wave * self.options.wave_length + self.options.round_offset
     }
 
-    /// Return the decision round of the specified wave. The decision round is
-    /// always the last round of the wave.
-    fn decision_round(&self, wave: WaveNumber) -> RoundNumber {
+    /// Return the certifying round of the specified wave. The certifying round
+    /// is always the last round of the wave.
+    fn certifying_round(&self, wave: WaveNumber) -> RoundNumber {
         let wave_length = self.options.wave_length;
         wave * wave_length + wave_length - 1 + self.options.round_offset
     }
@@ -144,14 +144,14 @@ impl BaseCommitter {
             .get_blocks_at_authority_round(leader, leader_round);
 
         // Get all blocks that could be potential certificates for the target leader.
-        // These blocks are in the decision round of the target leader and are
+        // These blocks are in the certifying round of the target leader and are
         // linked to the anchor. Use batch reachability: one BFS from anchor to
-        // decision_round instead of N linked() calls.
+        // certifying_round instead of N linked() calls.
         let wave = self.wave_number(leader_round);
-        let decision_round = self.decision_round(wave);
-        let decision_blocks = self.dag_state.get_blocks_by_round_cached(decision_round);
-        let reachable = self.dag_state.reachable_at_round(anchor, decision_round);
-        let potential_certificates: Vec<_> = decision_blocks
+        let certifying_round = self.certifying_round(wave);
+        let certifying_blocks = self.dag_state.get_blocks_by_round_cached(certifying_round);
+        let reachable = self.dag_state.reachable_at_round(anchor, certifying_round);
+        let potential_certificates: Vec<_> = certifying_blocks
             .iter()
             .filter(|block| reachable.contains(block.reference()))
             .collect();
@@ -266,18 +266,18 @@ impl BaseCommitter {
     /// certificates) to be directly committed.
     fn enough_leader_support(
         &self,
-        decision_round: RoundNumber,
+        certifying_round: RoundNumber,
         leader_block: &Data<VerifiedStatementBlock>,
         voter_info: &VoterInfo,
     ) -> bool {
-        let decision_blocks = self.dag_state.get_blocks_by_round_cached(decision_round);
+        let certifying_blocks = self.dag_state.get_blocks_by_round_cached(certifying_round);
 
         let mut total_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         // Quickly reject if there isn't enough stake to support the leader from
         // the potential certificates.
         let mut early_stop = true;
-        for decision_block in decision_blocks.iter() {
-            if total_stake_aggregator.add(decision_block.author(), &self.committee) {
+        for certifying_block in certifying_blocks.iter() {
+            if total_stake_aggregator.add(certifying_block.author(), &self.committee) {
                 early_stop = false;
                 break;
             }
@@ -292,26 +292,26 @@ impl BaseCommitter {
         }
 
         self.has_quorum_support(
-            decision_blocks
+            certifying_blocks
                 .iter()
                 .filter(|b| self.is_certificate(b, leader_block, voter_info))
                 .map(|b| b.author()),
         )
     }
 
-    /// Check whether a single round-(r+2) block carries a StrongQC for the
+    /// Check whether a single certifying-round block carries a StrongQC for the
     /// leader. A block carries StrongQC if its includes contain >=2f+1
     /// round-(r+1) blocks that both vote for the leader AND carry
     /// `strong_vote == true`.
     fn carries_strong_qc(
         &self,
-        decision_block: &Data<VerifiedStatementBlock>,
+        certifying_block: &Data<VerifiedStatementBlock>,
         leader_block: &Data<VerifiedStatementBlock>,
         voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
         self.has_quorum_support(
-            decision_block
+            certifying_block
                 .block_references()
                 .iter()
                 .filter(|r| {
@@ -324,7 +324,7 @@ impl BaseCommitter {
 
     /// Determine the commit metastate for StarfishS direct decide.
     /// Returns `None` for non-StarfishS protocols.
-    /// - Opt: 2f+1 decision blocks each carrying a StrongQC
+    /// - Opt: 2f+1 certifying blocks each carrying a StrongQC
     /// - Std: strong blame quorum at the voting round
     /// - Pending: neither strong vote nor strong blame quorum
     fn determine_metastate(
@@ -354,15 +354,15 @@ impl BaseCommitter {
             return Some(CommitMetastate::Std);
         }
 
-        // Check for quorum of StrongQCs at round r+2: count decision-round blocks
+        // Check for quorum of StrongQCs at round r+2: count certifying-round blocks
         // that each carry a StrongQC, and check if that count reaches 2f+1.
         let leader_round = voting_round - 1;
         let wave = self.wave_number(leader_round);
-        let decision_round = self.decision_round(wave);
-        let decision_blocks = self.dag_state.get_blocks_by_round_cached(decision_round);
+        let certifying_round = self.certifying_round(wave);
+        let certifying_blocks = self.dag_state.get_blocks_by_round_cached(certifying_round);
 
         if self.has_quorum_support(
-            decision_blocks
+            certifying_blocks
                 .iter()
                 .filter(|b| self.carries_strong_qc(b, leader_block, voter_info))
                 .map(|b| b.author()),
@@ -442,14 +442,14 @@ impl BaseCommitter {
         // 2f+1 certificates over the leader. Note that there could be more than
         // one leader block (created by Byzantine leaders).
         let wave = self.wave_number(leader_round);
-        let decision_round = self.decision_round(wave);
+        let certifying_round = self.certifying_round(wave);
         let leader_blocks = self
             .dag_state
             .get_blocks_at_authority_round(leader, leader_round);
 
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|l| self.enough_leader_support(decision_round, l, voter_info))
+            .filter(|l| self.enough_leader_support(certifying_round, l, voter_info))
             .map(|l| {
                 let metastate = self.determine_metastate(&l, voting_round, voter_info);
                 LeaderStatus::Commit(l, metastate)

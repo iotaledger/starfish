@@ -435,8 +435,24 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 ))
             }
             self.filter_for_blocks.add_batch(batch_with_status);
-            let (_, _, processed_additional_blocks_without_statements) =
+            let (_, missing_parents, processed_additional_blocks_without_statements) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
+            if matches!(
+                self.consensus_protocol,
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
+            ) && !missing_parents.is_empty()
+            {
+                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                tracing::debug!(
+                    "Make request missing parents of header/shard blocks {:?} from peer {:?}",
+                    missing_parents,
+                    self.peer
+                );
+                self.sender
+                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                    .await
+                    .ok();
+            }
             self.metrics
                 .used_additional_blocks_total
                 .inc_by(processed_additional_blocks_without_statements.len() as u64);
@@ -545,8 +561,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                             .ok();
                     }
                 }
-                ConsensusProtocol::CordialMiners => {}
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {}
+                ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS => {
+                    if !missing_parents.is_empty() {
+                        let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                        tracing::debug!(
+                            "Make request missing parents of blocks {:?} from peer {:?}",
+                            missing_parents,
+                            self.peer
+                        );
+                        self.sender
+                            .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                            .await
+                            .ok();
+                    }
+                }
             }
         }
     }
@@ -571,7 +601,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         &mut self,
         block_references: Vec<BlockReference>,
     ) -> bool {
-        if self.consensus_protocol == ConsensusProtocol::Mysticeti {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::CordialMiners
+        ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
                 block_references,

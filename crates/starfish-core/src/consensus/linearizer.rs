@@ -197,6 +197,20 @@ impl Linearizer {
         CommittedSubDag::new(leader_block_ref, to_commit)
     }
 
+    fn collect_strong_vote_holders(
+        &self,
+        dag_state: &DagState,
+        round: RoundNumber,
+    ) -> StakeAggregator<QuorumThreshold> {
+        let mut holders = StakeAggregator::<QuorumThreshold>::new();
+        for block in dag_state.get_blocks_by_round(round) {
+            if block.strong_vote() == Some(true) {
+                holders.add(block.author(), &self.committee);
+            }
+        }
+        holders
+    }
+
     pub fn handle_commit(
         &mut self,
         dag_state: &DagState,
@@ -207,6 +221,8 @@ impl Linearizer {
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
             let leader_acks = leader_block.acknowledgment_references().clone();
+            let optimistic_data_holders = (metastate == Some(CommitMetastate::Opt))
+                .then(|| self.collect_strong_vote_holders(dag_state, leader_block.round() + 1));
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishPull
@@ -221,8 +237,14 @@ impl Linearizer {
             // For StarfishS Opt: additionally include blocks from the leader's
             // acknowledgment_references. The strong vote quorum guarantees data
             // availability.
-            if metastate == Some(CommitMetastate::Opt) {
+            if let Some(data_holders) = optimistic_data_holders.as_ref() {
+                let data_holder_votes: Vec<_> = data_holders.voters().collect();
                 for ack_ref in &leader_acks {
+                    let votes = self.votes.entry(*ack_ref).or_default();
+                    for authority in &data_holder_votes {
+                        votes.add(*authority, &self.committee);
+                    }
+
                     if self.committed.insert(*ack_ref) {
                         if let Some(block) = dag_state.get_storage_block(*ack_ref) {
                             if self.committed_slots.insert((block.round(), block.author())) {
