@@ -5,7 +5,6 @@
 use std::{
     collections::HashMap,
     fmt::{Debug, Display},
-    time::Duration,
 };
 
 use aws_config::{BehaviorVersion, Region};
@@ -24,7 +23,6 @@ use aws_sdk_ec2::{
         },
     },
 };
-use rand::Rng;
 use serde::Serialize;
 
 use super::{Instance, ServerProviderClient};
@@ -336,15 +334,10 @@ impl ServerProviderClient for AwsClient {
         Ok(())
     }
 
-    async fn create_instance<S>(&self, region: S, quantity: usize) -> CloudProviderResult<Instance>
+    async fn create_instance<S>(&self, region: S, _quantity: usize) -> CloudProviderResult<Instance>
     where
         S: Into<String> + Serialize + Send,
     {
-        let random_delay_secs = rand::thread_rng().gen_range(0..=quantity) as u64;
-        println!("Sleeping for {} seconds...", random_delay_secs);
-
-        // Sleep for the random delay
-        let _sleep = tokio::time::sleep(Duration::from_secs(random_delay_secs)).await;
         let region = region.into();
         let testbed_id = &self.settings.testbed_id;
 

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use futures::future::try_join_all;
+use futures::{StreamExt, future::try_join_all, stream::FuturesUnordered};
 use prettytable::{Table, row};
 use tokio::time::{self, Instant};
 
@@ -129,21 +129,34 @@ impl<C: ServerProviderClient> Testbed<C> {
     /// amount x the number of regions.
     pub async fn deploy(&mut self, quantity: usize, region: Option<String>) -> TestbedResult<()> {
         display::action(format!("Deploying instances ({quantity} per region)"));
-        println!();
-        let instances = match region {
-            Some(x) => {
-                try_join_all(
-                    (0..quantity).map(|_| self.client.create_instance(x.clone(), quantity)),
-                )
-                .await?
-            }
-            None => {
-                try_join_all(self.settings.regions.iter().flat_map(|region| {
+
+        let futures: FuturesUnordered<_> = match region {
+            Some(x) => (0..quantity)
+                .map(|_| self.client.create_instance(x.clone(), quantity))
+                .collect(),
+            None => self
+                .settings
+                .regions
+                .iter()
+                .flat_map(|region| {
                     (0..quantity).map(|_| self.client.create_instance(region.clone(), quantity))
-                }))
-                .await?
-            }
+                })
+                .collect(),
         };
+
+        let total = futures.len();
+        let start = Instant::now();
+        let mut instances = Vec::with_capacity(total);
+        let mut completed = 0usize;
+        display::status(format!("{completed}/{total}"));
+
+        futures::pin_mut!(futures);
+        while let Some(result) = futures.next().await {
+            instances.push(result?);
+            completed += 1;
+            let elapsed = start.elapsed().as_secs();
+            display::status(format!("{completed}/{total} {elapsed}s"));
+        }
 
         // Wait until the instances are booted.
         if cfg!(not(test)) {

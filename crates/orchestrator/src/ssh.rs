@@ -6,12 +6,19 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
-use futures::future::try_join_all;
+use futures::{StreamExt, future::try_join_all, stream::FuturesUnordered};
 use ssh2::{Channel, Session};
-use tokio::{net::TcpStream, runtime::Handle, task::JoinHandle, time::sleep};
+use tokio::{
+    net::TcpStream,
+    runtime::Handle,
+    sync::Semaphore,
+    task::JoinHandle,
+    time::{Instant, sleep},
+};
 
 use crate::{
     client::Instance,
@@ -104,11 +111,16 @@ pub struct SshConnectionManager {
     timeout: Option<Duration>,
     /// The number of retries before giving up to execute the command.
     retries: usize,
+    /// Limits the number of concurrent SSH connections.
+    semaphore: Arc<Semaphore>,
 }
 
 impl SshConnectionManager {
     /// Delay before re-attempting an ssh execution.
     const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+    /// Maximum number of concurrent SSH connections.
+    const MAX_CONCURRENT_CONNECTIONS: usize = 20;
 
     /// Create a new ssh manager from the instances username and private keys.
     pub fn new(username: String, private_key_file: PathBuf) -> Self {
@@ -117,6 +129,7 @@ impl SshConnectionManager {
             private_key_file,
             timeout: None,
             retries: 0,
+            semaphore: Arc::new(Semaphore::new(Self::MAX_CONCURRENT_CONNECTIONS)),
         }
     }
 
@@ -174,12 +187,29 @@ impl SshConnectionManager {
         S: Into<String> + Send + 'static,
     {
         let handles = self.run_per_instance(instances, context);
+        let total = handles.len();
+        if total <= 1 {
+            return try_join_all(handles)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<SshResult<_>>();
+        }
 
-        try_join_all(handles)
-            .await
-            .unwrap()
-            .into_iter()
-            .collect::<SshResult<_>>()
+        let start = Instant::now();
+        let mut futures: FuturesUnordered<_> = handles.into_iter().collect();
+        let mut results = Vec::with_capacity(total);
+        let mut completed = 0usize;
+        crate::display::status(format!("{completed}/{total}"));
+
+        while let Some(join_result) = futures.next().await {
+            let result = join_result.unwrap()?;
+            results.push(result);
+            completed += 1;
+            let elapsed = start.elapsed().as_secs();
+            crate::display::status(format!("{completed}/{total} {elapsed}s"));
+        }
+        Ok(results)
     }
 
     pub fn run_per_instance<I, S>(
@@ -198,6 +228,7 @@ impl SshConnectionManager {
                 let context = context.clone();
 
                 tokio::spawn(async move {
+                    let _permit = ssh_manager.semaphore.acquire().await.unwrap();
                     let connection = ssh_manager.connect(instance.ssh_address()).await?;
                     // SshConnection::execute is a blocking call, needs to go to blocking pool
                     Handle::current()
@@ -295,6 +326,7 @@ impl SshConnectionManager {
                 let data = data.clone();
                 let remote = remote.clone();
                 tokio::spawn(async move {
+                    let _permit = ssh_manager.semaphore.acquire().await.unwrap();
                     let connection = ssh_manager.connect(instance.ssh_address()).await?;
                     Handle::current()
                         .spawn_blocking(move || connection.upload_bytes(&data, &remote))
