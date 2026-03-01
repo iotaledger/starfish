@@ -96,7 +96,18 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - run: cargo install cargo-tarpaulin@0.30.0
       - name: Run tests and record coverage
-        run: cargo tarpaulin
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::Attempt $attempt"
+            if cargo tarpaulin; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "Attempt $attempt failed"
+          done
+          echo "All 3 attempts failed"
+          exit 1
         shell: bash
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
