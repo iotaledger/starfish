@@ -25,17 +25,18 @@ use tokio::{
 use crate::{
     committee::Committee,
     data::Data,
-    decoder::CachedStatementBlockDecoder,
+    decoder,
     metrics::Metrics,
     types::{
-        AuthorityIndex, BlockReference, CachedStatementBlock, RoundNumber, Shard,
-        VerifiedStatementBlock,
+        AuthorityIndex, BlockHeader, BlockReference, RoundNumber, Shard, VerifiedStatementBlock,
     },
 };
 
 const EVICTION_TIMEOUT: Duration = Duration::from_secs(1);
 const SEND_TO_CORE_TIMEOUT: Duration = Duration::from_millis(20);
 const NUMBER_OF_RECONSTRUCTION_WORKERS: usize = 5;
+
+type ReconstructionJob = (BlockReference, BlockHeader, Vec<Option<Shard>>);
 
 /// Message sent from connection handlers to the shard reconstructor.
 #[derive(Clone, Debug)]
@@ -45,8 +46,8 @@ pub enum ShardMessage {
         block_reference: BlockReference,
         shard: Shard,
         shard_index: usize,
-        /// Block metadata needed to initialize the accumulator.
-        block_template: Box<VerifiedStatementBlock>,
+        /// Block header needed to initialize the accumulator.
+        block_header: Box<BlockHeader>,
     },
     /// Full block with statements arrived — stop collecting shards.
     FullBlock(BlockReference),
@@ -54,25 +55,33 @@ pub enum ShardMessage {
 
 /// Collects shards for a single block until reconstruction threshold is met.
 struct ShardAccumulator {
-    cached_block: CachedStatementBlock,
+    header: BlockHeader,
+    shards: Vec<Option<Shard>>,
     shard_count: usize,
 }
 
 impl ShardAccumulator {
-    fn new(block_template: &VerifiedStatementBlock, committee_size: usize) -> Self {
+    fn new(
+        header: BlockHeader,
+        committee_size: usize,
+        initial_shard: Option<(Shard, usize)>,
+    ) -> Self {
+        let mut shards = vec![None; committee_size];
+        let mut shard_count = 0;
+        if let Some((shard, index)) = initial_shard {
+            shards[index] = Some(shard);
+            shard_count = 1;
+        }
         Self {
-            cached_block: block_template.to_cached_block(committee_size),
-            shard_count: if block_template.encoded_shard().is_some() {
-                1
-            } else {
-                0
-            },
+            header,
+            shards,
+            shard_count,
         }
     }
 
     fn update_with_shard(&mut self, shard: Shard, shard_index: usize) {
-        if self.cached_block.encoded_statements()[shard_index].is_none() {
-            self.cached_block.add_encoded_shard(shard_index, shard);
+        if self.shards[shard_index].is_none() {
+            self.shards[shard_index] = Some(shard);
             self.shard_count += 1;
         }
     }
@@ -85,11 +94,11 @@ impl ShardAccumulator {
 /// Result of a successful reconstruction worker.
 struct ReconstructedBlock {
     block_reference: BlockReference,
-    storage_block: VerifiedStatementBlock,
+    block: VerifiedStatementBlock,
 }
 
 /// Type alias for decoded blocks sent to core.
-pub type DecodedBlocks = Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>;
+pub type DecodedBlocks = Vec<Data<VerifiedStatementBlock>>;
 
 /// Public handle for the running shard reconstructor.
 pub struct ShardReconstructorHandle {
@@ -131,8 +140,8 @@ struct ShardReconstructor {
     // Incoming shard messages
     shard_rx: Receiver<ShardMessage>,
     // Worker pool channels
-    ready_tx: Sender<(BlockReference, CachedStatementBlock)>,
-    ready_rx: Arc<Mutex<Receiver<(BlockReference, CachedStatementBlock)>>>,
+    ready_tx: Sender<ReconstructionJob>,
+    ready_rx: Arc<Mutex<Receiver<ReconstructionJob>>>,
     result_tx: Sender<ReconstructedBlock>,
     result_rx: Receiver<ReconstructedBlock>,
     // Decoded blocks waiting to be flushed to core
@@ -212,7 +221,7 @@ impl ShardReconstructor {
             tokio::spawn(async move {
                 let mut encoder =
                     ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
-                let mut decoder =
+                let mut rs_decoder =
                     ReedSolomonDecoder::new(2, 4, 2).expect("Decoder should be created");
 
                 loop {
@@ -222,21 +231,23 @@ impl ShardReconstructor {
                     };
 
                     match job {
-                        Some((block_reference, cached_block)) => {
-                            let result = decoder.decode_shards(
+                        Some((block_reference, header, shards)) => {
+                            let result = decoder::decode_shards(
+                                &mut rs_decoder,
                                 &committee,
                                 &mut encoder,
-                                cached_block,
+                                &header,
+                                &shards,
                                 own_id,
                             );
 
-                            if let Some(storage_block) = result {
+                            if let Some(block) = result {
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
                                 if result_tx
                                     .send(ReconstructedBlock {
                                         block_reference,
-                                        storage_block,
+                                        block,
                                     })
                                     .await
                                     .is_err()
@@ -306,7 +317,7 @@ impl ShardReconstructor {
                 block_reference,
                 shard,
                 shard_index,
-                block_template,
+                block_header,
             } => {
                 if self.processed_blocks.contains(&block_reference)
                     || self.reconstruction_queue.contains(&block_reference)
@@ -321,7 +332,9 @@ impl ShardReconstructor {
                 let acc = self
                     .shard_accumulators
                     .entry(block_reference)
-                    .or_insert_with(|| ShardAccumulator::new(&block_template, self.committee_size));
+                    .or_insert_with(|| {
+                        ShardAccumulator::new(*block_header, self.committee_size, None)
+                    });
                 acc.update_with_shard(shard, shard_index);
 
                 if acc.is_ready(self.info_length) {
@@ -332,7 +345,7 @@ impl ShardReconstructor {
                     self.reconstruction_queue.insert(block_reference);
                     if self
                         .ready_tx
-                        .send((block_reference, acc.cached_block))
+                        .send((block_reference, acc.header, acc.shards))
                         .await
                         .is_err()
                     {
@@ -361,10 +374,7 @@ impl ShardReconstructor {
         }
         self.processed_blocks.insert(block_reference);
 
-        let storage_block = result.storage_block;
-        let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
-        self.pending_decoded
-            .push((Data::new(storage_block), Data::new(transmission_block)));
+        self.pending_decoded.push(Data::new(result.block));
         self.update_backlog_metrics();
     }
 
@@ -387,7 +397,6 @@ impl ShardReconstructor {
         if gc == 0 {
             return;
         }
-        // split_off at the minimum BlockReference for gc round — O(log n)
         let threshold = BlockReference {
             round: gc,
             authority: 0,
@@ -459,22 +468,21 @@ mod tests {
         let committee_size = 4;
         let signers = Signer::new_for_test(committee_size);
         let committee = Committee::new_for_benchmarks(committee_size);
-        let info_length = committee.info_length(); // 2
+        let info_length = committee.info_length();
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
         let statements = vec![BaseStatement::Share(Transaction::new(vec![1; 50]))];
         let (block, shards) =
             make_test_block_and_shards(statements, 0, &committee, &mut encoder, &signers[0]);
 
-        // new_with_signer sets encoded_shard to None, so initial shard_count = 0
-        let mut acc = ShardAccumulator::new(&block, committee_size);
+        let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
         assert!(!acc.is_ready(info_length));
 
         acc.update_with_shard(shards[1].clone(), 1);
-        assert!(!acc.is_ready(info_length)); // 1 < info_length=2
+        assert!(!acc.is_ready(info_length));
 
         acc.update_with_shard(shards[2].clone(), 2);
-        assert!(acc.is_ready(info_length)); // 2 == info_length
+        assert!(acc.is_ready(info_length));
     }
 
     #[test]
@@ -489,10 +497,10 @@ mod tests {
         let (block, shards) =
             make_test_block_and_shards(statements, 0, &committee, &mut encoder, &signers[0]);
 
-        let mut acc = ShardAccumulator::new(&block, committee_size);
+        let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
         acc.update_with_shard(shards[0].clone(), 0);
-        acc.update_with_shard(shards[0].clone(), 0); // duplicate — should not increment
-        assert!(!acc.is_ready(info_length)); // still only 1 unique shard
+        acc.update_with_shard(shards[0].clone(), 0); // duplicate
+        assert!(!acc.is_ready(info_length));
     }
 
     // --- Async ShardReconstructor tests ---
@@ -527,20 +535,18 @@ mod tests {
         let block_ref = *block.reference();
         let sender = handle.shard_message_sender();
 
-        // Send exactly info_length shards to trigger reconstruction
         for (i, shard) in shards[..info_length].iter().enumerate() {
             sender
                 .send(ShardMessage::Shard {
                     block_reference: block_ref,
                     shard: shard.clone(),
                     shard_index: i,
-                    block_template: Box::new(block.clone()),
+                    block_header: Box::new(block.header().clone()),
                 })
                 .await
                 .unwrap();
         }
 
-        // Wait for decoded block (20ms flush + reconstruction time)
         let result = tokio::time::timeout(Duration::from_secs(5), decoded_rx.recv()).await;
         assert!(
             result.is_ok(),
@@ -549,13 +555,14 @@ mod tests {
         let decoded_blocks = result.unwrap().unwrap();
         assert!(!decoded_blocks.is_empty());
 
-        let (storage_block, _transmission_block) = &decoded_blocks[0];
+        let storage_block = &decoded_blocks[0];
         assert!(
             storage_block.merkle_root() == block.merkle_root(),
             "merkle root should match"
         );
-        assert!(
-            storage_block.statements().as_ref().unwrap() == &statements,
+        assert_eq!(
+            storage_block.statements().unwrap(),
+            &statements,
             "statements should match"
         );
 
@@ -586,37 +593,33 @@ mod tests {
         let block_ref = *block.reference();
         let sender = handle.shard_message_sender();
 
-        // Send 1 shard (not enough to reconstruct)
         sender
             .send(ShardMessage::Shard {
                 block_reference: block_ref,
                 shard: shards[0].clone(),
                 shard_index: 0,
-                block_template: Box::new(block.clone()),
+                block_header: Box::new(block.header().clone()),
             })
             .await
             .unwrap();
 
-        // Send FullBlock to cancel collection
         sender
             .send(ShardMessage::FullBlock(block_ref))
             .await
             .unwrap();
 
-        // Send remaining shards — should be ignored
         for (i, shard) in shards.iter().enumerate().skip(1) {
             sender
                 .send(ShardMessage::Shard {
                     block_reference: block_ref,
                     shard: shard.clone(),
                     shard_index: i,
-                    block_template: Box::new(block.clone()),
+                    block_header: Box::new(block.header().clone()),
                 })
                 .await
                 .unwrap();
         }
 
-        // Wait briefly — no decoded block should arrive
         let result = tokio::time::timeout(Duration::from_millis(200), decoded_rx.recv()).await;
         assert!(
             result.is_err(),

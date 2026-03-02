@@ -80,7 +80,8 @@ type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBl
 
 struct DagStateInner {
     store: Arc<dyn Store>,
-    index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
+    index:
+        BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), Data<VerifiedStatementBlock>>>,
     // Store the blocks for which we have transaction data
     data_availability: BTreeSet<BlockReference>,
     // Blocks for which has available transactions data and didn't yet acknowledge.
@@ -104,7 +105,6 @@ struct DagStateInner {
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
 
-type IndexEntry = (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>);
 type DagRoundEntries =
     HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>;
 
@@ -178,17 +178,10 @@ impl DagState {
 
             for block in blocks {
                 let block_ref = *block.reference();
-                let transmission_block = block.from_storage_to_transmission(authority);
-                let data_transmission_block = Data::new(transmission_block);
-                let data_storage_transmission_blocks = (block.clone(), data_transmission_block);
 
-                builder.block(current_round, data_storage_transmission_blocks.clone());
+                builder.block(current_round, block.clone());
                 block_count += 1;
-                inner.add_block(
-                    data_storage_transmission_blocks,
-                    0,
-                    committee.len() as AuthorityIndex,
-                );
+                inner.add_block(block, 0, committee.len() as AuthorityIndex);
                 if recovered_commit_leaders.insert(block_ref) {
                     if let Some(commit_data) = store
                         .get_commit(&block_ref)
@@ -289,10 +282,7 @@ impl DagState {
 
     pub fn insert_block_bounds(
         &self,
-        storage_and_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
+        block: Data<VerifiedStatementBlock>,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
@@ -301,7 +291,7 @@ impl DagState {
         // Persist to storage
         let store_start = std::time::Instant::now();
         self.store
-            .store_block(storage_and_transmission_blocks.0.clone())
+            .store_block(block.clone())
             .expect("Failed to store block");
         self.metrics
             .store_block_latency_us
@@ -310,11 +300,7 @@ impl DagState {
 
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();
-            inner.add_block(
-                storage_and_transmission_blocks,
-                authority_index_start,
-                authority_index_end,
-            );
+            inner.add_block(block, authority_index_start, authority_index_end);
             (
                 inner.highest_round,
                 inner.dag.keys().next().copied().unwrap_or(0),
@@ -324,27 +310,17 @@ impl DagState {
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
 
-    pub fn insert_general_block(
-        &self,
-        storage_and_transmission_blocks: (
-            Data<VerifiedStatementBlock>,
-            Data<VerifiedStatementBlock>,
-        ),
-    ) {
+    pub fn insert_general_block(&self, block: Data<VerifiedStatementBlock>) {
         let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
-        self.insert_block_bounds(
-            storage_and_transmission_blocks,
-            authority_index_start,
-            authority_index_end,
-        );
+        self.insert_block_bounds(block, authority_index_start, authority_index_end);
     }
 
     // Insert own blocks is primarily needed to capture Byzantine behavior with
     // equivocating blocks
     pub fn insert_own_block(&self, own_block: OwnBlockData) {
         self.insert_block_bounds(
-            own_block.storage_transmission_blocks,
+            own_block.block,
             own_block.authority_index_start,
             own_block.authority_index_end,
         );
@@ -373,8 +349,7 @@ impl DagState {
     }
 
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries = self.dag_state_inner.read().get_blocks_by_round(round);
-        Self::extract_storage_blocks(entries)
+        self.dag_state_inner.read().get_blocks_by_round(round)
     }
 
     /// Version-gated cached variant of `get_blocks_by_round`.
@@ -393,8 +368,7 @@ impl DagState {
                 }
             }
         }
-        let blocks: Arc<[_]> =
-            Self::extract_storage_blocks(inner.get_blocks_by_round(round)).into();
+        let blocks: Arc<[_]> = inner.get_blocks_by_round(round).into();
         self.round_block_cache
             .lock()
             .insert(round, (version, blocks.clone()));
@@ -406,11 +380,9 @@ impl DagState {
         authority: AuthorityIndex,
         round: RoundNumber,
     ) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries = self
-            .dag_state_inner
+        self.dag_state_inner
             .read()
-            .get_blocks_at_authority_round(authority, round);
-        Self::extract_storage_blocks(entries)
+            .get_blocks_at_authority_round(authority, round)
     }
 
     pub fn block_exists_at_authority_round(
@@ -437,7 +409,7 @@ impl DagState {
         }
         authorities
             .iter()
-            .all(|auth| blocks.iter().any(|(sb, _)| sb.author() == *auth))
+            .all(|auth| blocks.iter().any(|b| b.author() == *auth))
     }
 
     /// Check if a quorum of blocks at `round` include the leader
@@ -452,12 +424,12 @@ impl DagState {
         let inner = self.dag_state_inner.read();
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for (storage_block, _) in &blocks {
-            let votes_for_leader = storage_block
+        for block in &blocks {
+            let votes_for_leader = block
                 .block_references()
                 .iter()
                 .any(|r| r.authority == leader && r.round == leader_round);
-            if votes_for_leader && aggregator.add(storage_block.author(), committee) {
+            if votes_for_leader && aggregator.add(block.author(), committee) {
                 return true;
             }
         }
@@ -473,10 +445,8 @@ impl DagState {
         let inner = self.dag_state_inner.read();
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for (storage_block, _) in &blocks {
-            if storage_block.strong_vote() == Some(true)
-                && aggregator.add(storage_block.author(), committee)
-            {
+        for block in &blocks {
+            if block.strong_vote() == Some(true) && aggregator.add(block.author(), committee) {
                 return true;
             }
         }
@@ -621,12 +591,9 @@ impl DagState {
         peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries =
-            self.dag_state_inner
-                .read()
-                .get_unsent_own_blocks(sent, peer, batch_own_block_size);
-
-        Self::extract_transmission_blocks(entries)
+        self.dag_state_inner
+            .read()
+            .get_unsent_own_blocks(sent, peer, batch_own_block_size)
     }
 
     pub fn get_unsent_other_blocks(
@@ -636,14 +603,12 @@ impl DagState {
         batch_other_block_size: usize,
         max_round_own_blocks: Option<RoundNumber>,
     ) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries = self.dag_state_inner.read().get_unsent_other_blocks(
+        self.dag_state_inner.read().get_unsent_other_blocks(
             sent,
             peer,
             batch_other_block_size,
             max_round_own_blocks,
-        );
-
-        Self::extract_transmission_blocks(entries)
+        )
     }
 
     pub fn get_unsent_causal_history(
@@ -654,15 +619,13 @@ impl DagState {
         batch_other_block_size: usize,
         authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
     ) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries = self.dag_state_inner.read().get_unsent_causal_history(
+        self.dag_state_inner.read().get_unsent_causal_history(
             sent,
             peer,
             batch_own_block_size,
             batch_other_block_size,
             authorities_with_missing_blocks,
-        );
-
-        Self::extract_transmission_blocks(entries)
+        )
     }
 
     pub fn get_unsent_past_cone(
@@ -673,15 +636,13 @@ impl DagState {
         batch_own_block_size: usize,
         batch_other_block_size: usize,
     ) -> Vec<Data<VerifiedStatementBlock>> {
-        let entries = self.dag_state_inner.read().get_unsent_past_cone(
+        self.dag_state_inner.read().get_unsent_past_cone(
             sent,
             peer,
             block_reference,
             batch_own_block_size,
             batch_other_block_size,
-        );
-
-        Self::extract_transmission_blocks(entries)
+        )
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -704,14 +665,6 @@ impl DagState {
 
     pub fn last_own_block_ref(&self) -> Option<BlockReference> {
         self.dag_state_inner.read().last_own_block()
-    }
-
-    fn extract_storage_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
-        entries.into_iter().map(|(s, _)| s).collect()
-    }
-
-    fn extract_transmission_blocks(entries: Vec<IndexEntry>) -> Vec<Data<VerifiedStatementBlock>> {
-        entries.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
@@ -790,15 +743,15 @@ impl DagStateInner {
         &self,
         authority: AuthorityIndex,
         round: RoundNumber,
-    ) -> Vec<IndexEntry> {
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         let Some(blocks) = self.index.get(&round) else {
             return vec![];
         };
         blocks
             .iter()
-            .filter_map(|((a, _), entry)| {
+            .filter_map(|((a, _), block)| {
                 if *a == authority {
-                    Some(entry.clone())
+                    Some(block.clone())
                 } else {
                     None
                 }
@@ -806,44 +759,37 @@ impl DagStateInner {
             .collect()
     }
 
-    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<IndexEntry> {
+    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedStatementBlock>> {
         let Some(blocks) = self.index.get(&round) else {
             return vec![];
         };
         blocks.values().cloned().collect()
     }
 
-    pub fn get_block(&self, reference: BlockReference) -> Option<IndexEntry> {
+    pub fn get_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
         let round_entries = self.index.get(&reference.round)?;
         round_entries
             .get(&(reference.authority, reference.digest))
             .cloned()
     }
 
-    /// Get the storage variant of a block, with persistent store fallback for
-    /// evicted blocks.
+    /// Get a block, with persistent store fallback for evicted blocks.
     fn get_storage_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
-        if let Some((storage, _)) = self.get_block(reference) {
-            return Some(storage);
+        if let Some(block) = self.get_block(reference) {
+            return Some(block);
         }
         self.store
             .get_block(&reference)
             .expect("Storage read failed")
     }
 
-    /// Get the transmission variant of a block, with persistent store fallback
-    /// for evicted blocks.
+    /// Get a block suitable for transmission to peers. Same as storage block
+    /// since transmission views are now constructed at send time.
     fn get_transmission_block(
         &self,
         reference: BlockReference,
     ) -> Option<Data<VerifiedStatementBlock>> {
-        if let Some((_, transmission)) = self.get_block(reference) {
-            return Some(transmission);
-        }
-        self.store
-            .get_block(&reference)
-            .expect("Storage read failed")
-            .map(|storage| Data::new(storage.from_storage_to_transmission(self.authority)))
+        self.get_storage_block(reference)
     }
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
@@ -905,26 +851,26 @@ impl DagStateInner {
 
     pub fn add_block(
         &mut self,
-        blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+        block: Data<VerifiedStatementBlock>,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) {
-        let reference = blocks.0.reference();
+        let reference = block.reference();
         self.highest_round = max(self.highest_round, reference.round());
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
 
         let map = self.index.entry(reference.round()).or_default();
-        map.insert(reference.author_digest(), blocks.clone());
+        map.insert(reference.author_digest(), block.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_dag(
             *reference,
-            blocks.0.block_references().clone(),
-            blocks.0.acknowledgment_references().clone(),
+            block.block_references().clone(),
+            block.acknowledgment_references().clone(),
         );
-        self.update_data_availability(&blocks.0);
+        self.update_data_availability(&block);
     }
 
     fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
@@ -1080,7 +1026,7 @@ impl DagStateInner {
         peer: AuthorityIndex,
         filter: impl Fn(&BlockReference) -> bool,
         limit: usize,
-    ) -> Vec<(IndexEntry, RoundNumber)> {
+    ) -> Vec<(Data<VerifiedStatementBlock>, RoundNumber)> {
         let peer_bit = 1u128 << peer;
         self.dag
             .iter()
@@ -1102,15 +1048,17 @@ impl DagStateInner {
             .take(limit)
             .map(|(r, _)| r)
             .map(|r| {
-                let entry = self
+                let block = self
                     .get_block(r)
                     .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
-                (entry, r.round())
+                (block, r.round())
             })
             .collect()
     }
 
-    fn into_sorted_entries(mut blocks: Vec<(IndexEntry, RoundNumber)>) -> Vec<IndexEntry> {
+    fn into_sorted_blocks(
+        mut blocks: Vec<(Data<VerifiedStatementBlock>, RoundNumber)>,
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         blocks.sort_by_key(|x| x.1);
         blocks.into_iter().map(|x| x.0).collect()
     }
@@ -1120,9 +1068,9 @@ impl DagStateInner {
         sent: &AHashSet<BlockReference>,
         peer: AuthorityIndex,
         batch_own_block_size: usize,
-    ) -> Vec<IndexEntry> {
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         let auth = self.authority;
-        Self::into_sorted_entries(self.collect_unsent_blocks(
+        Self::into_sorted_blocks(self.collect_unsent_blocks(
             sent,
             peer,
             |r| r.authority == auth,
@@ -1136,10 +1084,10 @@ impl DagStateInner {
         peer: AuthorityIndex,
         batch_other_block_size: usize,
         max_round: Option<RoundNumber>,
-    ) -> Vec<IndexEntry> {
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         let auth = self.authority;
         let max = max_round.unwrap_or(RoundNumber::MAX);
-        Self::into_sorted_entries(self.collect_unsent_blocks(
+        Self::into_sorted_blocks(self.collect_unsent_blocks(
             sent,
             peer,
             |r| r.authority != auth && r.round < max,
@@ -1154,7 +1102,7 @@ impl DagStateInner {
         batch_own_block_size: usize,
         batch_other_block_size: usize,
         authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
-    ) -> Vec<IndexEntry> {
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         let auth = self.authority;
         let own =
             self.collect_unsent_blocks(sent, peer, |r| r.authority == auth, batch_own_block_size);
@@ -1165,7 +1113,7 @@ impl DagStateInner {
             |r| authorities_with_missing_blocks.contains(&r.authority) && r.round < max,
             batch_other_block_size,
         );
-        Self::into_sorted_entries(own.into_iter().chain(other).collect())
+        Self::into_sorted_blocks(own.into_iter().chain(other).collect())
     }
 
     pub fn get_unsent_past_cone(
@@ -1175,7 +1123,7 @@ impl DagStateInner {
         block_reference: BlockReference,
         batch_own_block_size: usize,
         batch_other_block_size: usize,
-    ) -> Vec<IndexEntry> {
+    ) -> Vec<Data<VerifiedStatementBlock>> {
         let auth = self.authority;
         let max = block_reference.round;
         let own = self.collect_unsent_blocks(
@@ -1190,7 +1138,7 @@ impl DagStateInner {
             |r| r.authority != auth && r.round < max,
             batch_other_block_size,
         );
-        Self::into_sorted_entries(own.into_iter().chain(other).collect())
+        Self::into_sorted_blocks(own.into_iter().chain(other).collect())
     }
 
     fn add_own_index(
@@ -1221,19 +1169,19 @@ impl DagStateInner {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnBlockData {
-    pub storage_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+    pub block: Data<VerifiedStatementBlock>,
     pub authority_index_start: AuthorityIndex,
     pub authority_index_end: AuthorityIndex,
 }
 
 impl OwnBlockData {
     pub fn new(
-        storage_transmission_blocks: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+        block: Data<VerifiedStatementBlock>,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
     ) -> Self {
         Self {
-            storage_transmission_blocks,
+            block,
             authority_index_start,
             authority_index_end,
         }

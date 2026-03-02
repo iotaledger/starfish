@@ -7,6 +7,7 @@ mod block_manager;
 pub mod committee;
 pub mod config;
 pub mod consensus;
+pub mod cordial_knowledge;
 pub mod core;
 mod core_thread;
 mod crypto;

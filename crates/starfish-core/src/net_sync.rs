@@ -23,12 +23,13 @@ use crate::{
     block_handler::BlockHandler,
     committee::Committee,
     consensus::universal_committer::UniversalCommitter,
+    cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
     core_thread::CoreThreadDispatcher,
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
-    network::{Connection, Network, NetworkMessage},
+    network::{BlockBatch, Connection, Network, NetworkMessage},
     runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
     store::Store,
     syncer::{CommitObserver, Syncer, SyncerSignals},
@@ -56,7 +57,7 @@ impl Status {
     fn get_status(block: &VerifiedStatementBlock, peer: usize) -> Self {
         if block.statements().is_some() {
             Status::Full
-        } else if block.encoded_shard().is_some() {
+        } else if block.has_shard_data() {
             Status::Shard(peer)
         } else {
             Status::Header
@@ -336,28 +337,83 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn handle_batch(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+    async fn handle_batch(&mut self, batch: BlockBatch) {
         let timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Network: verify blocks");
-        // Mark received blocks as "sent" so we don't re-send them back to the peer.
+
+        let BlockBatch {
+            full_blocks,
+            headers,
+            shards,
+            useful_headers_authors,
+            useful_shards_authors,
+        } = batch;
+
+        // Mark received full blocks as "sent" so we don't re-send them.
         {
             let mut sent = self.disseminator.sent_to_peer.write();
-            for block in &blocks {
+            for block in &full_blocks {
+                sent.insert(*block.reference());
+            }
+            for block in &headers {
                 sent.insert(*block.reference());
             }
         }
+
+        // Forward useful-authors feedback to CordialKnowledge
+        if useful_headers_authors != 0 || useful_shards_authors != 0 {
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::UsefulAuthors {
+                    peer: self.peer_id,
+                    headers: useful_headers_authors,
+                    shards: useful_shards_authors,
+                });
+        }
+
+        // Notify CordialKnowledge that this peer knows about received headers
+        for block in &full_blocks {
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::HeaderReceivedFrom {
+                    peer: self.peer_id,
+                    block_ref: *block.reference(),
+                });
+        }
+        for block in &headers {
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::HeaderReceivedFrom {
+                    peer: self.peer_id,
+                    block_ref: *block.reference(),
+                });
+        }
+        for shard in &shards {
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::ShardReceivedFrom {
+                    peer: self.peer_id,
+                    block_ref: shard.block_reference,
+                });
+        }
+
+        // Separate full blocks by whether they carry statements
         let mut blocks_with_statements = Vec::new();
         let mut blocks_without_statements = Vec::new();
-        for block in blocks {
+        for block in full_blocks {
             if block.statements().is_some() {
                 blocks_with_statements.push(block);
             } else {
                 blocks_without_statements.push(block);
             }
         }
-        // First process blocks without statements (causal history shards)
+
+        // Header-only blocks go into the without-statements path
+        blocks_without_statements.extend(headers);
+
+        // First process blocks without statements (causal history shards/headers)
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::StarfishPull
@@ -368,11 +424,47 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .await;
         }
 
+        // Process standalone shards — route directly to shard reconstructor
+        if !shards.is_empty() {
+            self.process_standalone_shards(shards).await;
+        }
+
         // Then process blocks with statements
         self.process_blocks_with_statements(blocks_with_statements)
             .await;
 
         drop(timer);
+    }
+
+    async fn process_standalone_shards(&mut self, shards: Vec<crate::network::ShardPayload>) {
+        use crate::shard_reconstructor::ShardMessage;
+
+        let maybe_tx = self.inner.shard_tx.lock().clone();
+        let Some(shard_tx) = maybe_tx else { return };
+
+        for payload in shards {
+            // Look up the block header from the DAG to supply to the reconstructor
+            if let Some(block) = self
+                .inner
+                .dag_state
+                .get_storage_block(payload.block_reference)
+            {
+                let _ = shard_tx
+                    .send(ShardMessage::Shard {
+                        block_reference: payload.block_reference,
+                        shard: payload.shard.shard().clone(),
+                        shard_index: payload.shard.shard_index(),
+                        block_header: Box::new(block.header().clone()),
+                    })
+                    .await;
+            } else {
+                tracing::debug!(
+                    "Standalone shard for unknown block {:?} from {} — dropped",
+                    payload.block_reference,
+                    self.peer
+                );
+            }
+        }
     }
 
     async fn process_blocks_without_statements(
@@ -412,15 +504,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
 
             // Send shard to reconstructor for off-critical-path decoding
-            if let Some((shard, shard_index)) = block.encoded_shard().clone() {
+            if let Some(provable_shard) = block.shard_data() {
                 let maybe_tx = self.inner.shard_tx.lock().clone();
                 if let Some(shard_tx) = maybe_tx {
                     let _ = shard_tx
                         .send(ShardMessage::Shard {
                             block_reference: *block.reference(),
-                            shard,
-                            shard_index,
-                            block_template: Box::new(block.clone()),
+                            shard: provable_shard.shard().clone(),
+                            shard_index: provable_shard.shard_index(),
+                            block_header: Box::new(block.header().clone()),
                         })
                         .await;
                 }
@@ -439,8 +531,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             let send_to_core = !self.filter_for_blocks.contains(&digest);
             batch_with_status.push((digest, status));
             if send_to_core {
-                let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
-                new_data_blocks.push((Data::new(storage_block), Data::new(transmission_block)));
+                new_data_blocks.push(Data::new(storage_block));
             }
         }
 
@@ -459,6 +550,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         // Only send first-appearance blocks to core (subsequent shards
         // already went to the shard reconstructor above).
         if !new_data_blocks.is_empty() {
+            // Notify CordialKnowledge about new headers entering the DAG
+            for block in &new_data_blocks {
+                self.inner
+                    .cordial_knowledge
+                    .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
+            }
             let (_, missing_parents, processed_additional_blocks_without_statements) =
                 self.inner.syncer.add_blocks(new_data_blocks).await;
             if matches!(
@@ -490,6 +587,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .collect();
         let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
         let mut verified_data_blocks = Vec::new();
+        let shard_tx = self.inner.shard_tx.lock().clone();
 
         for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
             if !is_needed {
@@ -514,31 +612,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 // todo: Terminate connection upon receiving incorrect block.
                 break;
             }
-            let storage_block = block;
-            let transmission_block = match self.consensus_protocol {
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                    storage_block.clone()
-                }
-                ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishPull => {
-                    storage_block.from_storage_to_transmission(self.own_id)
-                }
-            };
             // Notify reconstructor to stop collecting shards for this block
-            {
-                let shard_tx_guard = self.inner.shard_tx.lock();
-                if let Some(shard_tx) = shard_tx_guard.as_ref() {
-                    let _ = shard_tx.try_send(crate::shard_reconstructor::ShardMessage::FullBlock(
-                        *storage_block.reference(),
-                    ));
-                }
+            if let Some(shard_tx) = shard_tx.as_ref() {
+                let _ = shard_tx
+                    .send(crate::shard_reconstructor::ShardMessage::FullBlock(
+                        *block.reference(),
+                    ))
+                    .await;
             }
             self.filter_for_blocks
-                .add_batch(vec![(storage_block.digest(), Status::Full)]);
-            let data_storage_block = Data::new(storage_block);
-            let data_transmission_block = Data::new(transmission_block);
-            verified_data_blocks.push((data_storage_block, data_transmission_block));
+                .add_batch(vec![(block.digest(), Status::Full)]);
+            verified_data_blocks.push(Data::new(block));
         }
 
         tracing::debug!(
@@ -548,6 +632,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_data_blocks
         );
         if !verified_data_blocks.is_empty() {
+            // Notify CordialKnowledge about new headers entering the DAG
+            for block in &verified_data_blocks {
+                self.inner
+                    .cordial_knowledge
+                    .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
+            }
             let (pending_block_references, missing_parents, _processed_additional_blocks) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
             if !missing_parents.is_empty() {
@@ -694,6 +784,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     flusher_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
     bridge_task: Option<JoinHandle<()>>,
+    cordial_knowledge_task: JoinHandle<()>,
 }
 
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
@@ -707,6 +798,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub gc_round: Arc<AtomicU64>,
     pub shard_tx:
         parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
+    pub cordial_knowledge: CordialKnowledgeHandle,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -764,6 +856,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             (None, None)
         };
 
+        // Create CordialKnowledge actor for per-peer header/shard tracking
+        let own_id = dag_state.get_own_authority_index();
+        let (cordial_knowledge_handle, cordial_knowledge_actor) =
+            CordialKnowledgeHandle::new(committee.len(), own_id);
+        let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
+
         let inner = Arc::new(NetworkSyncerInner {
             notify,
             syncer,
@@ -774,6 +872,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             epoch_closing_time,
             gc_round,
             shard_tx: parking_lot::Mutex::new(shard_tx),
+            cordial_knowledge: cordial_knowledge_handle,
         });
 
         // Start bridge task that forwards decoded blocks to core via add_blocks
@@ -781,6 +880,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let bridge_inner = inner.clone();
             handle.spawn(async move {
                 while let Some(blocks) = decoded_rx.recv().await {
+                    // Notify CordialKnowledge about reconstructed blocks
+                    for block in &blocks {
+                        bridge_inner
+                            .cordial_knowledge
+                            .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
+                        // Decoded blocks have transaction data — notify shard availability
+                        if block.has_shard_data() {
+                            bridge_inner
+                                .cordial_knowledge
+                                .send(CordialKnowledgeMessage::NewShard(*block.reference()));
+                        }
+                    }
                     bridge_inner.syncer.add_blocks(blocks).await;
                 }
             })
@@ -804,6 +915,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             syncer_task,
             flusher_task,
             bridge_task,
+            cordial_knowledge_task,
         }
     }
 
@@ -820,6 +932,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         if let Some(bridge_task) = self.bridge_task {
             bridge_task.await.ok();
         }
+        // Stop the cordial knowledge actor.
+        self.cordial_knowledge_task.abort();
+        self.cordial_knowledge_task.await.ok();
         let Ok(inner) = Arc::try_unwrap(self.inner) else {
             panic!("Shutdown failed - not all resources are freed after main task is completed");
         };

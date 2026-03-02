@@ -14,8 +14,8 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, EpochStatus, RoundNumber, Shard,
-        TimestampNs, VerifiedStatementBlock,
+        AuthorityIndex, BaseStatement, BlockHeader, BlockReference, EpochStatus, RoundNumber,
+        Shard, TimestampNs,
     },
 };
 
@@ -259,20 +259,20 @@ impl<T: AsBytes> CryptoHash for T {
 impl PublicKey {
     pub fn verify_signature_in_block(
         &self,
-        block: &VerifiedStatementBlock,
+        header: &BlockHeader,
     ) -> Result<(), ed25519_consensus::Error> {
-        let signature = Signature::from(block.signature().0);
+        let signature = Signature::from(header.signature().0);
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
-            block.author(),
-            block.round(),
-            block.block_references(),
-            block.acknowledgment_references(),
-            block.meta_creation_time_ns(),
-            block.epoch_changed(),
-            block.merkle_root(),
-            block.strong_vote(),
+            header.author(),
+            header.round(),
+            header.block_references(),
+            header.acknowledgment_references(),
+            header.meta_creation_time_ns(),
+            header.epoch_changed(),
+            header.merkle_root(),
+            header.strong_vote(),
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())

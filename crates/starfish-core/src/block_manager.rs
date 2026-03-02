@@ -20,8 +20,7 @@ use crate::{
 /// existing graph, returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
-    blocks_pending:
-        HashMap<BlockReference, (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+    blocks_pending: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
     /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting
     /// for `BlockReference` to be processed.
     block_references_waiting: HashMap<BlockReference, AHashSet<BlockReference>>,
@@ -44,7 +43,7 @@ impl BlockManager {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
     ) -> (
         Vec<Data<VerifiedStatementBlock>>,
         bool,
@@ -52,18 +51,17 @@ impl BlockManager {
     ) {
         let dag_state = self.dag_state.clone();
         let mut updated_statements = false;
-        let mut blocks: VecDeque<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)> =
-            blocks.into();
-        let mut newly_storage_blocks_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
+        let mut blocks: VecDeque<Data<VerifiedStatementBlock>> = blocks.into();
+        let mut newly_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
-        while let Some(storage_and_transmission_blocks) = blocks.pop_front() {
-            let block_reference = storage_and_transmission_blocks.0.reference();
+        while let Some(block) = blocks.pop_front() {
+            let block_reference = block.reference();
 
             if let Some(existing_pending_block) = self.blocks_pending.get_mut(block_reference) {
-                if storage_and_transmission_blocks.0.statements().is_some() {
-                    *existing_pending_block = storage_and_transmission_blocks;
+                if block.statements().is_some() {
+                    *existing_pending_block = block;
                 }
                 continue;
             }
@@ -73,20 +71,17 @@ impl BlockManager {
                 .or_insert_with(|| self.dag_state.block_exists(*block_reference));
             if block_exists {
                 // Block already in store — check if this version brings new statement data
-                if self
-                    .dag_state
-                    .contains_new_statements(&storage_and_transmission_blocks.0)
-                {
+                if self.dag_state.contains_new_statements(&block) {
                     tracing::debug!("Block has new statements: {:?}", block_reference);
-                    dag_state.insert_general_block(storage_and_transmission_blocks.clone());
-                    newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
+                    dag_state.insert_general_block(block.clone());
+                    newly_processed.push(block);
                     updated_statements = true;
                 }
                 continue;
             }
 
             let mut processed = true;
-            for included_reference in storage_and_transmission_blocks.0.block_references() {
+            for included_reference in block.block_references() {
                 if self.blocks_pending.contains_key(included_reference) {
                     processed = false;
                     self.block_references_waiting
@@ -120,15 +115,14 @@ impl BlockManager {
             self.missing[block_reference.authority as usize].remove(block_reference);
 
             if !processed {
-                self.blocks_pending
-                    .insert(*block_reference, storage_and_transmission_blocks);
+                self.blocks_pending.insert(*block_reference, block);
             } else {
                 let block_reference = *block_reference;
 
                 // Block can be processed. So need to update indexes etc
-                dag_state.insert_general_block(storage_and_transmission_blocks.clone());
+                dag_state.insert_general_block(block.clone());
                 block_exists_cache.insert(block_reference, true);
-                newly_storage_blocks_processed.push(storage_and_transmission_blocks.0.clone());
+                newly_processed.push(block);
 
                 // Now unlock any pending blocks, and process them if ready.
                 if let Some(waiting_references) =
@@ -144,7 +138,6 @@ impl BlockManager {
                             );
 
                         if block_pointer
-                            .0
                             .block_references()
                             .iter()
                             .all(|item_ref| !self.block_references_waiting.contains_key(item_ref))
@@ -165,11 +158,7 @@ impl BlockManager {
             }
         }
 
-        (
-            newly_storage_blocks_processed,
-            updated_statements,
-            missing_references,
-        )
+        (newly_processed, updated_statements, missing_references)
     }
 
     pub fn missing_blocks(&self) -> &[AHashSet<BlockReference>] {

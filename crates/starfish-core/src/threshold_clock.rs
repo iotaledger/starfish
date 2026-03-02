@@ -6,35 +6,29 @@ use std::cmp::Ordering;
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{BlockHeader, BlockReference, RoundNumber},
 };
 
-pub fn threshold_clock_valid_verified_block(
-    block: &VerifiedStatementBlock,
-    committee: &Committee,
-) -> bool {
-    // get a committee from the creator of the block
-    let round_number = block.reference().round;
+pub fn threshold_clock_valid_block_header(header: &BlockHeader, committee: &Committee) -> bool {
+    let round_number = header.reference().round;
     assert!(round_number > 0);
 
     // Ensure all includes have a round number smaller than the block round number
-    for include in block.block_references() {
-        if include.round >= block.reference().round {
+    for include in header.block_references() {
+        if include.round >= header.reference().round {
             return false;
         }
     }
 
     let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
     let mut is_quorum = false;
-    // Collect the authorities with included blocks at round_number  - 1
-    for include in block.block_references() {
+    // Collect the authorities with included blocks at round_number - 1
+    for include in header.block_references() {
         if include.round == round_number - 1 {
             is_quorum = aggregator.add(include.authority, committee);
         }
     }
 
-    // Ensure the set of authorities with includes has a quorum in the current
-    // committee
     is_quorum
 }
 
@@ -85,60 +79,68 @@ impl ThresholdClockAggregator {
 mod tests {
 
     use super::*;
-    use crate::{crypto::TransactionsCommitment, types::VerifiedStatementBlock};
+    use crate::{
+        crypto::{SignatureBytes, TransactionsCommitment},
+        types::BlockDigest,
+    };
 
-    fn make_block(authority: u64, round: u64, refs: &[(u64, u64)]) -> VerifiedStatementBlock {
+    fn make_header(authority: u64, round: u64, refs: &[(u64, u64)]) -> BlockHeader {
         let block_references: Vec<_> = refs
             .iter()
             .map(|&(a, r)| BlockReference::new_test(a, r))
             .collect();
-        VerifiedStatementBlock::new(
-            authority,
-            round,
-            block_references.clone(),
+        let ack_refs = block_references.clone();
+        BlockHeader {
+            reference: BlockReference {
+                authority,
+                round,
+                digest: BlockDigest::new_without_statements(
+                    authority,
+                    round,
+                    &block_references,
+                    &ack_refs,
+                    0,
+                    false,
+                    &SignatureBytes::default(),
+                    TransactionsCommitment::default(),
+                    None,
+                ),
+            },
             block_references,
-            0,
-            false,
-            Default::default(),
-            vec![],
-            None,
-            None,
-            TransactionsCommitment::default(),
-            None,
-        )
+            acknowledgment_references: ack_refs,
+            meta_creation_time_ns: 0,
+            epoch_marker: false,
+            signature: SignatureBytes::default(),
+            transactions_commitment: TransactionsCommitment::default(),
+            strong_vote: None,
+        }
     }
 
     #[test]
     fn test_threshold_clock_valid() {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);
-        // No includes — not a quorum
-        assert!(!threshold_clock_valid_verified_block(
-            &make_block(0, 1, &[]),
+        assert!(!threshold_clock_valid_block_header(
+            &make_header(0, 1, &[]),
             &committee
         ));
-        // 2 includes at round 0 — below quorum (need 3 of 4)
-        assert!(!threshold_clock_valid_verified_block(
-            &make_block(0, 1, &[(0, 0), (1, 0)]),
+        assert!(!threshold_clock_valid_block_header(
+            &make_header(0, 1, &[(0, 0), (1, 0)]),
             &committee
         ));
-        // 3 includes at round 0 — quorum
-        assert!(threshold_clock_valid_verified_block(
-            &make_block(0, 1, &[(0, 0), (1, 0), (2, 0)]),
+        assert!(threshold_clock_valid_block_header(
+            &make_header(0, 1, &[(0, 0), (1, 0), (2, 0)]),
             &committee
         ));
-        // 4 includes at round 0 — quorum
-        assert!(threshold_clock_valid_verified_block(
-            &make_block(0, 1, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+        assert!(threshold_clock_valid_block_header(
+            &make_header(0, 1, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
             &committee
         ));
-        // Round 2 block: only 2 includes at round 1 — below quorum
-        assert!(!threshold_clock_valid_verified_block(
-            &make_block(0, 2, &[(0, 1), (1, 1), (2, 0), (3, 0)]),
+        assert!(!threshold_clock_valid_block_header(
+            &make_header(0, 2, &[(0, 1), (1, 1), (2, 0), (3, 0)]),
             &committee
         ));
-        // Round 2 block: 3 includes at round 1 — quorum
-        assert!(threshold_clock_valid_verified_block(
-            &make_block(0, 2, &[(0, 1), (1, 1), (2, 1), (3, 0)]),
+        assert!(threshold_clock_valid_block_header(
+            &make_header(0, 2, &[(0, 1), (1, 1), (2, 1), (3, 0)]),
             &committee
         ));
     }
