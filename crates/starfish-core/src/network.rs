@@ -31,7 +31,7 @@ use crate::{
     runtime,
     runtime::JoinHandle,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockReference, ProvableShard, RoundNumber, VerifiedStatementBlock},
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
@@ -73,11 +73,65 @@ const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
     [146, 142, 238, 254, 101, 108, 199, 245, 140, 1],
 ];
 
+/// A shard shipped independently of its block header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardPayload {
+    pub block_reference: BlockReference,
+    pub shard: ProvableShard,
+}
+
+/// A structured batch of block data, ordered by decreasing information density:
+/// full blocks first, then header-only blocks, then standalone shards.
+///
+/// The `useful_*_authors` bitmasks provide bidirectional feedback: they tell
+/// the receiving peer which authorities' content the sender would find useful
+/// in return.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockBatch {
+    /// Full blocks (header + statements + optional shard).
+    pub full_blocks: Vec<Data<VerifiedStatementBlock>>,
+    /// Header-only blocks (no payload) — causal history the peer may not have.
+    pub headers: Vec<Data<VerifiedStatementBlock>>,
+    /// Verified shards for blocks the peer already has the header for.
+    pub shards: Vec<ShardPayload>,
+    /// Bitmask: which authorities' headers would be useful FROM the receiving
+    /// peer.
+    pub useful_headers_authors: u128,
+    /// Bitmask: which authorities' shards would be useful FROM the receiving
+    /// peer.
+    pub useful_shards_authors: u128,
+}
+
+impl BlockBatch {
+    /// Wrap a flat list of blocks as a batch with only the `full_blocks` field
+    /// populated. Used for backward-compatible call sites that don't yet
+    /// distinguish headers/shards.
+    pub fn full_only(blocks: Vec<Data<VerifiedStatementBlock>>) -> Self {
+        Self {
+            full_blocks: blocks,
+            headers: Vec::new(),
+            shards: Vec::new(),
+            useful_headers_authors: 0,
+            useful_shards_authors: 0,
+        }
+    }
+
+    /// Total number of items across all sections.
+    pub fn len(&self) -> usize {
+        self.full_blocks.len() + self.headers.len() + self.shards.len()
+    }
+
+    /// Whether the batch carries no data at all.
+    pub fn is_empty(&self) -> bool {
+        self.full_blocks.is_empty() && self.headers.is_empty() && self.shards.is_empty()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetworkMessage {
     SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
-    // A batch of blocks is sent
-    Batch(Vec<Data<VerifiedStatementBlock>>),
+    /// A structured batch of block data.
+    Batch(BlockBatch),
     /// Request a potentially missing history of a given block (only shards are
     /// sent)
     MissingHistoryRequest(BlockReference),

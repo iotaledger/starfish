@@ -28,7 +28,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 
 enum CoreThreadCommand {
     AddBlocks(
-        Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+        Vec<Data<VerifiedStatementBlock>>,
         oneshot::Sender<(
             Vec<BlockReference>,
             AHashSet<BlockReference>,
@@ -71,7 +71,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
 
     pub async fn add_blocks(
         &self,
-        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,

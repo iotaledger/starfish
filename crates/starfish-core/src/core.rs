@@ -108,7 +108,7 @@ impl<H: BlockHandler> Core<H> {
         let mut pending = Vec::new();
         let committee_len = committee.len() as AuthorityIndex;
         let mut last_own_block = OwnBlockData {
-            storage_transmission_blocks: (own_genesis_block.clone(), own_genesis_block.clone()),
+            block: own_genesis_block.clone(),
             authority_index_start: 0,
             authority_index_end: committee_len,
         };
@@ -118,23 +118,19 @@ impl<H: BlockHandler> Core<H> {
             for block in other_genesis_blocks {
                 let reference = *block.reference();
                 threshold_clock.add_block(reference, &committee);
-                dag_state.insert_block_bounds((block.clone(), block.clone()), 0, committee_len);
+                dag_state.insert_block_bounds(block.clone(), 0, committee_len);
                 pending.push(MetaStatement::Include(reference));
             }
 
             threshold_clock.add_block(*own_genesis_block.reference(), &committee);
-            dag_state.insert_block_bounds(
-                (own_genesis_block.clone(), own_genesis_block.clone()),
-                0,
-                committee_len,
-            );
+            dag_state.insert_block_bounds(own_genesis_block.clone(), 0, committee_len);
             pending.push(MetaStatement::Include(*own_genesis_block.reference()));
         } else {
             // Rebuild runtime-only state (pending frontier, threshold clock, and
             // last own block) from recovered DAG blocks.
             let mut recovered_last_own_round = None;
-            for (storage_block, transmission_block) in &unprocessed_blocks {
-                let reference = *storage_block.reference();
+            for block in &unprocessed_blocks {
+                let reference = *block.reference();
                 threshold_clock.add_block(reference, &committee);
                 if reference.authority == authority
                     && recovered_last_own_round
@@ -143,10 +139,7 @@ impl<H: BlockHandler> Core<H> {
                 {
                     recovered_last_own_round = Some(reference.round);
                     last_own_block = OwnBlockData {
-                        storage_transmission_blocks: (
-                            storage_block.clone(),
-                            transmission_block.clone(),
-                        ),
+                        block: block.clone(),
                         authority_index_start: 0,
                         authority_index_end: committee_len,
                     };
@@ -156,15 +149,13 @@ impl<H: BlockHandler> Core<H> {
             let pending_start_round = recovered_last_own_round
                 .unwrap_or_default()
                 .max(threshold_clock.get_round().saturating_sub(1));
-            for (storage_block, _) in &unprocessed_blocks {
-                if storage_block.round() >= pending_start_round {
-                    pending.push(MetaStatement::Include(*storage_block.reference()));
+            for block in &unprocessed_blocks {
+                if block.round() >= pending_start_round {
+                    pending.push(MetaStatement::Include(*block.reference()));
                 }
             }
             if pending.is_empty() {
-                pending.push(MetaStatement::Include(
-                    *last_own_block.storage_transmission_blocks.0.reference(),
-                ));
+                pending.push(MetaStatement::Include(*last_own_block.block.reference()));
             }
         }
 
@@ -234,7 +225,7 @@ impl<H: BlockHandler> Core<H> {
     // statements that are added to the local DAG.
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
+        blocks: Vec<Data<VerifiedStatementBlock>>,
     ) -> (
         bool,
         Vec<BlockReference>,
@@ -247,8 +238,8 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("Core::add_blocks");
         let block_references_with_statements: Vec<_> = blocks
             .iter()
-            .filter(|(b, _)| b.statements().is_some())
-            .map(|(b, _)| *b.reference())
+            .filter(|b| b.statements().is_some())
+            .map(|b| *b.reference())
             .collect();
         let (processed, updated_statements, missing_references) = timed!(
             self.metrics,
@@ -390,9 +381,9 @@ impl<H: BlockHandler> Core<H> {
                     block_id,
                 )
             );
-            tracing::debug!("Created block {:?}", block_data.0);
+            tracing::debug!("Created block {:?}", block_data);
             if first_block.is_none() {
-                first_block = Some(block_data.0.clone());
+                first_block = Some(block_data.clone());
             }
             timed!(
                 self.metrics,
@@ -518,14 +509,9 @@ impl<H: BlockHandler> Core<H> {
         acknowledgment_references: &[BlockReference],
         clock_round: RoundNumber,
         block_id_in_round: usize,
-    ) -> (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>) {
+    ) -> Data<VerifiedStatementBlock> {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
-        let mut block_references = vec![
-            *self.last_own_block[block_id_in_round]
-                .storage_transmission_blocks
-                .0
-                .reference(),
-        ];
+        let mut block_references = vec![*self.last_own_block[block_id_in_round].block.reference()];
         block_references.extend(block_references_without_own.iter().cloned());
 
         let prev_round_ref_count = block_references
@@ -559,8 +545,7 @@ impl<H: BlockHandler> Core<H> {
             strong_vote,
         );
 
-        let data_block = Data::new(block);
-        (data_block.clone(), data_block)
+        Data::new(block)
     }
 
     fn prepare_last_blocks(&mut self) {
@@ -618,18 +603,18 @@ impl<H: BlockHandler> Core<H> {
 
     fn store_block(
         &mut self,
-        block_data: (Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>),
+        block_data: Data<VerifiedStatementBlock>,
         authority_bounds: &[usize],
         block_id: usize,
     ) {
         self.threshold_clock
-            .add_block(*block_data.0.reference(), &self.committee);
+            .add_block(*block_data.reference(), &self.committee);
         self.block_handler
-            .handle_proposal(block_data.0.number_transactions());
-        self.proposed_block_stats(&block_data.0);
+            .handle_proposal(block_data.number_transactions());
+        self.proposed_block_stats(&block_data);
 
         let own_block = OwnBlockData {
-            storage_transmission_blocks: block_data,
+            block: block_data,
             authority_index_start: authority_bounds[block_id] as AuthorityIndex,
             authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
         };
@@ -643,11 +628,19 @@ impl<H: BlockHandler> Core<H> {
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
         if let Some(statements) = block.statements() {
-            for stmt in statements {
-                let BaseStatement::Share(tx) = stmt;
+            if statements.is_empty() {
+                self.metrics.proposed_transaction_size_bytes.observe(0);
+            } else {
+                let total_bytes: usize = statements
+                    .iter()
+                    .map(|stmt| {
+                        let BaseStatement::Share(tx) = stmt;
+                        tx.as_bytes().len()
+                    })
+                    .sum();
                 self.metrics
                     .proposed_transaction_size_bytes
-                    .observe(tx.as_bytes().len());
+                    .observe(total_bytes / statements.len());
             }
         }
     }
@@ -801,13 +794,13 @@ impl<H: BlockHandler> Core<H> {
 
     // This function is needed only for signalling that we created a new block
     pub fn last_own_block(&self) -> &Data<VerifiedStatementBlock> {
-        &self.last_own_block[0].storage_transmission_blocks.0
+        &self.last_own_block[0].block
     }
 
     // This function is needed only for retrieving the last round of a block we
     // proposed
     pub fn last_proposed(&self) -> RoundNumber {
-        self.last_own_block[0].storage_transmission_blocks.0.round()
+        self.last_own_block[0].block.round()
     }
 
     pub fn authority(&self) -> AuthorityIndex {

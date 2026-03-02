@@ -19,7 +19,7 @@ use crate::{
     dag_state::{ByzantineStrategy, ConsensusProtocol},
     metrics::{Metrics, UtilizationTimerVecExt},
     net_sync::NetworkSyncerInner,
-    network::NetworkMessage,
+    network::{BlockBatch, NetworkMessage},
     runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_index},
@@ -300,7 +300,10 @@ where
         tracing::debug!(
             "Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}"
         );
-        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        self.sender
+            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+            .await
+            .ok()?;
         Some(())
     }
 
@@ -331,7 +334,10 @@ where
         tracing::debug!(
             "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
         );
-        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        self.sender
+            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+            .await
+            .ok()?;
         Some(())
     }
 
@@ -373,7 +379,10 @@ where
         tracing::debug!(
             "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
         );
-        self.sender.send(NetworkMessage::Batch(blocks)).await.ok()?;
+        self.sender
+            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+            .await
+            .ok()?;
         Some(())
     }
 
@@ -443,7 +452,9 @@ where
             }
             tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
             if !blocks.is_empty() {
-                to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+                to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+                    .await
+                    .ok()?;
             } else {
                 break;
             }
@@ -716,7 +727,9 @@ where
         }
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+        .await
+        .ok()?;
     Some(())
 }
 
@@ -758,7 +771,9 @@ where
         sent.retain(|r| r.round >= lowest_round);
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+        .await
+        .ok()?;
     Some(())
 }
 
@@ -797,7 +812,9 @@ where
     tracing::debug!(
         "Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}"
     );
-    to.send(NetworkMessage::Batch(blocks)).await.ok()?;
+    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+        .await
+        .ok()?;
     Some(())
 }
 

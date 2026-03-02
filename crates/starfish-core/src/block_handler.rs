@@ -193,7 +193,7 @@ impl RealCommitHandler {
 
     fn transaction_observer(&self, block: Data<VerifiedStatementBlock>) {
         let current_timestamp = runtime::timestamp_utc();
-        if let Some(vec) = block.statements().as_ref() {
+        if let Some(vec) = block.statements() {
             for statement in vec {
                 let BaseStatement::Share(transaction) = statement;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
