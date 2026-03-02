@@ -14,7 +14,7 @@ use eyre::{Context, Result, eyre};
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
-    config::{ClientParameters, NodePrivateConfig, NodePublicConfig},
+    config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::{Core, CoreOptions},
     dag_state::DagState,
     metrics::{MetricReporter, Metrics},
@@ -39,7 +39,7 @@ impl Validator {
         committee: Arc<Committee>,
         public_config: NodePublicConfig,
         private_config: NodePrivateConfig,
-        client_parameters: ClientParameters,
+        parameters: Parameters,
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
@@ -79,8 +79,12 @@ impl Validator {
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
-        // Open the DAG state with RocksDB
-        let rocks_path = private_config.rocksdb(); // You'll need to add this to NodePrivateConfig
+        // Apply leader_timeout from Parameters to the consensus config.
+        let mut public_config = public_config;
+        public_config.parameters.leader_timeout = parameters.leader_timeout;
+
+        // Open the DAG state.
+        let rocks_path = private_config.rocksdb();
         let recovered = DagState::open(
             authority,
             rocks_path,
@@ -88,7 +92,7 @@ impl Validator {
             &committee,
             byzantine_strategy,
             consensus,
-            &client_parameters.storage_backend,
+            &parameters.storage_backend,
         );
 
         // Rest of the function remains the same
@@ -97,7 +101,7 @@ impl Validator {
         TransactionGenerator::start(
             block_sender,
             authority,
-            client_parameters,
+            parameters,
             public_config.clone(),
             metrics.clone(),
         );
@@ -190,7 +194,7 @@ mod smoke_tests {
     use super::Validator;
     use crate::{
         committee::Committee,
-        config::{self, ClientParameters, NodePrivateConfig, NodePublicConfig},
+        config::{self, NodePrivateConfig, NodePublicConfig, Parameters},
         prometheus,
         types::AuthorityIndex,
     };
@@ -223,7 +227,7 @@ mod smoke_tests {
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
-        let client_parameters = ClientParameters::default();
+        let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -238,7 +242,7 @@ mod smoke_tests {
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                client_parameters.clone(),
+                parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
             )
@@ -281,7 +285,7 @@ mod smoke_tests {
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
-        let client_parameters = ClientParameters::default();
+        let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -300,7 +304,7 @@ mod smoke_tests {
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                client_parameters.clone(),
+                parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
             )
@@ -332,7 +336,7 @@ mod smoke_tests {
             committee.clone(),
             public_config.clone(),
             private_config,
-            client_parameters,
+            parameters,
             "honest".to_string(),
             consensus.to_string(),
         )
@@ -372,7 +376,7 @@ mod smoke_tests {
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
-        let client_parameters = ClientParameters::default();
+        let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -390,7 +394,7 @@ mod smoke_tests {
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                client_parameters.clone(),
+                parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
             )
@@ -521,7 +525,7 @@ mod smoke_tests {
         public_config: &NodePublicConfig,
         dir: &std::path::Path,
         committee_size: usize,
-        client_parameters: &ClientParameters,
+        parameters: &Parameters,
         consensus: &str,
     ) -> Validator {
         let private_config =
@@ -531,7 +535,7 @@ mod smoke_tests {
             committee.clone(),
             public_config.clone(),
             private_config,
-            client_parameters.clone(),
+            parameters.clone(),
             "honest".to_string(),
             consensus.to_string(),
         )
@@ -547,7 +551,7 @@ mod smoke_tests {
         let committee = Committee::new_for_benchmarks(committee_size);
         let public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
-        let client_parameters = ClientParameters::default();
+        let parameters = Parameters::default();
         let dir = TempDir::new().unwrap();
 
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -570,7 +574,7 @@ mod smoke_tests {
                 committee.clone(),
                 public_config.clone(),
                 pc,
-                client_parameters.clone(),
+                parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
             )
@@ -589,7 +593,7 @@ mod smoke_tests {
             &public_config,
             dir.as_ref(),
             committee_size,
-            &client_parameters,
+            &parameters,
             consensus,
         )
         .await;

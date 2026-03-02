@@ -8,7 +8,7 @@ use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{ClientParameters, NodePublicConfig, TransactionMode},
+    config::{NodePublicConfig, Parameters, TransactionMode},
     crypto::AsBytes,
     metrics::Metrics,
     runtime::{self, timestamp_utc},
@@ -18,7 +18,7 @@ use crate::{
 pub struct TransactionGenerator {
     sender: mpsc::Sender<Vec<Transaction>>,
     rng: StdRng,
-    client_parameters: ClientParameters,
+    parameters: Parameters,
     node_public_config: NodePublicConfig,
     metrics: Arc<Metrics>,
 }
@@ -31,16 +31,16 @@ impl TransactionGenerator {
     pub fn start(
         sender: mpsc::Sender<Vec<Transaction>>,
         seed: AuthorityIndex,
-        client_parameters: ClientParameters,
+        parameters: Parameters,
         node_public_config: NodePublicConfig,
         metrics: Arc<Metrics>,
     ) {
-        assert!(client_parameters.transaction_size > 8 + 8); // 8 bytes timestamp + 8 bytes random
+        assert!(parameters.transaction_size > 8 + 8); // 8 bytes timestamp + 8 bytes random
         runtime::Handle::current().spawn(
             Self {
                 sender,
                 rng: StdRng::seed_from_u64(seed),
-                client_parameters,
+                parameters,
                 node_public_config,
                 metrics,
             }
@@ -49,12 +49,12 @@ impl TransactionGenerator {
     }
 
     pub async fn run(mut self) {
-        let load = self.client_parameters.load;
+        let load = self.parameters.load;
 
         let transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
         // For every 10 validators, add 2 seconds to the initial default delay
         // used for establishing connections between validators
-        let initial_delay_plus_extra_delay = self.client_parameters.initial_delay
+        let initial_delay_plus_extra_delay = self.parameters.initial_delay
             + Duration::from_millis(
                 (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
             );
@@ -68,8 +68,8 @@ impl TransactionGenerator {
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
 
-        let tx_size = self.client_parameters.transaction_size;
-        let mode = &self.client_parameters.transaction_mode;
+        let tx_size = self.parameters.transaction_size;
+        let mode = &self.parameters.transaction_mode;
 
         let mut counter: u64 = 0;
         let mut tx_to_report = 0;

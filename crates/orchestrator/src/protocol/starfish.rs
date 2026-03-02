@@ -11,7 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use starfish_core::{
-    config::{self, ClientParameters, NodeParameters},
+    config::{self, NodeParameters, Parameters},
     types::AuthorityIndex,
 };
 
@@ -52,29 +52,35 @@ impl ProtocolParameters for StarfishNodeParameters {}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(transparent)]
-pub struct StarfishClientParameters(ClientParameters);
+pub struct StarfishParameters(Parameters);
 
-impl Deref for StarfishClientParameters {
-    type Target = ClientParameters;
+impl Deref for StarfishParameters {
+    type Target = Parameters;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl Debug for StarfishClientParameters {
+impl std::ops::DerefMut for StarfishParameters {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Debug for StarfishParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.transaction_size)
     }
 }
 
-impl Display for StarfishClientParameters {
+impl Display for StarfishParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}B tx", self.transaction_size)
     }
 }
 
-impl ProtocolParameters for StarfishClientParameters {}
+impl ProtocolParameters for StarfishParameters {}
 
 pub struct StarfishProtocol {
     working_dir: PathBuf,
@@ -112,14 +118,11 @@ impl ProtocolCommands for StarfishProtocol {
             node_parameters_path.display()
         );
 
-        let mut client_parameters = parameters.client_parameters.clone();
-        client_parameters.0.load = parameters.load / parameters.nodes;
-        let client_parameters_string = serde_yaml::to_string(&client_parameters).unwrap();
-        let client_parameters_path = self.working_dir.join("client-parameters.yaml");
-        let upload_client_parameters = format!(
-            "echo -e '{client_parameters_string}' > {}",
-            client_parameters_path.display()
-        );
+        let mut params = parameters.client_parameters.clone();
+        params.load = parameters.load / parameters.nodes;
+        let params_string = serde_yaml::to_string(&params).unwrap();
+        let params_path = self.working_dir.join(Parameters::DEFAULT_FILENAME);
+        let upload_parameters = format!("echo -e '{params_string}' > {}", params_path.display());
 
         let genesis = [
             &format!("./{BINARY_PATH}/starfish"),
@@ -135,7 +138,7 @@ impl ProtocolCommands for StarfishProtocol {
         [
             "source $HOME/.cargo/env",
             &upload_node_parameters,
-            &upload_client_parameters,
+            &upload_parameters,
             &genesis,
         ]
         .join(" && ")
@@ -159,7 +162,7 @@ impl ProtocolCommands for StarfishProtocol {
                 let private_config_path = self
                     .working_dir
                     .join(format!("private-config-{authority}.yaml"));
-                let client_parameters_path = self.working_dir.join("client-parameters.yaml");
+                let parameters_path = self.working_dir.join(Parameters::DEFAULT_FILENAME);
                 let byzantine_nodes = parameters.byzantine_nodes;
                 let mut byzantine_strategy = "honest".to_string();
                 if i % 3 == 0 && i / 3 < byzantine_nodes {
@@ -176,10 +179,7 @@ impl ProtocolCommands for StarfishProtocol {
                     format!("--committee-path {}", committee_path.display()),
                     format!("--public-config-path {}", public_config_path.display()),
                     format!("--private-config-path {}", private_config_path.display()),
-                    format!(
-                        "--client-parameters-path {}",
-                        client_parameters_path.display()
-                    ),
+                    format!("--parameters-path {}", parameters_path.display()),
                 ];
 
                 // Add byzantine strategy if needed

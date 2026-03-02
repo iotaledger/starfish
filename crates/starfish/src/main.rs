@@ -15,11 +15,11 @@ use std::{
 };
 
 use clap::Parser;
-use eyre::{Context, Result, eyre};
+use eyre::{Context, Result};
 use prettytable::format;
 use starfish_core::{
     committee::Committee,
-    config::{ClientParameters, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig},
+    config::{ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig, Parameters},
     metrics::Metrics,
     types::AuthorityIndex,
     validator::Validator,
@@ -58,7 +58,7 @@ enum Operation {
         #[clap(long, value_name = "FILE")]
         private_config_path: String,
         #[clap(long, value_name = "FILE")]
-        client_parameters_path: String,
+        parameters_path: String,
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
             committee_path,
             public_config_path,
             private_config_path,
-            client_parameters_path,
+            parameters_path,
             byzantine_strategy,
             consensus: consensus_protocol,
         } => {
@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
                 committee_path,
                 public_config_path,
                 private_config_path,
-                client_parameters_path,
+                parameters_path,
                 byzantine_strategy,
                 consensus_protocol,
             )
@@ -290,7 +290,7 @@ async fn local_benchmark(
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     load /= committee.len();
-    let client_parameters = ClientParameters::almost_default(load);
+    let parameters = Parameters::almost_default(load);
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
 
     // Create temporary directories for each validator
@@ -347,7 +347,7 @@ async fn local_benchmark(
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                client_parameters.clone(),
+                parameters.clone(),
                 byzantine_strategy.clone(),
                 consensus_protocol.clone(),
             )
@@ -358,7 +358,7 @@ async fn local_benchmark(
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                client_parameters.clone(),
+                parameters.clone(),
                 "honest".to_string(),
                 consensus_protocol.clone(),
             )
@@ -426,7 +426,7 @@ async fn run(
     committee_path: String,
     public_config_path: String,
     private_config_path: String,
-    client_parameters_path: String,
+    parameters_path: String,
     byzantine_strategy: String,
     consensus_protocol: String,
 ) -> Result<()> {
@@ -440,33 +440,19 @@ async fn run(
     let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{private_config_path}'"
     ))?;
-    let client_parameters = ClientParameters::load(&client_parameters_path).wrap_err(format!(
-        "Failed to load client parameters file '{client_parameters_path}'"
+    let parameters = Parameters::load(&parameters_path).wrap_err(format!(
+        "Failed to load parameters file '{parameters_path}'"
     ))?;
 
     let committee = Arc::new(committee);
-
-    let network_address = public_config
-        .network_address(authority)
-        .ok_or(eyre!("No network address for authority {authority}"))
-        .wrap_err("Unknown authority")?;
-    let mut binding_network_address = network_address;
-    binding_network_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-
-    let metrics_address = public_config
-        .metrics_address(authority)
-        .ok_or(eyre!("No metrics address for authority {authority}"))
-        .wrap_err("Unknown authority")?;
-    let mut binding_metrics_address = metrics_address;
-    binding_metrics_address.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
     // Boot the validator node.
     let validator = Validator::start(
         authority,
         committee,
-        public_config.clone(),
+        public_config,
         private_config,
-        client_parameters,
+        parameters,
         byzantine_strategy,
         consensus_protocol,
     )
@@ -504,7 +490,7 @@ async fn dryrun(
         None => vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size],
     };
     let committee = Committee::new_for_benchmarks(committee_size);
-    let client_parameters = ClientParameters::almost_default(load);
+    let parameters = Parameters::almost_default(load);
     let mut node_parameters = NodeParameters::default_with_latency(mimic_latency);
     if let Some(latency) = uniform_latency_ms {
         node_parameters.uniform_latency_ms = Some(latency);
@@ -541,7 +527,7 @@ async fn dryrun(
         committee,
         public_config,
         private_config,
-        client_parameters,
+        parameters,
         byzantine_strategy,
         consensus_protocol,
     )
