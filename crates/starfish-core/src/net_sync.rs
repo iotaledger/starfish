@@ -373,30 +373,29 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 });
         }
 
-        // Notify CordialKnowledge that this peer knows about received headers
-        for block in &full_blocks {
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::HeaderReceivedFrom {
-                    peer: self.peer_id,
-                    block_ref: *block.reference(),
-                });
-        }
-        for block in &headers {
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::HeaderReceivedFrom {
-                    peer: self.peer_id,
-                    block_ref: *block.reference(),
-                });
-        }
-        for shard in &shards {
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::ShardReceivedFrom {
-                    peer: self.peer_id,
-                    block_ref: shard.block_reference,
-                });
+        // Update ConnectionKnowledge directly — infer what the peer knows
+        // from the blocks they sent us and their causal references.
+        if let Some(ck) = self
+            .inner
+            .cordial_knowledge
+            .connection_knowledge(self.peer_id)
+        {
+            let mut ck = ck.write();
+            for block in full_blocks.iter().chain(headers.iter()) {
+                // Peer knows this block's header (they sent it to us)
+                ck.mark_header_known(*block.reference());
+                // Peer knows the header of every parent (causal history)
+                for parent_ref in block.block_references() {
+                    ck.mark_header_known(*parent_ref);
+                }
+                // Peer knows the shard of every acknowledged block
+                for ack_ref in block.acknowledgment_references() {
+                    ck.mark_shard_known(*ack_ref);
+                }
+            }
+            for shard in &shards {
+                ck.mark_shard_known(shard.block_reference);
+            }
         }
 
         // Separate full blocks by whether they carry statements
