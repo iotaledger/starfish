@@ -20,7 +20,7 @@ use crate::{
     dag_state::CommitData,
     data::Data,
     store::Store,
-    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{BlockReference, RoundNumber, VerifiedBlock},
 };
 // Column families for different types of data
 const CF_BLOCKS: &str = "blocks";
@@ -30,7 +30,7 @@ const BATCH_SIZE_THRESHOLD: usize = 2 * 1024 * 1024; // target batch size
 // Keep the batched operations in memory
 #[derive(Default)]
 struct BatchedOperations {
-    blocks: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
+    blocks: HashMap<BlockReference, Data<VerifiedBlock>>,
     commits: HashMap<BlockReference, CommitData>,
     total_size: usize,
 }
@@ -227,7 +227,7 @@ impl RocksStore {
         Ok(())
     }
 
-    fn do_store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
+    fn do_store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
         let reference = block.reference();
         let size = block.serialized_bytes().len();
         let mut batch = self.batch.write();
@@ -295,10 +295,7 @@ impl RocksStore {
         Ok(())
     }
 
-    fn do_get_block(
-        &self,
-        reference: &BlockReference,
-    ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
+    fn do_get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
         // Check in-memory batch first
         // Check current batch first
         let batch = self.batch.read();
@@ -336,10 +333,7 @@ impl RocksStore {
         }
     }
 
-    fn do_get_blocks_by_round(
-        &self,
-        round: RoundNumber,
-    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
+    fn do_get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
         let mut blocks = Vec::new();
 
         // Check in-memory batch first
@@ -484,21 +478,15 @@ impl RocksStore {
 }
 
 impl Store for RocksStore {
-    fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
+    fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
         self.do_store_block(block)
     }
 
-    fn get_block(
-        &self,
-        reference: &BlockReference,
-    ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
+    fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
         self.do_get_block(reference)
     }
 
-    fn get_blocks_by_round(
-        &self,
-        round: RoundNumber,
-    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
+    fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
         self.do_get_blocks_by_round(round)
     }
 

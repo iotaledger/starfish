@@ -14,7 +14,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
-    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock},
 };
 
 pub const MAX_TRAVERSAL_DEPTH: RoundNumber = 50;
@@ -28,12 +28,12 @@ pub struct CommittedSubDag {
     /// A reference to the anchor of the sub-dag
     pub anchor: BlockReference,
     /// All the committed blocks that are part of this sub-dag
-    pub blocks: Vec<Data<VerifiedStatementBlock>>,
+    pub blocks: Vec<Data<VerifiedBlock>>,
 }
 
 impl CommittedSubDag {
     /// Create new (empty) sub-dag.
-    pub fn new(anchor: BlockReference, blocks: Vec<Data<VerifiedStatementBlock>>) -> Self {
+    pub fn new(anchor: BlockReference, blocks: Vec<Data<VerifiedBlock>>) -> Self {
         Self { anchor, blocks }
     }
 
@@ -85,7 +85,7 @@ impl Linearizer {
     fn collect_subdag_mysticeti(
         &mut self,
         dag_state: &DagState,
-        leader_block: Data<VerifiedStatementBlock>,
+        leader_block: Data<VerifiedBlock>,
     ) -> CommittedSubDag {
         let mut to_commit = Vec::new();
 
@@ -121,7 +121,7 @@ impl Linearizer {
     fn collect_subdag_starfish(
         &mut self,
         dag_state: &DagState,
-        leader_block: Data<VerifiedStatementBlock>,
+        leader_block: Data<VerifiedBlock>,
     ) -> CommittedSubDag {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
@@ -215,7 +215,7 @@ impl Linearizer {
     pub fn handle_commit(
         &mut self,
         dag_state: &DagState,
-        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
+        committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
         let consensus_protocol = dag_state.consensus_protocol;
         let mut committed = vec![];

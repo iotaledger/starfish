@@ -31,8 +31,7 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, Encoder, RoundNumber, Shard,
-        VerifiedStatementBlock,
+        AuthorityIndex, BaseStatement, BlockReference, Encoder, RoundNumber, Shard, VerifiedBlock,
     },
 };
 
@@ -225,7 +224,7 @@ impl<H: BlockHandler> Core<H> {
     // statements that are added to the local DAG.
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
+        blocks: Vec<Data<VerifiedBlock>>,
     ) -> (
         bool,
         Vec<BlockReference>,
@@ -311,7 +310,7 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    pub fn try_new_block(&mut self) -> Option<Data<VerifiedStatementBlock>> {
+    pub fn try_new_block(&mut self) -> Option<Data<VerifiedBlock>> {
         let _block_timer = self
             .metrics
             .utilization_timer
@@ -509,7 +508,7 @@ impl<H: BlockHandler> Core<H> {
         acknowledgment_references: &[BlockReference],
         clock_round: RoundNumber,
         block_id_in_round: usize,
-    ) -> Data<VerifiedStatementBlock> {
+    ) -> Data<VerifiedBlock> {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
         let mut block_references = vec![*self.last_own_block[block_id_in_round].block.reference()];
         block_references.extend(block_references_without_own.iter().cloned());
@@ -531,7 +530,7 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let block = VerifiedStatementBlock::new_with_signer(
+        let block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
             block_references,
@@ -603,7 +602,7 @@ impl<H: BlockHandler> Core<H> {
 
     fn store_block(
         &mut self,
-        block_data: Data<VerifiedStatementBlock>,
+        block_data: Data<VerifiedBlock>,
         authority_bounds: &[usize],
         block_id: usize,
     ) {
@@ -622,7 +621,7 @@ impl<H: BlockHandler> Core<H> {
         self.dag_state.insert_own_block(own_block);
     }
 
-    fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
+    fn proposed_block_stats(&self, block: &Data<VerifiedBlock>) {
         self.metrics.created_own_blocks.inc();
         self.metrics
             .proposed_block_size_bytes
@@ -646,12 +645,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn try_commit(
-        &mut self,
-    ) -> (
-        Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
-        bool,
-    ) {
+    pub fn try_commit(&mut self) -> (Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>, bool) {
         let leaders = self.committer.try_commit(self.last_commit_leader);
         let any_decided = !leaders.is_empty();
         let sequence: Vec<_> = leaders
@@ -793,7 +787,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     // This function is needed only for signalling that we created a new block
-    pub fn last_own_block(&self) -> &Data<VerifiedStatementBlock> {
+    pub fn last_own_block(&self) -> &Data<VerifiedBlock> {
         &self.last_own_block[0].block
     }
 

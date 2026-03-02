@@ -6,7 +6,7 @@ use std::io;
 use crate::{
     dag_state::CommitData,
     data::Data,
-    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{BlockReference, RoundNumber, VerifiedBlock},
 };
 
 /// Backend-agnostic storage interface for consensus blocks and commit data.
@@ -16,17 +16,11 @@ use crate::{
 /// - `RocksStore` (default) — RocksDB-backed
 /// - `TideHunterStore` (feature `tidehunter`) — TideHunter WAL-backed
 pub trait Store: Send + Sync + 'static {
-    fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()>;
+    fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()>;
 
-    fn get_block(
-        &self,
-        reference: &BlockReference,
-    ) -> io::Result<Option<Data<VerifiedStatementBlock>>>;
+    fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>>;
 
-    fn get_blocks_by_round(
-        &self,
-        round: RoundNumber,
-    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>>;
+    fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>>;
 
     fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()>;
 

@@ -8,9 +8,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::{
     data::Data,
-    types::{
-        AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock, format_authority_round,
-    },
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock, format_authority_round},
 };
 
 pub mod base_committer;
@@ -55,7 +53,7 @@ pub enum CommitMetastate {
 pub enum LeaderStatus {
     /// Committed leader block with optional metastate (Some for StarfishS, None
     /// for others).
-    Commit(Data<VerifiedStatementBlock>, Option<CommitMetastate>),
+    Commit(Data<VerifiedBlock>, Option<CommitMetastate>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
 }
@@ -99,9 +97,7 @@ impl LeaderStatus {
         }
     }
 
-    pub fn into_decided_block(
-        self,
-    ) -> Option<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
+    pub fn into_decided_block(self) -> Option<(Data<VerifiedBlock>, Option<CommitMetastate>)> {
         match self {
             Self::Commit(block, meta) => Some((block, meta)),
             Self::Skip(..) => None,

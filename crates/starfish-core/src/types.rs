@@ -257,19 +257,19 @@ impl ProvableShard {
 }
 
 // ---------------------------------------------------------------------------
-// VerifiedStatementBlock — composite: header + optional payloads.
+// VerifiedBlock — composite: header + optional payloads.
 // Used for serialization/storage/network. The in-memory DAG representation
 // stores headers and payloads separately.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct VerifiedStatementBlock {
+pub struct VerifiedBlock {
     pub(crate) header: BlockHeader,
     pub(crate) transaction_data: Option<TransactionData>,
     pub(crate) shard_data: Option<ProvableShard>,
 }
 
-impl VerifiedStatementBlock {
+impl VerifiedBlock {
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -686,9 +686,7 @@ impl BlockReference {
     #[cfg(test)]
     pub fn new_test(authority: AuthorityIndex, round: RoundNumber) -> Self {
         if round == 0 {
-            VerifiedStatementBlock::new_genesis(authority)
-                .header
-                .reference
+            VerifiedBlock::new_genesis(authority).header.reference
         } else {
             Self {
                 authority,
@@ -791,13 +789,13 @@ impl std::hash::Hash for BlockHeader {
     }
 }
 
-impl fmt::Debug for VerifiedStatementBlock {
+impl fmt::Debug for VerifiedBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
 }
 
-impl fmt::Display for VerifiedStatementBlock {
+impl fmt::Display for VerifiedBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:[", self.header.reference)?;
         for include in self.block_references() {
@@ -814,14 +812,14 @@ impl fmt::Display for VerifiedStatementBlock {
         write!(f, ")")
     }
 }
-impl PartialEq for VerifiedStatementBlock {
+impl PartialEq for VerifiedBlock {
     fn eq(&self, other: &Self) -> bool {
         self.header.reference == other.header.reference
     }
 }
-impl Eq for VerifiedStatementBlock {}
+impl Eq for VerifiedBlock {}
 
-impl std::hash::Hash for VerifiedStatementBlock {
+impl std::hash::Hash for VerifiedBlock {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.header.reference.hash(state);
     }

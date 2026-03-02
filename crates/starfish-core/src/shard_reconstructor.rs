@@ -27,9 +27,7 @@ use crate::{
     data::Data,
     decoder,
     metrics::Metrics,
-    types::{
-        AuthorityIndex, BlockHeader, BlockReference, RoundNumber, Shard, VerifiedStatementBlock,
-    },
+    types::{AuthorityIndex, BlockHeader, BlockReference, RoundNumber, Shard, VerifiedBlock},
 };
 
 const EVICTION_TIMEOUT: Duration = Duration::from_secs(1);
@@ -94,11 +92,11 @@ impl ShardAccumulator {
 /// Result from a reconstruction worker (success or failure).
 struct ReconstructionResult {
     block_reference: BlockReference,
-    block: Option<VerifiedStatementBlock>,
+    block: Option<VerifiedBlock>,
 }
 
 /// Type alias for decoded blocks sent to core.
-pub type DecodedBlocks = Vec<Data<VerifiedStatementBlock>>;
+pub type DecodedBlocks = Vec<Data<VerifiedBlock>>;
 
 /// Public handle for the running shard reconstructor.
 pub struct ShardReconstructorHandle {
@@ -447,11 +445,11 @@ mod tests {
         committee: &Committee,
         encoder: &mut ReedSolomonEncoder,
         signer: &Signer,
-    ) -> (VerifiedStatementBlock, Vec<Shard>) {
+    ) -> (VerifiedBlock, Vec<Shard>) {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
         let encoded = encoder.encode_statements(&statements, info_length, parity_length);
-        let block = VerifiedStatementBlock::new_with_signer(
+        let block = VerifiedBlock::new_with_signer(
             authority,
             1,
             vec![],

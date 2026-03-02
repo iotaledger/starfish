@@ -16,7 +16,7 @@ use crate::{
     dag_state::CommitData,
     data::Data,
     store::Store,
-    types::{BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{BlockReference, RoundNumber, VerifiedBlock},
 };
 
 /// Key = round(8B BE) ++ authority(8B BE) ++ digest(32B) = 48 bytes.
@@ -97,7 +97,7 @@ impl TideHunterStore {
 }
 
 impl Store for TideHunterStore {
-    fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
+    fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
         let key = Self::encode_key(block.reference());
         // bytes::Bytes → minibytes::Bytes is zero-copy via BytesOwner impl.
         let value = block.serialized_bytes().clone();
@@ -106,10 +106,7 @@ impl Store for TideHunterStore {
             .map_err(|e| io::Error::other(format!("TideHunter store block: {e:?}")))
     }
 
-    fn get_block(
-        &self,
-        reference: &BlockReference,
-    ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
+    fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
         let key = Self::encode_key(reference);
         match self
             .db
@@ -123,10 +120,7 @@ impl Store for TideHunterStore {
         }
     }
 
-    fn get_blocks_by_round(
-        &self,
-        round: RoundNumber,
-    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
+    fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
         let mut iter = self.db.iterator(self.ks_blocks);
         iter.set_lower_bound(Self::round_lower_bound(round).to_vec());
         iter.set_upper_bound(Self::round_upper_bound(round).to_vec());
