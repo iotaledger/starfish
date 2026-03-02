@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    env,
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -426,47 +425,9 @@ impl SshConnection {
         session
             .handshake()
             .map_err(|error| SshError::SessionError { address, error })?;
-        let primary_key = private_key_file.as_ref().to_path_buf();
-        let file_auth_error = session
-            .userauth_pubkey_file(username, None, &primary_key, None)
-            .err();
-        if let Some(file_auth_error) = file_auth_error {
-            // Fall back to ssh-agent so `ssh user@host` and the orchestrator
-            // can use the same loaded identities when the configured key file
-            // is not accepted by a specific host (for example, an external
-            // monitoring server).
-            let mut last_auth_error = session.userauth_agent(username).err();
-
-            if last_auth_error.is_some() {
-                if let Some(home) = env::var_os("HOME") {
-                    let ssh_dir = Path::new(&home).join(".ssh");
-                    for identity_name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
-                        let candidate = ssh_dir.join(identity_name);
-                        if candidate == primary_key || !candidate.exists() {
-                            continue;
-                        }
-                        match session.userauth_pubkey_file(username, None, &candidate, None) {
-                            Ok(()) => {
-                                last_auth_error = None;
-                                break;
-                            }
-                            Err(identity_error) => last_auth_error = Some(identity_error),
-                        }
-                    }
-                }
-            }
-
-            if let Some(last_auth_error) = last_auth_error {
-                return Err(SshError::SessionError {
-                    address,
-                    error: if last_auth_error.code() == ssh2::ErrorCode::Session(-18) {
-                        file_auth_error
-                    } else {
-                        last_auth_error
-                    },
-                });
-            }
-        }
+        session
+            .userauth_pubkey_file(username, None, private_key_file.as_ref(), None)
+            .map_err(|error| SshError::SessionError { address, error })?;
 
         Ok(Self {
             session,

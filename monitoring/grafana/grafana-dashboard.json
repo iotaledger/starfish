@@ -627,7 +627,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(committed_blocks{validator=~\"$validator\"}[1m])",
+          "expr": "sum by (validator) (rate(committed_blocks{validator=~\"$validator\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,

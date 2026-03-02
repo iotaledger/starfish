@@ -417,6 +417,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     /// Install monitoring dependencies on the external monitoring server.
     async fn install_external_monitoring(&self) -> TestbedResult<()> {
         if let Some(instance) = self.settings.external_monitoring_instance()? {
+            // Newline so the message doesn't collide with the concurrent
+            // "Installing dependencies on all machines ..." progress line.
+            display::newline();
             display::action("Installing monitoring dependencies on external server");
 
             let ssh_manager = self.monitoring_ssh_manager();
