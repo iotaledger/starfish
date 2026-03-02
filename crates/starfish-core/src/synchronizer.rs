@@ -265,43 +265,31 @@ where
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
     ) -> Option<()> {
+        use crate::network::ShardPayload;
+
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.dag_state.get_own_authority_index();
-        let batch_own_block_size = self.parameters.batch_own_block_size;
-        let batch_other_block_size = self.parameters.batch_other_block_size;
 
         let all_blocks = self
             .inner
             .dag_state
             .get_transmission_blocks(&block_references);
 
-        let mut blocks = Vec::new();
-        let mut own_block_counter = 0;
-        let mut other_block_counter = 0;
+        let mut shards = Vec::new();
         for block in all_blocks.into_iter().flatten() {
-            if block.author() == own_index {
-                own_block_counter += 1;
-            } else {
-                other_block_counter += 1;
+            if let Some(shard) = block.shard_data() {
+                shards.push(ShardPayload {
+                    block_reference: *block.reference(),
+                    shard: shard.clone(),
+                });
             }
-            if own_block_counter >= batch_own_block_size
-                && other_block_counter >= batch_other_block_size
-            {
-                break;
-            }
-            if own_block_counter >= batch_own_block_size {
-                continue;
-            }
-            if other_block_counter >= batch_other_block_size {
-                continue;
-            }
-            blocks.push(block);
         }
         tracing::debug!(
-            "Requested blocks with missing data {blocks:?} are sent from {own_index:?} to {peer:?}"
+            "Sending {} shards for missing tx data from {own_index:?} to {peer:?}",
+            shards.len(),
         );
         self.sender
-            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+            .send(NetworkMessage::Batch(BlockBatch::shards_only(shards)))
             .await
             .ok()?;
         Some(())

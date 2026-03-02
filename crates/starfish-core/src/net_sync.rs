@@ -893,24 +893,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             cordial_knowledge: cordial_knowledge_handle,
         });
 
-        // Start bridge task that forwards decoded blocks to core via add_blocks
+        // Start bridge task that forwards reconstructed transaction data to core
         let bridge_task = decoded_rx.map(|mut decoded_rx| {
             let bridge_inner = inner.clone();
             handle.spawn(async move {
-                while let Some(blocks) = decoded_rx.recv().await {
-                    // Notify CordialKnowledge about reconstructed blocks
-                    for block in &blocks {
+                while let Some(items) = decoded_rx.recv().await {
+                    // Notify CordialKnowledge: reconstruction proves we have both
+                    // the header (already known) and the shard data.
+                    for item in &items {
                         bridge_inner
                             .cordial_knowledge
-                            .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-                        // Decoded blocks have transaction data — notify shard availability
-                        if block.has_shard_data() {
-                            bridge_inner
-                                .cordial_knowledge
-                                .send(CordialKnowledgeMessage::NewShard(*block.reference()));
-                        }
+                            .send(CordialKnowledgeMessage::NewShard(item.block_reference));
                     }
-                    bridge_inner.syncer.add_blocks(blocks).await;
+                    bridge_inner.syncer.add_transaction_data(items).await;
                 }
             })
         });

@@ -9,15 +9,15 @@ use crate::{
     committee::Committee,
     crypto::TransactionsCommitment,
     encoder::{Encoder, ShardEncoder},
-    types::{AuthorityIndex, BlockHeader, ProvableShard, Shard, TransactionData, VerifiedBlock},
+    types::{AuthorityIndex, BlockHeader, ProvableShard, Shard, TransactionData},
 };
 
 pub type Decoder = ReedSolomonDecoder;
 
-/// Decode a full block from collected shards + block header.
+/// Decode transaction data from collected shards + block header.
 ///
-/// Returns `Some(VerifiedBlock)` with reconstructed transactions and
-/// the caller's own shard+proof, or `None` on merkle mismatch.
+/// Returns `Some((TransactionData, ProvableShard))` with the reconstructed
+/// statements and the caller's own shard+proof, or `None` on merkle mismatch.
 pub fn decode_shards(
     decoder: &mut Decoder,
     committee: &Committee,
@@ -25,7 +25,7 @@ pub fn decode_shards(
     header: &BlockHeader,
     shards: &[Option<Shard>],
     own_id: AuthorityIndex,
-) -> Option<VerifiedBlock> {
+) -> Option<(TransactionData, ProvableShard)> {
     let info_length = committee.info_length();
     let total_length = committee.len();
     let parity_length = total_length - info_length;
@@ -76,7 +76,6 @@ pub fn decode_shards(
         TransactionsCommitment::new_from_encoded_statements(&recovered_statements, own_id as usize);
 
     if computed_merkle_root == header.merkle_root() {
-        // Reconstruct statements from info shards
         let statements = reconstruct_statements_from_shards(&recovered_statements, info_length);
         let own_shard = ProvableShard::new(
             recovered_statements[own_id as usize].clone(),
@@ -84,11 +83,7 @@ pub fn decode_shards(
             computed_merkle_proof,
             computed_merkle_root,
         );
-        Some(VerifiedBlock::from_parts(
-            header.clone(),
-            Some(TransactionData::new(statements)),
-            Some(own_shard),
-        ))
+        Some((TransactionData::new(statements), own_shard))
     } else {
         None
     }
@@ -139,7 +134,7 @@ mod tests {
         crypto::Signer,
         dag_state::ConsensusProtocol,
         encoder::ShardEncoder,
-        types::{BaseStatement, Transaction},
+        types::{BaseStatement, Transaction, VerifiedBlock},
     };
 
     fn make_test_block(
@@ -204,14 +199,14 @@ mod tests {
             result.is_some(),
             "decode_shards should succeed with all info shards"
         );
-        let reconstructed = result.unwrap();
+        let (tx_data, own_shard) = result.unwrap();
         assert_eq!(
-            reconstructed.statements().unwrap(),
+            tx_data.statements(),
             &statements,
             "reconstructed statements should match originals"
         );
         assert!(
-            reconstructed.merkle_root() == block.merkle_root(),
+            own_shard.transactions_commitment() == block.merkle_root(),
             "merkle root should match"
         );
     }
@@ -248,9 +243,9 @@ mod tests {
             result.is_some(),
             "decode_shards should succeed with parity recovery"
         );
-        let reconstructed = result.unwrap();
+        let (tx_data, _own_shard) = result.unwrap();
         assert_eq!(
-            reconstructed.statements().unwrap(),
+            tx_data.statements(),
             &statements,
             "reconstructed statements should match originals"
         );

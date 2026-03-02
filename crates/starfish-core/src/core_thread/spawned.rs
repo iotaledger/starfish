@@ -12,7 +12,9 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
+    types::{
+        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, VerifiedBlock,
+    },
 };
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -35,6 +37,7 @@ enum CoreThreadCommand {
             Vec<BlockReference>,
         )>,
     ),
+    AddTransactionData(Vec<ReconstructedTransactionData>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
@@ -79,6 +82,13 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     ) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop")
+    }
+
+    pub async fn add_transaction_data(&self, items: Vec<ReconstructedTransactionData>) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::AddTransactionData(items, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -159,6 +169,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                             used_additional_references,
                         ))
                         .ok();
+                }
+                CoreThreadCommand::AddTransactionData(items, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["add_transaction_data"])
+                        .inc();
+                    self.syncer.add_transaction_data(items);
+                    sender.send(()).ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
                     metrics

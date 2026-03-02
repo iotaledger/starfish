@@ -24,7 +24,10 @@ use crate::{
     rocks_store::RocksStore,
     state::{RecoveredState, RecoveredStateBuilder},
     store::Store,
-    types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock},
+    types::{
+        AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, TransactionData,
+        VerifiedBlock,
+    },
 };
 
 /// Bitmask tracking which authorities know about a block. Supports up to 128
@@ -490,6 +493,55 @@ impl DagState {
 
     pub fn contains_new_statements(&self, block: &VerifiedBlock) -> bool {
         self.dag_state_inner.read().contains_new_statements(block)
+    }
+
+    /// Attach recovered transaction data to an existing header-only block.
+    /// Bypasses the block manager — the header is already accepted and
+    /// connected.
+    pub fn attach_transaction_data(
+        &self,
+        block_ref: BlockReference,
+        transaction_data: TransactionData,
+        shard_data: ProvableShard,
+    ) {
+        let mut inner = self.dag_state_inner.write();
+
+        // Clone the header from the existing block (immutable borrow, dropped at block
+        // end).
+        let header = {
+            let existing = inner
+                .index
+                .get(&block_ref.round)
+                .and_then(|m| m.get(&(block_ref.authority, block_ref.digest)));
+            match existing {
+                Some(b) => b.header().clone(),
+                None => return,
+            }
+        };
+
+        // Build and persist the updated block.
+        let updated = Data::new(VerifiedBlock::from_parts(
+            header,
+            Some(transaction_data),
+            Some(shard_data),
+        ));
+        self.store
+            .store_block(updated.clone())
+            .expect("Failed to store updated block");
+
+        // Replace in index (short-lived mutable borrow).
+        inner
+            .index
+            .get_mut(&block_ref.round)
+            .unwrap()
+            .insert((block_ref.authority, block_ref.digest), updated);
+
+        // Mark data-available + queue acknowledgment.
+        if !inner.data_availability.contains(&block_ref) {
+            inner.data_availability.insert(block_ref);
+            inner.pending_acknowledgment.push(block_ref);
+        }
+        *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
     }
 
     pub fn len_expensive(&self) -> usize {

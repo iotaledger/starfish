@@ -24,10 +24,12 @@ use tokio::{
 
 use crate::{
     committee::Committee,
-    data::Data,
     decoder,
     metrics::Metrics,
-    types::{AuthorityIndex, BlockHeader, BlockReference, RoundNumber, Shard, VerifiedBlock},
+    types::{
+        AuthorityIndex, BlockHeader, BlockReference, ReconstructedTransactionData, RoundNumber,
+        Shard,
+    },
 };
 
 const EVICTION_TIMEOUT: Duration = Duration::from_secs(1);
@@ -92,11 +94,11 @@ impl ShardAccumulator {
 /// Result from a reconstruction worker (success or failure).
 struct ReconstructionResult {
     block_reference: BlockReference,
-    block: Option<VerifiedBlock>,
+    data: Option<ReconstructedTransactionData>,
 }
 
-/// Type alias for decoded blocks sent to core.
-pub type DecodedBlocks = Vec<Data<VerifiedBlock>>;
+/// Type alias for reconstructed transaction data sent to core.
+pub type DecodedBlocks = Vec<ReconstructedTransactionData>;
 
 /// Public handle for the running shard reconstructor.
 pub struct ShardReconstructorHandle {
@@ -230,7 +232,7 @@ impl ShardReconstructor {
 
                     match job {
                         Some((block_reference, header, shards)) => {
-                            let block = decoder::decode_shards(
+                            let decoded = decoder::decode_shards(
                                 &mut rs_decoder,
                                 &committee,
                                 &mut encoder,
@@ -239,21 +241,27 @@ impl ShardReconstructor {
                                 own_id,
                             );
 
-                            if block.is_some() {
+                            let data = if let Some((transaction_data, shard_data)) = decoded {
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
+                                Some(ReconstructedTransactionData {
+                                    block_reference,
+                                    transaction_data,
+                                    shard_data,
+                                })
                             } else {
                                 metrics.shard_reconstruction_failed_total.inc();
                                 tracing::warn!(
                                     "Worker failed to reconstruct block {:?}",
                                     block_reference
                                 );
-                            }
+                                None
+                            };
 
                             if result_tx
                                 .send(ReconstructionResult {
                                     block_reference,
-                                    block,
+                                    data,
                                 })
                                 .await
                                 .is_err()
@@ -372,9 +380,9 @@ impl ShardReconstructor {
             return;
         }
 
-        if let Some(block) = result.block {
+        if let Some(data) = result.data {
             self.processed_blocks.insert(block_reference);
-            self.pending_decoded.push(Data::new(block));
+            self.pending_decoded.push(data);
         }
         // On failure (block == None): the entry is removed from
         // reconstruction_queue so future shards can retry accumulation.
@@ -436,7 +444,7 @@ mod tests {
         crypto::Signer,
         dag_state::ConsensusProtocol,
         encoder::ShardEncoder,
-        types::{BaseStatement, Transaction},
+        types::{BaseStatement, Transaction, VerifiedBlock},
     };
 
     fn make_test_block_and_shards(
@@ -556,16 +564,21 @@ mod tests {
             result.is_ok(),
             "should receive decoded blocks within timeout"
         );
-        let decoded_blocks = result.unwrap().unwrap();
-        assert!(!decoded_blocks.is_empty());
+        let decoded_items = result.unwrap().unwrap();
+        assert!(!decoded_items.is_empty());
 
-        let storage_block = &decoded_blocks[0];
-        assert!(
-            storage_block.merkle_root() == block.merkle_root(),
+        let item = &decoded_items[0];
+        assert_eq!(
+            item.block_reference, block_ref,
+            "block reference should match"
+        );
+        assert_eq!(
+            item.shard_data.transactions_commitment(),
+            block.merkle_root(),
             "merkle root should match"
         );
         assert_eq!(
-            storage_block.statements().unwrap(),
+            item.transaction_data.statements(),
             &statements,
             "statements should match"
         );
