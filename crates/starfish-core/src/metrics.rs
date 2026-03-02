@@ -101,6 +101,8 @@ pub struct Metrics {
     pub store_block_count: IntCounter,
     pub store_commits_latency_us: IntCounter,
     pub store_commits_count: IntCounter,
+    pub storage_backend_info: IntGauge,
+    pub transaction_mode_info: IntGauge,
 
     // tracking total bytes sent and received
     pub bytes_sent_total: IntCounter,
@@ -325,6 +327,18 @@ impl Metrics {
             store_commits_count: register_int_counter_with_registry!(
                 "store_commits_count",
                 "Total number of store_commits calls",
+                registry,
+            )
+            .unwrap(),
+            storage_backend_info: register_int_gauge_with_registry!(
+                "storage_backend_info",
+                "Storage backend: 0 = RocksDB, 1 = TideHunter",
+                registry,
+            )
+            .unwrap(),
+            transaction_mode_info: register_int_gauge_with_registry!(
+                "transaction_mode_info",
+                "Transaction mode: 0 = AllZero, 1 = Random",
                 registry,
             )
             .unwrap(),

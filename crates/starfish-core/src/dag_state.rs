@@ -127,6 +127,7 @@ impl DagState {
             #[cfg(feature = "tidehunter")]
             StorageBackend::Tidehunter => {
                 tracing::info!("Using TideHunter storage backend");
+                metrics.storage_backend_info.set(1);
                 Arc::new(
                     crate::tidehunter_store::TideHunterStore::open(&path)
                         .expect("Failed to open TideHunter"),
@@ -137,6 +138,7 @@ impl DagState {
                 panic!("TideHunter storage requested but the `tidehunter` feature is not enabled");
             }
             StorageBackend::Rocksdb => {
+                metrics.storage_backend_info.set(0);
                 Arc::new(RocksStore::open(&path).expect("Failed to open RocksDB"))
             }
         };

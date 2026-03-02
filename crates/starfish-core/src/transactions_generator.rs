@@ -70,6 +70,10 @@ impl TransactionGenerator {
 
         let tx_size = self.parameters.transaction_size;
         let mode = &self.parameters.transaction_mode;
+        self.metrics.transaction_mode_info.set(match mode {
+            TransactionMode::AllZero => 0,
+            TransactionMode::Random => 1,
+        });
 
         let mut counter: u64 = 0;
         let mut tx_to_report = 0;
