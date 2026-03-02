@@ -66,6 +66,8 @@ pub struct Metrics {
     pub core_lock_util: IntCounter,
     pub core_lock_enqueued: IntCounter,
     pub core_lock_dequeued: IntCounter,
+    pub core_queue_length: IntGauge,
+    pub core_thread_tasks_total: IntCounterVec,
 
     pub block_handler_cleanup_util: IntCounter,
 
@@ -80,8 +82,10 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
+    pub proposed_transaction_size_bytes: HistogramSender<usize>,
     pub proposed_block_refs: Histogram,
     pub proposed_block_acks: Histogram,
+    pub created_own_blocks: IntCounter,
     pub previous_round_refs: Histogram,
     pub commit_gap: Histogram,
 
@@ -121,6 +125,7 @@ pub struct MetricReporter {
     pub transaction_committed_latency: parking_lot::Mutex<HistogramReporter<Duration>>,
     pub block_committed_latency: parking_lot::Mutex<HistogramReporter<Duration>>,
     pub proposed_block_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
+    pub proposed_transaction_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
     pub connection_latency: parking_lot::Mutex<VecHistogramReporter<Duration>>,
     pub global_in_memory_blocks: IntGauge,
     pub global_in_memory_blocks_bytes: IntGauge,
@@ -165,6 +170,7 @@ impl Metrics {
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
         let (proposed_block_size_bytes_hist, proposed_block_size_bytes) = histogram();
+        let (proposed_transaction_size_bytes_hist, proposed_transaction_size_bytes) = histogram();
 
         let committee_size = committee.map(Committee::len).unwrap_or_default();
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
@@ -193,6 +199,14 @@ impl Metrics {
                 registry,
                 "proposed_block_size_bytes",
             )),
+
+            proposed_transaction_size_bytes: parking_lot::Mutex::new(
+                HistogramReporter::new_in_registry(
+                    proposed_transaction_size_bytes_hist,
+                    registry,
+                    "proposed_transaction_size_bytes",
+                ),
+            ),
 
             connection_latency: parking_lot::Mutex::new(VecHistogramReporter::new_in_registry(
                 connection_latency_hist,
@@ -462,6 +476,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            core_queue_length: register_int_gauge_with_registry!(
+                "core_queue_length",
+                "Current number of tasks in the core thread channel",
+                registry,
+            )
+            .unwrap(),
+            core_thread_tasks_total: register_int_counter_vec_with_registry!(
+                "core_thread_tasks_total",
+                "Total core thread commands processed, by task type",
+                &["task_type"],
+                registry,
+            )
+            .unwrap(),
             block_handler_cleanup_util: register_int_counter_with_registry!(
                 "block_handler_cleanup_util",
                 "block_handler_cleanup_util",
@@ -512,6 +539,7 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
+            proposed_transaction_size_bytes,
             proposed_block_refs: {
                 let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
                 register_histogram_with_registry!(
@@ -537,6 +565,12 @@ impl Metrics {
                 )
                 .unwrap()
             },
+            created_own_blocks: register_int_counter_with_registry!(
+                "created_own_blocks",
+                "Total number of blocks created by this validator",
+                registry,
+            )
+            .unwrap(),
             previous_round_refs: {
                 let mut buckets: Vec<f64> = (1..=100).map(|i| i as f64).collect();
                 let mut v = 200.0;
@@ -631,6 +665,11 @@ impl Metrics {
         let average_bytes_received: u64 = metrics
             .iter()
             .map(|m| m.bytes_received_total.get())
+            .sum::<u64>()
+            / num_validators;
+        let average_reconstructed_sent_to_core: u64 = metrics
+            .iter()
+            .map(|m| m.reconstructed_blocks_total.get())
             .sum::<u64>()
             / num_validators;
         let average_reconstruction_jobs: u64 = metrics
@@ -737,6 +776,7 @@ impl Metrics {
         table.add_row(
             row![b->"Average cancelled reconstructions:", average_reconstruction_cancelled],
         );
+        table.add_row(row![b->"Average blocks sent to core:", average_reconstructed_sent_to_core]);
         table.add_row(row![b->"Pending shard accumulators:", average_pending_accumulators]);
         table.add_row(row![b->"Queued/in-flight jobs:", average_queued_jobs]);
         table.add_row(row![b->"Pending decoded blocks:", average_pending_decoded_blocks]);
@@ -902,6 +942,12 @@ impl MetricReporter {
         }
 
         {
+            let mut tx_size = self.proposed_transaction_size_bytes.lock();
+            tx_size.clear_receive_all();
+            tx_size.report();
+        }
+
+        {
             let mut conn_latency = self.connection_latency.lock();
             conn_latency.clear_receive_all();
             conn_latency.report();
@@ -914,6 +960,9 @@ impl MetricReporter {
             .clear_receive_all();
         self.block_committed_latency.lock().clear_receive_all();
         self.proposed_block_size_bytes.lock().clear_receive_all();
+        self.proposed_transaction_size_bytes
+            .lock()
+            .clear_receive_all();
         self.connection_latency.lock().clear_receive_all();
     }
 }

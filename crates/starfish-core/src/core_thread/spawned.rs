@@ -126,6 +126,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
 
     async fn send(&self, command: CoreThreadCommand) {
         self.metrics.core_lock_enqueued.inc();
+        self.metrics.core_queue_length.inc();
         if self.sender.send(command).await.is_err() {
             panic!("core thread is not expected to stop");
         }
@@ -139,8 +140,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
         while let Some(command) = self.receiver.blocking_recv() {
             let _timer = metrics.core_lock_util.utilization_timer();
             metrics.core_lock_dequeued.inc();
+            metrics.core_queue_length.dec();
             match command {
                 CoreThreadCommand::AddBlocks(blocks, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["add_blocks"])
+                        .inc();
                     let (
                         pending_blocks_with_statements,
                         missing_references,
@@ -155,18 +161,34 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["force_new_block"])
+                        .inc();
                     self.syncer.force_new_block(round);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ForceCommit(sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["force_commit"])
+                        .inc();
                     self.syncer.try_new_commit();
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::Cleanup(sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["cleanup"])
+                        .inc();
                     self.syncer.cleanup();
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ConnectionEstablished(authority, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["connection_established"])
+                        .inc();
                     self.syncer.connected_authorities.insert(authority);
                     self.syncer
                         .metrics
@@ -175,6 +197,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ConnectionDropped(authority, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["connection_dropped"])
+                        .inc();
                     self.syncer.connected_authorities.remove(&authority);
                     self.syncer.subscribed_by_authorities.remove(&authority);
                     self.syncer
@@ -188,6 +214,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::PeerSubscribed(authority, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["peer_subscribed"])
+                        .inc();
                     self.syncer.subscribed_by_authorities.insert(authority);
                     self.syncer
                         .metrics

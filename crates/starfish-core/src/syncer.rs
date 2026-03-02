@@ -131,7 +131,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::try_new_commit");
-        let newly_committed = self.core.try_commit();
+        let (newly_committed, any_decided) = self.core.try_commit();
         drop(timer_core_commit);
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {
@@ -150,7 +150,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .commit_observer
             .handle_commit(self.core.dag_state(), newly_committed);
 
-        self.core.handle_committed_subdag(committed_subdag);
+        self.core
+            .handle_committed_subdag(committed_subdag, any_decided);
     }
 
     pub fn cleanup(&mut self) {

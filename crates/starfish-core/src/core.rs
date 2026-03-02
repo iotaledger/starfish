@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::Signer,
+    crypto::{AsBytes, Signer},
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
@@ -638,15 +638,30 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedStatementBlock>) {
+        self.metrics.created_own_blocks.inc();
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
+        if let Some(statements) = block.statements() {
+            for stmt in statements {
+                let BaseStatement::Share(tx) = stmt;
+                self.metrics
+                    .proposed_transaction_size_bytes
+                    .observe(tx.as_bytes().len());
+            }
+        }
     }
 
-    pub fn try_commit(&mut self) -> Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)> {
-        let sequence: Vec<_> = self
-            .committer
-            .try_commit(self.last_commit_leader)
+    #[allow(clippy::type_complexity)]
+    pub fn try_commit(
+        &mut self,
+    ) -> (
+        Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
+        bool,
+    ) {
+        let leaders = self.committer.try_commit(self.last_commit_leader);
+        let any_decided = !leaders.is_empty();
+        let sequence: Vec<_> = leaders
             .into_iter()
             .filter_map(|leader| leader.into_decided_block())
             .collect();
@@ -660,7 +675,7 @@ impl<H: BlockHandler> Core<H> {
             self.epoch_manager.epoch_change_begun();
         }
 
-        sequence
+        (sequence, any_decided)
     }
 
     pub fn cleanup(&mut self) -> RoundNumber {
@@ -723,7 +738,7 @@ impl<H: BlockHandler> Core<H> {
         true
     }
 
-    pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>) {
+    pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>, any_decided: bool) {
         let mut commit_data = vec![];
         for commit in &committed {
             self.dag_state
@@ -742,7 +757,7 @@ impl<H: BlockHandler> Core<H> {
             .store_commits_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
-        if !committed.is_empty() {
+        if any_decided {
             self.persist_to_storage("Core::commit");
         }
     }
