@@ -168,7 +168,7 @@ impl ShardReconstructor {
         let info_length = committee.info_length();
         let committee_size = committee.len();
 
-        let (shard_tx, shard_rx) = mpsc::channel(4096);
+        let (shard_tx, shard_rx) = mpsc::channel(10_000);
         let (ready_tx, ready_rx) = mpsc::channel(1000);
         let (result_tx, result_rx) = mpsc::channel(1000);
 
@@ -231,7 +231,6 @@ impl ShardReconstructor {
                             );
 
                             if let Some(storage_block) = result {
-                                metrics.reconstructed_blocks_total.inc();
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
                                 if result_tx
@@ -374,6 +373,9 @@ impl ShardReconstructor {
             return;
         }
         let blocks = std::mem::take(&mut self.pending_decoded);
+        self.metrics
+            .reconstructed_blocks_total
+            .inc_by(blocks.len() as u64);
         if self.decoded_tx.send(blocks).await.is_err() {
             tracing::warn!("Decoded blocks channel closed");
         }

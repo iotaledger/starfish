@@ -86,12 +86,14 @@ impl StatusFilter {
     /// fully covered.
     fn transition(&mut self, status: &Status, info_length: usize) -> bool {
         match (status, &*self) {
-            (_, StatusFilter::Full) => true,
-            (Status::Header, _) => true,
+            // Full blocks always pass — they carry statements we may need
+            // even if we already counted enough shards.
             (Status::Full, _) => {
                 *self = StatusFilter::Full;
                 false
             }
+            (_, StatusFilter::Full) => true,
+            (Status::Header, _) => true,
             (Status::Shard(peer), StatusFilter::Shards { count, bitmap }) => {
                 let mask = 1u128 << peer;
                 if *bitmap & mask != 0 {
@@ -179,6 +181,11 @@ impl FilterForBlocks {
             }
             None => Some(StatusFilter::from_status(&status)),
         }
+    }
+
+    /// Returns `true` if the digest is already tracked in the filter.
+    fn contains(&self, digest: &BlockDigest) -> bool {
+        self.digests.read().contains_key(digest)
     }
 
     /// Checks whether the batch is needed based on each digest and status,
@@ -405,57 +412,55 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
 
             // Send shard to reconstructor for off-critical-path decoding
-            {
-                let shard_tx_guard = self.inner.shard_tx.lock();
-                if let (Some(shard_tx), Some((shard, shard_index))) =
-                    (shard_tx_guard.as_ref(), block.encoded_shard().clone())
-                {
-                    let _ = shard_tx.try_send(ShardMessage::Shard {
-                        block_reference: *block.reference(),
-                        shard,
-                        shard_index,
-                        block_template: Box::new(block.clone()),
-                    });
+            if let Some((shard, shard_index)) = block.encoded_shard().clone() {
+                let maybe_tx = self.inner.shard_tx.lock().clone();
+                if let Some(shard_tx) = maybe_tx {
+                    let _ = shard_tx
+                        .send(ShardMessage::Shard {
+                            block_reference: *block.reference(),
+                            shard,
+                            shard_index,
+                            block_template: Box::new(block.clone()),
+                        })
+                        .await;
                 }
             }
             verified_blocks.push(block);
         }
 
-        let verified_statuses: Vec<_> = verified_blocks
-            .iter()
-            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
-            .collect();
-        let needed_after_verify = self.filter_for_blocks.needed_batch(&verified_statuses);
-        let mut verified_data_blocks = Vec::new();
-
-        for (storage_block, is_needed) in verified_blocks.into_iter().zip(needed_after_verify) {
-            if !is_needed {
-                self.metrics.processed_after_filtering_total.inc();
-                continue;
+        // Partition verified blocks: only the very first appearance of a block
+        // (not yet in filter) goes to core. Once the filter has an entry — even
+        // as Shards or Full — subsequent arrivals only go to the reconstructor.
+        let mut new_data_blocks = Vec::new();
+        let mut batch_with_status = Vec::new();
+        for storage_block in verified_blocks {
+            let digest = storage_block.digest();
+            let status = Status::get_status(&storage_block, self.peer_usize);
+            let send_to_core = !self.filter_for_blocks.contains(&digest);
+            batch_with_status.push((digest, status));
+            if send_to_core {
+                let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
+                new_data_blocks.push((Data::new(storage_block), Data::new(transmission_block)));
             }
-            let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
-            let data_storage_block = Data::new(storage_block);
-            let data_transmission_block = Data::new(transmission_block);
-            verified_data_blocks.push((data_storage_block, data_transmission_block));
+        }
+
+        // Always update the filter for all verified blocks (shards count
+        // toward reconstruction threshold).
+        if !batch_with_status.is_empty() {
+            self.filter_for_blocks.add_batch(batch_with_status);
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, {} blocks without statements {:?}",
+            "To be processed after verification from {:?}, {} new blocks without statements {:?}",
             self.peer,
-            verified_data_blocks.len(),
-            verified_data_blocks
+            new_data_blocks.len(),
+            new_data_blocks
         );
-        if !verified_data_blocks.is_empty() {
-            let mut batch_with_status = Vec::new();
-            for block in &verified_data_blocks {
-                batch_with_status.push((
-                    block.0.digest(),
-                    Status::get_status(&block.0, self.peer_usize),
-                ))
-            }
-            self.filter_for_blocks.add_batch(batch_with_status);
+        // Only send first-appearance blocks to core (subsequent shards
+        // already went to the shard reconstructor above).
+        if !new_data_blocks.is_empty() {
             let (_, missing_parents, processed_additional_blocks_without_statements) =
-                self.inner.syncer.add_blocks(verified_data_blocks).await;
+                self.inner.syncer.add_blocks(new_data_blocks).await;
             if matches!(
                 self.consensus_protocol,
                 ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
