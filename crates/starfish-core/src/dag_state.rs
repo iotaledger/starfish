@@ -501,9 +501,9 @@ impl DagState {
     pub fn attach_transaction_data(
         &self,
         block_ref: BlockReference,
-        transaction_data: TransactionData,
-        shard_data: ProvableShard,
-    ) {
+        transaction_data: &TransactionData,
+        shard_data: &ProvableShard,
+    ) -> bool {
         let mut inner = self.dag_state_inner.write();
 
         // Clone the header from the existing block (immutable borrow, dropped at block
@@ -514,16 +514,17 @@ impl DagState {
                 .get(&block_ref.round)
                 .and_then(|m| m.get(&(block_ref.authority, block_ref.digest)));
             match existing {
+                Some(b) if b.has_transaction_data() => return true,
                 Some(b) => b.header().clone(),
-                None => return,
+                None => return false,
             }
         };
 
         // Build and persist the updated block.
         let updated = Data::new(VerifiedBlock::from_parts(
             header,
-            Some(transaction_data),
-            Some(shard_data),
+            Some(transaction_data.clone()),
+            Some(shard_data.clone()),
         ));
         self.store
             .store_block(updated.clone())
@@ -542,6 +543,7 @@ impl DagState {
             inner.pending_acknowledgment.push(block_ref);
         }
         *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
+        true
     }
 
     pub fn len_expensive(&self) -> usize {

@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
 
 use crate::{
@@ -46,6 +46,7 @@ macro_rules! timed {
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: Vec<MetaStatement>,
+    pending_reconstructed_data: AHashMap<BlockReference, ReconstructedTransactionData>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
@@ -172,6 +173,7 @@ impl<H: BlockHandler> Core<H> {
             block_manager,
             store,
             pending,
+            pending_reconstructed_data: AHashMap::new(),
             last_own_block: vec![last_own_block],
             block_handler,
             authority,
@@ -273,6 +275,7 @@ impl<H: BlockHandler> Core<H> {
                 .add_block(*processed.reference(), &self.committee);
             self.pending
                 .push(MetaStatement::Include(*processed.reference()));
+            self.attach_pending_transaction_data(processed);
             result.push(processed.clone());
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
@@ -290,11 +293,36 @@ impl<H: BlockHandler> Core<H> {
     /// connected.
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         for item in items {
-            self.dag_state.attach_transaction_data(
-                item.block_reference,
-                item.transaction_data,
-                item.shard_data,
-            );
+            self.attach_or_buffer_transaction_data(item);
+        }
+    }
+
+    fn attach_or_buffer_transaction_data(&mut self, item: ReconstructedTransactionData) {
+        if !self.dag_state.attach_transaction_data(
+            item.block_reference,
+            &item.transaction_data,
+            &item.shard_data,
+        ) {
+            self.pending_reconstructed_data.insert(item.block_reference, item);
+        }
+    }
+
+    fn attach_pending_transaction_data(&mut self, block: &Data<VerifiedBlock>) {
+        let block_ref = *block.reference();
+        let Some(item) = self.pending_reconstructed_data.remove(&block_ref) else {
+            return;
+        };
+
+        if block.has_transaction_data() {
+            return;
+        }
+
+        if !self.dag_state.attach_transaction_data(
+            item.block_reference,
+            &item.transaction_data,
+            &item.shard_data,
+        ) {
+            self.pending_reconstructed_data.insert(block_ref, item);
         }
     }
 
@@ -682,6 +710,8 @@ impl<H: BlockHandler> Core<H> {
     pub fn cleanup(&mut self) -> RoundNumber {
         self.dag_state.cleanup();
         let threshold = self.dag_state.gc_round();
+        self.pending_reconstructed_data
+            .retain(|block_ref, _| block_ref.round >= threshold);
         self.committer.cleanup(threshold);
         threshold
     }
