@@ -906,7 +906,7 @@ impl DagStateInner {
         self.update_dag(
             *reference,
             block.block_references().clone(),
-            block.acknowledgment_references().clone(),
+            block.acknowledgments(),
         );
         self.update_data_availability(&block);
     }

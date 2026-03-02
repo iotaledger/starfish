@@ -364,12 +364,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         // Forward useful-authors feedback to CordialKnowledge
         if useful_headers_authors != 0 || useful_shards_authors != 0 {
+            let max_round = full_blocks
+                .iter()
+                .chain(headers.iter())
+                .map(|b| b.round())
+                .max()
+                .unwrap_or(0);
             self.inner
                 .cordial_knowledge
                 .send(CordialKnowledgeMessage::UsefulAuthors {
                     peer: self.peer_id,
                     headers: useful_headers_authors,
                     shards: useful_shards_authors,
+                    round: max_round,
                 });
         }
 
@@ -389,8 +396,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     ck.mark_header_known(*parent_ref);
                 }
                 // Peer knows the shard of every acknowledged block
-                for ack_ref in block.acknowledgment_references() {
-                    ck.mark_shard_known(*ack_ref);
+                for ack_ref in block.acknowledgments() {
+                    ck.mark_shard_known(ack_ref);
                 }
             }
             for shard in &shards {
@@ -574,8 +581,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
             }
-            let (_, missing_parents, processed_additional_blocks_without_statements) =
-                self.inner.syncer.add_blocks(new_data_blocks).await;
+            let (missing_parents, processed_additional_refs) =
+                self.inner.syncer.add_headers(new_data_blocks).await;
             if matches!(
                 self.consensus_protocol,
                 ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
@@ -594,7 +601,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             self.metrics
                 .used_additional_blocks_total
-                .inc_by(processed_additional_blocks_without_statements.len() as u64);
+                .inc_by(processed_additional_refs.len() as u64);
         }
     }
 

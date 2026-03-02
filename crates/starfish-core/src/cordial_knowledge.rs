@@ -51,6 +51,7 @@ pub enum CordialKnowledgeMessage {
         peer: AuthorityIndex,
         headers: u128,
         shards: u128,
+        round: RoundNumber,
     },
     /// Evict entries below these per-authority rounds.
     EvictBelow(Vec<RoundNumber>),
@@ -235,8 +236,8 @@ impl ConnectionKnowledge {
     }
 
     /// Process useful-authors feedback received from this peer's batch.
-    /// The bitmasks indicate which authorities the peer would find useful
-    /// headers/shards from.
+    /// Updates `_from_peer` fields based on our local not-known frontiers.
+    #[allow(dead_code)]
     pub fn update_useful_authors_from_peer(&mut self, headers_bitmask: u128, shards_bitmask: u128) {
         for i in 0..self.committee_size {
             if headers_bitmask & (1u128 << i) != 0 {
@@ -249,6 +250,36 @@ impl ConnectionKnowledge {
             if shards_bitmask & (1u128 << i) != 0 {
                 if let Some(latest) = self.shards_not_known[i].keys().next_back() {
                     self.last_useful_shards_from_peer_round[i] = Some(*latest);
+                }
+            }
+        }
+    }
+
+    /// Update which authorities' data the peer wants from us. The bitmasks
+    /// come from the peer's `BlockBatch` and `round` is the max round of that
+    /// batch. Updates are monotonic — only applied if `round` exceeds the
+    /// previously recorded value.
+    pub fn update_useful_authors_to_peer(
+        &mut self,
+        headers_bitmask: u128,
+        shards_bitmask: u128,
+        round: RoundNumber,
+    ) {
+        for i in 0..self.committee_size {
+            if headers_bitmask & (1u128 << i) != 0 {
+                let entry = &mut self.last_useful_headers_to_peer_round[i];
+                match entry {
+                    Some(r) if round > *r => *r = round,
+                    None => *entry = Some(round),
+                    _ => {}
+                }
+            }
+            if shards_bitmask & (1u128 << i) != 0 {
+                let entry = &mut self.last_useful_shards_to_peer_round[i];
+                match entry {
+                    Some(r) if round > *r => *r = round,
+                    None => *entry = Some(round),
+                    _ => {}
                 }
             }
         }
@@ -343,12 +374,13 @@ impl CordialKnowledge {
                     peer,
                     headers,
                     shards,
+                    round,
                 } => {
                     let idx = peer as usize;
                     if idx < self.committee_size {
                         self.connection_knowledges[idx]
                             .write()
-                            .update_useful_authors_from_peer(headers, shards);
+                            .update_useful_authors_to_peer(headers, shards, round);
                     }
                 }
                 CordialKnowledgeMessage::EvictBelow(rounds) => {
@@ -494,6 +526,62 @@ mod tests {
         assert_eq!(headers, 0);
         // authority 2, round 10 + 40 >= 20 → still useful
         assert_ne!(shards & (1u128 << 2), 0);
+    }
+
+    #[test]
+    fn test_update_useful_authors_to_peer() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+
+        // Authority 0 and 2 are useful at round 10
+        let bitmask = (1u128 << 0) | (1u128 << 2);
+        ck.update_useful_authors_to_peer(bitmask, bitmask, 10);
+        assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(10));
+        assert_eq!(ck.last_useful_headers_to_peer_round[2], Some(10));
+        assert_eq!(ck.last_useful_shards_to_peer_round[0], Some(10));
+        assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
+        // Authority 1 untouched
+        assert_eq!(ck.last_useful_headers_to_peer_round[1], None);
+
+        // Monotonic: round 5 should NOT overwrite round 10
+        ck.update_useful_authors_to_peer(bitmask, bitmask, 5);
+        assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(10));
+
+        // Higher round updates
+        ck.update_useful_authors_to_peer(1u128 << 0, 0, 15);
+        assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(15));
+        // Shards for authority 0 unchanged (shards bitmask was 0)
+        assert_eq!(ck.last_useful_shards_to_peer_round[0], Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_actor_useful_authors_updates_to_peer() {
+        let (handle, actor) = CordialKnowledgeHandle::new(4, 0);
+        let actor_task = tokio::spawn(actor.run());
+
+        // Peer 1 tells us authorities 0 and 2 are useful at round 10
+        let bitmask = (1u128 << 0) | (1u128 << 2);
+        handle.send(CordialKnowledgeMessage::UsefulAuthors {
+            peer: 1,
+            headers: bitmask,
+            shards: bitmask,
+            round: 10,
+        });
+
+        tokio::task::yield_now().await;
+
+        {
+            let ck = handle.connection_knowledge(1).unwrap();
+            let ck = ck.read();
+            assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(10));
+            assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
+            // Bitmask produces useful_authors_bitmasks output at round 20
+            let (h, s) = ck.useful_authors_bitmasks(20);
+            assert_ne!(h & (1u128 << 0), 0);
+            assert_ne!(s & (1u128 << 2), 0);
+        }
+
+        drop(handle);
+        actor_task.await.ok();
     }
 
     #[tokio::test]
