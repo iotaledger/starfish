@@ -56,6 +56,7 @@ impl From<VultrInstance> for Instance {
             tags: instance.tags,
             specs: instance.plan,
             status: instance.power_status.as_str().into(),
+            spot: false,
         }
     }
 }

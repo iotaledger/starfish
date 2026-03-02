@@ -12,7 +12,7 @@ use std::{
 };
 
 use reqwest::Url;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DisplayFromStr, DurationSeconds, serde_as};
 
 use crate::{
@@ -65,6 +65,45 @@ pub enum CloudProvider {
     Aws,
     #[serde(alias = "vultr")]
     Vultr,
+}
+
+/// Controls EC2 instance purchasing strategy.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpotPolicy {
+    /// Always use on-demand instances.
+    #[default]
+    OnDemand,
+    /// Always use spot instances (cheapest but may be interrupted).
+    Spot,
+    /// Try spot first; fall back to on-demand if capacity is unavailable.
+    Mixed,
+}
+
+impl<'de> Deserialize<'de> for SpotPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Str(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Bool(true) => Ok(SpotPolicy::Spot),
+            Raw::Bool(false) => Ok(SpotPolicy::OnDemand),
+            Raw::Str(s) => match s.to_lowercase().as_str() {
+                "on_demand" | "ondemand" | "false" => Ok(SpotPolicy::OnDemand),
+                "spot" | "true" => Ok(SpotPolicy::Spot),
+                "mixed" => Ok(SpotPolicy::Mixed),
+                _ => Err(serde::de::Error::custom(format!(
+                    "unknown spot policy '{s}', expected on_demand | spot | mixed"
+                ))),
+            },
+        }
+    }
 }
 
 /// The testbed settings. Those are topically specified in a file.
@@ -159,10 +198,11 @@ pub struct Settings {
     /// orchestrator treats it as a local path and SCPs it to each machine.
     #[serde(default)]
     pub pre_built_binary: Option<String>,
-    /// Whether to use EC2 Spot Instances instead of On-Demand. Spot
-    /// instances are significantly cheaper but may be interrupted.
+    /// EC2 instance purchasing strategy: on_demand, spot, or mixed.
+    /// Accepts booleans for backwards compatibility (true → spot, false →
+    /// on_demand).
     #[serde(default)]
-    pub spot: bool,
+    pub spot: SpotPolicy,
 }
 
 mod defaults {
@@ -305,6 +345,7 @@ impl Settings {
             tags: vec!["monitoring".into()],
             specs: "external".into(),
             status: InstanceStatus::Active,
+            spot: false,
         }))
     }
 

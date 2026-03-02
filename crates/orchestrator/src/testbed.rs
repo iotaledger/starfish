@@ -168,6 +168,9 @@ impl<C: ServerProviderClient> Testbed<C> {
             }
         }
 
+        let spot_count = instances.iter().filter(|i| i.spot).count();
+        let on_demand_count = instances.len() - spot_count;
+
         // Wait until the instances are booted.
         if cfg!(not(test)) {
             self.wait_until_reachable(instances.iter()).await?;
@@ -175,6 +178,12 @@ impl<C: ServerProviderClient> Testbed<C> {
         self.instances = self.client.list_instances().await?;
 
         display::done();
+        if spot_count > 0 || on_demand_count > 0 {
+            display::config(
+                "Instances",
+                format!("{spot_count} spot, {on_demand_count} on-demand"),
+            );
+        }
         Ok(())
     }
 

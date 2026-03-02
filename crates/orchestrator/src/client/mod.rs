@@ -48,6 +48,9 @@ pub struct Instance {
     pub specs: String,
     /// The current status of the instance.
     pub status: InstanceStatus,
+    /// Whether this instance was launched as a spot instance.
+    #[serde(default)]
+    pub spot: bool,
 }
 
 impl Instance {
@@ -82,6 +85,7 @@ impl Instance {
             tags: Default::default(),
             specs: Default::default(),
             status: InstanceStatus::Active,
+            spot: false,
         }
     }
 }
@@ -215,6 +219,7 @@ pub mod test_client {
                 tags: Vec::new(),
                 specs: self.settings.specs.clone(),
                 status: InstanceStatus::Active,
+                spot: false,
             };
             guard.push(instance.clone());
             Ok(instance)

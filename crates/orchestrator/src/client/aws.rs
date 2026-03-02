@@ -28,7 +28,7 @@ use serde::Serialize;
 use super::{Instance, ServerProviderClient};
 use crate::{
     error::{CloudProviderError, CloudProviderResult},
-    settings::Settings,
+    settings::{Settings, SpotPolicy},
 };
 
 // Make a request error from an AWS error message.
@@ -108,7 +108,7 @@ impl AwsClient {
 
     /// Convert an AWS instance into an orchestrator instance (used in the rest
     /// of the codebase).
-    fn make_instance(&self, region: String, aws_instance: &AwsInstance) -> Instance {
+    fn make_instance(&self, region: String, aws_instance: &AwsInstance, spot: bool) -> Instance {
         Instance {
             id: aws_instance
                 .instance_id()
@@ -132,6 +132,7 @@ impl AwsClient {
                     .instance_type()
                     .expect("AWS instance should have a type")
             ),
+            spot,
             status: format!(
                 "{:?}",
                 aws_instance
@@ -286,7 +287,10 @@ impl ServerProviderClient for AwsClient {
             let request = client.describe_instances().filters(filter.clone());
             for reservation in request.send().await?.reservations() {
                 for instance in reservation.instances() {
-                    instances.push(self.make_instance(region.clone(), instance));
+                    let is_spot = instance
+                        .instance_lifecycle()
+                        .is_some_and(|l| l.as_str() == "spot");
+                    instances.push(self.make_instance(region.clone(), instance, is_spot));
                 }
             }
         }
@@ -360,52 +364,59 @@ impl ServerProviderClient for AwsClient {
             }
         };
 
-        // Create a new instance.
-        let tags = TagSpecificationBuilder::default()
-            .resource_type(ResourceType::Instance)
-            .tags(TagBuilder::default().key("Name").value(testbed_id).build())
-            .build();
-
-        let storage = BlockDeviceMappingBuilder::default()
-            .device_name("/dev/sda1")
-            .ebs(
-                EbsBlockDeviceBuilder::default()
-                    .delete_on_termination(true)
-                    .volume_size(Self::DEFAULT_EBS_SIZE_GB)
-                    .volume_type(VolumeType::Gp2)
-                    .build(),
-            )
-            .build();
-
-        let mut request = client
-            .run_instances()
-            .image_id(image_id)
-            .instance_type(self.settings.specs.as_str().into())
-            .key_name(testbed_id)
-            .min_count(1)
-            .max_count(1)
-            .security_groups(&self.settings.testbed_id)
-            .block_device_mappings(storage)
-            .tag_specifications(tags);
-
-        if self.settings.spot {
-            let spot_options = SpotMarketOptionsBuilder::default()
-                .spot_instance_type(SpotInstanceType::OneTime)
+        let build_request = |spot: bool| {
+            let tags = TagSpecificationBuilder::default()
+                .resource_type(ResourceType::Instance)
+                .tags(TagBuilder::default().key("Name").value(testbed_id).build())
                 .build();
-            let market_options = InstanceMarketOptionsRequestBuilder::default()
-                .market_type(MarketType::Spot)
-                .spot_options(spot_options)
+            let storage = BlockDeviceMappingBuilder::default()
+                .device_name("/dev/sda1")
+                .ebs(
+                    EbsBlockDeviceBuilder::default()
+                        .delete_on_termination(true)
+                        .volume_size(Self::DEFAULT_EBS_SIZE_GB)
+                        .volume_type(VolumeType::Gp2)
+                        .build(),
+                )
                 .build();
-            request = request.instance_market_options(market_options);
-        }
+            let mut req = client
+                .run_instances()
+                .image_id(&image_id)
+                .instance_type(self.settings.specs.as_str().into())
+                .key_name(testbed_id)
+                .min_count(1)
+                .max_count(1)
+                .security_groups(&self.settings.testbed_id)
+                .block_device_mappings(storage)
+                .tag_specifications(tags);
+            if spot {
+                let spot_options = SpotMarketOptionsBuilder::default()
+                    .spot_instance_type(SpotInstanceType::OneTime)
+                    .build();
+                let market_options = InstanceMarketOptionsRequestBuilder::default()
+                    .market_type(MarketType::Spot)
+                    .spot_options(spot_options)
+                    .build();
+                req = req.instance_market_options(market_options);
+            }
+            req
+        };
 
-        let response = request.send().await?;
+        let use_spot = matches!(self.settings.spot, SpotPolicy::Spot | SpotPolicy::Mixed);
+        let (response, got_spot) = match build_request(use_spot).send().await {
+            Ok(resp) => (resp, use_spot),
+            Err(e) if self.settings.spot == SpotPolicy::Mixed => {
+                eprintln!("Spot request failed in {region}, retrying as on-demand: {e}");
+                (build_request(false).send().await?, false)
+            }
+            Err(e) => return Err(e.into()),
+        };
         let instance = &response
             .instances()
             .first()
             .expect("AWS instances list should contain instances");
 
-        Ok(self.make_instance(region, instance))
+        Ok(self.make_instance(region, instance, got_spot))
     }
 
     async fn delete_instance(&self, instance: Instance) -> CloudProviderResult<()> {
