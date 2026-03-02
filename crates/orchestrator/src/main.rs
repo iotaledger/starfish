@@ -137,6 +137,11 @@ pub enum Operation {
         /// parameters file. Available options: rocksdb | tidehunter
         #[clap(long, value_name = "STRING", global = true)]
         storage_backend: Option<String>,
+
+        /// Transaction payload mode. Overrides the value from the
+        /// parameters file. Available options: all_zero | random
+        #[clap(long, value_name = "STRING", global = true)]
+        transaction_mode: Option<String>,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -461,6 +466,7 @@ async fn run<C: ServerProviderClient>(
             skip_testbed_configuration,
             enable_tracing,
             storage_backend,
+            transaction_mode,
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
@@ -502,6 +508,15 @@ async fn run<C: ServerProviderClient>(
                     "tidehunter" => starfish_core::config::StorageBackend::Tidehunter,
                     other => eyre::bail!(
                         "Unknown storage backend '{other}'. Use 'rocksdb' or 'tidehunter'."
+                    ),
+                };
+            }
+            if let Some(ref mode) = transaction_mode {
+                client_parameters.transaction_mode = match mode.as_str() {
+                    "all_zero" => starfish_core::config::TransactionMode::AllZero,
+                    "random" => starfish_core::config::TransactionMode::Random,
+                    other => eyre::bail!(
+                        "Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."
                     ),
                 };
             }

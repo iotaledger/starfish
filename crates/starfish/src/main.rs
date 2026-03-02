@@ -19,7 +19,10 @@ use eyre::{Context, Result};
 use prettytable::format;
 use starfish_core::{
     committee::Committee,
-    config::{ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig, Parameters},
+    config::{
+        ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig, Parameters,
+        StorageBackend, TransactionMode,
+    },
     metrics::Metrics,
     types::AuthorityIndex,
     validator::Validator,
@@ -88,6 +91,12 @@ enum Operation {
         /// Default: 127.0.0.1
         #[clap(long, value_name = "IP")]
         base_ip: Option<IpAddr>,
+        /// Storage backend for the DAG: rocksdb | tidehunter
+        #[clap(long, value_name = "STRING")]
+        storage_backend: Option<String>,
+        /// Transaction payload mode: all_zero | random
+        #[clap(long, value_name = "STRING")]
+        transaction_mode: Option<String>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -156,6 +165,8 @@ async fn main() -> Result<()> {
             consensus: consensus_protocol,
             data_dir,
             base_ip,
+            storage_backend,
+            transaction_mode,
         } => {
             dryrun(
                 authority,
@@ -167,6 +178,8 @@ async fn main() -> Result<()> {
                 consensus_protocol,
                 data_dir,
                 base_ip,
+                storage_backend,
+                transaction_mode,
             )
             .await?
         }
@@ -472,6 +485,8 @@ async fn dryrun(
     consensus_protocol: String,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
+    storage_backend: Option<String>,
+    transaction_mode: Option<String>,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
@@ -490,7 +505,23 @@ async fn dryrun(
         None => vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size],
     };
     let committee = Committee::new_for_benchmarks(committee_size);
-    let parameters = Parameters::almost_default(load);
+    let mut parameters = Parameters::almost_default(load);
+    if let Some(ref backend) = storage_backend {
+        parameters.storage_backend = match backend.as_str() {
+            "rocksdb" => StorageBackend::Rocksdb,
+            "tidehunter" => StorageBackend::Tidehunter,
+            other => {
+                eyre::bail!("Unknown storage backend '{other}'. Use 'rocksdb' or 'tidehunter'.")
+            }
+        };
+    }
+    if let Some(ref mode) = transaction_mode {
+        parameters.transaction_mode = match mode.as_str() {
+            "all_zero" => TransactionMode::AllZero,
+            "random" => TransactionMode::Random,
+            other => eyre::bail!("Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."),
+        };
+    }
     let mut node_parameters = NodeParameters::default_with_latency(mimic_latency);
     if let Some(latency) = uniform_latency_ms {
         node_parameters.uniform_latency_ms = Some(latency);

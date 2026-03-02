@@ -5,7 +5,7 @@
 #----------------------------------------------------------------------
 # Recommend < physical cores. Hard limit is 128
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}
-DESIRED_TPS=${DESIRED_TPS:-100}
+DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-pull,
 #          cordial-miners, mysticeti
 CONSENSUS=${CONSENSUS:-starfish-s}
@@ -18,6 +18,10 @@ TEST_TIME=${TEST_TIME:-300}
 # Optional: set to use uniform latency (ms)
 # instead of AWS RTT table
 # UNIFORM_LATENCY_MS=100
+# Storage backend: rocksdb (default) | tidehunter
+STORAGE_BACKEND=rocksdb
+# Transaction payload mode: all_zero (default) | random
+TRANSACTION_MODE=all_zero
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
@@ -298,6 +302,14 @@ EOH
             LATENCY_FLAGS+=" $UNIFORM_LATENCY_MS"
         fi
 
+        PARAM_FLAGS=""
+        if [ -n "${STORAGE_BACKEND:-}" ]; then
+            PARAM_FLAGS+=" --storage-backend $STORAGE_BACKEND"
+        fi
+        if [ -n "${TRANSACTION_MODE:-}" ]; then
+            PARAM_FLAGS+=" --transaction-mode $TRANSACTION_MODE"
+        fi
+
         cat <<EOV
 
   validator-$i:
@@ -313,6 +325,7 @@ EOH
       --data-dir /data
       $LATENCY_FLAGS
       $EXTRA_FLAGS
+      $PARAM_FLAGS
     environment:
       - RUST_BACKTRACE=1
       - RUST_LOG=$RUST_LOG
