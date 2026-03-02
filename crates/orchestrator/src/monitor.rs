@@ -24,6 +24,7 @@ pub struct Monitor {
     nodes: Vec<Instance>,
     ssh_manager: SshConnectionManager,
     working_dir: PathBuf,
+    scrape_over_public_ip: bool,
 }
 
 impl Monitor {
@@ -34,6 +35,7 @@ impl Monitor {
         nodes: Vec<Instance>,
         ssh_manager: SshConnectionManager,
         working_dir: PathBuf,
+        scrape_over_public_ip: bool,
     ) -> Self {
         Self {
             instance,
@@ -41,6 +43,7 @@ impl Monitor {
             nodes,
             ssh_manager,
             working_dir,
+            scrape_over_public_ip,
         }
     }
 
@@ -73,11 +76,16 @@ impl Monitor {
     ) -> MonitorResult<()> {
         self.ensure_working_dir().await?;
 
+        let mut scrape_parameters = parameters.clone();
+        if self.scrape_over_public_ip {
+            scrape_parameters.use_internal_ip_address = false;
+        }
+
         let config = Prometheus::configuration(
             self.nodes.clone(),
             self.clients.clone(),
             protocol_commands,
-            parameters,
+            &scrape_parameters,
         );
         let remote_config: PathBuf = "prometheus.yml".into();
         let remote_config_path = self.working_dir.join(&remote_config);
@@ -259,7 +267,7 @@ impl Grafana {
     const DASHBOARDS_PATH: &'static str = "/etc/grafana/provisioning/dashboards";
 
     /// The default grafana port.
-    pub const DEFAULT_PORT: u16 = 3000;
+    pub const DEFAULT_PORT: u16 = 3100;
 
     /// The commands to install grafana.
     pub fn install_commands() -> Vec<&'static str> {
@@ -298,7 +306,11 @@ impl Grafana {
             ),
             // copy your default dashboard yaml/json
             &format!("sudo cp grafana-dashboard.json {}", Self::DASHBOARDS_PATH),
-            // Free the port in case another process occupies it.
+            // Set custom port and free it in case another process occupies it.
+            &format!(
+                "sudo sed -i 's/^;\\?http_port = .*/http_port = {}/' /etc/grafana/grafana.ini",
+                Self::DEFAULT_PORT
+            ),
             &format!("(sudo fuser -k {}/tcp || true)", Self::DEFAULT_PORT),
             "sudo service grafana-server restart",
         ]

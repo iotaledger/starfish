@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use ahash::AHashMap;
 use futures::future::join_all;
 use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::{
@@ -28,8 +29,8 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{Connection, Network, NetworkMessage},
-    rocks_store::RocksStore,
     runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
+    store::Store,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, DataRequester, SynchronizerParameters},
     types::{
@@ -42,9 +43,10 @@ const MAX_FILTER_SIZE: usize = 100_000;
 
 struct FilterForBlocks {
     info_length: usize,
-    digests: parking_lot::RwLock<HashMap<BlockDigest, StatusFilter>>,
+    digests: parking_lot::RwLock<AHashMap<BlockDigest, StatusFilter>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
 }
+#[derive(Clone, Copy)]
 enum Status {
     Full,
     Shard(usize),
@@ -61,6 +63,7 @@ impl Status {
         }
     }
 }
+#[derive(Clone, Copy)]
 enum StatusFilter {
     Full,
     Shards { count: usize, bitmap: u128 },
@@ -121,7 +124,7 @@ impl FilterForBlocks {
     fn new(info_length: usize) -> Self {
         Self {
             info_length,
-            digests: parking_lot::RwLock::new(HashMap::new()),
+            digests: parking_lot::RwLock::new(AHashMap::new()),
             queue: parking_lot::RwLock::new(VecDeque::new()),
         }
     }
@@ -161,32 +164,43 @@ impl FilterForBlocks {
         already_inserted
     }
 
-    ///  Checks whether the block is needed based on its digest and status.
-    fn is_needed(&self, digest: &BlockDigest, status: Status) -> bool {
-        match status {
-            Status::Header => {
-                // Header is needed if not already in the filter
-                !self.digests.read().contains_key(digest)
-            }
-            Status::Shard(peer) => {
-                // Shard is needed if not already in the filter
-                // or if the number of shards is not sufficient
-                let digests = self.digests.read();
-                match digests.get(digest) {
-                    Some(StatusFilter::Full) => false,
-                    Some(StatusFilter::Header) => true,
-                    Some(StatusFilter::Shards { count: _, bitmap }) => {
-                        let mask = 1u128 << peer;
-                        (*bitmap & mask) == 0
-                    }
-                    None => true,
+    fn preview_next_status(
+        &self,
+        current: Option<StatusFilter>,
+        status: Status,
+    ) -> Option<StatusFilter> {
+        match current {
+            Some(mut existing) => {
+                if existing.transition(&status, self.info_length) {
+                    None
+                } else {
+                    Some(existing)
                 }
             }
-            Status::Full => {
-                let digests = self.digests.read();
-                !matches!(digests.get(digest), Some(StatusFilter::Full))
-            }
+            None => Some(StatusFilter::from_status(&status)),
         }
+    }
+
+    /// Checks whether the batch is needed based on each digest and status,
+    /// taking a single read lock while simulating in-batch transitions locally.
+    fn needed_batch(&self, batch: &[(BlockDigest, Status)]) -> Vec<bool> {
+        let digests = self.digests.read();
+        let mut seen_in_batch = AHashMap::with_capacity(batch.len());
+
+        batch
+            .iter()
+            .map(|(digest, status)| {
+                let current = seen_in_batch
+                    .get(digest)
+                    .copied()
+                    .or_else(|| digests.get(digest).copied());
+                let Some(next) = self.preview_next_status(current, *status) else {
+                    return false;
+                };
+                seen_in_batch.insert(*digest, next);
+                true
+            })
+            .collect()
     }
 }
 
@@ -360,18 +374,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) {
         use crate::shard_reconstructor::ShardMessage;
 
-        let mut verified_data_blocks = Vec::new();
-        for data_block in blocks {
-            let mut block: VerifiedStatementBlock = (*data_block).clone();
-            tracing::debug!("Received {} from {}", block, self.peer);
-            let block_status = Status::get_status(&block, self.peer_usize);
-            if !self
-                .filter_for_blocks
-                .is_needed(&block.digest(), block_status)
-            {
+        let incoming_statuses: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
+            .collect();
+        let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
+        let mut verified_blocks = Vec::new();
+
+        for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
+            if !is_needed {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
+            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            tracing::debug!("Received {} from {}", block, self.peer);
             if let Err(e) = block.verify(
                 &self.inner.committee,
                 self.own_id as usize,
@@ -402,17 +418,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     });
                 }
             }
+            verified_blocks.push(block);
+        }
 
-            // Still send block (as header/shard) to Core for DAG tracking
-            let block_status = Status::get_status(&block, self.peer_usize);
-            if !self
-                .filter_for_blocks
-                .is_needed(&block.digest(), block_status)
-            {
+        let verified_statuses: Vec<_> = verified_blocks
+            .iter()
+            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
+            .collect();
+        let needed_after_verify = self.filter_for_blocks.needed_batch(&verified_statuses);
+        let mut verified_data_blocks = Vec::new();
+
+        for (storage_block, is_needed) in verified_blocks.into_iter().zip(needed_after_verify) {
+            if !is_needed {
                 self.metrics.processed_after_filtering_total.inc();
                 continue;
             }
-            let storage_block = block;
             let transmission_block = storage_block.from_storage_to_transmission(self.own_id);
             let data_storage_block = Data::new(storage_block);
             let data_transmission_block = Data::new(transmission_block);
@@ -459,18 +479,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn process_blocks_with_statements(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+        let incoming_statuses: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
+            .collect();
+        let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
         let mut verified_data_blocks = Vec::new();
-        for data_block in blocks {
-            let mut block: VerifiedStatementBlock = (*data_block).clone();
-            tracing::debug!("Received {} from {}", block, self.peer);
-            let block_status = Status::get_status(&block, self.peer_usize);
-            let contains_new_shard_or_header = self
-                .filter_for_blocks
-                .is_needed(&block.digest(), block_status);
-            if !contains_new_shard_or_header {
+
+        for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
+            if !is_needed {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
+            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            tracing::debug!("Received {} from {}", block, self.peer);
             if let Err(e) = block.verify(
                 &self.inner.committee,
                 self.own_id as usize,
@@ -696,7 +718,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
         let dag_state = core.dag_state().clone();
-        let rocks_store = core.rocks_store();
+        let store = core.store();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(core, notify.clone(), commit_observer, metrics.clone());
@@ -768,9 +790,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
         ));
-        let syncer_task =
-            AsyncRocksDBSyncer::start(stop_sender.clone(), epoch_sender, rocks_store.clone());
-        let flusher_task = AsyncRocksDBFlusher::start(stop_sender, rocks_store);
+        let syncer_task = AsyncStoreSyncer::start(stop_sender.clone(), epoch_sender, store.clone());
+        let flusher_task = AsyncStoreFlusher::start(stop_sender, store);
         Self {
             inner,
             main_task,
@@ -1049,36 +1070,36 @@ impl SyncerSignals for Arc<Notify> {
     }
 }
 
-pub struct AsyncRocksDBSyncer {
+pub struct AsyncStoreSyncer {
     stop: mpsc::Sender<()>,
     epoch_signal: mpsc::Sender<()>,
-    rocks_store: Arc<RocksStore>,
+    store: Arc<dyn Store>,
     runtime: tokio::runtime::Handle,
 }
 
-pub struct AsyncRocksDBFlusher {
+pub struct AsyncStoreFlusher {
     stop: mpsc::Sender<()>,
-    rocks_store: Arc<RocksStore>,
+    store: Arc<dyn Store>,
     runtime: tokio::runtime::Handle,
 }
 
-impl AsyncRocksDBSyncer {
+impl AsyncStoreSyncer {
     pub fn start(
         stop: mpsc::Sender<()>,
         epoch_signal: mpsc::Sender<()>,
-        rocks_store: Arc<RocksStore>,
+        store: Arc<dyn Store>,
     ) -> oneshot::Receiver<()> {
         let (_sender, receiver) = oneshot::channel();
         let this = Self {
             stop,
             epoch_signal,
-            rocks_store,
+            store,
             runtime: tokio::runtime::Handle::current(),
         };
         std::thread::Builder::new()
-            .name("rocksdb-syncer".to_string())
+            .name("store-syncer".to_string())
             .spawn(move || this.run())
-            .expect("Failed to spawn rocksdb-syncer");
+            .expect("Failed to spawn store-syncer");
         receiver
     }
 
@@ -1088,9 +1109,7 @@ impl AsyncRocksDBSyncer {
             if runtime.block_on(self.wait_next()) {
                 return;
             }
-            self.rocks_store
-                .sync()
-                .expect("Failed to sync rocksdb store");
+            self.store.sync().expect("Failed to sync store");
         }
     }
 
@@ -1110,18 +1129,18 @@ impl AsyncRocksDBSyncer {
     }
 }
 
-impl AsyncRocksDBFlusher {
-    pub fn start(stop: mpsc::Sender<()>, rocks_store: Arc<RocksStore>) -> oneshot::Receiver<()> {
+impl AsyncStoreFlusher {
+    pub fn start(stop: mpsc::Sender<()>, store: Arc<dyn Store>) -> oneshot::Receiver<()> {
         let (_sender, receiver) = oneshot::channel();
         let this = Self {
             stop,
-            rocks_store,
+            store,
             runtime: tokio::runtime::Handle::current(),
         };
         std::thread::Builder::new()
-            .name("rocksdb-flusher".to_string())
+            .name("store-flusher".to_string())
             .spawn(move || this.run())
-            .expect("Failed to spawn rocksdb-flusher");
+            .expect("Failed to spawn store-flusher");
         receiver
     }
 
@@ -1131,9 +1150,9 @@ impl AsyncRocksDBFlusher {
             if runtime.block_on(self.wait_next()) {
                 return;
             }
-            self.rocks_store
+            self.store
                 .flush_pending_batches()
-                .expect("Failed to flush rocksdb store");
+                .expect("Failed to flush store");
         }
     }
 

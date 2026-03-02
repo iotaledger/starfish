@@ -44,6 +44,17 @@ name = "ring"
 expression = "LicenseRef-ring"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
+# tidehunter and minibytes don't set `license` in Cargo.toml
+[[licenses.clarify]]
+name = "tidehunter"
+expression = "Apache-2.0"
+license-files = [{ path = "../LICENSE", hash = 0x9f085d70 }]
+
+[[licenses.clarify]]
+name = "minibytes"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x6b2d3210 }]
+
 [licenses.private]
 # If true, ignores workspace crates that aren't published, or are only
 # published to private registries.
@@ -68,6 +79,9 @@ skip = [
   # procfs (from prometheus process feature) uses older rustix/linux-raw-sys
   { name = "linux-raw-sys", version = "0.4" },
   { name = "rustix", version = "0.38" },
+  # tidehunter uses prometheus 0.14 (protobuf 3.x), starfish-core uses 0.13 (protobuf 2.x)
+  { name = "prometheus", version = "0.13" },
+  { name = "protobuf", version = "2" },
 ]
 skip-tree = [
   # aws-smithy-http-client depends on both hyper 0.14 and 1.x,
@@ -91,6 +105,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
   "https://github.com/asonnino/prometheus-parser",
+  "https://github.com/MystenLabs/tidehunter",
 ]
 
 [sources.allow-org]

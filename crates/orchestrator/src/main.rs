@@ -35,7 +35,7 @@ mod testbed;
 /// NOTE: Link these types to the correct protocol.
 type Protocol = protocol::starfish::StarfishProtocol;
 type NodeParameters = protocol::starfish::StarfishNodeParameters;
-type ClientParameters = protocol::starfish::StarfishClientParameters;
+type ClientParameters = protocol::starfish::StarfishParameters;
 
 /// The orchestrator command line options.
 #[derive(Parser, Debug)]
@@ -132,6 +132,16 @@ pub enum Operation {
         /// for debugging
         #[clap(long, action, default_value_t = false, global = true)]
         enable_tracing: bool,
+
+        /// Storage backend for the DAG. Overrides the value from the
+        /// parameters file. Available options: rocksdb | tidehunter
+        #[clap(long, value_name = "STRING", global = true)]
+        storage_backend: Option<String>,
+
+        /// Transaction payload mode. Overrides the value from the
+        /// parameters file. Available options: all_zero | random
+        #[clap(long, value_name = "STRING", global = true)]
+        transaction_mode: Option<String>,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -455,6 +465,8 @@ async fn run<C: ServerProviderClient>(
             skip_testbed_update,
             skip_testbed_configuration,
             enable_tracing,
+            storage_backend,
+            transaction_mode,
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
@@ -486,12 +498,28 @@ async fn run<C: ServerProviderClient>(
                 }
                 None => NodeParameters::default_with_latency(mimic_extra_latency),
             };
-            let client_parameters = match &settings.client_parameters_path {
-                Some(path) => {
-                    ClientParameters::load(path).wrap_err("Failed to load client's parameters")?
-                }
+            let mut client_parameters = match &settings.parameters_path {
+                Some(path) => ClientParameters::load(path).wrap_err("Failed to load parameters")?,
                 None => ClientParameters::default(),
             };
+            if let Some(ref backend) = storage_backend {
+                client_parameters.storage_backend = match backend.as_str() {
+                    "rocksdb" => starfish_core::config::StorageBackend::Rocksdb,
+                    "tidehunter" => starfish_core::config::StorageBackend::Tidehunter,
+                    other => eyre::bail!(
+                        "Unknown storage backend '{other}'. Use 'rocksdb' or 'tidehunter'."
+                    ),
+                };
+            }
+            if let Some(ref mode) = transaction_mode {
+                client_parameters.transaction_mode = match mode.as_str() {
+                    "all_zero" => starfish_core::config::TransactionMode::AllZero,
+                    "random" => starfish_core::config::TransactionMode::Random,
+                    other => eyre::bail!(
+                        "Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."
+                    ),
+                };
+            }
 
             let set_of_benchmark_parameters = BenchmarkParameters::new_from_loads(
                 settings.clone(),

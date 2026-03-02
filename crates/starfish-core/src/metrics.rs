@@ -94,6 +94,13 @@ pub struct Metrics {
 
     pub utilization_timer: IntCounterVec,
     pub submitted_transactions: IntCounter,
+    pub submitted_transactions_bytes: IntCounter,
+
+    // storage write metrics
+    pub store_block_latency_us: IntCounter,
+    pub store_block_count: IntCounter,
+    pub store_commits_latency_us: IntCounter,
+    pub store_commits_count: IntCounter,
 
     // tracking total bytes sent and received
     pub bytes_sent_total: IntCounter,
@@ -288,6 +295,36 @@ impl Metrics {
             submitted_transactions: register_int_counter_with_registry!(
                 "submitted_transactions",
                 "Total number of submitted transactions",
+                registry,
+            )
+            .unwrap(),
+            submitted_transactions_bytes: register_int_counter_with_registry!(
+                "submitted_transactions_bytes",
+                "Total bytes of submitted transactions",
+                registry,
+            )
+            .unwrap(),
+            store_block_latency_us: register_int_counter_with_registry!(
+                "store_block_latency_us",
+                "Cumulative store_block latency in microseconds",
+                registry,
+            )
+            .unwrap(),
+            store_block_count: register_int_counter_with_registry!(
+                "store_block_count",
+                "Total number of store_block calls",
+                registry,
+            )
+            .unwrap(),
+            store_commits_latency_us: register_int_counter_with_registry!(
+                "store_commits_latency_us",
+                "Cumulative store_commits latency in microseconds",
+                registry,
+            )
+            .unwrap(),
+            store_commits_count: register_int_counter_with_registry!(
+                "store_commits_count",
+                "Total number of store_commits calls",
                 registry,
             )
             .unwrap(),

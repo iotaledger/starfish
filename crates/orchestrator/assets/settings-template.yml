@@ -13,7 +13,7 @@ repository:
 # spot: true
 # External monitoring server (optional). Uses this server for Prometheus +
 # Grafana instead of allocating a cloud instance. Accepts [user@]host format.
-# The server must be reachable via SSH with the configured private key.
+# The server must authorize the same public key as ssh_private_key_file.
 # monitoring_server: root@monitor.example.com
 # Pre-built binary (optional). Skips source compilation on remote machines.
 # URL downloads via curl; local path SCPs to all machines.

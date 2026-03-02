@@ -26,9 +26,9 @@ use crate::{
     encoder::ShardEncoder,
     epoch_close::EpochManager,
     metrics::{Metrics, UtilizationTimerVecExt},
-    rocks_store::RocksStore,
     runtime::timestamp_utc,
     state::RecoveredState,
+    store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
         AuthorityIndex, BaseStatement, BlockReference, Encoder, RoundNumber, Shard,
@@ -49,7 +49,7 @@ pub struct Core<H: BlockHandler> {
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
-    rocks_store: Arc<RocksStore>,
+    store: Arc<dyn Store>,
     authority: AuthorityIndex,
     threshold_clock: ThresholdClockAggregator,
     pub(crate) committee: Arc<Committee>,
@@ -91,7 +91,7 @@ impl<H: BlockHandler> Core<H> {
     ) -> Self {
         let RecoveredState {
             dag_state,
-            rocks_store,
+            store,
             unprocessed_blocks,
             last_committed_leader,
             committed_blocks,
@@ -179,7 +179,7 @@ impl<H: BlockHandler> Core<H> {
 
         let this = Self {
             block_manager,
-            rocks_store,
+            store,
             pending,
             last_own_block: vec![last_own_block],
             block_handler,
@@ -734,9 +734,14 @@ impl<H: BlockHandler> Core<H> {
             }
             commit_data.push(CommitData::from(commit));
         }
-        self.rocks_store
+        let store_start = std::time::Instant::now();
+        self.store
             .store_commits(commit_data)
             .expect("Store commits should not fail");
+        self.metrics
+            .store_commits_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_commits_count.inc();
         if !committed.is_empty() {
             self.persist_to_storage("Core::commit");
         }
@@ -748,13 +753,13 @@ impl<H: BlockHandler> Core<H> {
                 .metrics
                 .utilization_timer
                 .utilization_timer(&format!("{label}::sync_with_disk"));
-            self.rocks_store.sync().expect("RocksDB sync failed");
+            self.store.sync().expect("Storage sync failed");
         } else {
             let _t = self
                 .metrics
                 .utilization_timer
                 .utilization_timer(&format!("{label}::flush_to_buffer"));
-            self.rocks_store.flush().expect("RocksDB sync failed");
+            self.store.flush().expect("Storage flush failed");
         }
     }
 
@@ -775,8 +780,8 @@ impl<H: BlockHandler> Core<H> {
     pub fn dag_state(&self) -> &DagState {
         &self.dag_state
     }
-    pub fn rocks_store(&self) -> Arc<RocksStore> {
-        self.rocks_store.clone()
+    pub fn store(&self) -> Arc<dyn Store> {
+        self.store.clone()
     }
 
     // This function is needed only for signalling that we created a new block

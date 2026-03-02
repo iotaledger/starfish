@@ -9,7 +9,7 @@ use ahash::AHashSet;
 use crate::{
     core::{MetaStatement, MetaStatement::Include},
     dag_state::CommitData,
-    rocks_store::RocksStore,
+    store::Store,
     types::VerifiedStatementBlock,
 };
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 
 pub struct RecoveredState {
     pub dag_state: DagState,
-    pub rocks_store: Arc<RocksStore>,
+    pub store: Arc<dyn Store>,
     pub unprocessed_blocks: Vec<(Data<VerifiedStatementBlock>, Data<VerifiedStatementBlock>)>,
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: AHashSet<BlockReference>,
@@ -70,10 +70,10 @@ impl RecoveredStateBuilder {
         self.committed_blocks.extend(commit_data.sub_dag);
     }
 
-    pub fn build(self, rocks_store: Arc<RocksStore>, dag_state: DagState) -> RecoveredState {
+    pub fn build(self, store: Arc<dyn Store>, dag_state: DagState) -> RecoveredState {
         RecoveredState {
             dag_state,
-            rocks_store,
+            store,
             unprocessed_blocks: self.unprocessed_blocks,
             last_committed_leader: self.last_committed_leader,
             committed_blocks: self.committed_blocks,

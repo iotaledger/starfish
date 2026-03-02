@@ -263,30 +263,65 @@ impl NodePrivateConfig {
 
 impl ImportExport for NodePrivateConfig {}
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ClientParameters {
-    /// The number of transactions to send to the network per second.
-    #[serde(default = "client_defaults::default_load")]
-    pub load: usize,
-    /// The size of transactions to send to the network in bytes.
-    #[serde(default = "client_defaults::default_transaction_size")]
-    pub transaction_size: usize,
-    /// The initial delay before starting to send transactions.
-    #[serde(default = "client_defaults::default_initial_delay")]
-    pub initial_delay: Duration,
+/// How transaction payloads are filled by the generator.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionMode {
+    /// 8 B timestamp + 8 B counter + zero-padded (current default).
+    #[default]
+    AllZero,
+    /// 8 B timestamp + random bytes for the rest.
+    Random,
 }
 
-impl ClientParameters {
+/// Which storage backend to use for the DAG.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageBackend {
+    #[default]
+    Rocksdb,
+    Tidehunter,
+}
+
+/// Unified experiment parameters — loaded from `parameters.yaml`.
+///
+/// Replaces the old `client-parameters.yaml`. Includes transaction generation
+/// knobs, storage backend selection, and consensus tuning in a single file.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Parameters {
+    /// Transactions per second (total; divided across nodes by the
+    /// orchestrator).
+    #[serde(default = "param_defaults::default_load")]
+    pub load: usize,
+    /// Size of each transaction in bytes.
+    #[serde(default = "param_defaults::default_transaction_size")]
+    pub transaction_size: usize,
+    /// Delay before the generator starts sending transactions.
+    #[serde(default = "param_defaults::default_initial_delay")]
+    pub initial_delay: Duration,
+    /// How to fill transaction payloads.
+    #[serde(default)]
+    pub transaction_mode: TransactionMode,
+    /// Which storage backend to use for the DAG.
+    #[serde(default)]
+    pub storage_backend: StorageBackend,
+    /// Leader timeout for the consensus protocol.
+    #[serde(default = "param_defaults::default_leader_timeout")]
+    pub leader_timeout: Duration,
+}
+
+impl Parameters {
+    pub const DEFAULT_FILENAME: &'static str = "parameters.yaml";
+
     pub fn almost_default(load: usize) -> Self {
         Self {
             load,
-            transaction_size: client_defaults::default_transaction_size(),
-            initial_delay: client_defaults::default_initial_delay(),
+            ..Self::default()
         }
     }
 }
 
-mod client_defaults {
+mod param_defaults {
     use super::Duration;
 
     pub fn default_load() -> usize {
@@ -300,16 +335,23 @@ mod client_defaults {
     pub fn default_initial_delay() -> Duration {
         Duration::from_secs(10)
     }
+
+    pub fn default_leader_timeout() -> Duration {
+        Duration::from_millis(600)
+    }
 }
 
-impl Default for ClientParameters {
+impl Default for Parameters {
     fn default() -> Self {
         Self {
-            load: client_defaults::default_load(),
-            transaction_size: client_defaults::default_transaction_size(),
-            initial_delay: client_defaults::default_initial_delay(),
+            load: param_defaults::default_load(),
+            transaction_size: param_defaults::default_transaction_size(),
+            initial_delay: param_defaults::default_initial_delay(),
+            transaction_mode: TransactionMode::default(),
+            storage_backend: StorageBackend::default(),
+            leader_timeout: param_defaults::default_leader_timeout(),
         }
     }
 }
 
-impl ImportExport for ClientParameters {}
+impl ImportExport for Parameters {}

@@ -289,7 +289,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     &format!("git checkout -B {commit} origin/{commit}"),
                     "source $HOME/.cargo/env",
                     "RUSTFLAGS=-Ctarget-cpu=native \
-                    cargo build --release --workspace \
+                    cargo build --release --all-features --workspace \
                     --exclude orchestrator",
                 ]
                 .join(" && ");
@@ -401,6 +401,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 nodes,
                 ssh_manager,
                 self.settings.monitoring_working_dir(),
+                self.settings.is_external_monitoring(),
             );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
@@ -416,6 +417,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     /// Install monitoring dependencies on the external monitoring server.
     async fn install_external_monitoring(&self) -> TestbedResult<()> {
         if let Some(instance) = self.settings.external_monitoring_instance()? {
+            // Newline so the message doesn't collide with the concurrent
+            // "Installing dependencies on all machines ..." progress line.
+            display::newline();
             display::action("Installing monitoring dependencies on external server");
 
             let ssh_manager = self.monitoring_ssh_manager();
@@ -700,9 +704,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Update the software on all instances.
         if !self.skip_testbed_update {
-            self.install().await?;
-            self.install_external_monitoring().await?;
-            self.update().await?;
+            tokio::try_join!(
+                async {
+                    self.install().await?;
+                    self.update().await
+                },
+                self.install_external_monitoring(),
+            )?;
         }
 
         // Run all benchmarks.

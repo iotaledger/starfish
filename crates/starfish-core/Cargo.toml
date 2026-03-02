@@ -33,10 +33,14 @@ serde = { workspace = true }
 serde_yaml = "0.9.21"
 tabled = "0.12.2"
 tempfile = { workspace = true } # todo - move to dev-dep
+tidehunter = { git = "https://github.com/MystenLabs/tidehunter", rev = "cfe208a", optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 zeroize = "1.6.0"
 zstd = { version = "0.13.3", default-features = false }
+
+[features]
+tidehunter = ["dep:tidehunter"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 prometheus = { version = "0.13.3", features = ["process"] }

@@ -19,6 +19,7 @@ use crate::{
     crypto::BlockDigest,
     dag_state::CommitData,
     data::Data,
+    store::Store,
     types::{BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 // Column families for different types of data
@@ -169,8 +170,8 @@ impl RocksStore {
         Ok(store)
     }
 
-    pub fn flush(&self) -> io::Result<()> {
-        self.flush_pending_batches()?;
+    fn do_flush(&self) -> io::Result<()> {
+        self.drain_pending_batches()?;
 
         // Then do regular flush of current batch
         // Quick check with read lock
@@ -226,7 +227,7 @@ impl RocksStore {
         Ok(())
     }
 
-    pub fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
+    fn do_store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
         let reference = block.reference();
         let size = block.serialized_bytes().len();
         let mut batch = self.batch.write();
@@ -242,7 +243,7 @@ impl RocksStore {
         Ok(())
     }
 
-    pub fn flush_pending_batches(&self) -> io::Result<()> {
+    fn drain_pending_batches(&self) -> io::Result<()> {
         loop {
             let ops = {
                 let mut pending = self.pending_batches.lock();
@@ -284,7 +285,7 @@ impl RocksStore {
         Ok(())
     }
 
-    pub fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
+    fn do_store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
         let mut batch = self.batch.write();
         for committed_sub_dag in committed_sub_dags {
             batch
@@ -294,7 +295,7 @@ impl RocksStore {
         Ok(())
     }
 
-    pub fn get_block(
+    fn do_get_block(
         &self,
         reference: &BlockReference,
     ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
@@ -335,7 +336,7 @@ impl RocksStore {
         }
     }
 
-    pub fn get_blocks_by_round(
+    fn do_get_blocks_by_round(
         &self,
         round: RoundNumber,
     ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
@@ -393,7 +394,7 @@ impl RocksStore {
         Ok(blocks)
     }
 
-    pub fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
+    fn do_get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
         // Check in-memory batch first
         let batch = self.batch.read();
         if let Some(commit) = batch.commits.get(reference) {
@@ -422,7 +423,7 @@ impl RocksStore {
         }
     }
 
-    pub fn sync(&self) -> io::Result<()> {
+    fn do_sync(&self) -> io::Result<()> {
         // Quick check with read lock
         {
             let batch_read = self.batch.read();
@@ -479,5 +480,45 @@ impl RocksStore {
         tracing::debug!("Data is synced with disk");
         *self.last_sync.write() = Instant::now();
         Ok(())
+    }
+}
+
+impl Store for RocksStore {
+    fn store_block(&self, block: Data<VerifiedStatementBlock>) -> io::Result<()> {
+        self.do_store_block(block)
+    }
+
+    fn get_block(
+        &self,
+        reference: &BlockReference,
+    ) -> io::Result<Option<Data<VerifiedStatementBlock>>> {
+        self.do_get_block(reference)
+    }
+
+    fn get_blocks_by_round(
+        &self,
+        round: RoundNumber,
+    ) -> io::Result<Vec<Data<VerifiedStatementBlock>>> {
+        self.do_get_blocks_by_round(round)
+    }
+
+    fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
+        self.do_store_commits(committed_sub_dags)
+    }
+
+    fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
+        self.do_get_commit(reference)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.do_flush()
+    }
+
+    fn flush_pending_batches(&self) -> io::Result<()> {
+        self.drain_pending_batches()
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        self.do_sync()
     }
 }
