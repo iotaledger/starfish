@@ -4,11 +4,11 @@
 
 use std::{cmp::min, sync::Arc, time::Duration};
 
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{ClientParameters, NodePublicConfig},
+    config::{ClientParameters, NodePublicConfig, TransactionMode},
     crypto::AsBytes,
     metrics::Metrics,
     runtime::{self, timestamp_utc},
@@ -68,11 +68,14 @@ impl TransactionGenerator {
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, transactions_per_block_interval);
 
-        let mut counter = 0;
+        let tx_size = self.client_parameters.transaction_size;
+        let mode = &self.client_parameters.transaction_mode;
+
+        let mut counter: u64 = 0;
         let mut tx_to_report = 0;
-        let mut random: u64 = self.rng.gen(); // 8 bytes
-        // 8 bytes timestamp + 8 bytes random
-        let zeros = vec![0u8; self.client_parameters.transaction_size - 8 - 8];
+        let mut random: u64 = self.rng.gen();
+        // Pre-allocated payload buffer reused in AllZero mode.
+        let zeros = vec![0u8; tx_size - 8 - 8];
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
         runtime::sleep(initial_delay_plus_extra_delay).await;
@@ -84,15 +87,24 @@ impl TransactionGenerator {
             let mut block = Vec::with_capacity(target_block_size);
             let mut block_size = 0;
             for _ in 0..transactions_per_block_interval {
-                random += counter;
-
-                let mut transaction = Vec::with_capacity(self.client_parameters.transaction_size);
+                let mut transaction = Vec::with_capacity(tx_size);
                 transaction.extend_from_slice(&timestamp); // 8 bytes
-                transaction.extend_from_slice(&random.to_le_bytes()); // 8 bytes
-                transaction.extend_from_slice(&zeros[..]);
+
+                match mode {
+                    TransactionMode::AllZero => {
+                        random += counter;
+                        transaction.extend_from_slice(&random.to_le_bytes()); // 8 bytes
+                        transaction.extend_from_slice(&zeros);
+                    }
+                    TransactionMode::Random => {
+                        // Fill remaining bytes with RNG.
+                        transaction.resize(tx_size, 0);
+                        self.rng.fill_bytes(&mut transaction[8..]);
+                    }
+                }
 
                 block.push(Transaction::new(transaction));
-                block_size += self.client_parameters.transaction_size;
+                block_size += tx_size;
                 counter += 1;
                 tx_to_report += 1;
 

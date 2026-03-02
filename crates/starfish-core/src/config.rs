@@ -263,6 +263,26 @@ impl NodePrivateConfig {
 
 impl ImportExport for NodePrivateConfig {}
 
+/// How transaction payloads are filled by the generator.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionMode {
+    /// 8 B timestamp + 8 B counter + zero-padded (current default).
+    #[default]
+    AllZero,
+    /// 8 B timestamp + random bytes for the rest.
+    Random,
+}
+
+/// Which storage backend to use for the DAG.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageBackend {
+    #[default]
+    Rocksdb,
+    Tidehunter,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ClientParameters {
     /// The number of transactions to send to the network per second.
@@ -274,6 +294,12 @@ pub struct ClientParameters {
     /// The initial delay before starting to send transactions.
     #[serde(default = "client_defaults::default_initial_delay")]
     pub initial_delay: Duration,
+    /// How to fill transaction payloads.
+    #[serde(default)]
+    pub transaction_mode: TransactionMode,
+    /// Which storage backend to use.
+    #[serde(default)]
+    pub storage_backend: StorageBackend,
 }
 
 impl ClientParameters {
@@ -282,6 +308,8 @@ impl ClientParameters {
             load,
             transaction_size: client_defaults::default_transaction_size(),
             initial_delay: client_defaults::default_initial_delay(),
+            transaction_mode: TransactionMode::default(),
+            storage_backend: StorageBackend::default(),
         }
     }
 }
@@ -308,6 +336,8 @@ impl Default for ClientParameters {
             load: client_defaults::default_load(),
             transaction_size: client_defaults::default_transaction_size(),
             initial_delay: client_defaults::default_initial_delay(),
+            transaction_mode: TransactionMode::default(),
+            storage_backend: StorageBackend::default(),
         }
     }
 }

@@ -27,9 +27,12 @@ mod serde;
 pub mod shard_reconstructor;
 mod stat;
 mod state;
+pub(crate) mod store;
 mod syncer;
 mod synchronizer;
 mod threshold_clock;
+#[cfg(feature = "tidehunter")]
+mod tidehunter_store;
 mod transactions_generator;
 pub mod types;
 pub mod validator;

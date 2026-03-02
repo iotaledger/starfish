@@ -142,8 +142,8 @@ pub struct Settings {
     /// External monitoring server in `[user@]host` format (e.g.,
     /// `root@10.0.1.50` or `monitor.example.com`). When set, the
     /// orchestrator uses this server for Prometheus and Grafana instead
-    /// of allocating a cloud instance. The server must be reachable via
-    /// SSH with the configured private key.
+    /// of allocating a cloud instance. The server must authorize the
+    /// same public key as `ssh_private_key_file`.
     #[serde(default)]
     pub monitoring_server: Option<String>,
     /// The timeout duration for ssh commands (in seconds).

@@ -88,6 +88,7 @@ impl Validator {
             &committee,
             byzantine_strategy,
             consensus,
+            &client_parameters.storage_backend,
         );
 
         // Rest of the function remains the same

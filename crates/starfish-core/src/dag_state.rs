@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
+    config::StorageBackend,
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     rocks_store::RocksStore,
     state::{RecoveredState, RecoveredStateBuilder},
+    store::Store,
     types::{AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock},
 };
 
@@ -65,7 +67,7 @@ pub enum ByzantineStrategy {
 #[derive(Clone)]
 pub struct DagState {
     dag_state_inner: Arc<RwLock<DagStateInner>>,
-    rocks_store: Arc<RocksStore>,
+    store: Arc<dyn Store>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
@@ -77,7 +79,7 @@ pub struct DagState {
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedStatementBlock>]>)>;
 
 struct DagStateInner {
-    rocks_store: Arc<RocksStore>,
+    store: Arc<dyn Store>,
     index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), IndexEntry>>,
     // Store the blocks for which we have transaction data
     data_availability: BTreeSet<BlockReference>,
@@ -114,17 +116,34 @@ impl DagState {
         committee: &Committee,
         byzantine_strategy: String,
         consensus: String,
+        storage_backend: &StorageBackend,
     ) -> RecoveredState {
         assert!(
             committee.len() <= 128,
             "Committee size {} exceeds AuthorityBitmask capacity (128)",
             committee.len()
         );
-        let rocks_store = Arc::new(RocksStore::open(path).expect("Failed to open RocksDB"));
+        let store: Arc<dyn Store> = match storage_backend {
+            #[cfg(feature = "tidehunter")]
+            StorageBackend::Tidehunter => {
+                tracing::info!("Using TideHunter storage backend");
+                Arc::new(
+                    crate::tidehunter_store::TideHunterStore::open(&path)
+                        .expect("Failed to open TideHunter"),
+                )
+            }
+            #[cfg(not(feature = "tidehunter"))]
+            StorageBackend::Tidehunter => {
+                panic!("TideHunter storage requested but the `tidehunter` feature is not enabled");
+            }
+            StorageBackend::Rocksdb => {
+                Arc::new(RocksStore::open(&path).expect("Failed to open RocksDB"))
+            }
+        };
         let consensus_protocol = ConsensusProtocol::from_str(&consensus);
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let mut inner = DagStateInner {
-            rocks_store: rocks_store.clone(),
+            store: store.clone(),
             authority,
             last_seen_by_authority,
             last_available_commit: 0,
@@ -144,12 +163,12 @@ impl DagState {
         let replay_started = Instant::now();
         let mut block_count = 0u64;
         let mut recovered_commit_leaders = AHashSet::new();
-        // Recover blocks from RocksDB
+        // Recover blocks from storage
         let mut current_round = 0;
         loop {
-            let blocks = rocks_store
+            let blocks = store
                 .get_blocks_by_round(current_round)
-                .expect("Failed to read blocks from RocksDB");
+                .expect("Failed to read blocks from storage");
 
             if blocks.is_empty() {
                 break;
@@ -169,9 +188,9 @@ impl DagState {
                     committee.len() as AuthorityIndex,
                 );
                 if recovered_commit_leaders.insert(block_ref) {
-                    if let Some(commit_data) = rocks_store
+                    if let Some(commit_data) = store
                         .get_commit(&block_ref)
-                        .expect("Failed to read commit data from RocksDB")
+                        .expect("Failed to read commit data from storage")
                     {
                         builder.commit(commit_data);
                     }
@@ -187,7 +206,7 @@ impl DagState {
             .dag_lowest_round
             .set(inner.dag.keys().next().copied().unwrap_or(0) as i64);
         tracing::debug!(
-            "authority={} RocksDB replay: {} blocks in {:?}, highest_round={}",
+            "authority={} storage replay: {} blocks in {:?}, highest_round={}",
             authority,
             block_count,
             replay_started.elapsed(),
@@ -213,7 +232,7 @@ impl DagState {
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let dag_state = Self {
-            rocks_store: rocks_store.clone(),
+            store: store.clone(),
             byzantine_strategy,
             dag_state_inner: Arc::new(RwLock::new(inner)),
             metrics,
@@ -221,7 +240,7 @@ impl DagState {
             committee_size: committee.len(),
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
         };
-        builder.build(rocks_store, dag_state)
+        builder.build(store, dag_state)
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
@@ -277,10 +296,10 @@ impl DagState {
     ) {
         self.metrics.dag_state_entries.inc();
 
-        // Store in RocksDB
-        self.rocks_store
+        // Persist to storage
+        self.store
             .store_block(storage_and_transmission_blocks.0.clone())
-            .expect("Failed to store block in RocksDB");
+            .expect("Failed to store block");
 
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();
@@ -720,10 +739,10 @@ impl DagStateInner {
                 return true;
             }
         }
-        // RocksDB fallback for evicted blocks
-        self.rocks_store
+        // Storage fallback for evicted blocks
+        self.store
             .get_block(&reference)
-            .expect("RocksDB read failed")
+            .expect("Storage read failed")
             .is_some()
     }
 
@@ -794,19 +813,19 @@ impl DagStateInner {
             .cloned()
     }
 
-    /// Get the storage variant of a block, with RocksDB fallback for evicted
-    /// blocks.
+    /// Get the storage variant of a block, with persistent store fallback for
+    /// evicted blocks.
     fn get_storage_block(&self, reference: BlockReference) -> Option<Data<VerifiedStatementBlock>> {
         if let Some((storage, _)) = self.get_block(reference) {
             return Some(storage);
         }
-        self.rocks_store
+        self.store
             .get_block(&reference)
-            .expect("RocksDB read failed")
+            .expect("Storage read failed")
     }
 
-    /// Get the transmission variant of a block, with RocksDB fallback for
-    /// evicted blocks.
+    /// Get the transmission variant of a block, with persistent store fallback
+    /// for evicted blocks.
     fn get_transmission_block(
         &self,
         reference: BlockReference,
@@ -814,9 +833,9 @@ impl DagStateInner {
         if let Some((_, transmission)) = self.get_block(reference) {
             return Some(transmission);
         }
-        self.rocks_store
+        self.store
             .get_block(&reference)
-            .expect("RocksDB read failed")
+            .expect("Storage read failed")
             .map(|storage| Data::new(storage.from_storage_to_transmission(self.authority)))
     }
 

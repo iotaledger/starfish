@@ -401,6 +401,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 nodes,
                 ssh_manager,
                 self.settings.monitoring_working_dir(),
+                self.settings.is_external_monitoring(),
             );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;
@@ -700,9 +701,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Update the software on all instances.
         if !self.skip_testbed_update {
-            self.install().await?;
-            self.install_external_monitoring().await?;
-            self.update().await?;
+            tokio::try_join!(
+                async {
+                    self.install().await?;
+                    self.update().await
+                },
+                self.install_external_monitoring(),
+            )?;
         }
 
         // Run all benchmarks.
