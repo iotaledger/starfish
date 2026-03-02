@@ -45,7 +45,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 4,
+        "w": 2,
         "x": 0,
         "y": 0
       },
@@ -87,30 +87,96 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+            "mode": "fixed"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
               {
-                "color": "blue",
-                "value": null
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
               }
             ]
           },
-          "mappings": []
-        },
-        "overrides": []
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "E"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 3,
-        "w": 8,
-        "x": 4,
+        "w": 10,
+        "x": 2,
         "y": 0
       },
       "id": 101,
       "options": {
-        "colorMode": "background",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
@@ -123,7 +189,7 @@
         },
         "textMode": "name"
       },
-      "title": "Protocol",
+      "title": "Configuration (protocol, transaction type, storage)",
       "type": "stat",
       "targets": [
         {
@@ -134,6 +200,46 @@
           "expr": "max by (protocol) (consensus_protocol_info{validator=~\"$validator\"})",
           "legendFormat": "{{protocol}}",
           "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "quantile(0.5, transaction_mode_info{validator=~\"$validator\"}) == 0",
+          "legendFormat": "AllZero",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "quantile(0.5, transaction_mode_info{validator=~\"$validator\"}) == 1",
+          "legendFormat": "Random",
+          "refId": "C",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"}) == 0",
+          "legendFormat": "RocksDB",
+          "refId": "D",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"}) == 1",
+          "legendFormat": "TideHunter",
+          "refId": "E",
           "instant": true
         }
       ]
@@ -305,288 +411,12 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "orange",
-                "value": null
-              }
-            ]
-          },
-          "unit": "\u00b5s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 6,
-        "x": 0,
-        "y": 3
-      },
-      "id": 300,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "value"
-      },
-      "title": "Store block avg (\u00b5s)",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "expr": "rate(store_block_latency_us{validator=~\"$validator\"}[$__rate_interval]) / rate(store_block_count{validator=~\"$validator\"}[$__rate_interval])",
-          "legendFormat": "{{validator}}",
-          "refId": "A",
-          "instant": false
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "orange",
-                "value": null
-              }
-            ]
-          },
-          "unit": "\u00b5s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 6,
-        "x": 6,
-        "y": 3
-      },
-      "id": 301,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "value"
-      },
-      "title": "Store commits avg (\u00b5s)",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "expr": "rate(store_commits_latency_us{validator=~\"$validator\"}[$__rate_interval]) / rate(store_commits_count{validator=~\"$validator\"}[$__rate_interval])",
-          "legendFormat": "{{validator}}",
-          "refId": "A",
-          "instant": false
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "text": "AllZero",
-                  "color": "green",
-                  "index": 0
-                },
-                "1": {
-                  "text": "Random",
-                  "color": "yellow",
-                  "index": 1
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 6,
-        "x": 12,
-        "y": 3
-      },
-      "id": 302,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "value"
-      },
-      "title": "Transaction mode",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "expr": "quantile(0.5, transaction_mode_info{validator=~\"$validator\"})",
-          "legendFormat": "",
-          "refId": "A",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "text": "RocksDB",
-                  "color": "blue",
-                  "index": 0
-                },
-                "1": {
-                  "text": "TideHunter",
-                  "color": "orange",
-                  "index": 1
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 6,
-        "x": 18,
-        "y": 3
-      },
-      "id": 303,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "value"
-      },
-      "title": "Storage backend",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"})",
-          "legendFormat": "",
-          "refId": "A",
-          "instant": true
-        }
-      ]
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 3
       },
       "id": 200,
       "panels": [],
@@ -657,7 +487,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 7
+        "y": 4
       },
       "id": 4,
       "options": {
@@ -760,7 +590,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 7
+        "y": 4
       },
       "id": 2,
       "options": {
@@ -879,7 +709,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 12
       },
       "id": 17,
       "options": {
@@ -981,7 +811,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 12
       },
       "id": 23,
       "options": {
@@ -1014,12 +844,108 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 30,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "rate(created_own_blocks{validator=~\"$validator\"}[1m])",
+          "legendFormat": "{{validator}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Created blocks per second",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 28
       },
       "id": 201,
       "panels": [],
@@ -1073,7 +999,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 29
       },
       "id": 20,
       "options": {
@@ -1165,7 +1091,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 29
       },
       "id": 27,
       "options": {
@@ -1215,7 +1141,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 37
       },
       "id": 19,
       "options": {
@@ -1333,7 +1259,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 37
       },
       "id": 24,
       "options": {
@@ -1421,15 +1347,16 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "ms"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 40
+        "x": 12,
+        "y": 20
       },
       "id": 11,
       "options": {
@@ -1449,16 +1376,16 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg by(proc) (rate(utilization_timer{validator=~\"$validator\"}[1m]) / 1000)",
+          "expr": "rate(utilization_timer{validator=~\"$validator\"}[1m]) / 1000",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "__auto",
+          "legendFormat": "{{validator}} - {{proc}}",
           "range": true,
           "refId": "A",
           "useBackend": false
         }
       ],
-      "title": "Core functions [ms]",
+      "title": "Time for core functions per second",
       "type": "timeseries"
     },
     {
@@ -1525,7 +1452,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 45
       },
       "id": 7,
       "options": {
@@ -1622,7 +1549,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 48
+        "y": 45
       },
       "id": 8,
       "options": {
@@ -1645,7 +1572,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "core_lock_enqueued{validator=~\"$validator\"} - core_lock_dequeued{validator=~\"$validator\"}",
+          "expr": "core_queue_length{validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
@@ -1711,15 +1638,16 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "bytes"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 48
+        "x": 0,
+        "y": 53
       },
       "id": 6,
       "options": {
@@ -1742,14 +1670,112 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_block_size_bytes{v=\"p50\", validator=~\"$validator\"} / 1024",
+          "expr": "proposed_block_size_bytes{v=\"p50\", validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Proposed block size p50(Kbytes)",
+      "title": "Proposed block size",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
+      "id": 31,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "proposed_transaction_size_bytes{v=\"p50\", validator=~\"$validator\"}",
+          "legendFormat": "{{validator}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Proposed transaction size",
       "type": "timeseries"
     },
     {
@@ -1816,7 +1842,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 61
       },
       "id": 28,
       "options": {
@@ -1913,7 +1939,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 61
       },
       "id": 29,
       "options": {
@@ -1952,7 +1978,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 69
       },
       "id": 206,
       "panels": [],
@@ -2023,7 +2049,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 70
       },
       "id": 207,
       "options": {
@@ -2132,7 +2158,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 70
       },
       "id": 209,
       "options": {
@@ -2171,7 +2197,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 78
       },
       "id": 202,
       "panels": [],
@@ -2242,7 +2268,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 79
       },
       "id": 14,
       "options": {
@@ -2339,7 +2365,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 79
       },
       "id": 13,
       "options": {
@@ -2436,7 +2462,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 87
       },
       "id": 16,
       "options": {
@@ -2529,7 +2555,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 82
+        "y": 87
       },
       "id": 25,
       "options": {
@@ -2568,6 +2594,12 @@
           "legendFormat": "{{validator}} cancelled",
           "range": true,
           "refId": "D"
+        },
+        {
+          "expr": "rate(reconstructed_blocks_total{validator=~\"$validator\"}[1m])",
+          "legendFormat": "{{validator}} sent to core",
+          "range": true,
+          "refId": "E"
         }
       ],
       "title": "Shard reconstruction throughput",
@@ -2633,7 +2665,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 95
       },
       "id": 26,
       "options": {
@@ -2677,7 +2709,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 103
       },
       "id": 203,
       "panels": [],
@@ -2748,7 +2780,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 99
+        "y": 104
       },
       "id": 12,
       "options": {
@@ -2849,7 +2881,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 99
+        "y": 104
       },
       "id": 5,
       "options": {
@@ -2933,7 +2965,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 107
+        "y": 112
       },
       "id": 21,
       "options": {
@@ -3012,7 +3044,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 107
+        "y": 112
       },
       "id": 22,
       "options": {
@@ -3108,7 +3140,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 115
+        "y": 120
       },
       "id": 210,
       "options": {
@@ -3204,7 +3236,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 115
+        "y": 120
       },
       "id": 211,
       "options": {
@@ -3301,7 +3333,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 123
+        "y": 128
       },
       "id": 212,
       "options": {
@@ -3399,7 +3431,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 123
+        "y": 128
       },
       "id": 213,
       "options": {
@@ -3496,7 +3528,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 131
+        "y": 136
       },
       "id": 9,
       "options": {
@@ -3528,6 +3560,104 @@
       ],
       "title": "Avg connection latency (by peer)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 144
+      },
+      "id": 214,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "sum by (validator, task_type) (rate(core_thread_tasks_total{validator=~\"$validator\"}[1m]))",
+          "legendFormat": "{{validator}} \u2014 {{task_type}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Core thread tasks (rate by type)",
+      "type": "timeseries"
     }
   ],
   "preload": false,
@@ -3537,7 +3667,7 @@
   "templating": {
     "list": [
       {
-        "allValue": ".*",
+        "allValue": "validator-.*",
         "current": {
           "selected": true,
           "text": "All",
