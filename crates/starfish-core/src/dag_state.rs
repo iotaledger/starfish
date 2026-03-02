@@ -297,9 +297,14 @@ impl DagState {
         self.metrics.dag_state_entries.inc();
 
         // Persist to storage
+        let store_start = std::time::Instant::now();
         self.store
             .store_block(storage_and_transmission_blocks.0.clone())
             .expect("Failed to store block");
+        self.metrics
+            .store_block_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_block_count.inc();
 
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();

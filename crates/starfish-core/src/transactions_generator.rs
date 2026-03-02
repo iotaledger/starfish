@@ -122,6 +122,9 @@ impl TransactionGenerator {
             }
 
             if counter.is_multiple_of(10_000) {
+                self.metrics
+                    .submitted_transactions_bytes
+                    .inc_by(tx_to_report * tx_size as u64);
                 self.metrics.submitted_transactions.inc_by(tx_to_report);
                 tx_to_report = 0
             }

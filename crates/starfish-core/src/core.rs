@@ -734,9 +734,14 @@ impl<H: BlockHandler> Core<H> {
             }
             commit_data.push(CommitData::from(commit));
         }
+        let store_start = std::time::Instant::now();
         self.store
             .store_commits(commit_data)
             .expect("Store commits should not fail");
+        self.metrics
+            .store_commits_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_commits_count.inc();
         if !committed.is_empty() {
             self.persist_to_storage("Core::commit");
         }

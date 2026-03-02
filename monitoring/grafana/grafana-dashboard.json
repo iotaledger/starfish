@@ -305,12 +305,247 @@
       ]
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          },
+          "unit": "µs"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 0,
+        "y": 3
+      },
+      "id": 300,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "title": "Store block avg (µs)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "rate(store_block_latency_us{validator=~\"$validator\"}[$__rate_interval]) / rate(store_block_count{validator=~\"$validator\"}[$__rate_interval])",
+          "legendFormat": "{{validator}}",
+          "refId": "A",
+          "instant": false
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          },
+          "unit": "µs"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 6,
+        "y": 3
+      },
+      "id": 301,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "title": "Store commits avg (µs)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "rate(store_commits_latency_us{validator=~\"$validator\"}[$__rate_interval]) / rate(store_commits_count{validator=~\"$validator\"}[$__rate_interval])",
+          "legendFormat": "{{validator}}",
+          "refId": "A",
+          "instant": false
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 12,
+        "y": 3
+      },
+      "id": 302,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "title": "Tx generation (tx/s)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "sum(rate(submitted_transactions{validator=~\"$validator\"}[$__rate_interval]))",
+          "legendFormat": "total",
+          "refId": "A",
+          "instant": false
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
+          "unit": "MB/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 18,
+        "y": 3
+      },
+      "id": 303,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "title": "Tx data (MB/s)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "sum(rate(submitted_transactions_bytes{validator=~\"$validator\"}[$__rate_interval])) / 1e6",
+          "legendFormat": "total",
+          "refId": "A",
+          "instant": false
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 3
+        "y": 6
       },
       "id": 200,
       "panels": [],
@@ -381,7 +616,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 7
       },
       "id": 4,
       "options": {
@@ -484,7 +719,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 7
       },
       "id": 2,
       "options": {
@@ -603,7 +838,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 15
       },
       "id": 17,
       "options": {
@@ -705,7 +940,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 15
       },
       "id": 23,
       "options": {
@@ -743,7 +978,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 23
       },
       "id": 201,
       "panels": [],
@@ -797,7 +1032,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 24
       },
       "id": 20,
       "options": {
@@ -889,7 +1124,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 24
       },
       "id": 27,
       "options": {
@@ -939,7 +1174,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 32
       },
       "id": 19,
       "options": {
@@ -1057,7 +1292,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 32
       },
       "id": 24,
       "options": {
@@ -1153,7 +1388,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 40
       },
       "id": 11,
       "options": {
@@ -1249,7 +1484,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 40
       },
       "id": 7,
       "options": {
@@ -1346,7 +1581,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 48
       },
       "id": 8,
       "options": {
@@ -1443,7 +1678,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 48
       },
       "id": 6,
       "options": {
@@ -1540,7 +1775,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 53
+        "y": 56
       },
       "id": 28,
       "options": {
@@ -1637,7 +1872,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 53
+        "y": 56
       },
       "id": 29,
       "options": {
@@ -1676,7 +1911,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 64
       },
       "id": 206,
       "panels": [],
@@ -1747,7 +1982,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 65
       },
       "id": 207,
       "options": {
@@ -1856,7 +2091,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 65
       },
       "id": 209,
       "options": {
@@ -1895,7 +2130,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 73
       },
       "id": 202,
       "panels": [],
@@ -1966,7 +2201,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 74
       },
       "id": 14,
       "options": {
@@ -2063,7 +2298,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 74
       },
       "id": 13,
       "options": {
@@ -2160,7 +2395,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 82
       },
       "id": 16,
       "options": {
@@ -2253,7 +2488,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 82
       },
       "id": 25,
       "options": {
@@ -2357,7 +2592,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 87
+        "y": 90
       },
       "id": 26,
       "options": {
@@ -2401,7 +2636,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 95
+        "y": 98
       },
       "id": 203,
       "panels": [],
@@ -2472,7 +2707,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 96
+        "y": 99
       },
       "id": 12,
       "options": {
@@ -2573,7 +2808,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 96
+        "y": 99
       },
       "id": 5,
       "options": {
@@ -2657,7 +2892,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 104
+        "y": 107
       },
       "id": 21,
       "options": {
@@ -2736,7 +2971,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 104
+        "y": 107
       },
       "id": 22,
       "options": {
@@ -2832,7 +3067,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 115
       },
       "id": 210,
       "options": {
@@ -2928,7 +3163,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 115
       },
       "id": 211,
       "options": {
@@ -3025,7 +3260,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 123
       },
       "id": 212,
       "options": {
@@ -3049,7 +3284,7 @@
           },
           "editorMode": "code",
           "expr": "rate(network_requests_sent_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} \u2014 {{request_type}}",
+          "legendFormat": "{{validator}} — {{request_type}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3123,7 +3358,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 123
       },
       "id": 213,
       "options": {
@@ -3147,7 +3382,7 @@
           },
           "editorMode": "code",
           "expr": "rate(network_requests_received_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} \u2014 {{request_type}}",
+          "legendFormat": "{{validator}} — {{request_type}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3220,7 +3455,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 131
       },
       "id": 9,
       "options": {
