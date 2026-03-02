@@ -86,6 +86,19 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         )
     }
 
+    /// Add header-only blocks and attempt block creation.
+    pub fn add_headers(
+        &mut self,
+        headers: Vec<Data<VerifiedBlock>>,
+    ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
+        let (success, missing_parents, processed_refs) = self.core.add_headers(headers);
+        if success {
+            tracing::debug!("Attempt to create block from syncer after adding headers");
+            self.try_new_block();
+        }
+        (missing_parents, processed_refs)
+    }
+
     /// Attach recovered transaction data to existing blocks and attempt block
     /// creation.
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {

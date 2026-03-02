@@ -27,6 +27,7 @@ use std::{
     time::Duration,
 };
 
+use ahash::AHashSet;
 use bytes::Bytes;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
@@ -104,8 +105,14 @@ pub struct BlockHeader {
     /// Order matters: the first reference for a given (round, authority) is the
     /// vote.
     pub(crate) block_references: Vec<BlockReference>,
-    /// Transaction data acknowledgment (compressed: excludes refs already in
-    /// block_references).
+    /// Start of the trailing `block_references` suffix that is also
+    /// acknowledged.
+    ///
+    /// `None` preserves backward compatibility for legacy blocks where
+    /// `acknowledgment_references` stores the full logical acknowledgment list.
+    pub(crate) acknowledgment_intersection: Option<u32>,
+    /// Additional acknowledged references not covered by the trailing
+    /// `block_references` suffix.
     pub(crate) acknowledgment_references: Vec<BlockReference>,
     /// Creation time as reported by creator (currently not enforced).
     pub(crate) meta_creation_time_ns: TimestampNs,
@@ -128,8 +135,20 @@ impl BlockHeader {
         &self.block_references
     }
 
-    pub fn acknowledgment_references(&self) -> &Vec<BlockReference> {
+    pub fn acknowledgment_intersection(&self) -> Option<usize> {
+        self.acknowledgment_intersection.map(|start| start as usize)
+    }
+
+    pub fn extra_acknowledgment_references(&self) -> &Vec<BlockReference> {
         &self.acknowledgment_references
+    }
+
+    pub fn acknowledgments(&self) -> Vec<BlockReference> {
+        expand_acknowledgments(
+            &self.block_references,
+            self.acknowledgment_intersection,
+            &self.acknowledgment_references,
+        )
     }
 
     pub fn author(&self) -> AuthorityIndex {
@@ -173,6 +192,52 @@ impl BlockHeader {
     pub fn strong_vote(&self) -> Option<bool> {
         self.strong_vote
     }
+}
+
+fn expand_acknowledgments(
+    block_references: &[BlockReference],
+    acknowledgment_intersection: Option<u32>,
+    acknowledgment_references: &[BlockReference],
+) -> Vec<BlockReference> {
+    let Some(start) = acknowledgment_intersection else {
+        return acknowledgment_references.to_vec();
+    };
+
+    let start = usize::min(start as usize, block_references.len());
+    let mut acknowledgments = block_references[start..].to_vec();
+    acknowledgments.extend_from_slice(acknowledgment_references);
+    acknowledgments
+}
+
+fn compress_acknowledgments(
+    block_references: &[BlockReference],
+    acknowledgment_references: &[BlockReference],
+) -> (Option<u32>, Vec<BlockReference>) {
+    let acknowledged: AHashSet<_> = acknowledgment_references.iter().copied().collect();
+
+    let mut intersection_start = block_references.len();
+    while intersection_start > 0 && acknowledged.contains(&block_references[intersection_start - 1])
+    {
+        intersection_start -= 1;
+    }
+
+    let shared_suffix: AHashSet<_> = block_references[intersection_start..]
+        .iter()
+        .copied()
+        .collect();
+    let extra_acknowledgments = acknowledgment_references
+        .iter()
+        .copied()
+        .filter(|reference| !shared_suffix.contains(reference))
+        .collect();
+
+    (
+        Some(
+            u32::try_from(intersection_start)
+                .expect("block reference intersection should fit into u32"),
+        ),
+        extra_acknowledgments,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +362,13 @@ impl VerifiedBlock {
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
     ) -> Self {
+        let (acknowledgment_intersection, acknowledgment_references) =
+            compress_acknowledgments(&block_references, &acknowledgment_references);
+        let acknowledgments = expand_acknowledgments(
+            &block_references,
+            acknowledgment_intersection,
+            &acknowledgment_references,
+        );
         let header = BlockHeader {
             reference: BlockReference {
                 authority,
@@ -305,7 +377,7 @@ impl VerifiedBlock {
                     authority,
                     round,
                     &block_references,
-                    &acknowledgment_references,
+                    &acknowledgments,
                     meta_creation_time_ns,
                     epoch_marker,
                     &signature,
@@ -314,6 +386,7 @@ impl VerifiedBlock {
                 ),
             },
             block_references,
+            acknowledgment_intersection,
             acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
@@ -362,6 +435,7 @@ impl VerifiedBlock {
                 ),
             },
             block_references: block_refs,
+            acknowledgment_intersection: Some(0),
             acknowledgment_references: ack_refs,
             meta_creation_time_ns: 0,
             epoch_marker: false,
@@ -403,11 +477,18 @@ impl VerifiedBlock {
                 TransactionsCommitment::new_from_statements(&statements)
             }
         };
+        let (acknowledgment_intersection, extra_acknowledgment_references) =
+            compress_acknowledgments(&block_references, &acknowledgment_references);
+        let acknowledgments = expand_acknowledgments(
+            &block_references,
+            acknowledgment_intersection,
+            &extra_acknowledgment_references,
+        );
         let signature = signer.sign_block(
             authority,
             round,
             &block_references,
-            &acknowledgment_references,
+            &acknowledgments,
             meta_creation_time_ns,
             epoch_marker,
             transactions_commitment,
@@ -444,8 +525,16 @@ impl VerifiedBlock {
         self.header.block_references()
     }
 
-    pub fn acknowledgment_references(&self) -> &Vec<BlockReference> {
-        self.header.acknowledgment_references()
+    pub fn acknowledgment_intersection(&self) -> Option<usize> {
+        self.header.acknowledgment_intersection()
+    }
+
+    pub fn extra_acknowledgment_references(&self) -> &Vec<BlockReference> {
+        self.header.extra_acknowledgment_references()
+    }
+
+    pub fn acknowledgments(&self) -> Vec<BlockReference> {
+        self.header.acknowledgments()
     }
 
     pub fn author(&self) -> AuthorityIndex {
@@ -632,11 +721,20 @@ impl VerifiedBlock {
     /// Verify digest, signature, includes, and threshold clock.
     fn verify_block_structure(&self, committee: &Committee) -> eyre::Result<()> {
         let round = self.round();
+        if let Some(intersection_start) = self.header.acknowledgment_intersection() {
+            ensure!(
+                intersection_start <= self.header.block_references.len(),
+                "Acknowledgment intersection {} exceeds block reference count {}",
+                intersection_start,
+                self.header.block_references.len(),
+            );
+        }
+        let acknowledgments = self.header.acknowledgments();
         let digest = BlockDigest::new(
             self.author(),
             round,
             &self.header.block_references,
-            &self.header.acknowledgment_references,
+            &acknowledgments,
             self.header.meta_creation_time_ns,
             self.header.epoch_marker,
             &self.header.signature,
@@ -835,6 +933,56 @@ impl Eq for VerifiedBlock {}
 impl std::hash::Hash for VerifiedBlock {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.header.reference.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compresses_acknowledgments_against_shared_suffix() {
+        let a = BlockReference::new_test(0, 1);
+        let b = BlockReference::new_test(1, 1);
+        let c = BlockReference::new_test(2, 1);
+        let d = BlockReference::new_test(3, 1);
+        let block = VerifiedBlock::new(
+            0,
+            2,
+            vec![a, b, c],
+            vec![d, c],
+            0,
+            false,
+            SignatureBytes::default(),
+            vec![],
+            None,
+            None,
+            TransactionsCommitment::default(),
+            None,
+        );
+
+        assert_eq!(block.acknowledgment_intersection(), Some(2));
+        assert_eq!(block.extra_acknowledgment_references(), &vec![d]);
+        assert_eq!(block.acknowledgments(), vec![c, d]);
+    }
+
+    #[test]
+    fn preserves_legacy_acknowledgment_encoding() {
+        let a = BlockReference::new_test(0, 1);
+        let b = BlockReference::new_test(1, 1);
+        let header = BlockHeader {
+            reference: BlockReference::new_test(0, 2),
+            block_references: vec![a],
+            acknowledgment_intersection: None,
+            acknowledgment_references: vec![b],
+            meta_creation_time_ns: 0,
+            epoch_marker: false,
+            signature: SignatureBytes::default(),
+            transactions_commitment: TransactionsCommitment::default(),
+            strong_vote: None,
+        };
+
+        assert_eq!(header.acknowledgments(), vec![b]);
     }
 }
 

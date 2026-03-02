@@ -37,6 +37,10 @@ enum CoreThreadCommand {
             Vec<BlockReference>,
         )>,
     ),
+    AddHeaders(
+        Vec<Data<VerifiedBlock>>,
+        oneshot::Sender<(AHashSet<BlockReference>, Vec<BlockReference>)>,
+    ),
     AddTransactionData(Vec<ReconstructedTransactionData>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
@@ -82,6 +86,16 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     ) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddBlocks(blocks, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop")
+    }
+
+    pub async fn add_headers(
+        &self,
+        headers: Vec<Data<VerifiedBlock>>,
+    ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::AddHeaders(headers, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -169,6 +183,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                             used_additional_references,
                         ))
                         .ok();
+                }
+                CoreThreadCommand::AddHeaders(headers, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["add_headers"])
+                        .inc();
+                    let result = self.syncer.add_headers(headers);
+                    sender.send(result).ok();
                 }
                 CoreThreadCommand::AddTransactionData(items, sender) => {
                     metrics

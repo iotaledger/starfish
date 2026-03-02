@@ -288,6 +288,36 @@ impl<H: BlockHandler> Core<H> {
         )
     }
 
+    /// Add header-only blocks to the DAG. Skips statement-related bookkeeping
+    /// that `add_blocks` performs (statement tracking, partitioning by
+    /// statement presence).
+    pub fn add_headers(
+        &mut self,
+        headers: Vec<Data<VerifiedBlock>>,
+    ) -> (bool, AHashSet<BlockReference>, Vec<BlockReference>) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::add_headers");
+        let (processed, _, missing_references) = timed!(
+            self.metrics,
+            "BlockManager::add_headers",
+            self.block_manager.add_blocks(headers)
+        );
+        let success = !processed.is_empty();
+        let mut processed_refs = Vec::with_capacity(processed.len());
+        for block in &processed {
+            self.threshold_clock
+                .add_block(*block.reference(), &self.committee);
+            self.pending
+                .push(MetaStatement::Include(*block.reference()));
+            self.attach_pending_transaction_data(block);
+            processed_refs.push(*block.reference());
+        }
+        self.run_block_handler();
+        (success, missing_references, processed_refs)
+    }
+
     /// Attach recovered transaction data directly to existing blocks in the
     /// DAG. Bypasses the block manager — headers are already accepted and
     /// connected.
@@ -303,7 +333,8 @@ impl<H: BlockHandler> Core<H> {
             &item.transaction_data,
             &item.shard_data,
         ) {
-            self.pending_reconstructed_data.insert(item.block_reference, item);
+            self.pending_reconstructed_data
+                .insert(item.block_reference, item);
         }
     }
 
@@ -533,8 +564,8 @@ impl<H: BlockHandler> Core<H> {
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
-        for ack_ref in leader_block.acknowledgment_references() {
-            if !self.dag_state.is_data_available(ack_ref) {
+        for ack_ref in leader_block.acknowledgments() {
+            if !self.dag_state.is_data_available(&ack_ref) {
                 return Some(false);
             }
         }

@@ -131,13 +131,13 @@ impl Linearizer {
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
             let who_votes = x.reference().authority;
-            for ack_ref in x.acknowledgment_references() {
+            for ack_ref in x.acknowledgments() {
                 if ack_ref.round < min_round {
                     continue;
                 }
-                let s = self.votes.entry(*ack_ref).or_default();
+                let s = self.votes.entry(ack_ref).or_default();
                 if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
-                    blocks_transaction_data_quorum.push(*ack_ref);
+                    blocks_transaction_data_quorum.push(ack_ref);
                 }
             }
             self.traversed_blocks.insert(*x.reference());
@@ -221,7 +221,7 @@ impl Linearizer {
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
-            let leader_acks = leader_block.acknowledgment_references().clone();
+            let leader_acks = leader_block.acknowledgments();
             let optimistic_data_holders = (metastate == Some(CommitMetastate::Opt))
                 .then(|| self.collect_strong_vote_holders(dag_state, leader_block.round() + 1));
             let mut sub_dag = match consensus_protocol {

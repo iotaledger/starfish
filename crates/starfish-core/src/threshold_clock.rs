@@ -107,6 +107,7 @@ mod tests {
                 ),
             },
             block_references,
+            acknowledgment_intersection: None,
             acknowledgment_references: ack_refs,
             meta_creation_time_ns: 0,
             epoch_marker: false,

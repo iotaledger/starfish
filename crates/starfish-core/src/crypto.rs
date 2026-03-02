@@ -127,7 +127,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
-        acknowledgment_references: &Vec<BlockReference>,
+        acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
@@ -154,7 +154,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
-        acknowledgment_references: &Vec<BlockReference>,
+        acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
@@ -182,7 +182,7 @@ impl BlockDigest {
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
-        acknowledgment_references: &Vec<BlockReference>,
+        acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
@@ -262,13 +262,14 @@ impl PublicKey {
         header: &BlockHeader,
     ) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(header.signature().0);
+        let acknowledgments = header.acknowledgments();
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
             header.author(),
             header.round(),
             header.block_references(),
-            header.acknowledgment_references(),
+            &acknowledgments,
             header.meta_creation_time_ns(),
             header.epoch_changed(),
             header.merkle_root(),
@@ -292,7 +293,7 @@ impl Signer {
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
-        acknowledgment_references: &Vec<BlockReference>,
+        acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
