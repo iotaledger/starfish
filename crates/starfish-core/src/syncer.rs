@@ -14,7 +14,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
 };
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -35,7 +35,7 @@ pub trait CommitObserver: Send + Sync {
     fn handle_commit(
         &mut self,
         dag_state: &DagState,
-        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
+        committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
     fn recover_committed(
@@ -63,7 +63,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
+        blocks: Vec<Data<VerifiedBlock>>,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,

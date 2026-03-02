@@ -12,7 +12,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
 };
 
 pub struct CoreThreadDispatcher<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -28,7 +28,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 
 enum CoreThreadCommand {
     AddBlocks(
-        Vec<Data<VerifiedStatementBlock>>,
+        Vec<Data<VerifiedBlock>>,
         oneshot::Sender<(
             Vec<BlockReference>,
             AHashSet<BlockReference>,
@@ -71,7 +71,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
 
     pub async fn add_blocks(
         &self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
+        blocks: Vec<Data<VerifiedBlock>>,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,

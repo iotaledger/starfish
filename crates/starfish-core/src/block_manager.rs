@@ -13,14 +13,14 @@ use crate::{
     committee::Committee,
     dag_state::DagState,
     data::Data,
-    types::{BlockReference, VerifiedStatementBlock},
+    types::{BlockReference, VerifiedBlock},
 };
 
 /// Block manager suspends incoming blocks until they are connected to the
 /// existing graph, returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
-    blocks_pending: HashMap<BlockReference, Data<VerifiedStatementBlock>>,
+    blocks_pending: HashMap<BlockReference, Data<VerifiedBlock>>,
     /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting
     /// for `BlockReference` to be processed.
     block_references_waiting: HashMap<BlockReference, AHashSet<BlockReference>>,
@@ -43,16 +43,12 @@ impl BlockManager {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
-    ) -> (
-        Vec<Data<VerifiedStatementBlock>>,
-        bool,
-        AHashSet<BlockReference>,
-    ) {
+        blocks: Vec<Data<VerifiedBlock>>,
+    ) -> (Vec<Data<VerifiedBlock>>, bool, AHashSet<BlockReference>) {
         let dag_state = self.dag_state.clone();
         let mut updated_statements = false;
-        let mut blocks: VecDeque<Data<VerifiedStatementBlock>> = blocks.into();
-        let mut newly_processed: Vec<Data<VerifiedStatementBlock>> = vec![];
+        let mut blocks: VecDeque<Data<VerifiedBlock>> = blocks.into();
+        let mut newly_processed: Vec<Data<VerifiedBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();

@@ -31,7 +31,7 @@ use crate::{
     runtime,
     runtime::JoinHandle,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, ProvableShard, RoundNumber, VerifiedStatementBlock},
+    types::{AuthorityIndex, BlockReference, ProvableShard, RoundNumber, VerifiedBlock},
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
@@ -89,9 +89,9 @@ pub struct ShardPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockBatch {
     /// Full blocks (header + statements + optional shard).
-    pub full_blocks: Vec<Data<VerifiedStatementBlock>>,
+    pub full_blocks: Vec<Data<VerifiedBlock>>,
     /// Header-only blocks (no payload) — causal history the peer may not have.
-    pub headers: Vec<Data<VerifiedStatementBlock>>,
+    pub headers: Vec<Data<VerifiedBlock>>,
     /// Verified shards for blocks the peer already has the header for.
     pub shards: Vec<ShardPayload>,
     /// Bitmask: which authorities' headers would be useful FROM the receiving
@@ -106,7 +106,7 @@ impl BlockBatch {
     /// Wrap a flat list of blocks as a batch with only the `full_blocks` field
     /// populated. Used for backward-compatible call sites that don't yet
     /// distinguish headers/shards.
-    pub fn full_only(blocks: Vec<Data<VerifiedStatementBlock>>) -> Self {
+    pub fn full_only(blocks: Vec<Data<VerifiedBlock>>) -> Self {
         Self {
             full_blocks: blocks,
             headers: Vec::new(),

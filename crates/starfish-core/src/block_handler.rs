@@ -20,8 +20,7 @@ use crate::{
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, RoundNumber, Transaction,
-        VerifiedStatementBlock,
+        AuthorityIndex, BaseStatement, BlockReference, RoundNumber, Transaction, VerifiedBlock,
     },
 };
 
@@ -191,7 +190,7 @@ impl RealCommitHandler {
         }
     }
 
-    fn transaction_observer(&self, block: Data<VerifiedStatementBlock>) {
+    fn transaction_observer(&self, block: Data<VerifiedBlock>) {
         let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.statements() {
             for statement in vec {
@@ -222,7 +221,7 @@ impl CommitObserver for RealCommitHandler {
     fn handle_commit(
         &mut self,
         dag_state: &DagState,
-        committed_leaders: Vec<(Data<VerifiedStatementBlock>, Option<CommitMetastate>)>,
+        committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag> {
         let mut committed = self
             .commit_interpreter

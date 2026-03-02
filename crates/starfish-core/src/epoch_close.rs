@@ -11,7 +11,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     data::Data,
     runtime::timestamp_utc,
-    types::{InternalEpochStatus, VerifiedStatementBlock},
+    types::{InternalEpochStatus, VerifiedBlock},
 };
 
 pub struct EpochManager {
@@ -36,11 +36,7 @@ impl EpochManager {
         }
     }
 
-    pub fn observe_committed_block(
-        &mut self,
-        block: &Data<VerifiedStatementBlock>,
-        committee: &Committee,
-    ) {
+    pub fn observe_committed_block(&mut self, block: &Data<VerifiedBlock>, committee: &Committee) {
         if block.epoch_changed() {
             let is_quorum = self.change_aggregator.add(block.author(), committee);
             if is_quorum && (self.epoch_status != InternalEpochStatus::SafeToClose) {

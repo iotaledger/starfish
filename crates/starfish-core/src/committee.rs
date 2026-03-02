@@ -12,7 +12,7 @@ use crate::{
     config::ImportExport,
     crypto::{PublicKey, Signer, dummy_public_key},
     data::Data,
-    types::{AuthorityIndex, AuthoritySet, Stake, VerifiedStatementBlock},
+    types::{AuthorityIndex, AuthoritySet, Stake, VerifiedBlock},
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -102,21 +102,18 @@ impl Committee {
     pub fn genesis_blocks(
         &self,
         for_authority: AuthorityIndex,
-    ) -> (
-        Data<VerifiedStatementBlock>,
-        Vec<Data<VerifiedStatementBlock>>,
-    ) {
+    ) -> (Data<VerifiedBlock>, Vec<Data<VerifiedBlock>>) {
         let other_blocks: Vec<_> = self
             .authorities()
             .filter_map(|a| {
                 if a == for_authority {
                     None
                 } else {
-                    Some(VerifiedStatementBlock::new_genesis(a))
+                    Some(VerifiedBlock::new_genesis(a))
                 }
             })
             .collect();
-        let own_genesis_block = VerifiedStatementBlock::new_genesis(for_authority);
+        let own_genesis_block = VerifiedBlock::new_genesis(for_authority);
         (own_genesis_block, other_blocks)
     }
 

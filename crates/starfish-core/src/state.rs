@@ -10,14 +10,14 @@ use crate::{
     core::{MetaStatement, MetaStatement::Include},
     dag_state::CommitData,
     store::Store,
-    types::VerifiedStatementBlock,
+    types::VerifiedBlock,
 };
 use crate::{dag_state::DagState, data::Data, types::BlockReference};
 
 pub struct RecoveredState {
     pub dag_state: DagState,
     pub store: Arc<dyn Store>,
-    pub unprocessed_blocks: Vec<Data<VerifiedStatementBlock>>,
+    pub unprocessed_blocks: Vec<Data<VerifiedBlock>>,
     pub last_committed_leader: Option<BlockReference>,
     pub committed_blocks: AHashSet<BlockReference>,
     pub committed_leaders_count: usize,
@@ -26,7 +26,7 @@ pub struct RecoveredState {
 #[derive(Default)]
 pub struct RecoveredStateBuilder {
     pending: BTreeMap<u64, MetaStatement>, // Use sequence number instead of WalPosition
-    unprocessed_blocks: Vec<Data<VerifiedStatementBlock>>,
+    unprocessed_blocks: Vec<Data<VerifiedBlock>>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: AHashSet<BlockReference>,
     committed_leaders_count: usize,
@@ -37,7 +37,7 @@ impl RecoveredStateBuilder {
         Self::default()
     }
 
-    pub fn block(&mut self, sequence: u64, block: Data<VerifiedStatementBlock>) {
+    pub fn block(&mut self, sequence: u64, block: Data<VerifiedBlock>) {
         self.pending.insert(sequence, Include(*block.reference()));
         self.unprocessed_blocks.push(block);
     }

@@ -9,7 +9,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
-    types::{AuthorityIndex, RoundNumber, VerifiedStatementBlock, format_authority_round},
+    types::{AuthorityIndex, RoundNumber, VerifiedBlock, format_authority_round},
 };
 
 /// The consensus protocol operates in 'waves'. Each wave is
@@ -112,8 +112,8 @@ impl BaseCommitter {
     /// certificate for the specified leader (`leader_block`).
     fn is_certificate(
         &self,
-        potential_certificate: &Data<VerifiedStatementBlock>,
-        leader_block: &Data<VerifiedStatementBlock>,
+        potential_certificate: &Data<VerifiedBlock>,
+        leader_block: &Data<VerifiedBlock>,
         voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
@@ -131,7 +131,7 @@ impl BaseCommitter {
     /// Otherwise, we skip the target leader.
     fn decide_leader_from_anchor(
         &self,
-        anchor: &Data<VerifiedStatementBlock>,
+        anchor: &Data<VerifiedBlock>,
         leader: AuthorityIndex,
         leader_round: RoundNumber,
         voter_info: &VoterInfo,
@@ -266,7 +266,7 @@ impl BaseCommitter {
     fn enough_leader_support(
         &self,
         certifying_round: RoundNumber,
-        leader_block: &Data<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedBlock>,
         voter_info: &VoterInfo,
     ) -> bool {
         let certifying_blocks = self.dag_state.get_blocks_by_round_cached(certifying_round);
@@ -304,8 +304,8 @@ impl BaseCommitter {
     /// `strong_vote == true`.
     fn carries_strong_qc(
         &self,
-        certifying_block: &Data<VerifiedStatementBlock>,
-        leader_block: &Data<VerifiedStatementBlock>,
+        certifying_block: &Data<VerifiedBlock>,
+        leader_block: &Data<VerifiedBlock>,
         voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
@@ -328,7 +328,7 @@ impl BaseCommitter {
     /// - Pending: neither strong vote nor strong blame quorum
     fn determine_metastate(
         &self,
-        leader_block: &Data<VerifiedStatementBlock>,
+        leader_block: &Data<VerifiedBlock>,
         voting_round: RoundNumber,
         voter_info: &VoterInfo,
     ) -> Option<CommitMetastate> {

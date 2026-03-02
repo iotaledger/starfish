@@ -35,7 +35,7 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, DataRequester, SynchronizerParameters},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedStatementBlock,
+        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock,
         format_authority_index,
     },
 };
@@ -54,7 +54,7 @@ enum Status {
     Header,
 }
 impl Status {
-    fn get_status(block: &VerifiedStatementBlock, peer: usize) -> Self {
+    fn get_status(block: &VerifiedBlock, peer: usize) -> Self {
         if block.statements().is_some() {
             Status::Full
         } else if block.has_shard_data() {
@@ -488,10 +488,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_without_statements(
-        &mut self,
-        blocks: Vec<Data<VerifiedStatementBlock>>,
-    ) {
+    async fn process_blocks_without_statements(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         use crate::shard_reconstructor::ShardMessage;
 
         let incoming_statuses: Vec<_> = blocks
@@ -506,7 +503,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
-            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
             if let Err(e) = block.verify(
                 &self.inner.committee,
@@ -601,7 +598,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_with_statements(&mut self, blocks: Vec<Data<VerifiedStatementBlock>>) {
+    async fn process_blocks_with_statements(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         let incoming_statuses: Vec<_> = blocks
             .iter()
             .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
@@ -615,7 +612,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
-            let mut block: VerifiedStatementBlock = (*data_block).clone();
+            let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
             if let Err(e) = block.verify(
                 &self.inner.committee,

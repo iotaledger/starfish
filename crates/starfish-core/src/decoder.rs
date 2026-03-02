@@ -9,16 +9,14 @@ use crate::{
     committee::Committee,
     crypto::TransactionsCommitment,
     encoder::{Encoder, ShardEncoder},
-    types::{
-        AuthorityIndex, BlockHeader, ProvableShard, Shard, TransactionData, VerifiedStatementBlock,
-    },
+    types::{AuthorityIndex, BlockHeader, ProvableShard, Shard, TransactionData, VerifiedBlock},
 };
 
 pub type Decoder = ReedSolomonDecoder;
 
 /// Decode a full block from collected shards + block header.
 ///
-/// Returns `Some(VerifiedStatementBlock)` with reconstructed transactions and
+/// Returns `Some(VerifiedBlock)` with reconstructed transactions and
 /// the caller's own shard+proof, or `None` on merkle mismatch.
 pub fn decode_shards(
     decoder: &mut Decoder,
@@ -27,7 +25,7 @@ pub fn decode_shards(
     header: &BlockHeader,
     shards: &[Option<Shard>],
     own_id: AuthorityIndex,
-) -> Option<VerifiedStatementBlock> {
+) -> Option<VerifiedBlock> {
     let info_length = committee.info_length();
     let total_length = committee.len();
     let parity_length = total_length - info_length;
@@ -86,7 +84,7 @@ pub fn decode_shards(
             computed_merkle_proof,
             computed_merkle_root,
         );
-        Some(VerifiedStatementBlock::from_parts(
+        Some(VerifiedBlock::from_parts(
             header.clone(),
             Some(TransactionData::new(statements)),
             Some(own_shard),
@@ -150,11 +148,11 @@ mod tests {
         committee: &Committee,
         encoder: &mut Encoder,
         signer: &Signer,
-    ) -> (VerifiedStatementBlock, Vec<Shard>) {
+    ) -> (VerifiedBlock, Vec<Shard>) {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
         let encoded = encoder.encode_statements(&statements, info_length, parity_length);
-        let block = VerifiedStatementBlock::new_with_signer(
+        let block = VerifiedBlock::new_with_signer(
             authority,
             1,
             vec![],
