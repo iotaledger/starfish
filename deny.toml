@@ -39,6 +39,12 @@ allow = [
 # [possible values: any between 0.0 and 1.0].
 confidence-threshold = 0.8
 
+exceptions = [
+  # tidehunter and minibytes don't publish license metadata
+  { name = "tidehunter", allow = ["Apache-2.0"] },
+  { name = "minibytes", allow = ["Apache-2.0"] },
+]
+
 [[licenses.clarify]]
 name = "ring"
 expression = "LicenseRef-ring"
@@ -68,6 +74,9 @@ skip = [
   # procfs (from prometheus process feature) uses older rustix/linux-raw-sys
   { name = "linux-raw-sys", version = "0.4" },
   { name = "rustix", version = "0.38" },
+  # tidehunter uses prometheus 0.14 (protobuf 3.x), starfish-core uses 0.13 (protobuf 2.x)
+  { name = "prometheus", version = "0.13" },
+  { name = "protobuf", version = "2" },
 ]
 skip-tree = [
   # aws-smithy-http-client depends on both hyper 0.14 and 1.x,
@@ -91,6 +100,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
   "https://github.com/asonnino/prometheus-parser",
+  "https://github.com/MystenLabs/tidehunter",
 ]
 
 [sources.allow-org]
