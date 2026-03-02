@@ -267,7 +267,7 @@ impl Grafana {
     const DASHBOARDS_PATH: &'static str = "/etc/grafana/provisioning/dashboards";
 
     /// The default grafana port.
-    pub const DEFAULT_PORT: u16 = 3000;
+    pub const DEFAULT_PORT: u16 = 3100;
 
     /// The commands to install grafana.
     pub fn install_commands() -> Vec<&'static str> {
@@ -306,7 +306,11 @@ impl Grafana {
             ),
             // copy your default dashboard yaml/json
             &format!("sudo cp grafana-dashboard.json {}", Self::DASHBOARDS_PATH),
-            // Free the port in case another process occupies it.
+            // Set custom port and free it in case another process occupies it.
+            &format!(
+                "sudo sed -i 's/^;\\?http_port = .*/http_port = {}/' /etc/grafana/grafana.ini",
+                Self::DEFAULT_PORT
+            ),
             &format!("(sudo fuser -k {}/tcp || true)", Self::DEFAULT_PORT),
             "sudo service grafana-server restart",
         ]
