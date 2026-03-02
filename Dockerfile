@@ -6,7 +6,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release --bin starfish && \
+    cargo build --release --all-features --bin starfish && \
     cp target/release/starfish /usr/local/bin/starfish && \
     strip /usr/local/bin/starfish
 

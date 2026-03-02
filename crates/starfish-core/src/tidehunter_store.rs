@@ -83,6 +83,8 @@ impl TideHunterStore {
 
         let metrics = Metrics::new();
 
+        std::fs::create_dir_all(path.as_ref())?;
+
         let db = Db::open(path.as_ref(), key_shape, config, metrics)
             .map_err(|e| io::Error::other(format!("TideHunter open: {e:?}")))?;
 

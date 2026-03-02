@@ -289,7 +289,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     &format!("git checkout -B {commit} origin/{commit}"),
                     "source $HOME/.cargo/env",
                     "RUSTFLAGS=-Ctarget-cpu=native \
-                    cargo build --release --workspace \
+                    cargo build --release --all-features --workspace \
                     --exclude orchestrator",
                 ]
                 .join(" && ");
