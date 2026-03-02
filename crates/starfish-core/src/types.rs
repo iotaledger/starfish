@@ -207,14 +207,21 @@ pub struct ProvableShard {
     pub(crate) shard: Shard,
     pub(crate) shard_index: ShardIndex,
     pub(crate) merkle_proof: Vec<u8>,
+    pub(crate) transactions_commitment: TransactionsCommitment,
 }
 
 impl ProvableShard {
-    pub fn new(shard: Shard, shard_index: ShardIndex, merkle_proof: Vec<u8>) -> Self {
+    pub fn new(
+        shard: Shard,
+        shard_index: ShardIndex,
+        merkle_proof: Vec<u8>,
+        transactions_commitment: TransactionsCommitment,
+    ) -> Self {
         Self {
             shard,
             shard_index,
             merkle_proof,
+            transactions_commitment,
         }
     }
 
@@ -228,6 +235,24 @@ impl ProvableShard {
 
     pub fn merkle_proof(&self) -> &Vec<u8> {
         &self.merkle_proof
+    }
+
+    pub fn transactions_commitment(&self) -> TransactionsCommitment {
+        self.transactions_commitment
+    }
+
+    /// Verify the Merkle proof against the embedded transactions commitment.
+    pub fn verify(&self, committee_size: usize) -> bool {
+        if self.merkle_proof.is_empty() {
+            return false;
+        }
+        TransactionsCommitment::check_correctness_merkle_leaf(
+            self.shard.clone(),
+            self.transactions_commitment,
+            self.merkle_proof.clone(),
+            committee_size,
+            self.shard_index,
+        )
     }
 }
 
@@ -286,11 +311,14 @@ impl VerifiedStatementBlock {
 
         let shard_data = match (encoded_shard, merkle_proof) {
             (Some((shard, shard_index)), Some(proof)) => {
-                Some(ProvableShard::new(shard, shard_index, proof))
+                Some(ProvableShard::new(shard, shard_index, proof, merkle_root))
             }
-            (Some((shard, shard_index)), None) => {
-                Some(ProvableShard::new(shard, shard_index, Vec::new()))
-            }
+            (Some((shard, shard_index)), None) => Some(ProvableShard::new(
+                shard,
+                shard_index,
+                Vec::new(),
+                merkle_root,
+            )),
             _ => None,
         };
 
@@ -551,6 +579,7 @@ impl VerifiedStatementBlock {
                         encoded_statements[own_id].clone(),
                         own_id,
                         merkle_proof_bytes,
+                        self.header.transactions_commitment,
                     ));
                 } else if let Some(sd) = self.shard_data.as_ref() {
                     if sd.shard_index != peer_id {

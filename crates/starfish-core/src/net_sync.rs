@@ -441,14 +441,36 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         let maybe_tx = self.inner.shard_tx.lock().clone();
         let Some(shard_tx) = maybe_tx else { return };
+        let committee_size = self.inner.committee.len();
 
         for payload in shards {
-            // Look up the block header from the DAG to supply to the reconstructor
+            // Verify the Merkle proof against the embedded transactions commitment.
+            if !payload.shard.verify(committee_size) {
+                tracing::warn!(
+                    "Standalone shard for {:?} from {} failed Merkle proof — dropped",
+                    payload.block_reference,
+                    self.peer
+                );
+                continue;
+            }
+
+            // Look up the block header from the DAG to supply to the reconstructor.
             if let Some(block) = self
                 .inner
                 .dag_state
                 .get_storage_block(payload.block_reference)
             {
+                // Cross-check: the shard's commitment must match the block header's.
+                if payload.shard.transactions_commitment() != block.header().transactions_commitment
+                {
+                    tracing::warn!(
+                        "Standalone shard commitment mismatch for {:?} from {} — dropped",
+                        payload.block_reference,
+                        self.peer
+                    );
+                    continue;
+                }
+
                 let _ = shard_tx
                     .send(ShardMessage::Shard {
                         block_reference: payload.block_reference,
@@ -1133,13 +1155,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
     async fn cleanup_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let cleanup_interval = Duration::from_secs(10);
+        let committee_size = inner.committee.len();
         loop {
             select! {
                 _sleep = sleep(cleanup_interval) => {
-                    // Keep read lock for everything else
                     let gc_round = inner.dag_state.gc_round();
                     inner.gc_round.store(gc_round, Ordering::Relaxed);
                     inner.syncer.cleanup().await;
+
+                    // Evict stale entries from CordialKnowledge.
+                    if gc_round > 0 {
+                        let eviction_rounds = vec![gc_round as RoundNumber; committee_size];
+                        inner.cordial_knowledge.send(
+                            CordialKnowledgeMessage::EvictBelow(eviction_rounds),
+                        );
+                    }
                 }
                 _stopped = inner.stopped() => {
                     return None;

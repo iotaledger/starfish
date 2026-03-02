@@ -84,6 +84,7 @@ pub fn decode_shards(
             recovered_statements[own_id as usize].clone(),
             own_id as usize,
             computed_merkle_proof,
+            computed_merkle_root,
         );
         Some(VerifiedStatementBlock::from_parts(
             header.clone(),

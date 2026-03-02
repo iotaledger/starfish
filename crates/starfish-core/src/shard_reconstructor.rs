@@ -91,10 +91,10 @@ impl ShardAccumulator {
     }
 }
 
-/// Result of a successful reconstruction worker.
-struct ReconstructedBlock {
+/// Result from a reconstruction worker (success or failure).
+struct ReconstructionResult {
     block_reference: BlockReference,
-    block: VerifiedStatementBlock,
+    block: Option<VerifiedStatementBlock>,
 }
 
 /// Type alias for decoded blocks sent to core.
@@ -142,8 +142,8 @@ struct ShardReconstructor {
     // Worker pool channels
     ready_tx: Sender<ReconstructionJob>,
     ready_rx: Arc<Mutex<Receiver<ReconstructionJob>>>,
-    result_tx: Sender<ReconstructedBlock>,
-    result_rx: Receiver<ReconstructedBlock>,
+    result_tx: Sender<ReconstructionResult>,
+    result_rx: Receiver<ReconstructionResult>,
     // Decoded blocks waiting to be flushed to core
     pending_decoded: DecodedBlocks,
     // Output channel to core bridge
@@ -232,7 +232,7 @@ impl ShardReconstructor {
 
                     match job {
                         Some((block_reference, header, shards)) => {
-                            let result = decoder::decode_shards(
+                            let block = decoder::decode_shards(
                                 &mut rs_decoder,
                                 &committee,
                                 &mut encoder,
@@ -241,25 +241,26 @@ impl ShardReconstructor {
                                 own_id,
                             );
 
-                            if let Some(block) = result {
+                            if block.is_some() {
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
-                                if result_tx
-                                    .send(ReconstructedBlock {
-                                        block_reference,
-                                        block,
-                                    })
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
                             } else {
                                 metrics.shard_reconstruction_failed_total.inc();
                                 tracing::warn!(
                                     "Worker failed to reconstruct block {:?}",
                                     block_reference
                                 );
+                            }
+
+                            if result_tx
+                                .send(ReconstructionResult {
+                                    block_reference,
+                                    block,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
                             }
                         }
                         None => break,
@@ -367,14 +368,18 @@ impl ShardReconstructor {
         self.update_backlog_metrics();
     }
 
-    fn handle_reconstruction_result(&mut self, result: ReconstructedBlock) {
+    fn handle_reconstruction_result(&mut self, result: ReconstructionResult) {
         let block_reference = result.block_reference;
         if !self.reconstruction_queue.remove(&block_reference) {
             return;
         }
-        self.processed_blocks.insert(block_reference);
 
-        self.pending_decoded.push(Data::new(result.block));
+        if let Some(block) = result.block {
+            self.processed_blocks.insert(block_reference);
+            self.pending_decoded.push(Data::new(block));
+        }
+        // On failure (block == None): the entry is removed from
+        // reconstruction_queue so future shards can retry accumulation.
         self.update_backlog_metrics();
     }
 
@@ -404,6 +409,7 @@ impl ShardReconstructor {
         };
         self.shard_accumulators = self.shard_accumulators.split_off(&threshold);
         self.processed_blocks = self.processed_blocks.split_off(&threshold);
+        self.reconstruction_queue.retain(|r| r.round >= gc);
         self.update_backlog_metrics();
     }
 

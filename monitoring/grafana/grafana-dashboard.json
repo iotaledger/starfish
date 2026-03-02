@@ -1768,14 +1768,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_transaction_size_bytes{v=\"p50\", validator=~\"$validator\"}",
+          "expr": "proposed_transaction_size_bytes{v=\"sum\", validator=~\"$validator\"} / clamp_min(proposed_transaction_size_bytes{v=\"count\", validator=~\"$validator\"}, 1)",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Proposed transaction size",
+      "title": "Average transaction payload size",
       "type": "timeseries"
     },
     {
@@ -3305,7 +3305,7 @@
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "normal"
+              "mode": "none"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -3403,7 +3403,7 @@
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "normal"
+              "mode": "none"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -3598,7 +3598,7 @@
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "normal"
+              "mode": "none"
             },
             "thresholdsStyle": {
               "mode": "off"
