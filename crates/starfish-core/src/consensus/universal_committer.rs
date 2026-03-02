@@ -28,6 +28,10 @@ pub struct UniversalCommitter {
     /// Version-gated cache of voter info per (leader, leader_round).
     /// Key: (leader, leader_round), Value: (voting_round_version, VoterInfo).
     voters_cache: AHashMap<(AuthorityIndex, RoundNumber), (u64, VoterInfo)>,
+    /// Leaders whose metrics have already been reported (to avoid overcounting
+    /// when the same decided leader is re-emitted across multiple `try_commit`
+    /// calls).
+    metrics_emitted: AHashSet<(AuthorityIndex, RoundNumber)>,
 }
 
 impl UniversalCommitter {
@@ -149,9 +153,12 @@ impl UniversalCommitter {
             // For StarfishS, Commit(Pending) blocks sequencing; for others is_final == is_decided.
             .take_while(|x| x.is_final())
             .inspect(|x| {
-                tracing::debug!("Decided {x}");
-                let direct_decide = !indirect_decided.contains(&(x.authority(), x.round()));
-                self.update_metrics(x, direct_decide);
+                let key = (x.authority(), x.round());
+                if self.metrics_emitted.insert(key) {
+                    tracing::debug!("Decided {x}");
+                    let direct_decide = !indirect_decided.contains(&key);
+                    self.update_metrics(x, direct_decide);
+                }
             })
             .collect()
     }
@@ -173,6 +180,8 @@ impl UniversalCommitter {
             .retain(|&(_, round), _| round >= threshold_round);
         self.voters_cache
             .retain(|&(_, round), _| round >= threshold_round);
+        self.metrics_emitted
+            .retain(|&(_, round)| round >= threshold_round);
     }
 
     /// Update metrics.
@@ -250,6 +259,7 @@ impl UniversalCommitterBuilder {
             metrics: self.metrics,
             decided: AHashMap::new(),
             voters_cache: AHashMap::new(),
+            metrics_emitted: AHashSet::new(),
         }
     }
 }
