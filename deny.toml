@@ -39,16 +39,21 @@ allow = [
 # [possible values: any between 0.0 and 1.0].
 confidence-threshold = 0.8
 
-exceptions = [
-  # tidehunter and minibytes don't publish license metadata
-  { name = "tidehunter", allow = ["Apache-2.0"] },
-  { name = "minibytes", allow = ["Apache-2.0"] },
-]
-
 [[licenses.clarify]]
 name = "ring"
 expression = "LicenseRef-ring"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# tidehunter and minibytes don't set `license` in Cargo.toml
+[[licenses.clarify]]
+name = "tidehunter"
+expression = "Apache-2.0"
+license-files = [{ path = "../LICENSE", hash = 0x9f085d70 }]
+
+[[licenses.clarify]]
+name = "minibytes"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x6b2d3210 }]
 
 [licenses.private]
 # If true, ignores workspace crates that aren't published, or are only
