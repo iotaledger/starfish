@@ -116,6 +116,18 @@ impl BlockBatch {
         }
     }
 
+    /// Wrap a list of shard payloads as a batch with only the `shards` field
+    /// populated.
+    pub fn shards_only(shards: Vec<ShardPayload>) -> Self {
+        Self {
+            full_blocks: Vec::new(),
+            headers: Vec::new(),
+            shards,
+            useful_headers_authors: 0,
+            useful_shards_authors: 0,
+        }
+    }
+
     /// Total number of items across all sections.
     pub fn len(&self) -> usize {
         self.full_blocks.len() + self.headers.len() + self.shards.len()

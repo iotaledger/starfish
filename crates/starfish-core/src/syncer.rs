@@ -14,7 +14,9 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
+    types::{
+        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, VerifiedBlock,
+    },
 };
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
@@ -82,6 +84,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             missing_parents,
             used_additional_blocks,
         )
+    }
+
+    /// Attach recovered transaction data to existing blocks and attempt block
+    /// creation.
+    pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
+        self.core.add_transaction_data(items);
+        self.try_new_block();
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {

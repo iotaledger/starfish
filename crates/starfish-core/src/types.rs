@@ -199,6 +199,19 @@ impl TransactionData {
 }
 
 // ---------------------------------------------------------------------------
+// ReconstructedTransactionData — tx data recovered from erasure-coded shards.
+// ---------------------------------------------------------------------------
+
+/// Transaction data recovered from shard reconstruction. Sent to core via a
+/// dedicated `add_transaction_data` path that bypasses the block manager
+/// (the block header is already in the DAG).
+pub struct ReconstructedTransactionData {
+    pub block_reference: BlockReference,
+    pub transaction_data: TransactionData,
+    pub shard_data: ProvableShard,
+}
+
+// ---------------------------------------------------------------------------
 // ProvableShard — one erasure-coded piece with its Merkle proof.
 // ---------------------------------------------------------------------------
 

@@ -31,7 +31,8 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, Encoder, RoundNumber, Shard, VerifiedBlock,
+        AuthorityIndex, BaseStatement, BlockReference, Encoder, ReconstructedTransactionData,
+        RoundNumber, Shard, VerifiedBlock,
     },
 };
 
@@ -282,6 +283,19 @@ impl<H: BlockHandler> Core<H> {
             missing_references,
             processed_references_without_statements,
         )
+    }
+
+    /// Attach recovered transaction data directly to existing blocks in the
+    /// DAG. Bypasses the block manager — headers are already accepted and
+    /// connected.
+    pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
+        for item in items {
+            self.dag_state.attach_transaction_data(
+                item.block_reference,
+                item.transaction_data,
+                item.shard_data,
+            );
+        }
     }
 
     fn run_block_handler(&mut self) {
