@@ -110,8 +110,9 @@ struct DagStateInner {
     // Blocks for which we have transaction data and still need to acknowledge.
     // Unsupported protocols leave this disabled entirely.
     pending_acknowledgment: Option<Vec<BlockReference>>,
-    // Byzantine nodes will create different blocks intended for the different validators
-    own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
+    // Per-recipient index of our own blocks. Vec index = recipient authority.
+    // Byzantine nodes may create different blocks for different validators.
+    own_blocks: Vec<BTreeMap<RoundNumber, BlockDigest>>,
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     committee_size: usize,
@@ -179,7 +180,7 @@ impl DagState {
             index: (0..n).map(|_| BTreeMap::new()).collect(),
             data_availability: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_acknowledgment: consensus_protocol.supports_acknowledgments().then(Vec::new),
-            own_blocks: BTreeMap::new(),
+            own_blocks: (0..n).map(|_| BTreeMap::new()).collect(),
             highest_round: 0,
             last_own_block: None,
             dag: (0..n).map(|_| BTreeMap::new()).collect(),
@@ -618,6 +619,42 @@ impl DagState {
                 pending_acknowledgment.push(block_ref);
             }
         }
+        *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
+        true
+    }
+
+    /// Attach a shard to an existing DAG block that has no shard data yet.
+    /// Pre-serializes the shard internally. Returns true if the shard was
+    /// attached (or was already present), false if the block doesn't exist.
+    pub fn attach_shard_data(&self, block_ref: BlockReference, shard_data: &ProvableShard) -> bool {
+        let mut inner = self.dag_state_inner.write();
+        let auth = block_ref.authority as usize;
+
+        let (header, existing_tx) = {
+            let existing = inner.index[auth]
+                .get(&block_ref.round)
+                .and_then(|m| m.get(&block_ref.digest));
+            match existing {
+                Some(b) if b.shard_data().is_some() => return true,
+                Some(b) => (b.header().clone(), b.transaction_data().cloned()),
+                None => return false,
+            }
+        };
+
+        let mut shard = shard_data.clone();
+        shard.preserialize();
+        let shard_bytes = shard
+            .serialized_bytes()
+            .expect("shard should be preserialized");
+        self.store
+            .store_shard_data_bytes(&block_ref, shard_bytes)
+            .expect("Failed to store shard data");
+
+        let updated = Data::new(VerifiedBlock::from_parts(header, existing_tx, Some(shard)));
+        inner.index[auth]
+            .get_mut(&block_ref.round)
+            .unwrap()
+            .insert(block_ref.digest, updated);
         *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
         true
     }
@@ -1153,10 +1190,11 @@ impl DagStateInner {
         limit: usize,
     ) -> Vec<BlockReference> {
         self.own_blocks
-            .range((from_excluded + 1, 0)..)
-            .filter(|((_round, authority_index), _digest)| *authority_index == to_whom_index)
+            .get(to_whom_index as usize)
+            .into_iter()
+            .flat_map(|blocks| blocks.range((from_excluded + 1)..))
             .take(limit)
-            .map(|((round, _authority_index), digest)| BlockReference {
+            .map(|(round, digest)| BlockReference {
                 authority: self.authority,
                 round: *round,
                 digest: *digest,
@@ -1221,13 +1259,43 @@ impl DagStateInner {
         peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<Data<VerifiedBlock>> {
-        let auth = self.authority;
-        Self::into_sorted_blocks(self.collect_unsent_blocks(
-            sent,
-            peer,
-            |r| r.authority == auth,
-            batch_own_block_size,
-        ))
+        let Some(own_blocks) = self.own_blocks.get(peer as usize) else {
+            return Vec::new();
+        };
+        let peer_bit = 1u128 << peer;
+        let mut result = Vec::with_capacity(batch_own_block_size);
+
+        for (round, digest) in own_blocks {
+            if result.len() >= batch_own_block_size {
+                break;
+            }
+
+            let block_ref = BlockReference {
+                authority: self.authority,
+                round: *round,
+                digest: *digest,
+            };
+
+            if sent.contains(&block_ref) {
+                continue;
+            }
+
+            let Some((_, known_by)) = self.dag_get(&block_ref) else {
+                // Preserve the old behavior: once the DAG metadata for this round
+                // is evicted, this path stops considering it for unsent scans.
+                continue;
+            };
+            if known_by & peer_bit != 0 {
+                continue;
+            }
+
+            let block = self
+                .get_transmission_block(block_ref)
+                .unwrap_or_else(|| panic!("Block index corrupted, not found: {block_ref}"));
+            result.push(block);
+        }
+
+        result
     }
 
     pub fn get_unsent_other_blocks(
@@ -1306,10 +1374,10 @@ impl DagStateInner {
             self.last_own_block = Some(*reference);
         }
         for authority_index in authority_index_start..authority_index_end {
-            // own_blocks is never evicted, so duplicates are expected when blocks
-            // arrive again from the network.
-            self.own_blocks
-                .entry((reference.round, authority_index))
+            // Re-receiving our own block from the network should not replace the
+            // originally indexed block for this recipient/round.
+            self.own_blocks[authority_index as usize]
+                .entry(reference.round)
                 .or_insert(reference.digest);
         }
     }
