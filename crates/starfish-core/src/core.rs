@@ -420,11 +420,16 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::prepare_encoded_statements",
             self.prepare_encoded_statements(&statements)
         );
-        let acknowledgment_references = timed!(
-            self.metrics,
-            "Core::new_block::get_pending_acknowledgment",
-            self.dag_state.get_pending_acknowledgment(clock_round)
-        );
+        let acknowledgment_references =
+            if self.dag_state.consensus_protocol.supports_acknowledgments() {
+                timed!(
+                    self.metrics,
+                    "Core::new_block::get_pending_acknowledgment",
+                    self.dag_state.get_pending_acknowledgment(clock_round)
+                )
+            } else {
+                Vec::new()
+            };
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = timed!(
             self.metrics,
@@ -590,16 +595,10 @@ impl<H: BlockHandler> Core<H> {
             .iter()
             .filter(|r| r.round + 1 == clock_round)
             .count();
+        let block_ref_count = block_references.len();
         self.metrics
             .previous_round_refs
             .observe(prev_round_ref_count as f64);
-
-        self.metrics
-            .proposed_block_refs
-            .observe(block_references.len() as f64);
-        self.metrics
-            .proposed_block_acks
-            .observe(acknowledgment_references.len() as f64);
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
@@ -616,6 +615,13 @@ impl<H: BlockHandler> Core<H> {
             self.dag_state.consensus_protocol,
             strong_vote,
         );
+
+        self.metrics
+            .proposed_block_refs
+            .observe(block_ref_count as f64);
+        self.metrics
+            .proposed_block_acks
+            .observe(block.acknowledgment_count() as f64);
 
         Data::new(block)
     }
