@@ -14,7 +14,7 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BaseStatement, BlockHeader, BlockReference, EpochStatus, RoundNumber,
+        AuthorityIndex, BaseTransaction, BlockHeader, BlockReference, EpochStatus, RoundNumber,
         Shard, TimestampNs,
     },
 };
@@ -56,12 +56,12 @@ impl Hasher for Blake3 {
 }
 
 impl TransactionsCommitment {
-    pub fn new_from_encoded_statements(
-        encoded_statements: &Vec<Shard>,
+    pub fn new_from_encoded_transactions(
+        encoded_transactions: &Vec<Shard>,
         authority_index: usize,
     ) -> (TransactionsCommitment, Vec<u8>) {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
-        for shard in encoded_statements {
+        for shard in encoded_transactions {
             let mut hasher = crypto::Blake3Hasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
@@ -77,21 +77,21 @@ impl TransactionsCommitment {
         let merkle_proof_bytes = merkle_proof.to_bytes();
         (TransactionsCommitment(merkle_root), merkle_proof_bytes)
     }
-    pub fn new_from_statements(statements: &Vec<BaseStatement>) -> TransactionsCommitment {
+    pub fn new_from_transactions(transactions: &Vec<BaseTransaction>) -> TransactionsCommitment {
         let mut hasher = crypto::Blake3Hasher::new();
-        for statement in statements {
-            statement.crypto_hash(&mut hasher);
+        for transaction in transactions {
+            transaction.crypto_hash(&mut hasher);
         }
         let digest = hasher.finalize().into();
         TransactionsCommitment(digest)
     }
 
     pub fn check_correctness_merkle_root(
-        encoded_statements: &Vec<Shard>,
+        encoded_transactions: &Vec<Shard>,
         merkle_root: TransactionsCommitment,
     ) -> bool {
         let mut leaves: Vec<[u8; 32]> = Vec::new();
-        for shard in encoded_statements {
+        for shard in encoded_transactions {
             let mut hasher = Blake3Hasher::new();
             shard.crypto_hash(&mut hasher);
             let leaf = hasher.finalize().into();
@@ -105,7 +105,7 @@ impl TransactionsCommitment {
         computed_merkle_root == merkle_root.0
     }
 
-    // The function assumes that encoded_statements[leaf_index] is Some. Otherwise
+    // The function assumes that encoded_transactions[leaf_index] is Some. Otherwise
     // panics
     pub fn check_correctness_merkle_leaf(
         shard: Shard,
@@ -123,7 +123,7 @@ impl TransactionsCommitment {
     }
 }
 impl BlockDigest {
-    pub fn new_without_statements(
+    pub fn new_without_transactions(
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
@@ -238,7 +238,7 @@ impl CryptoHash for u64 {
     }
 }
 
-// impl CryptoHash for StatementDigest {
+// impl CryptoHash for TransactionDigest {
 // fn crypto_hash(&self, state: &mut BlockHasher) {
 // state.update(self.as_ref());
 // }

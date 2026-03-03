@@ -20,13 +20,13 @@ use crate::{
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, RoundNumber, Transaction, VerifiedBlock,
+        AuthorityIndex, BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock,
     },
 };
 
 pub trait BlockHandler: Send + Sync {
     fn handle_proposal(&mut self, number_transactions: usize);
-    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement>;
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseTransaction>;
 }
 
 const REAL_BLOCK_HANDLER_TXN_SIZE: usize = 512;
@@ -81,12 +81,12 @@ impl BlockHandler for RealBlockHandler {
         self.pending_transactions -= number_transactions;
     }
 
-    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseTransaction> {
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {
                 for tx in data {
-                    response.push(BaseStatement::Share(tx));
+                    response.push(BaseTransaction::Share(tx));
                 }
             }
         }
@@ -146,14 +146,14 @@ impl BlockHandler for TestBlockHandler {
         self.pending_transactions -= number_transactions;
     }
 
-    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseStatement> {
+    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseTransaction> {
         // todo - this is ugly, but right now we need a way to recover
         // self.last_transaction
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {
                 for tx in data {
-                    response.push(BaseStatement::Share(tx));
+                    response.push(BaseTransaction::Share(tx));
                 }
             }
         }
@@ -192,9 +192,9 @@ impl RealCommitHandler {
 
     fn transaction_observer(&self, block: Data<VerifiedBlock>) {
         let current_timestamp = runtime::timestamp_utc();
-        if let Some(vec) = block.statements() {
-            for statement in vec {
-                let BaseStatement::Share(transaction) = statement;
+        if let Some(vec) = block.transactions() {
+            for transaction in vec {
+                let BaseTransaction::Share(transaction) = transaction;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                 let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 

@@ -55,7 +55,7 @@ enum Status {
 }
 impl Status {
     fn get_status(block: &VerifiedBlock, peer: usize) -> Self {
-        if block.statements().is_some() {
+        if block.transactions().is_some() {
             Status::Full
         } else if block.has_shard_data() {
             Status::Shard(peer)
@@ -87,7 +87,7 @@ impl StatusFilter {
     /// fully covered.
     fn transition(&mut self, status: &Status, info_length: usize) -> bool {
         match (status, &*self) {
-            // Full blocks always pass — they carry statements we may need
+            // Full blocks always pass — they carry transactions we may need
             // even if we already counted enough shards.
             (Status::Full, _) => {
                 *self = StatusFilter::Full;
@@ -405,28 +405,28 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
 
-        // Separate full blocks by whether they carry statements
-        let mut blocks_with_statements = Vec::new();
-        let mut blocks_without_statements = Vec::new();
+        // Separate full blocks by whether they carry transactions
+        let mut blocks_with_transactions = Vec::new();
+        let mut blocks_without_transactions = Vec::new();
         for block in full_blocks {
-            if block.statements().is_some() {
-                blocks_with_statements.push(block);
+            if block.transactions().is_some() {
+                blocks_with_transactions.push(block);
             } else {
-                blocks_without_statements.push(block);
+                blocks_without_transactions.push(block);
             }
         }
 
-        // Header-only blocks go into the without-statements path
-        blocks_without_statements.extend(headers);
+        // Header-only blocks go into the without-transactions path
+        blocks_without_transactions.extend(headers);
 
-        // First process blocks without statements (causal history shards/headers)
+        // First process blocks without transactions (causal history shards/headers)
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
         ) {
-            self.process_blocks_without_statements(blocks_without_statements)
+            self.process_blocks_without_transactions(blocks_without_transactions)
                 .await;
         }
 
@@ -435,8 +435,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             self.process_standalone_shards(shards).await;
         }
 
-        // Then process blocks with statements
-        self.process_blocks_with_statements(blocks_with_statements)
+        // Then process blocks with transactions
+        self.process_blocks_with_transactions(blocks_with_transactions)
             .await;
 
         drop(timer);
@@ -495,7 +495,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_without_statements(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_blocks_without_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         use crate::shard_reconstructor::ShardMessage;
 
         let incoming_statuses: Vec<_> = blocks
@@ -569,7 +569,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, {} new blocks without statements {:?}",
+            "To be processed after verification from {:?}, {} new blocks without transactions {:?}",
             self.peer,
             new_data_blocks.len(),
             new_data_blocks
@@ -607,7 +607,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_with_statements(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_blocks_with_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         let incoming_statuses: Vec<_> = blocks
             .iter()
             .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
@@ -655,7 +655,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, {} blocks with statements {:?}",
+            "To be processed after verification from {:?}, {} blocks with transactions {:?}",
             self.peer,
             verified_data_blocks.len(),
             verified_data_blocks

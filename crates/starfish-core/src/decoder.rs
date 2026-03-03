@@ -17,7 +17,7 @@ pub type Decoder = ReedSolomonDecoder;
 /// Decode transaction data from collected shards + block header.
 ///
 /// Returns `Some((TransactionData, ProvableShard))` with the reconstructed
-/// statements and the caller's own shard+proof, or `None` on merkle mismatch.
+/// transactions and the caller's own shard+proof, or `None` on merkle mismatch.
 pub fn decode_shards(
     decoder: &mut Decoder,
     committee: &Committee,
@@ -71,30 +71,34 @@ pub fn decode_shards(
     }
     drop(result);
 
-    let recovered_statements = encoder.encode_shards(data, info_length, parity_length);
+    let recovered_transactions = encoder.encode_shards(data, info_length, parity_length);
     let (computed_merkle_root, computed_merkle_proof) =
-        TransactionsCommitment::new_from_encoded_statements(&recovered_statements, own_id as usize);
+        TransactionsCommitment::new_from_encoded_transactions(
+            &recovered_transactions,
+            own_id as usize,
+        );
 
     if computed_merkle_root == header.merkle_root() {
-        let statements = reconstruct_statements_from_shards(&recovered_statements, info_length);
+        let transactions =
+            reconstruct_transactions_from_shards(&recovered_transactions, info_length);
         let own_shard = ProvableShard::new(
-            recovered_statements[own_id as usize].clone(),
+            recovered_transactions[own_id as usize].clone(),
             own_id as usize,
             computed_merkle_proof,
             computed_merkle_root,
         );
-        Some((TransactionData::new(statements), own_shard))
+        Some((TransactionData::new(transactions), own_shard))
     } else {
         None
     }
 }
 
-/// Reconstruct statements by concatenating info shards and deserializing.
-fn reconstruct_statements_from_shards(
-    encoded_statements: &[Shard],
+/// Reconstruct transactions by concatenating info shards and deserializing.
+fn reconstruct_transactions_from_shards(
+    encoded_transactions: &[Shard],
     info_length: usize,
-) -> Vec<crate::types::BaseStatement> {
-    let reconstructed_data: Vec<u8> = encoded_statements
+) -> Vec<crate::types::BaseTransaction> {
+    let reconstructed_data: Vec<u8> = encoded_transactions
         .iter()
         .take(info_length)
         .flat_map(|s| s.iter().copied())
@@ -134,11 +138,11 @@ mod tests {
         crypto::Signer,
         dag_state::ConsensusProtocol,
         encoder::ShardEncoder,
-        types::{BaseStatement, Transaction, VerifiedBlock},
+        types::{BaseTransaction, Transaction, VerifiedBlock},
     };
 
     fn make_test_block(
-        statements: Vec<BaseStatement>,
+        transactions: Vec<BaseTransaction>,
         authority: AuthorityIndex,
         committee: &Committee,
         encoder: &mut Encoder,
@@ -146,7 +150,7 @@ mod tests {
     ) -> (VerifiedBlock, Vec<Shard>) {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
-        let encoded = encoder.encode_statements(&statements, info_length, parity_length);
+        let encoded = encoder.encode_transactions(&transactions, info_length, parity_length);
         let block = VerifiedBlock::new_with_signer(
             authority,
             1,
@@ -155,7 +159,7 @@ mod tests {
             0,
             false,
             signer,
-            statements,
+            transactions,
             Some(encoded.clone()),
             ConsensusProtocol::Starfish,
             None,
@@ -173,13 +177,18 @@ mod tests {
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
         let mut decoder = Decoder::new(2, 4, 2).unwrap();
 
-        let statements = vec![
-            BaseStatement::Share(Transaction::new(vec![1, 2, 3])),
-            BaseStatement::Share(Transaction::new(vec![4, 5, 6, 7, 8])),
+        let transactions = vec![
+            BaseTransaction::Share(Transaction::new(vec![1, 2, 3])),
+            BaseTransaction::Share(Transaction::new(vec![4, 5, 6, 7, 8])),
         ];
 
-        let (block, shards) =
-            make_test_block(statements.clone(), 0, &committee, &mut encoder, &signers[0]);
+        let (block, shards) = make_test_block(
+            transactions.clone(),
+            0,
+            &committee,
+            &mut encoder,
+            &signers[0],
+        );
 
         // Build shard collection with only info shards (0 and 1)
         let mut shard_slots: Vec<Option<Shard>> = vec![None; committee_size];
@@ -201,9 +210,9 @@ mod tests {
         );
         let (tx_data, own_shard) = result.unwrap();
         assert_eq!(
-            tx_data.statements(),
-            &statements,
-            "reconstructed statements should match originals"
+            tx_data.transactions(),
+            &transactions,
+            "reconstructed transactions should match originals"
         );
         assert!(
             own_shard.transactions_commitment() == block.merkle_root(),
@@ -221,10 +230,15 @@ mod tests {
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
         let mut decoder = Decoder::new(2, 4, 2).unwrap();
 
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![42; 100]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![42; 100]))];
 
-        let (block, shards) =
-            make_test_block(statements.clone(), 0, &committee, &mut encoder, &signers[0]);
+        let (block, shards) = make_test_block(
+            transactions.clone(),
+            0,
+            &committee,
+            &mut encoder,
+            &signers[0],
+        );
 
         // Provide shard 0 (info) + shard 2 (first parity), skip shard 1 and 3
         let mut shard_slots: Vec<Option<Shard>> = vec![None; committee_size];
@@ -245,9 +259,9 @@ mod tests {
         );
         let (tx_data, _own_shard) = result.unwrap();
         assert_eq!(
-            tx_data.statements(),
-            &statements,
-            "reconstructed statements should match originals"
+            tx_data.transactions(),
+            &transactions,
+            "reconstructed transactions should match originals"
         );
     }
 
@@ -261,9 +275,10 @@ mod tests {
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
         let mut decoder = Decoder::new(2, 4, 2).unwrap();
 
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![1, 2, 3]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![1, 2, 3]))];
 
-        let (block, shards) = make_test_block(statements, 0, &committee, &mut encoder, &signers[0]);
+        let (block, shards) =
+            make_test_block(transactions, 0, &committee, &mut encoder, &signers[0]);
 
         // Build shards with tampered data
         let mut shard_slots: Vec<Option<Shard>> = vec![None; committee_size];

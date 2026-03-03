@@ -172,13 +172,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["add_blocks"])
                         .inc();
                     let (
-                        pending_blocks_with_statements,
+                        pending_blocks_with_transactions,
                         missing_references,
                         used_additional_references,
                     ) = self.syncer.add_blocks(blocks);
                     sender
                         .send((
-                            pending_blocks_with_statements,
+                            pending_blocks_with_transactions,
                             missing_references,
                             used_additional_references,
                         ))

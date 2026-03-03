@@ -1768,14 +1768,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_transaction_size_bytes{v=\"sum\", validator=~\"$validator\"} / clamp_min(proposed_transaction_size_bytes{v=\"count\", validator=~\"$validator\"}, 1)",
+          "expr": "proposed_transaction_size_bytes{v=\"p50\", validator=~\"$validator\"}",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Average transaction payload size",
+      "title": "Transaction payload size (p50)",
       "type": "timeseries"
     },
     {
@@ -3657,6 +3657,102 @@
         }
       ],
       "title": "Core thread tasks (rate by type)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 152
+      },
+      "id": 215,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "useful_authorities{validator=~\"$validator\"}",
+          "legendFormat": "{{validator}} \u2014 peer {{peer}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Useful authorities per peer",
       "type": "timeseries"
     }
   ],

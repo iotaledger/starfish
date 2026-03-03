@@ -94,7 +94,7 @@ mod tests {
             reference: BlockReference {
                 authority,
                 round,
-                digest: BlockDigest::new_without_statements(
+                digest: BlockDigest::new_without_transactions(
                     authority,
                     round,
                     &block_references,

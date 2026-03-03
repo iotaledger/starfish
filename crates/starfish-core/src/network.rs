@@ -88,7 +88,7 @@ pub struct ShardPayload {
 /// in return.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockBatch {
-    /// Full blocks (header + statements + optional shard).
+    /// Full blocks (header + transactions + optional shard).
     pub full_blocks: Vec<Data<VerifiedBlock>>,
     /// Header-only blocks (no payload) — causal history the peer may not have.
     pub headers: Vec<Data<VerifiedBlock>>,
