@@ -500,6 +500,7 @@ impl DagState {
 
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();
+            inner.threshold_clock.add_block(*block.reference(), &self.committee);
             inner.add_block(block, authority_index_start, authority_index_end);
             (inner.highest_round, inner.global_lowest_round())
         };
