@@ -8,12 +8,12 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-s}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
+CONSENSUS=${CONSENSUS:-starfish}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, equivocating-chains-bomb, random-drop
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-random-drop}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains}
 TEST_TIME=${TEST_TIME:-300}
 # Optional: set to use uniform latency (ms)
 # instead of AWS RTT table
