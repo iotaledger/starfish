@@ -29,7 +29,6 @@ use crate::{
     runtime::timestamp_utc,
     state::RecoveredState,
     store::Store,
-    threshold_clock::ThresholdClockAggregator,
     types::{
         AuthorityIndex, BaseTransaction, BlockReference, Encoder, ReconstructedTransactionData,
         RoundNumber, Shard, VerifiedBlock,
@@ -52,7 +51,6 @@ pub struct Core<H: BlockHandler> {
     block_handler: H,
     store: Arc<dyn Store>,
     authority: AuthorityIndex,
-    threshold_clock: ThresholdClockAggregator,
     pub(crate) committee: Arc<Committee>,
     last_commit_leader: BlockReference,
     dag_state: DagState,
@@ -99,11 +97,15 @@ impl<H: BlockHandler> Core<H> {
             committed_leaders_count,
         } = recovered;
 
-        let mut threshold_clock = ThresholdClockAggregator::new(0);
-
-        // Initialize genesis blocks if needed
-        let (own_genesis_block, other_genesis_blocks) = committee.genesis_blocks(authority);
-        assert_eq!(own_genesis_block.author(), authority);
+        // Use genesis blocks cached in DagState (already inserted into DAG on
+        // clean start by DagState::open()). Threshold clock is also initialized
+        // inside DagState::open().
+        let own_genesis_block = dag_state
+            .genesis_blocks()
+            .iter()
+            .find(|b| b.author() == authority)
+            .expect("own genesis block not found")
+            .clone();
 
         // Pending references for inclusion
         let mut pending = Vec::new();
@@ -115,24 +117,18 @@ impl<H: BlockHandler> Core<H> {
         };
 
         if unprocessed_blocks.is_empty() {
-            // Store genesis blocks if necessary on clean start.
-            for block in other_genesis_blocks {
-                let reference = *block.reference();
-                threshold_clock.add_block(reference, &committee);
-                dag_state.insert_block_bounds(block.clone(), 0, committee_len);
-                pending.push(MetaTransaction::Include(reference));
+            // Clean start: genesis blocks and threshold clock already populated
+            // by DagState::open(). Just build the pending queue.
+            for block in dag_state.genesis_blocks() {
+                pending.push(MetaTransaction::Include(*block.reference()));
             }
-
-            threshold_clock.add_block(*own_genesis_block.reference(), &committee);
-            dag_state.insert_block_bounds(own_genesis_block.clone(), 0, committee_len);
-            pending.push(MetaTransaction::Include(*own_genesis_block.reference()));
         } else {
-            // Rebuild runtime-only state (pending frontier, threshold clock, and
-            // last own block) from recovered DAG blocks.
+            // Rebuild runtime-only state (pending frontier and last own block)
+            // from recovered DAG blocks. Threshold clock is already populated
+            // by DagState::open().
             let mut recovered_last_own_round = None;
             for block in &unprocessed_blocks {
                 let reference = *block.reference();
-                threshold_clock.add_block(reference, &committee);
                 if reference.authority == authority
                     && recovered_last_own_round
                         .map(|round| reference.round > round)
@@ -149,7 +145,7 @@ impl<H: BlockHandler> Core<H> {
 
             let pending_start_round = recovered_last_own_round
                 .unwrap_or_default()
-                .max(threshold_clock.get_round().saturating_sub(1));
+                .max(dag_state.threshold_clock_round().saturating_sub(1));
             for block in &unprocessed_blocks {
                 if block.round() >= pending_start_round {
                     pending.push(MetaTransaction::Include(*block.reference()));
@@ -177,7 +173,6 @@ impl<H: BlockHandler> Core<H> {
             last_own_block: vec![last_own_block],
             block_handler,
             authority,
-            threshold_clock,
             committee,
             last_commit_leader: last_committed_leader.unwrap_or_default(),
             dag_state,
@@ -279,8 +274,8 @@ impl<H: BlockHandler> Core<H> {
         );
 
         for processed in &processed {
-            self.threshold_clock
-                .add_block(*processed.reference(), &self.committee);
+            self.dag_state
+                .add_to_threshold_clock(*processed.reference());
             self.pending
                 .push(MetaTransaction::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
@@ -315,8 +310,8 @@ impl<H: BlockHandler> Core<H> {
         let success = !processed.is_empty();
         let mut processed_refs = Vec::with_capacity(processed.len());
         for block in &processed {
-            self.threshold_clock
-                .add_block(*block.reference(), &self.committee);
+            self.dag_state
+                .add_to_threshold_clock(*block.reference());
             self.pending
                 .push(MetaTransaction::Include(*block.reference()));
             self.attach_pending_transaction_data(block);
@@ -413,7 +408,7 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("Core::new_block::try_new_block");
 
         // Check if we're ready for a new block
-        let clock_round = self.threshold_clock.get_round();
+        let clock_round = self.dag_state.threshold_clock_round();
         tracing::debug!(
             "Attempt to construct block in round {}. Current pending: {:?}",
             clock_round,
@@ -712,8 +707,8 @@ impl<H: BlockHandler> Core<H> {
         authority_bounds: &[usize],
         block_id: usize,
     ) {
-        self.threshold_clock
-            .add_block(*block_data.reference(), &self.committee);
+        self.dag_state
+            .add_to_threshold_clock(*block_data.reference());
         self.block_handler
             .handle_proposal(block_data.number_transactions());
         self.proposed_block_stats(&block_data);
@@ -787,7 +782,7 @@ impl<H: BlockHandler> Core<H> {
     /// The algorithm to calling is roughly:
     /// if timeout || commit_ready_new_block then try_new_block(..)
     pub fn ready_new_block(&self, connected_authorities: &AHashSet<AuthorityIndex>) -> bool {
-        let quorum_round = self.threshold_clock.get_round();
+        let quorum_round = self.dag_state.threshold_clock_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
 
         if quorum_round < self.last_commit_leader.round().max(1) {
@@ -839,11 +834,13 @@ impl<H: BlockHandler> Core<H> {
         for commit in &committed {
             self.dag_state
                 .update_last_available_commit(commit.anchor.round);
+            self.dag_state.update_last_committed_rounds(commit);
             for block in &commit.blocks {
                 self.epoch_manager
                     .observe_committed_block(block, &self.committee);
             }
-            commit_data.push(CommitData::from(commit));
+            let committed_rounds = self.dag_state.last_committed_rounds();
+            commit_data.push(CommitData::new(commit, committed_rounds));
         }
         let store_start = std::time::Instant::now();
         self.store

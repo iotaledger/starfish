@@ -89,7 +89,7 @@ impl Validator {
             authority,
             rocks_path,
             metrics.clone(),
-            &committee,
+            committee.clone(),
             byzantine_strategy,
             consensus,
             &parameters.storage_backend,
