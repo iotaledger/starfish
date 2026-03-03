@@ -901,9 +901,13 @@ where
         batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
     let (header_candidates, shard_refs, useful_headers, useful_shards) = {
         let mut ck = ck.write();
-        let header_refs = ck.take_unsent_headers(header_candidate_limit);
-        let shard_refs = ck.take_unsent_shards(batch_shard_size);
         let current_round = inner.dag_state.highest_round();
+        let (useful_headers_to_peer, useful_shards_to_peer) =
+            ck.useful_authors_to_peer_bitmasks(current_round);
+        let header_refs =
+            ck.take_unsent_headers_for_authorities(header_candidate_limit, useful_headers_to_peer);
+        let shard_refs =
+            ck.take_unsent_shards_for_authorities(batch_shard_size, useful_shards_to_peer);
         let (uh, us) = ck.useful_authors_bitmasks(current_round);
         (header_refs, shard_refs, uh, us)
     };

@@ -93,10 +93,14 @@ impl ConnectionKnowledge {
         maps: &mut [BTreeMap<RoundNumber, AHashSet<BlockReference>>],
         limit: usize,
         excluded_authority: Option<AuthorityIndex>,
+        allowed_authorities: u128,
     ) -> Vec<BlockReference> {
         let mut result = Vec::with_capacity(limit);
         for (authority, authority_map) in maps.iter_mut().enumerate() {
             if excluded_authority == Some(authority as AuthorityIndex) {
+                continue;
+            }
+            if allowed_authorities & (1u128 << authority) == 0 {
                 continue;
             }
             let mut empty_rounds = Vec::new();
@@ -127,6 +131,21 @@ impl ConnectionKnowledge {
             }
         }
         result
+    }
+
+    fn recent_authors_bitmask(
+        last_useful_rounds: &[Option<RoundNumber>],
+        current_round: RoundNumber,
+    ) -> u128 {
+        let mut mask = 0;
+        for (authority, round) in last_useful_rounds.iter().enumerate() {
+            if let Some(round) = round {
+                if round.saturating_add(MAX_ROUND_GAP_FOR_USEFUL_PARTS) >= current_round {
+                    mask |= 1u128 << authority;
+                }
+            }
+        }
+        mask
     }
 
     pub fn new(peer: AuthorityIndex, committee_size: usize) -> Self {
@@ -204,7 +223,7 @@ impl ConnectionKnowledge {
     /// Drain the oldest unknown headers, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_headers(&mut self, limit: usize) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.headers_not_known, limit, None)
+        Self::take_unsent_refs(&mut self.headers_not_known, limit, None, u128::MAX)
     }
 
     /// Drain the oldest unknown headers, excluding a single authority.
@@ -213,13 +232,38 @@ impl ConnectionKnowledge {
         limit: usize,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.headers_not_known, limit, Some(excluded_authority))
+        Self::take_unsent_refs(
+            &mut self.headers_not_known,
+            limit,
+            Some(excluded_authority),
+            u128::MAX,
+        )
+    }
+
+    /// Drain the oldest unknown headers, but only for authorities currently
+    /// considered useful to the peer.
+    pub fn take_unsent_headers_for_authorities(
+        &mut self,
+        limit: usize,
+        allowed_authorities: u128,
+    ) -> Vec<BlockReference> {
+        Self::take_unsent_refs(&mut self.headers_not_known, limit, None, allowed_authorities)
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_shards(&mut self, limit: usize) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.shards_not_known, limit, None)
+        Self::take_unsent_refs(&mut self.shards_not_known, limit, None, u128::MAX)
+    }
+
+    /// Drain the oldest unknown shards, but only for authorities currently
+    /// considered useful to the peer.
+    pub fn take_unsent_shards_for_authorities(
+        &mut self,
+        limit: usize,
+        allowed_authorities: u128,
+    ) -> Vec<BlockReference> {
+        Self::take_unsent_refs(&mut self.shards_not_known, limit, None, allowed_authorities)
     }
 
     /// Evict all entries below the given per-authority rounds.
@@ -332,21 +376,19 @@ impl ConnectionKnowledge {
     /// useful FROM this peer. Used when constructing a batch to send to this
     /// peer.
     pub fn useful_authors_bitmasks(&self, current_round: RoundNumber) -> (u128, u128) {
-        let mut headers_mask: u128 = 0;
-        let mut shards_mask: u128 = 0;
-        for i in 0..self.committee_size {
-            if let Some(round) = self.last_useful_headers_from_peer_round[i] {
-                if round.saturating_add(MAX_ROUND_GAP_FOR_USEFUL_PARTS) >= current_round {
-                    headers_mask |= 1u128 << i;
-                }
-            }
-            if let Some(round) = self.last_useful_shards_from_peer_round[i] {
-                if round.saturating_add(MAX_ROUND_GAP_FOR_USEFUL_PARTS) >= current_round {
-                    shards_mask |= 1u128 << i;
-                }
-            }
-        }
-        (headers_mask, shards_mask)
+        (
+            Self::recent_authors_bitmask(&self.last_useful_headers_from_peer_round, current_round),
+            Self::recent_authors_bitmask(&self.last_useful_shards_from_peer_round, current_round),
+        )
+    }
+
+    /// Build bitmasks indicating which authorities' headers/shards are still
+    /// useful TO this peer. This gates which extra parts we piggyback.
+    pub fn useful_authors_to_peer_bitmasks(&self, current_round: RoundNumber) -> (u128, u128) {
+        (
+            Self::recent_authors_bitmask(&self.last_useful_headers_to_peer_round, current_round),
+            Self::recent_authors_bitmask(&self.last_useful_shards_to_peer_round, current_round),
+        )
     }
 }
 
@@ -577,6 +619,23 @@ mod tests {
     }
 
     #[test]
+    fn test_take_unsent_headers_for_authorities() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let first = block_ref(0, 5);
+        let second = block_ref(2, 5);
+
+        ck.new_header(first);
+        ck.new_header(second);
+
+        let drained = ck.take_unsent_headers_for_authorities(10, 1u128 << 2);
+        assert_eq!(drained, vec![second]);
+        assert_eq!(ck.unknown_headers_count(), 1);
+
+        let remaining = ck.take_unsent_headers(10);
+        assert_eq!(remaining, vec![first]);
+    }
+
+    #[test]
     fn test_evict_below() {
         let mut ck = ConnectionKnowledge::new(1, 4);
         for round in 1..=10 {
@@ -600,6 +659,16 @@ mod tests {
         let (headers, shards) = ck.useful_authors_bitmasks(20);
         assert_ne!(headers & (1u128 << 0), 0);
         // authority 2, round 10 + 40 >= 20 → still useful
+        assert_ne!(shards & (1u128 << 2), 0);
+    }
+
+    #[test]
+    fn test_useful_authors_to_peer_bitmask() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        ck.mark_header_useful_to_peer(block_ref(0, 10));
+        ck.mark_shard_useful_to_peer(block_ref(2, 10));
+        let (headers, shards) = ck.useful_authors_to_peer_bitmasks(20);
+        assert_ne!(headers & (1u128 << 0), 0);
         assert_ne!(shards & (1u128 << 2), 0);
     }
 
