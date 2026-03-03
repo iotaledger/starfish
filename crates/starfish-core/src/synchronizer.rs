@@ -31,6 +31,8 @@ pub struct SynchronizerParameters {
     pub batch_own_block_size: usize,
     /// The number of other blocks to send in a single batch.
     pub batch_other_block_size: usize,
+    /// The number of shards to send in a single batch.
+    pub batch_shard_size: usize,
     /// The sampling precision with which to re-evaluate the sync strategy.
     pub sample_timeout: Duration,
 }
@@ -41,6 +43,7 @@ impl SynchronizerParameters {
             ConsensusProtocol::Mysticeti => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: 3 * committee_size,
+                batch_shard_size: 3 * committee_size,
                 sample_timeout: Duration::from_millis(600),
             },
             ConsensusProtocol::StarfishPull
@@ -49,6 +52,7 @@ impl SynchronizerParameters {
             | ConsensusProtocol::CordialMiners => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
+                batch_shard_size: committee_size * committee_size,
                 sample_timeout: Duration::from_millis(600),
             },
         }
@@ -60,6 +64,7 @@ impl Default for SynchronizerParameters {
         Self {
             batch_own_block_size: 8,
             batch_other_block_size: 128,
+            batch_shard_size: 128,
             sample_timeout: Duration::from_millis(600),
         }
     }
@@ -646,76 +651,36 @@ where
 
         loop {
             let notified = inner.notify.notified();
-            select! {
-                _sleep = sleep(sample_timeout) => {
-                    let timer = metrics
-                        .utilization_timer
-                        .utilization_timer(
-                            "Broadcaster: send blocks",
-                        );
-                    tracing::debug!(
-                        "Disseminate to \
-                        {to_whom_authority_index} \
-                        after timeout"
-                    );
-                    if use_starfish_dissemination {
-                        sending_batch_starfish_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            synchronizer_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                        )
-                        .await?;
-                    } else {
-                        sending_batch_all_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            synchronizer_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                        )
-                        .await?;
-                    }
-                    drop(timer);
-                }
-                _created_block = notified => {
-                    let timer = metrics
-                        .utilization_timer
-                        .utilization_timer(
-                            "Broadcaster: send blocks",
-                        );
-                    tracing::debug!(
-                        "Disseminate to \
-                        {to_whom_authority_index} \
-                        after creating new block"
-                    );
-                    if use_starfish_dissemination {
-                        sending_batch_starfish_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            synchronizer_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                        )
-                        .await?;
-                    } else {
-                        sending_batch_all_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            synchronizer_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                        )
-                        .await?;
-                    }
-                    drop(timer);
-                }
+            let trigger = select! {
+                _ = sleep(sample_timeout) => "timeout",
+                _ = notified => "new block",
+            };
+            let timer = metrics
+                .utilization_timer
+                .utilization_timer("Broadcaster: send blocks");
+            tracing::debug!("Disseminate to {to_whom_authority_index} after {trigger}");
+            if use_starfish_dissemination {
+                sending_batch_starfish_blocks(
+                    inner.clone(),
+                    to.clone(),
+                    to_whom_authority_index,
+                    synchronizer_parameters.clone(),
+                    sent_to_peer.clone(),
+                    &metrics,
+                )
+                .await?;
+            } else {
+                sending_batch_all_blocks(
+                    inner.clone(),
+                    to.clone(),
+                    to_whom_authority_index,
+                    synchronizer_parameters.clone(),
+                    sent_to_peer.clone(),
+                    &metrics,
+                )
+                .await?;
             }
+            drop(timer);
         }
     }
 }
@@ -771,6 +736,33 @@ fn report_useful_authorities(
         .set((useful_headers | useful_shards).count_ones() as i64);
 }
 
+/// Track sent references in `sent_to_peer`, evict stale entries, and send the
+/// batch.
+async fn send_batch_and_track<H, C>(
+    to: &Sender<NetworkMessage>,
+    batch: BlockBatch,
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
+    refs: impl Iterator<Item = BlockReference>,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    {
+        let mut sent = sent_to_peer.write();
+        for r in refs {
+            sent.insert(r);
+        }
+        let lowest_round = inner.dag_state.lowest_round();
+        sent.retain(|r| r.round >= lowest_round);
+    }
+    if !batch.is_empty() {
+        to.send(NetworkMessage::Batch(batch)).await.ok()?;
+    }
+    Some(())
+}
+
 async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
@@ -801,14 +793,6 @@ where
             authorities_with_missing_blocks,
         )
     };
-    {
-        let mut sent = sent_to_peer.write();
-        for block in &blocks {
-            sent.insert(*block.reference());
-        }
-        let lowest_round = inner.dag_state.lowest_round();
-        sent.retain(|r| r.round >= lowest_round);
-    }
     // Populate useful-authors feedback bitmasks for the peer
     let (useful_headers, useful_shards) = inner
         .cordial_knowledge
@@ -819,8 +803,7 @@ where
             ck.useful_authors_bitmasks(current_round)
         })
         .unwrap_or((0, 0));
-    let peer_label = peer.to_string();
-    report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
+    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
@@ -830,8 +813,8 @@ where
         useful_headers_authors: useful_headers,
         useful_shards_authors: useful_shards,
     };
-    to.send(NetworkMessage::Batch(batch)).await.ok()?;
-    Some(())
+    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }
 
 /// Starfish-specific batch: own blocks as full, others' headers from
@@ -851,6 +834,7 @@ where
 {
     let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
     let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let batch_shard_size = synchronizer_parameters.batch_shard_size;
     let peer = format_authority_index(to_whom_authority_index);
 
     // 1. Own blocks: send as full blocks
@@ -868,7 +852,7 @@ where
     let (header_refs, shard_refs, useful_headers, useful_shards) = {
         let mut ck = ck.write();
         let header_refs = ck.take_unsent_headers(batch_other_block_size);
-        let shard_refs = ck.take_unsent_shards(batch_other_block_size);
+        let shard_refs = ck.take_unsent_shards(batch_shard_size);
         let current_round = inner.dag_state.highest_round();
         let (uh, us) = ck.useful_authors_bitmasks(current_round);
         (header_refs, shard_refs, uh, us)
@@ -879,23 +863,7 @@ where
     let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
     let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
 
-    // 3. Track what we sent
-    {
-        let mut sent = sent_to_peer.write();
-        for block in &own_blocks {
-            sent.insert(*block.reference());
-        }
-        for block in &header_blocks {
-            sent.insert(*block.reference());
-        }
-        for shard in &shard_payloads {
-            sent.insert(shard.block_reference);
-        }
-        let lowest_round = inner.dag_state.lowest_round();
-        sent.retain(|r| r.round >= lowest_round);
-    }
-
-    // 4. Build structured batch
+    // 3. Build structured batch
     let batch = BlockBatch {
         full_blocks: own_blocks,
         headers: header_blocks,
@@ -910,51 +878,14 @@ where
         batch.headers.len(),
         batch.shards.len()
     );
-    if !batch.is_empty() {
-        to.send(NetworkMessage::Batch(batch)).await.ok()?;
-    }
-    Some(())
-}
-
-#[allow(unused)]
-async fn sending_past_cone_block<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
-    to_whom_authority_index: AuthorityIndex,
-    synchronizer_parameters: SynchronizerParameters,
-    block_reference: BlockReference,
-    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-) -> Option<()>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
-    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-    let own_index = inner.dag_state.get_own_authority_index();
-    let blocks = {
-        let sent = sent_to_peer.read();
-        inner.dag_state.get_unsent_past_cone(
-            &sent,
-            to_whom_authority_index,
-            block_reference,
-            batch_own_block_size,
-            batch_other_block_size,
-        )
-    };
-    {
-        let mut sent = sent_to_peer.write();
-        for block in &blocks {
-            sent.insert(*block.reference());
-        }
-    }
-    tracing::debug!(
-        "Blocks to be sent from {own_index} to {to_whom_authority_index} are {blocks:?}"
-    );
-    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-        .await
-        .ok()?;
-    Some(())
+    let sent_refs: Vec<_> = batch
+        .full_blocks
+        .iter()
+        .map(|b| *b.reference())
+        .chain(batch.headers.iter().map(|b| *b.reference()))
+        .chain(batch.shards.iter().map(|s| s.block_reference))
+        .collect();
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }
 
 enum BlockFetcherMessage {
