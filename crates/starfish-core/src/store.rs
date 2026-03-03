@@ -34,4 +34,14 @@ pub trait Store: Send + Sync + 'static {
 
     /// Sync data to disk (blocking, ensures durability).
     fn sync(&self) -> io::Result<()>;
+
+    // -- Component-level writes (pre-serialized) --
+    // Accept raw bincode bytes produced off the core thread by
+    // `VerifiedBlock::preserialize()` or shard reconstructor workers.
+
+    fn store_header_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
+
+    fn store_tx_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
+
+    fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
 }

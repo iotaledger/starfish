@@ -21,6 +21,7 @@ use crate::{
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
+    network::ShardPayload,
     rocks_store::RocksStore,
     state::{RecoveredState, RecoveredStateBuilder},
     store::Store,
@@ -315,11 +316,22 @@ impl DagState {
     ) {
         self.metrics.dag_state_entries.inc();
 
-        // Persist to storage
+        // Persist to storage — use component stores for header-only blocks
+        // to avoid writing empty payloads, and store_block for full blocks.
+        // Pre-serialized bytes (from preserialize()) are used when available.
         let store_start = std::time::Instant::now();
-        self.store
-            .store_block(block.clone())
-            .expect("Failed to store block");
+        if block.has_transaction_data() {
+            self.store
+                .store_block(block.clone())
+                .expect("Failed to store block");
+        } else {
+            let header_bytes = block
+                .serialized_header_bytes()
+                .expect("header should be preserialized before entering core thread");
+            self.store
+                .store_header_bytes(block.reference(), header_bytes)
+                .expect("Failed to store header");
+        }
         self.metrics
             .store_block_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
@@ -507,6 +519,33 @@ impl DagState {
             .collect()
     }
 
+    /// Fetch blocks as header-only for the given references.
+    pub fn get_header_only_blocks(&self, refs: &[BlockReference]) -> Vec<Data<VerifiedBlock>> {
+        let inner = self.dag_state_inner.read();
+        refs.iter()
+            .filter_map(|r| {
+                inner
+                    .get_storage_block(*r)
+                    .map(|block| Data::new(block.as_header_only()))
+            })
+            .collect()
+    }
+
+    /// Fetch shard payloads for the given references.
+    pub fn get_shard_payloads(&self, refs: &[BlockReference]) -> Vec<ShardPayload> {
+        let inner = self.dag_state_inner.read();
+        refs.iter()
+            .filter_map(|r| {
+                let block = inner.get_storage_block(*r)?;
+                let shard = block.shard_data()?.clone();
+                Some(ShardPayload {
+                    block_reference: *r,
+                    shard,
+                })
+            })
+            .collect()
+    }
+
     /// Batch variant of `is_data_available` — single read lock for N lookups.
     pub fn are_data_available(&self, refs: &[BlockReference]) -> Vec<bool> {
         let inner = self.dag_state_inner.read();
@@ -525,6 +564,8 @@ impl DagState {
         block_ref: BlockReference,
         transaction_data: &TransactionData,
         shard_data: &ProvableShard,
+        serialized_tx_data: &[u8],
+        serialized_shard_data: &[u8],
     ) -> bool {
         let mut inner = self.dag_state_inner.write();
         let auth = block_ref.authority as usize;
@@ -542,15 +583,21 @@ impl DagState {
             }
         };
 
-        // Build and persist the updated block.
+        // Persist only the new components — the header is already stored.
+        // Bytes are pre-serialized off the core thread.
+        self.store
+            .store_tx_data_bytes(&block_ref, serialized_tx_data)
+            .expect("Failed to store transaction data");
+        self.store
+            .store_shard_data_bytes(&block_ref, serialized_shard_data)
+            .expect("Failed to store shard data");
+
+        // Rebuild the in-memory composite block (consumers expect Data<VerifiedBlock>).
         let updated = Data::new(VerifiedBlock::from_parts(
             header,
             Some(transaction_data.clone()),
             Some(shard_data.clone()),
         ));
-        self.store
-            .store_block(updated.clone())
-            .expect("Failed to store updated block");
 
         // Replace in index (short-lived mutable borrow).
         inner.index[auth]

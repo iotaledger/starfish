@@ -295,6 +295,9 @@ pub struct ReconstructedTransactionData {
     pub block_reference: BlockReference,
     pub transaction_data: TransactionData,
     pub shard_data: ProvableShard,
+    /// Pre-serialized in shard_reconstructor worker threads (off core thread).
+    pub serialized_tx_data: Bytes,
+    pub serialized_shard_data: Bytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +369,15 @@ pub struct VerifiedBlock {
     pub(crate) header: BlockHeader,
     pub(crate) transaction_data: Option<TransactionData>,
     pub(crate) shard_data: Option<ProvableShard>,
+    /// Cached bincode-serialized bytes for each component.
+    /// Populated by `preserialize()` off the core thread so that store writes
+    /// are zero-serialization on the critical path.
+    #[serde(skip, default)]
+    pub(crate) serialized_header: Option<Bytes>,
+    #[serde(skip, default)]
+    pub(crate) serialized_tx_data: Option<Bytes>,
+    #[serde(skip, default)]
+    pub(crate) serialized_shard_data: Option<Bytes>,
 }
 
 impl VerifiedBlock {
@@ -433,6 +445,9 @@ impl VerifiedBlock {
             header,
             transaction_data: Some(TransactionData::new(statements)),
             shard_data,
+            serialized_header: None,
+            serialized_tx_data: None,
+            serialized_shard_data: None,
         }
     }
 
@@ -464,11 +479,16 @@ impl VerifiedBlock {
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
         };
-        Data::new(Self {
+        let mut block = Self {
             header,
             transaction_data: None,
             shard_data: None,
-        })
+            serialized_header: None,
+            serialized_tx_data: None,
+            serialized_shard_data: None,
+        };
+        block.preserialize();
+        Data::new(block)
     }
 
     pub fn new_with_signer(
@@ -631,6 +651,19 @@ impl VerifiedBlock {
         self.shard_data.is_some()
     }
 
+    /// Create a lightweight copy with only the header (no transaction data, no
+    /// shard).
+    pub fn as_header_only(&self) -> Self {
+        Self {
+            header: self.header.clone(),
+            transaction_data: None,
+            shard_data: None,
+            serialized_header: self.serialized_header.clone(),
+            serialized_tx_data: None,
+            serialized_shard_data: None,
+        }
+    }
+
     // --- Decomposition ---
 
     /// Extract the header, consuming self.
@@ -648,7 +681,54 @@ impl VerifiedBlock {
             header,
             transaction_data,
             shard_data,
+            serialized_header: None,
+            serialized_tx_data: None,
+            serialized_shard_data: None,
         }
+    }
+
+    // --- Pre-serialization (call off the core thread) ---
+
+    /// Eagerly serialize all components into cached `Bytes` for zero-copy
+    /// store writes. Must be called before the block enters the core thread.
+    pub fn preserialize(&mut self) {
+        if self.serialized_header.is_none() {
+            self.serialized_header = Some(
+                bincode::serialize(&self.header)
+                    .expect("header serialization")
+                    .into(),
+            );
+        }
+        if self.serialized_tx_data.is_none() {
+            if let Some(ref tx) = self.transaction_data {
+                self.serialized_tx_data = Some(
+                    bincode::serialize(tx)
+                        .expect("tx_data serialization")
+                        .into(),
+                );
+            }
+        }
+        if self.serialized_shard_data.is_none() {
+            if let Some(ref shard) = self.shard_data {
+                self.serialized_shard_data = Some(
+                    bincode::serialize(shard)
+                        .expect("shard_data serialization")
+                        .into(),
+                );
+            }
+        }
+    }
+
+    pub fn serialized_header_bytes(&self) -> Option<&Bytes> {
+        self.serialized_header.as_ref()
+    }
+
+    pub fn serialized_tx_data_bytes(&self) -> Option<&Bytes> {
+        self.serialized_tx_data.as_ref()
+    }
+
+    pub fn serialized_shard_data_bytes(&self) -> Option<&Bytes> {
+        self.serialized_shard_data.as_ref()
     }
 
     // --- Serialization ---

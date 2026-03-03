@@ -556,6 +556,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             let send_to_core = !self.filter_for_blocks.contains(&digest);
             batch_with_status.push((digest, status));
             if send_to_core {
+                let mut storage_block = storage_block;
+                storage_block.preserialize();
                 new_data_blocks.push(Data::new(storage_block));
             }
         }
@@ -647,6 +649,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             self.filter_for_blocks
                 .add_batch(vec![(block.digest(), Status::Full)]);
+            let mut block = block;
+            block.preserialize();
             verified_data_blocks.push(Data::new(block));
         }
 

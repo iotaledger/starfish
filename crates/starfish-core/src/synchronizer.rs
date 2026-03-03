@@ -639,6 +639,10 @@ where
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let sample_timeout = synchronizer_parameters.sample_timeout;
+        let use_starfish_dissemination = matches!(
+            inner.dag_state.consensus_protocol,
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
+        );
 
         loop {
             let notified = inner.notify.notified();
@@ -654,14 +658,25 @@ where
                         {to_whom_authority_index} \
                         after timeout"
                     );
-                    sending_batch_all_blocks(
-                        inner.clone(),
-                        to.clone(),
-                        to_whom_authority_index,
-                        synchronizer_parameters.clone(),
-                        sent_to_peer.clone(),
-                    )
-                    .await?;
+                    if use_starfish_dissemination {
+                        sending_batch_starfish_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            synchronizer_parameters.clone(),
+                            sent_to_peer.clone(),
+                        )
+                        .await?;
+                    } else {
+                        sending_batch_all_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            synchronizer_parameters.clone(),
+                            sent_to_peer.clone(),
+                        )
+                        .await?;
+                    }
                     drop(timer);
                 }
                 _created_block = notified => {
@@ -675,14 +690,25 @@ where
                         {to_whom_authority_index} \
                         after creating new block"
                     );
-                    sending_batch_all_blocks(
-                        inner.clone(),
-                        to.clone(),
-                        to_whom_authority_index,
-                        synchronizer_parameters.clone(),
-                        sent_to_peer.clone(),
-                    )
-                    .await?;
+                    if use_starfish_dissemination {
+                        sending_batch_starfish_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            synchronizer_parameters.clone(),
+                            sent_to_peer.clone(),
+                        )
+                        .await?;
+                    } else {
+                        sending_batch_all_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            synchronizer_parameters.clone(),
+                            sent_to_peer.clone(),
+                        )
+                        .await?;
+                    }
                     drop(timer);
                 }
             }
@@ -758,10 +784,105 @@ where
         let lowest_round = inner.dag_state.lowest_round();
         sent.retain(|r| r.round >= lowest_round);
     }
+    // Populate useful-authors feedback bitmasks for the peer
+    let (useful_headers, useful_shards) = inner
+        .cordial_knowledge
+        .connection_knowledge(to_whom_authority_index)
+        .map(|ck| {
+            let ck = ck.read();
+            let current_round = inner.dag_state.highest_round();
+            ck.useful_authors_bitmasks(current_round)
+        })
+        .unwrap_or((0, 0));
+
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-        .await
-        .ok()?;
+    let batch = BlockBatch {
+        full_blocks: blocks,
+        headers: Vec::new(),
+        shards: Vec::new(),
+        useful_headers_authors: useful_headers,
+        useful_shards_authors: useful_shards,
+    };
+    to.send(NetworkMessage::Batch(batch)).await.ok()?;
+    Some(())
+}
+
+/// Starfish-specific batch: own blocks as full, others' headers from
+/// CordialKnowledge, shards from CordialKnowledge, plus useful-authors
+/// feedback bitmasks.
+async fn sending_batch_starfish_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    synchronizer_parameters: SynchronizerParameters,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let peer = format_authority_index(to_whom_authority_index);
+
+    // 1. Own blocks: send as full blocks
+    let own_blocks = {
+        let sent = sent_to_peer.read();
+        inner
+            .dag_state
+            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
+    };
+
+    // 2. Others' headers + shards: consult CordialKnowledge
+    let ck = inner
+        .cordial_knowledge
+        .connection_knowledge(to_whom_authority_index)?;
+    let (header_refs, shard_refs, useful_headers, useful_shards) = {
+        let mut ck = ck.write();
+        let header_refs = ck.take_unsent_headers(batch_other_block_size);
+        let shard_refs = ck.take_unsent_shards(batch_other_block_size);
+        let current_round = inner.dag_state.highest_round();
+        let (uh, us) = ck.useful_authors_bitmasks(current_round);
+        (header_refs, shard_refs, uh, us)
+    };
+
+    let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
+    let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
+
+    // 3. Track what we sent
+    {
+        let mut sent = sent_to_peer.write();
+        for block in &own_blocks {
+            sent.insert(*block.reference());
+        }
+        for block in &header_blocks {
+            sent.insert(*block.reference());
+        }
+        for shard in &shard_payloads {
+            sent.insert(shard.block_reference);
+        }
+        let lowest_round = inner.dag_state.lowest_round();
+        sent.retain(|r| r.round >= lowest_round);
+    }
+
+    // 4. Build structured batch
+    let batch = BlockBatch {
+        full_blocks: own_blocks,
+        headers: header_blocks,
+        shards: shard_payloads,
+        useful_headers_authors: useful_headers,
+        useful_shards_authors: useful_shards,
+    };
+
+    tracing::debug!(
+        "Starfish batch to {peer}: {} full, {} headers, {} shards",
+        batch.full_blocks.len(),
+        batch.headers.len(),
+        batch.shards.len()
+    );
+    if !batch.is_empty() {
+        to.send(NetworkMessage::Batch(batch)).await.ok()?;
+    }
     Some(())
 }
 
