@@ -54,6 +54,15 @@ impl ConsensusProtocol {
             _ => ConsensusProtocol::StarfishPull, // Default to Starfish
         }
     }
+
+    pub fn supports_acknowledgments(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        )
+    }
 }
 
 #[allow(unused)]
@@ -81,13 +90,24 @@ pub struct DagState {
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
 
+/// Number of rounds to keep in memory per authority beyond the evicted
+/// frontier. Must be >= 2 * MAX_TRAVERSAL_DEPTH to guarantee consensus
+/// traversals can complete without storage fallback.
+const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
+
+/// Per-authority DAG: round → (digest → (parents, known_by_bitmask)).
+type DagAuthorityMap =
+    BTreeMap<RoundNumber, HashMap<BlockDigest, (Vec<BlockReference>, AuthorityBitmask)>>;
+
 struct DagStateInner {
     store: Arc<dyn Store>,
-    index: BTreeMap<RoundNumber, HashMap<(AuthorityIndex, BlockDigest), Data<VerifiedBlock>>>,
-    // Store the blocks for which we have transaction data
-    data_availability: BTreeSet<BlockReference>,
-    // Blocks for which has available transactions data and didn't yet acknowledge.
-    pending_acknowledgment: Vec<BlockReference>,
+    /// Per-authority block storage. Vec index = authority.
+    index: Vec<BTreeMap<RoundNumber, HashMap<BlockDigest, Data<VerifiedBlock>>>>,
+    /// Per-authority data availability tracking. Vec index = authority.
+    data_availability: Vec<BTreeSet<BlockReference>>,
+    // Blocks for which we have transaction data and still need to acknowledge.
+    // Unsupported protocols leave this disabled entirely.
+    pending_acknowledgment: Option<Vec<BlockReference>>,
     // Byzantine nodes will create different blocks intended for the different validators
     own_blocks: BTreeMap<(RoundNumber, AuthorityIndex), BlockDigest>,
     highest_round: RoundNumber,
@@ -96,19 +116,19 @@ struct DagStateInner {
     consensus_protocol: ConsensusProtocol,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    // this dag structure store for each block its predecessors and who knows the block
-    dag: BTreeMap<RoundNumber, DagRoundEntries>,
+    /// Per-authority DAG metadata. Vec index = authority.
+    dag: Vec<DagAuthorityMap>,
+    /// Per-authority eviction frontier: highest round evicted for each
+    /// authority.
+    evicted_rounds: Vec<RoundNumber>,
     // Round of the latest committed leader whose sub-dag was fully sequenced
-    // (all data available). Used as the single eviction threshold source.
+    // (all data available).
     last_available_commit: RoundNumber,
     // per-round version counter, incremented on each add_block to that round
     round_version: AHashMap<RoundNumber, u64>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
 }
-
-type DagRoundEntries =
-    HashMap<(AuthorityIndex, BlockDigest), (Vec<BlockReference>, AuthorityBitmask)>;
 
 impl DagState {
     pub fn open(
@@ -146,20 +166,22 @@ impl DagState {
         };
         let consensus_protocol = ConsensusProtocol::from_str(&consensus);
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
+        let n = committee.len();
         let mut inner = DagStateInner {
             store: store.clone(),
             authority,
             last_seen_by_authority,
             last_available_commit: 0,
-            committee_size: committee.len(),
+            committee_size: n,
             consensus_protocol,
-            index: BTreeMap::new(),
-            data_availability: BTreeSet::new(),
-            pending_acknowledgment: Vec::new(),
+            index: (0..n).map(|_| BTreeMap::new()).collect(),
+            data_availability: (0..n).map(|_| BTreeSet::new()).collect(),
+            pending_acknowledgment: consensus_protocol.supports_acknowledgments().then(Vec::new),
             own_blocks: BTreeMap::new(),
             highest_round: 0,
             last_own_block: None,
-            dag: BTreeMap::new(),
+            dag: (0..n).map(|_| BTreeMap::new()).collect(),
+            evicted_rounds: vec![0; n],
             pending_not_available: Vec::new(),
             round_version: AHashMap::new(),
         };
@@ -201,7 +223,7 @@ impl DagState {
         metrics.dag_highest_round.set(inner.highest_round as i64);
         metrics
             .dag_lowest_round
-            .set(inner.dag.keys().next().copied().unwrap_or(0) as i64);
+            .set(inner.global_lowest_round() as i64);
         tracing::debug!(
             "authority={} storage replay: {} blocks in {:?}, highest_round={}",
             authority,
@@ -242,16 +264,16 @@ impl DagState {
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
         let inner = self.dag_state_inner.read();
-        // BTreeMap is already sorted by round
-        inner
+        let mut result: Vec<_> = inner
             .dag
             .iter()
-            .flat_map(|(round, map)| {
-                map.iter()
-                    .map(move |((authority, digest), (parents, known_by))| {
+            .enumerate()
+            .flat_map(|(auth_idx, auth_dag)| {
+                auth_dag.iter().flat_map(move |(round, entries)| {
+                    entries.iter().map(move |(digest, (parents, known_by))| {
                         (
                             BlockReference {
-                                authority: *authority,
+                                authority: auth_idx as AuthorityIndex,
                                 round: *round,
                                 digest: *digest,
                             },
@@ -259,8 +281,11 @@ impl DagState {
                             *known_by,
                         )
                     })
+                })
             })
-            .collect()
+            .collect();
+        result.sort_by_key(|(r, _, _)| r.round);
+        result
     }
 
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
@@ -303,10 +328,7 @@ impl DagState {
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();
             inner.add_block(block, authority_index_start, authority_index_end);
-            (
-                inner.highest_round,
-                inner.dag.keys().next().copied().unwrap_or(0),
-            )
+            (inner.highest_round, inner.global_lowest_round())
         };
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
@@ -505,14 +527,14 @@ impl DagState {
         shard_data: &ProvableShard,
     ) -> bool {
         let mut inner = self.dag_state_inner.write();
+        let auth = block_ref.authority as usize;
 
         // Clone the header from the existing block (immutable borrow, dropped at block
         // end).
         let header = {
-            let existing = inner
-                .index
+            let existing = inner.index[auth]
                 .get(&block_ref.round)
-                .and_then(|m| m.get(&(block_ref.authority, block_ref.digest)));
+                .and_then(|m| m.get(&block_ref.digest));
             match existing {
                 Some(b) if b.has_transaction_data() => return true,
                 Some(b) => b.header().clone(),
@@ -531,16 +553,17 @@ impl DagState {
             .expect("Failed to store updated block");
 
         // Replace in index (short-lived mutable borrow).
-        inner
-            .index
+        inner.index[auth]
             .get_mut(&block_ref.round)
             .unwrap()
-            .insert((block_ref.authority, block_ref.digest), updated);
+            .insert(block_ref.digest, updated);
 
         // Mark data-available + queue acknowledgment.
-        if !inner.data_availability.contains(&block_ref) {
-            inner.data_availability.insert(block_ref);
-            inner.pending_acknowledgment.push(block_ref);
+        if !inner.data_availability[auth].contains(&block_ref) {
+            inner.data_availability[auth].insert(block_ref);
+            if let Some(pending_acknowledgment) = inner.pending_acknowledgment.as_mut() {
+                pending_acknowledgment.push(block_ref);
+            }
         }
         *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
         true
@@ -548,7 +571,12 @@ impl DagState {
 
     pub fn len_expensive(&self) -> usize {
         let inner = self.dag_state_inner.read();
-        inner.index.values().map(HashMap::len).sum()
+        inner
+            .index
+            .iter()
+            .flat_map(|auth_map| auth_map.values())
+            .map(HashMap::len)
+            .sum()
     }
 
     pub fn highest_round(&self) -> RoundNumber {
@@ -567,13 +595,7 @@ impl DagState {
     }
 
     pub fn lowest_round(&self) -> RoundNumber {
-        self.dag_state_inner
-            .read()
-            .dag
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or(0)
+        self.dag_state_inner.read().global_lowest_round()
     }
 
     pub fn update_last_available_commit(&self, round: RoundNumber) {
@@ -588,24 +610,27 @@ impl DagState {
     pub fn cleanup(&self) {
         let _timer = self.metrics.dag_state_cleanup_util.utilization_timer();
 
-        let threshold_round = self.gc_round();
-        if threshold_round == 0 {
-            return;
-        }
-
-        let (highest_round, lowest_round, block_count) = {
+        let (highest_round, lowest_round, block_count, max_evicted) = {
             let mut inner = self.dag_state_inner.write();
-            inner.evict_below_round(threshold_round);
+            inner.evict_per_authority();
             (
                 inner.highest_round,
-                inner.dag.keys().next().copied().unwrap_or(0),
-                inner.index.values().map(|m| m.len() as i64).sum::<i64>(),
+                inner.global_lowest_round(),
+                inner
+                    .index
+                    .iter()
+                    .flat_map(|m| m.values())
+                    .map(|h| h.len() as i64)
+                    .sum::<i64>(),
+                inner.evicted_rounds.iter().copied().max().unwrap_or(0),
             )
         };
 
+        // Invalidate cache below max evicted round (any partially-evicted round
+        // is stale).
         self.round_block_cache
             .lock()
-            .retain(|&r, _| r >= threshold_round);
+            .retain(|&r, _| r >= max_evicted);
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
         self.metrics.dag_blocks_in_memory.set(block_count);
@@ -696,12 +721,15 @@ impl DagState {
         self.dag_state_inner.read().min_last_seen_round()
     }
 
-    /// Oldest round we expect to retain in memory and serve after GC/eviction.
+    /// Conservative global GC round (minimum across all authorities).
+    /// Used by external callers that need a single safe threshold.
     pub fn gc_round(&self) -> RoundNumber {
-        self.dag_state_inner
-            .read()
-            .last_available_commit
-            .saturating_sub(2 * MAX_TRAVERSAL_DEPTH)
+        self.dag_state_inner.read().min_evicted_round()
+    }
+
+    /// Per-authority eviction rounds for fine-grained cleanup.
+    pub fn evicted_rounds(&self) -> Vec<RoundNumber> {
+        self.dag_state_inner.read().evicted_rounds.clone()
     }
 
     pub fn last_own_block_ref(&self) -> Option<BlockReference> {
@@ -734,9 +762,22 @@ impl DagState {
 }
 
 impl DagStateInner {
+    fn global_lowest_round(&self) -> RoundNumber {
+        self.dag
+            .iter()
+            .filter_map(|m| m.keys().next().copied())
+            .min()
+            .unwrap_or(0)
+    }
+
+    fn min_evicted_round(&self) -> RoundNumber {
+        self.evicted_rounds.iter().copied().min().unwrap_or(0)
+    }
+
     pub fn block_exists(&self, reference: BlockReference) -> bool {
-        if let Some(blocks) = self.index.get(&reference.round) {
-            if blocks.contains_key(&(reference.authority, reference.digest)) {
+        let auth = reference.authority as usize;
+        if let Some(blocks) = self.index[auth].get(&reference.round) {
+            if blocks.contains_key(&reference.digest) {
                 return true;
             }
         }
@@ -748,11 +789,11 @@ impl DagStateInner {
     }
 
     pub fn is_data_available(&self, reference: &BlockReference) -> bool {
-        self.data_availability.contains(reference)
+        self.data_availability[reference.authority as usize].contains(reference)
     }
 
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
-        if self.data_availability.contains(block_reference) {
+        if self.data_availability[block_reference.authority as usize].contains(block_reference) {
             return self.committee_size;
         }
         0
@@ -774,7 +815,7 @@ impl DagStateInner {
     /// Check if the block has new statement data we don't already have.
     pub fn contains_new_statements(&self, block: &VerifiedBlock) -> bool {
         let block_reference = block.reference();
-        if self.data_availability.contains(block_reference) {
+        if self.data_availability[block_reference.authority as usize].contains(block_reference) {
             return false;
         }
         block.statements().is_some()
@@ -785,32 +826,29 @@ impl DagStateInner {
         authority: AuthorityIndex,
         round: RoundNumber,
     ) -> Vec<Data<VerifiedBlock>> {
-        let Some(blocks) = self.index.get(&round) else {
-            return vec![];
-        };
-        blocks
+        self.index[authority as usize]
+            .get(&round)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedBlock>> {
+        self.index
             .iter()
-            .filter_map(|((a, _), block)| {
-                if *a == authority {
-                    Some(block.clone())
-                } else {
-                    None
-                }
+            .flat_map(|auth_map| {
+                auth_map
+                    .get(&round)
+                    .into_iter()
+                    .flat_map(|m| m.values().cloned())
             })
             .collect()
     }
 
-    pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedBlock>> {
-        let Some(blocks) = self.index.get(&round) else {
-            return vec![];
-        };
-        blocks.values().cloned().collect()
-    }
-
     pub fn get_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
-        let round_entries = self.index.get(&reference.round)?;
-        round_entries
-            .get(&(reference.authority, reference.digest))
+        let auth = reference.authority as usize;
+        self.index[auth]
+            .get(&reference.round)?
+            .get(&reference.digest)
             .cloned()
     }
 
@@ -871,20 +909,28 @@ impl DagStateInner {
         frontier.iter().map(|b| *b.reference()).collect()
     }
 
-    pub fn evict_below_round(&mut self, dag_threshold: RoundNumber) {
-        if dag_threshold == 0 {
-            return;
-        }
-        self.dag = self.dag.split_off(&dag_threshold);
-        self.index = self.index.split_off(&dag_threshold);
+    /// Per-authority eviction using BTreeMap::split_off.
+    fn evict_per_authority(&mut self) {
+        for auth in 0..self.committee_size {
+            let last_seen = self.last_seen_by_authority[auth];
+            let threshold = last_seen.saturating_sub(CACHED_ROUNDS);
+            if threshold == 0 || threshold <= self.evicted_rounds[auth] {
+                continue;
+            }
+            self.evicted_rounds[auth] = threshold;
 
-        let split_ref = BlockReference {
-            authority: 0,
-            round: dag_threshold,
-            digest: BlockDigest::default(),
-        };
-        self.data_availability = self.data_availability.split_off(&split_ref);
-        self.round_version.retain(|&r, _| r >= dag_threshold);
+            self.index[auth] = self.index[auth].split_off(&threshold);
+            self.dag[auth] = self.dag[auth].split_off(&threshold);
+
+            let split_ref = BlockReference {
+                authority: auth as AuthorityIndex,
+                round: threshold,
+                digest: BlockDigest::default(),
+            };
+            self.data_availability[auth] = self.data_availability[auth].split_off(&split_ref);
+        }
+        let min_evicted = self.min_evicted_round();
+        self.round_version.retain(|&r, _| r >= min_evicted);
     }
 
     pub fn add_block(
@@ -894,13 +940,14 @@ impl DagStateInner {
         authority_index_end: AuthorityIndex,
     ) {
         let reference = block.reference();
+        let auth = reference.authority as usize;
         self.highest_round = max(self.highest_round, reference.round());
 
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
 
-        let map = self.index.entry(reference.round()).or_default();
-        map.insert(reference.author_digest(), block.clone());
+        let map = self.index[auth].entry(reference.round()).or_default();
+        map.insert(reference.digest, block.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_dag(
@@ -912,16 +959,16 @@ impl DagStateInner {
     }
 
     fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
-        self.dag.get(&r.round)?.get(&(r.authority, r.digest))
+        self.dag[r.authority as usize].get(&r.round)?.get(&r.digest)
     }
 
     fn dag_get_mut(
         &mut self,
         r: &BlockReference,
     ) -> Option<&mut (Vec<BlockReference>, AuthorityBitmask)> {
-        self.dag
+        self.dag[r.authority as usize]
             .get_mut(&r.round)?
-            .get_mut(&(r.authority, r.digest))
+            .get_mut(&r.digest)
     }
 
     fn dag_contains(&self, r: &BlockReference) -> bool {
@@ -929,17 +976,19 @@ impl DagStateInner {
     }
 
     fn dag_insert(&mut self, r: BlockReference, val: (Vec<BlockReference>, AuthorityBitmask)) {
-        self.dag
+        self.dag[r.authority as usize]
             .entry(r.round)
             .or_default()
-            .insert((r.authority, r.digest), val);
+            .insert(r.digest, val);
     }
 
     fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
         let bit = !(1u128 << peer);
-        for (_, entries) in self.dag.range_mut((round.saturating_add(1))..) {
-            for (_, (_, known_by)) in entries.iter_mut() {
-                *known_by &= bit;
+        for auth_dag in self.dag.iter_mut() {
+            for (_, entries) in auth_dag.range_mut((round.saturating_add(1))..) {
+                for (_, (_, known_by)) in entries.iter_mut() {
+                    *known_by &= bit;
+                }
             }
         }
     }
@@ -1000,18 +1049,24 @@ impl DagStateInner {
     }
 
     pub fn update_data_availability(&mut self, block: &VerifiedBlock) {
-        if block.statements().is_some() && !self.data_availability.contains(block.reference()) {
-            self.data_availability.insert(*block.reference());
-            self.pending_acknowledgment.push(*block.reference());
+        let r = block.reference();
+        let auth = r.authority as usize;
+        if block.statements().is_some() && !self.data_availability[auth].contains(r) {
+            self.data_availability[auth].insert(*r);
+            if let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() {
+                pending_acknowledgment.push(*r);
+            }
         }
     }
 
     pub fn get_pending_acknowledgment(&mut self, round_number: RoundNumber) -> Vec<BlockReference> {
-        let (to_return, to_keep): (Vec<_>, Vec<_>) = self
-            .pending_acknowledgment
+        let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
+            return Vec::new();
+        };
+        let (to_return, to_keep): (Vec<_>, Vec<_>) = pending_acknowledgment
             .drain(..)
             .partition(|x| x.round <= round_number);
-        self.pending_acknowledgment = to_keep;
+        *pending_acknowledgment = to_keep;
         to_return
     }
 
@@ -1066,30 +1121,36 @@ impl DagStateInner {
         limit: usize,
     ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
         let peer_bit = 1u128 << peer;
-        self.dag
+        let mut candidates: Vec<(BlockReference, RoundNumber)> = self
+            .dag
             .iter()
-            .flat_map(|(round, entries)| {
-                entries
-                    .iter()
-                    .map(move |((authority, digest), (_, known_by))| {
+            .enumerate()
+            .flat_map(|(auth_idx, auth_dag)| {
+                auth_dag.iter().flat_map(move |(round, entries)| {
+                    entries.iter().map(move |(digest, (_, known_by))| {
                         (
                             BlockReference {
-                                authority: *authority,
+                                authority: auth_idx as AuthorityIndex,
                                 round: *round,
                                 digest: *digest,
                             },
                             *known_by,
                         )
                     })
+                })
             })
             .filter(|(r, known_by)| known_by & peer_bit == 0 && !sent.contains(r) && filter(r))
-            .take(limit)
-            .map(|(r, _)| r)
-            .map(|r| {
+            .map(|(r, _)| (r, r.round))
+            .collect();
+        candidates.sort_by_key(|(_, round)| *round);
+        candidates.truncate(limit);
+        candidates
+            .into_iter()
+            .map(|(r, round)| {
                 let block = self
                     .get_block(r)
                     .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
-                (block, r.round())
+                (block, round)
             })
             .collect()
     }
@@ -1248,5 +1309,19 @@ impl From<&CommittedSubDag> for CommitData {
             leader: value.anchor,
             sub_dag,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConsensusProtocol;
+
+    #[test]
+    fn acknowledgments_are_only_enabled_for_starfish_variants() {
+        assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
+        assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishPull.supports_acknowledgments());
+        assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
     }
 }
