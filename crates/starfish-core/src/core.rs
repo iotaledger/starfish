@@ -339,8 +339,6 @@ impl<H: BlockHandler> Core<H> {
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
-            &item.serialized_tx_data,
-            &item.serialized_shard_data,
         ) {
             self.pending_reconstructed_data
                 .insert(item.block_reference, item);
@@ -361,8 +359,6 @@ impl<H: BlockHandler> Core<H> {
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
-            &item.serialized_tx_data,
-            &item.serialized_shard_data,
         ) {
             self.pending_reconstructed_data.insert(block_ref, item);
         }
@@ -374,8 +370,6 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer
             .utilization_timer("Core::run_block_handler");
         let transactions = self.block_handler.handle_blocks(!self.epoch_changing());
-        let _serialized_transactions =
-            bincode::serialize(&transactions).expect("Payload serialization failed");
         self.pending.push(MetaTransaction::Payload(transactions));
     }
 

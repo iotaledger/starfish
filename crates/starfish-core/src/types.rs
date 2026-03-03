@@ -124,6 +124,11 @@ pub struct BlockHeader {
     pub(crate) transactions_commitment: TransactionsCommitment,
     /// Starfish-S strong vote flag. None for non-StarfishS protocols.
     pub(crate) strong_vote: Option<bool>,
+    /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
+    /// core thread so that store writes are zero-serialization on the critical
+    /// path.
+    #[serde(skip, default)]
+    pub(crate) serialized: Option<Bytes>,
 }
 
 impl BlockHeader {
@@ -200,6 +205,20 @@ impl BlockHeader {
     pub fn strong_vote(&self) -> Option<bool> {
         self.strong_vote
     }
+
+    pub fn preserialize(&mut self) {
+        if self.serialized.is_none() {
+            self.serialized = Some(
+                bincode::serialize(&self)
+                    .expect("header serialization")
+                    .into(),
+            );
+        }
+    }
+
+    pub fn serialized_bytes(&self) -> Option<&Bytes> {
+        self.serialized.as_ref()
+    }
 }
 
 fn expand_acknowledgments(
@@ -268,11 +287,16 @@ fn compress_acknowledgments(
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransactionData {
     pub(crate) transactions: Vec<BaseTransaction>,
+    #[serde(skip, default)]
+    pub(crate) serialized: Option<Bytes>,
 }
 
 impl TransactionData {
     pub fn new(transactions: Vec<BaseTransaction>) -> Self {
-        Self { transactions }
+        Self {
+            transactions,
+            serialized: None,
+        }
     }
 
     pub fn transactions(&self) -> &Vec<BaseTransaction> {
@@ -281,6 +305,20 @@ impl TransactionData {
 
     pub fn number_transactions(&self) -> usize {
         self.transactions.len()
+    }
+
+    pub fn preserialize(&mut self) {
+        if self.serialized.is_none() {
+            self.serialized = Some(
+                bincode::serialize(&self)
+                    .expect("tx_data serialization")
+                    .into(),
+            );
+        }
+    }
+
+    pub fn serialized_bytes(&self) -> Option<&Bytes> {
+        self.serialized.as_ref()
     }
 }
 
@@ -291,13 +329,13 @@ impl TransactionData {
 /// Transaction data recovered from shard reconstruction. Sent to core via a
 /// dedicated `add_transaction_data` path that bypasses the block manager
 /// (the block header is already in the DAG).
+///
+/// Components carry their own pre-serialized bytes (populated by
+/// `preserialize()` in shard_reconstructor worker threads).
 pub struct ReconstructedTransactionData {
     pub block_reference: BlockReference,
     pub transaction_data: TransactionData,
     pub shard_data: ProvableShard,
-    /// Pre-serialized in shard_reconstructor worker threads (off core thread).
-    pub serialized_tx_data: Bytes,
-    pub serialized_shard_data: Bytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +348,8 @@ pub struct ProvableShard {
     pub(crate) shard_index: ShardIndex,
     pub(crate) merkle_proof: Vec<u8>,
     pub(crate) transactions_commitment: TransactionsCommitment,
+    #[serde(skip, default)]
+    pub(crate) serialized: Option<Bytes>,
 }
 
 impl ProvableShard {
@@ -324,6 +364,7 @@ impl ProvableShard {
             shard_index,
             merkle_proof,
             transactions_commitment,
+            serialized: None,
         }
     }
 
@@ -341,6 +382,20 @@ impl ProvableShard {
 
     pub fn transactions_commitment(&self) -> TransactionsCommitment {
         self.transactions_commitment
+    }
+
+    pub fn preserialize(&mut self) {
+        if self.serialized.is_none() {
+            self.serialized = Some(
+                bincode::serialize(&self)
+                    .expect("shard_data serialization")
+                    .into(),
+            );
+        }
+    }
+
+    pub fn serialized_bytes(&self) -> Option<&Bytes> {
+        self.serialized.as_ref()
     }
 
     /// Verify the Merkle proof against the embedded transactions commitment.
@@ -369,15 +424,6 @@ pub struct VerifiedBlock {
     pub(crate) header: BlockHeader,
     pub(crate) transaction_data: Option<TransactionData>,
     pub(crate) shard_data: Option<ProvableShard>,
-    /// Cached bincode-serialized bytes for each component.
-    /// Populated by `preserialize()` off the core thread so that store writes
-    /// are zero-serialization on the critical path.
-    #[serde(skip, default)]
-    pub(crate) serialized_header: Option<Bytes>,
-    #[serde(skip, default)]
-    pub(crate) serialized_tx_data: Option<Bytes>,
-    #[serde(skip, default)]
-    pub(crate) serialized_shard_data: Option<Bytes>,
 }
 
 impl VerifiedBlock {
@@ -426,6 +472,7 @@ impl VerifiedBlock {
             signature,
             transactions_commitment: merkle_root,
             strong_vote,
+            serialized: None,
         };
 
         let shard_data = match (encoded_shard, merkle_proof) {
@@ -445,9 +492,6 @@ impl VerifiedBlock {
             header,
             transaction_data: Some(TransactionData::new(transactions)),
             shard_data,
-            serialized_header: None,
-            serialized_tx_data: None,
-            serialized_shard_data: None,
         }
     }
 
@@ -478,14 +522,12 @@ impl VerifiedBlock {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            serialized: None,
         };
         let mut block = Self {
             header,
             transaction_data: None,
             shard_data: None,
-            serialized_header: None,
-            serialized_tx_data: None,
-            serialized_shard_data: None,
         };
         block.preserialize();
         Data::new(block)
@@ -659,9 +701,6 @@ impl VerifiedBlock {
             header: self.header.clone(),
             transaction_data: None,
             shard_data: None,
-            serialized_header: self.serialized_header.clone(),
-            serialized_tx_data: None,
-            serialized_shard_data: None,
         }
     }
 
@@ -682,9 +721,6 @@ impl VerifiedBlock {
             header,
             transaction_data,
             shard_data,
-            serialized_header: None,
-            serialized_tx_data: None,
-            serialized_shard_data: None,
         }
     }
 
@@ -693,43 +729,27 @@ impl VerifiedBlock {
     /// Eagerly serialize all components into cached `Bytes` for zero-copy
     /// store writes. Must be called before the block enters the core thread.
     pub fn preserialize(&mut self) {
-        if self.serialized_header.is_none() {
-            self.serialized_header = Some(
-                bincode::serialize(&self.header)
-                    .expect("header serialization")
-                    .into(),
-            );
+        self.header.preserialize();
+        if let Some(ref mut tx) = self.transaction_data {
+            tx.preserialize();
         }
-        if self.serialized_tx_data.is_none() {
-            if let Some(ref tx) = self.transaction_data {
-                self.serialized_tx_data = Some(
-                    bincode::serialize(tx)
-                        .expect("tx_data serialization")
-                        .into(),
-                );
-            }
-        }
-        if self.serialized_shard_data.is_none() {
-            if let Some(ref shard) = self.shard_data {
-                self.serialized_shard_data = Some(
-                    bincode::serialize(shard)
-                        .expect("shard_data serialization")
-                        .into(),
-                );
-            }
+        if let Some(ref mut shard) = self.shard_data {
+            shard.preserialize();
         }
     }
 
     pub fn serialized_header_bytes(&self) -> Option<&Bytes> {
-        self.serialized_header.as_ref()
+        self.header.serialized_bytes()
     }
 
     pub fn serialized_tx_data_bytes(&self) -> Option<&Bytes> {
-        self.serialized_tx_data.as_ref()
+        self.transaction_data
+            .as_ref()
+            .and_then(|t| t.serialized_bytes())
     }
 
     pub fn serialized_shard_data_bytes(&self) -> Option<&Bytes> {
-        self.serialized_shard_data.as_ref()
+        self.shard_data.as_ref().and_then(|s| s.serialized_bytes())
     }
 
     // --- Serialization ---
@@ -1087,6 +1107,7 @@ mod tests {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            serialized: None,
         };
 
         assert_eq!(header.acknowledgment_count(), 1);
