@@ -16,8 +16,6 @@ mod data;
 mod decoder;
 mod encoder;
 mod epoch_close;
-#[allow(dead_code)] // todo - delete if unused after a while
-mod lock;
 pub mod metrics;
 pub mod net_sync;
 pub mod network;
