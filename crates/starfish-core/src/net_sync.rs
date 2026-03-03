@@ -760,10 +760,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         );
         if !verified_data_blocks.is_empty() {
             // Notify CordialKnowledge about new headers (and shards) entering the DAG
-            for (block, &has_shard) in verified_data_blocks
-                .iter()
-                .zip(verified_has_shard.iter())
-            {
+            for (block, &has_shard) in verified_data_blocks.iter().zip(verified_has_shard.iter()) {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));

@@ -1137,10 +1137,7 @@ impl DagStateInner {
         map.insert(reference.digest, block.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(
-            *reference,
-            block.block_references().clone(),
-        );
+        self.update_dag(*reference, block.block_references().clone());
         self.update_data_availability(&block);
     }
 
@@ -1182,11 +1179,7 @@ impl DagStateInner {
     /// Insert a block into the DAG and propagate "known-by" bits along the
     /// causal history. `known_by` tracks only header knowledge; shard/data
     /// availability is tracked separately in CordialKnowledge.
-    pub fn update_dag(
-        &mut self,
-        block_reference: BlockReference,
-        parents: Vec<BlockReference>,
-    ) {
+    pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
         if block_reference.round == 0 {
             return;
         }
