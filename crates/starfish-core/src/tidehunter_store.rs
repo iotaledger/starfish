@@ -16,7 +16,9 @@ use crate::{
     dag_state::CommitData,
     data::Data,
     store::Store,
-    types::{BlockReference, RoundNumber, VerifiedBlock},
+    types::{
+        BlockHeader, BlockReference, ProvableShard, RoundNumber, TransactionData, VerifiedBlock,
+    },
 };
 
 /// Key = round(8B BE) ++ authority(8B BE) ++ digest(32B) = 48 bytes.
@@ -32,7 +34,10 @@ const MUTEXES: usize = 64;
 
 pub struct TideHunterStore {
     db: Arc<Db>,
-    ks_blocks: KeySpace,
+    ks_blocks: KeySpace, // legacy composite blob (read-only for migration)
+    ks_headers: KeySpace,
+    ks_tx_data: KeySpace,
+    ks_shard_data: KeySpace,
     ks_commits: KeySpace,
 }
 
@@ -60,20 +65,22 @@ impl TideHunterStore {
         key
     }
 
+    fn add_ks(builder: &mut KeyShapeBuilder, name: &str) -> KeySpace {
+        builder.add_key_space(
+            name,
+            KEY_SIZE,
+            MUTEXES,
+            KeyType::prefix_uniform(PREFIX_LEN, 0),
+        )
+    }
+
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let mut builder = KeyShapeBuilder::new();
-        let ks_blocks = builder.add_key_space(
-            "blocks",
-            KEY_SIZE,
-            MUTEXES,
-            KeyType::prefix_uniform(PREFIX_LEN, 0),
-        );
-        let ks_commits = builder.add_key_space(
-            "commits",
-            KEY_SIZE,
-            MUTEXES,
-            KeyType::prefix_uniform(PREFIX_LEN, 0),
-        );
+        let ks_blocks = Self::add_ks(&mut builder, "blocks");
+        let ks_headers = Self::add_ks(&mut builder, "headers");
+        let ks_tx_data = Self::add_ks(&mut builder, "tx_data");
+        let ks_shard_data = Self::add_ks(&mut builder, "shard_data");
+        let ks_commits = Self::add_ks(&mut builder, "commits");
         let key_shape = builder.build();
 
         let config = Arc::new(Config {
@@ -91,23 +98,91 @@ impl TideHunterStore {
         Ok(Self {
             db,
             ks_blocks,
+            ks_headers,
+            ks_tx_data,
+            ks_shard_data,
             ks_commits,
         })
+    }
+
+    /// Point-read and deserialize an optional value from a key space.
+    fn point_read<T: serde::de::DeserializeOwned>(
+        &self,
+        ks: KeySpace,
+        key: &[u8; KEY_SIZE],
+    ) -> io::Result<Option<T>> {
+        match self
+            .db
+            .get(ks, key)
+            .map_err(|e| io::Error::other(format!("TideHunter get: {e:?}")))?
+        {
+            Some(value) => bincode::deserialize(&value)
+                .map(Some)
+                .map_err(io::Error::other),
+            None => Ok(None),
+        }
+    }
+
+    /// Assemble a VerifiedBlock from component key spaces. Returns None if
+    /// header not found.
+    fn assemble_from_components(
+        &self,
+        key: &[u8; KEY_SIZE],
+    ) -> io::Result<Option<Data<VerifiedBlock>>> {
+        let header: Option<BlockHeader> = self.point_read(self.ks_headers, key)?;
+        let Some(header) = header else {
+            return Ok(None);
+        };
+        let tx: Option<TransactionData> = self.point_read(self.ks_tx_data, key)?;
+        let shard: Option<ProvableShard> = self.point_read(self.ks_shard_data, key)?;
+        Ok(Some(Data::new(VerifiedBlock::from_parts(
+            header, tx, shard,
+        ))))
     }
 }
 
 impl Store for TideHunterStore {
     fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
         let key = Self::encode_key(block.reference());
-        // bytes::Bytes → minibytes::Bytes is zero-copy via BytesOwner impl.
-        let value = block.serialized_bytes().clone();
-        self.db
-            .insert(self.ks_blocks, key, value)
+
+        // Use pre-serialized bytes when available; fall back to serialization.
+        let header_bytes = match block.serialized_header_bytes() {
+            Some(b) => b.to_vec(),
+            None => bincode::serialize(block.header()).map_err(io::Error::other)?,
+        };
+
+        let mut batch = self.db.write_batch();
+        batch.write(self.ks_headers, key.to_vec(), header_bytes);
+
+        if let Some(tx) = block.transaction_data() {
+            let tx_bytes = match block.serialized_tx_data_bytes() {
+                Some(b) => b.to_vec(),
+                None => bincode::serialize(tx).map_err(io::Error::other)?,
+            };
+            batch.write(self.ks_tx_data, key.to_vec(), tx_bytes);
+        }
+        if let Some(shard) = block.shard_data() {
+            let shard_bytes = match block.serialized_shard_data_bytes() {
+                Some(b) => b.to_vec(),
+                None => bincode::serialize(shard).map_err(io::Error::other)?,
+            };
+            batch.write(self.ks_shard_data, key.to_vec(), shard_bytes);
+        }
+
+        batch
+            .commit()
             .map_err(|e| io::Error::other(format!("TideHunter store block: {e:?}")))
     }
 
     fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
         let key = Self::encode_key(reference);
+
+        // Try component key spaces first.
+        if let Some(block) = self.assemble_from_components(&key)? {
+            return Ok(Some(block));
+        }
+
+        // Legacy fallback: ks_blocks.
         match self
             .db
             .get(self.ks_blocks, &key)
@@ -121,17 +196,51 @@ impl Store for TideHunterStore {
     }
 
     fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
-        let mut iter = self.db.iterator(self.ks_blocks);
-        iter.set_lower_bound(Self::round_lower_bound(round).to_vec());
-        iter.set_upper_bound(Self::round_upper_bound(round).to_vec());
-
         let mut blocks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // 1. Iterate component ks_headers.
+        let lower = Self::round_lower_bound(round);
+        let upper = Self::round_upper_bound(round);
+
+        let mut iter = self.db.iterator(self.ks_headers);
+        iter.set_lower_bound(lower.to_vec());
+        iter.set_upper_bound(upper.to_vec());
+
         for result in iter {
-            let (_key, value) =
+            let (key_bytes, header_bytes) =
                 result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
-            let block = Data::from_bytes(Bytes::from(value.to_vec())).map_err(io::Error::other)?;
-            blocks.push(block);
+            let header: BlockHeader =
+                bincode::deserialize(&header_bytes).map_err(io::Error::other)?;
+
+            let key: [u8; KEY_SIZE] = key_bytes[..KEY_SIZE]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid key length"))?;
+            let tx: Option<TransactionData> = self.point_read(self.ks_tx_data, &key)?;
+            let shard: Option<ProvableShard> = self.point_read(self.ks_shard_data, &key)?;
+
+            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx, shard)));
+            seen.insert(key);
         }
+
+        // 2. Legacy fallback: ks_blocks for any not yet found.
+        let mut iter = self.db.iterator(self.ks_blocks);
+        iter.set_lower_bound(lower.to_vec());
+        iter.set_upper_bound(upper.to_vec());
+
+        for result in iter {
+            let (key_bytes, value) =
+                result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
+            let key: [u8; KEY_SIZE] = key_bytes[..KEY_SIZE]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid key length"))?;
+            if !seen.contains(&key) {
+                let block =
+                    Data::from_bytes(Bytes::from(value.to_vec())).map_err(io::Error::other)?;
+                blocks.push(block);
+            }
+        }
+
         Ok(blocks)
     }
 
@@ -177,5 +286,26 @@ impl Store for TideHunterStore {
         // Writes are durable after insert()/commit() returns — WAL is the source of
         // truth.
         Ok(())
+    }
+
+    fn store_header_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
+        let key = Self::encode_key(reference);
+        self.db
+            .insert(self.ks_headers, key, bytes.to_vec())
+            .map_err(|e| io::Error::other(format!("TideHunter store header: {e:?}")))
+    }
+
+    fn store_tx_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
+        let key = Self::encode_key(reference);
+        self.db
+            .insert(self.ks_tx_data, key, bytes.to_vec())
+            .map_err(|e| io::Error::other(format!("TideHunter store tx_data: {e:?}")))
+    }
+
+    fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
+        let key = Self::encode_key(reference);
+        self.db
+            .insert(self.ks_shard_data, key, bytes.to_vec())
+            .map_err(|e| io::Error::other(format!("TideHunter store shard_data: {e:?}")))
     }
 }

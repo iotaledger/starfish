@@ -243,7 +243,7 @@ impl<H: BlockHandler> Core<H> {
             .filter(|b| b.statements().is_some())
             .map(|b| *b.reference())
             .collect();
-        let (processed, updated_statements, missing_references) = timed!(
+        let (processed, updated_existing_with_statements, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_blocks",
             self.block_manager.add_blocks(blocks)
@@ -257,6 +257,11 @@ impl<H: BlockHandler> Core<H> {
                 processed_references_without_statements.push(*block.reference());
             }
         }
+        for block in &updated_existing_with_statements {
+            if block.statements().is_some() {
+                processed_references_with_statements.insert(*block.reference());
+            }
+        }
         let not_processed_block_references_with_statements: Vec<_> =
             block_references_with_statements
                 .iter()
@@ -266,17 +271,19 @@ impl<H: BlockHandler> Core<H> {
                 .copied()
                 .collect();
 
-        let success: bool = !processed.is_empty() || updated_statements;
-        tracing::debug!("Processed {:?}", processed);
+        let success: bool = !processed.is_empty() || !updated_existing_with_statements.is_empty();
+        tracing::debug!("Processed new {:?}", processed);
+        tracing::debug!(
+            "Processed existing blocks with upgraded statements {:?}",
+            updated_existing_with_statements
+        );
 
-        let mut result = Vec::with_capacity(processed.len());
         for processed in &processed {
             self.threshold_clock
                 .add_block(*processed.reference(), &self.committee);
             self.pending
                 .push(MetaStatement::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
-            result.push(processed.clone());
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
@@ -332,6 +339,8 @@ impl<H: BlockHandler> Core<H> {
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
+            &item.serialized_tx_data,
+            &item.serialized_shard_data,
         ) {
             self.pending_reconstructed_data
                 .insert(item.block_reference, item);
@@ -352,6 +361,8 @@ impl<H: BlockHandler> Core<H> {
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
+            &item.serialized_tx_data,
+            &item.serialized_shard_data,
         ) {
             self.pending_reconstructed_data.insert(block_ref, item);
         }
@@ -602,7 +613,7 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let block = VerifiedBlock::new_with_signer(
+        let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
             block_references,
@@ -623,6 +634,7 @@ impl<H: BlockHandler> Core<H> {
             .proposed_block_acks
             .observe(block.acknowledgment_count() as f64);
 
+        block.preserialize();
         Data::new(block)
     }
 

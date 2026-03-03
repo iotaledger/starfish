@@ -244,10 +244,19 @@ impl ShardReconstructor {
                             let data = if let Some((transaction_data, shard_data)) = decoded {
                                 metrics.shard_reconstruction_success_total.inc();
                                 tracing::debug!("Worker reconstructed block {:?}", block_reference);
+                                // Pre-serialize off the core thread.
+                                let serialized_tx_data = bincode::serialize(&transaction_data)
+                                    .expect("tx_data serialization")
+                                    .into();
+                                let serialized_shard_data = bincode::serialize(&shard_data)
+                                    .expect("shard_data serialization")
+                                    .into();
                                 Some(ReconstructedTransactionData {
                                     block_reference,
                                     transaction_data,
                                     shard_data,
+                                    serialized_tx_data,
+                                    serialized_shard_data,
                                 })
                             } else {
                                 metrics.shard_reconstruction_failed_total.inc();

@@ -44,11 +44,15 @@ impl BlockManager {
     pub fn add_blocks(
         &mut self,
         blocks: Vec<Data<VerifiedBlock>>,
-    ) -> (Vec<Data<VerifiedBlock>>, bool, AHashSet<BlockReference>) {
+    ) -> (
+        Vec<Data<VerifiedBlock>>,
+        Vec<Data<VerifiedBlock>>,
+        AHashSet<BlockReference>,
+    ) {
         let dag_state = self.dag_state.clone();
-        let mut updated_statements = false;
         let mut blocks: VecDeque<Data<VerifiedBlock>> = blocks.into();
         let mut newly_processed: Vec<Data<VerifiedBlock>> = vec![];
+        let mut updated_existing_with_statements: Vec<Data<VerifiedBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
@@ -70,8 +74,7 @@ impl BlockManager {
                 if self.dag_state.contains_new_statements(&block) {
                     tracing::debug!("Block has new statements: {:?}", block_reference);
                     dag_state.insert_general_block(block.clone());
-                    newly_processed.push(block);
-                    updated_statements = true;
+                    updated_existing_with_statements.push(block);
                 }
                 continue;
             }
@@ -154,7 +157,11 @@ impl BlockManager {
             }
         }
 
-        (newly_processed, updated_statements, missing_references)
+        (
+            newly_processed,
+            updated_existing_with_statements,
+            missing_references,
+        )
     }
 
     pub fn missing_blocks(&self) -> &[AHashSet<BlockReference>] {
