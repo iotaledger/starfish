@@ -608,11 +608,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         // Only send first-appearance blocks to core (subsequent shards
         // already went to the shard reconstructor above).
         if !new_data_blocks.is_empty() {
-            // Notify CordialKnowledge about new headers entering the DAG
+            // Notify CordialKnowledge about new headers (and shards) entering the DAG
             for block in &new_data_blocks {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
+                if block.shard_data().is_some() {
+                    self.inner
+                        .cordial_knowledge
+                        .send(CordialKnowledgeMessage::NewShard(*block.reference()));
+                }
             }
             let (missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
@@ -705,11 +710,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_data_blocks
         );
         if !verified_data_blocks.is_empty() {
-            // Notify CordialKnowledge about new headers entering the DAG
+            // Notify CordialKnowledge about new headers (and shards) entering the DAG
             for block in &verified_data_blocks {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
+                if block.shard_data().is_some() {
+                    self.inner
+                        .cordial_knowledge
+                        .send(CordialKnowledgeMessage::NewShard(*block.reference()));
+                }
             }
             let (pending_block_references, missing_parents, _processed_additional_blocks) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
