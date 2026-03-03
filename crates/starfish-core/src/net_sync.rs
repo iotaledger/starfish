@@ -1153,17 +1153,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
     async fn cleanup_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let cleanup_interval = Duration::from_secs(10);
-        let committee_size = inner.committee.len();
         loop {
             select! {
                 _sleep = sleep(cleanup_interval) => {
+                    inner.syncer.cleanup().await;
                     let gc_round = inner.dag_state.gc_round();
                     inner.gc_round.store(gc_round, Ordering::Relaxed);
-                    inner.syncer.cleanup().await;
 
-                    // Evict stale entries from CordialKnowledge.
-                    if gc_round > 0 {
-                        let eviction_rounds = vec![gc_round as RoundNumber; committee_size];
+                    // Evict stale entries from CordialKnowledge
+                    // using per-authority eviction rounds.
+                    let eviction_rounds = inner.dag_state.evicted_rounds();
+                    if eviction_rounds.iter().any(|&r| r > 0) {
                         inner.cordial_knowledge.send(
                             CordialKnowledgeMessage::EvictBelow(eviction_rounds),
                         );
