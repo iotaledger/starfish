@@ -3,7 +3,7 @@
 
 use reed_solomon_simd::ReedSolomonEncoder;
 
-use crate::types::{BaseStatement, Shard};
+use crate::types::{BaseTransaction, Shard};
 
 pub type Encoder = ReedSolomonEncoder;
 
@@ -15,9 +15,9 @@ pub trait ShardEncoder {
         parity_length: usize,
     ) -> Vec<Shard>;
 
-    fn encode_statements(
+    fn encode_transactions(
         &mut self,
-        block: &[BaseStatement],
+        block: &[BaseTransaction],
         info_length: usize,
         parity_length: usize,
     ) -> Vec<Shard>;
@@ -42,17 +42,17 @@ impl ShardEncoder for Encoder {
         data
     }
 
-    fn encode_statements(
+    fn encode_transactions(
         &mut self,
-        block: &[BaseStatement],
+        block: &[BaseTransaction],
         info_length: usize,
         parity_length: usize,
     ) -> Vec<Shard> {
-        let mut serialized =
-            bincode::serialize(&block).expect("Serialization of statements before encoding failed");
+        let mut serialized = bincode::serialize(&block)
+            .expect("Serialization of transactions before encoding failed");
         let bytes_length = serialized.len();
-        let mut statements_with_len: Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
-        statements_with_len.append(&mut serialized);
+        let mut transactions_with_len: Vec<u8> = (bytes_length as u32).to_le_bytes().to_vec();
+        transactions_with_len.append(&mut serialized);
         // increase the length by 4 for u32
         let mut shard_bytes = (bytes_length + 4).div_ceil(info_length);
 
@@ -62,9 +62,9 @@ impl ShardEncoder for Encoder {
         }
 
         let length_with_padding = shard_bytes * info_length;
-        statements_with_len.resize(length_with_padding, 0);
+        transactions_with_len.resize(length_with_padding, 0);
 
-        let data: Vec<Shard> = statements_with_len
+        let data: Vec<Shard> = transactions_with_len
             .chunks(shard_bytes)
             .map(|chunk| chunk.to_vec())
             .collect();
@@ -83,14 +83,18 @@ mod tests {
     use super::*;
     use crate::{
         committee::Committee,
-        types::{BaseStatement, Transaction},
+        types::{BaseTransaction, Transaction},
     };
 
-    fn random_statements(rng: &mut impl Rng, count: usize, tx_size: usize) -> Vec<BaseStatement> {
+    fn random_transactions(
+        rng: &mut impl Rng,
+        count: usize,
+        tx_size: usize,
+    ) -> Vec<BaseTransaction> {
         (0..count)
             .map(|_| {
                 let data: Vec<u8> = (0..tx_size).map(|_| rng.gen::<u8>()).collect();
-                BaseStatement::Share(Transaction::new(data))
+                BaseTransaction::Share(Transaction::new(data))
             })
             .collect()
     }
@@ -119,9 +123,9 @@ mod tests {
             for _ in 0..10 {
                 let num_tx = rng.gen_range(1..8);
                 let tx_size = rng.gen_range(1..200);
-                let statements = random_statements(&mut rng, num_tx, tx_size);
+                let transactions = random_transactions(&mut rng, num_tx, tx_size);
 
-                let shards = encoder.encode_statements(&statements, info_length, parity_length);
+                let shards = encoder.encode_transactions(&transactions, info_length, parity_length);
                 assert_eq!(shards.len(), committee_size);
 
                 // Verify alignment: every shard must be a multiple of 2
@@ -171,15 +175,15 @@ mod tests {
                 }
                 drop(result);
 
-                // Reconstruct statements from info shards
+                // Reconstruct transactions from info shards
                 let reconstructed_data: Vec<u8> =
                     info_shards.iter().flat_map(|s| s.clone()).collect();
                 let bytes_length =
                     u32::from_le_bytes(reconstructed_data[0..4].try_into().unwrap()) as usize;
-                let reconstructed: Vec<BaseStatement> =
+                let reconstructed: Vec<BaseTransaction> =
                     bincode::deserialize(&reconstructed_data[4..4 + bytes_length]).unwrap();
                 assert!(
-                    reconstructed == statements,
+                    reconstructed == transactions,
                     "Mismatch for committee_size={committee_size}"
                 );
             }

@@ -119,6 +119,9 @@ pub struct Metrics {
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
     pub subscribed_by_peers: IntGauge,
+
+    // per-peer useful-authorities count
+    pub useful_authorities: IntGaugeVec,
 }
 
 pub struct MetricReporter {
@@ -391,6 +394,13 @@ impl Metrics {
             subscribed_by_peers: register_int_gauge_with_registry!(
                 "subscribed_by_peers",
                 "Number of peers subscribed to this validator",
+                registry,
+            )
+            .unwrap(),
+            useful_authorities: register_int_gauge_vec_with_registry!(
+                "useful_authorities",
+                "Number of useful authorities per peer",
+                &["peer"],
                 registry,
             )
             .unwrap(),

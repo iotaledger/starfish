@@ -52,7 +52,7 @@ impl BlockManager {
         let dag_state = self.dag_state.clone();
         let mut blocks: VecDeque<Data<VerifiedBlock>> = blocks.into();
         let mut newly_processed: Vec<Data<VerifiedBlock>> = vec![];
-        let mut updated_existing_with_statements: Vec<Data<VerifiedBlock>> = vec![];
+        let mut updated_existing_with_transactions: Vec<Data<VerifiedBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
@@ -60,7 +60,7 @@ impl BlockManager {
             let block_reference = block.reference();
 
             if let Some(existing_pending_block) = self.blocks_pending.get_mut(block_reference) {
-                if block.statements().is_some() {
+                if block.transactions().is_some() {
                     *existing_pending_block = block;
                 }
                 continue;
@@ -70,11 +70,11 @@ impl BlockManager {
                 .entry(*block_reference)
                 .or_insert_with(|| self.dag_state.block_exists(*block_reference));
             if block_exists {
-                // Block already in store — check if this version brings new statement data
-                if self.dag_state.contains_new_statements(&block) {
-                    tracing::debug!("Block has new statements: {:?}", block_reference);
+                // Block already in store — check if this version brings new transaction data
+                if self.dag_state.contains_new_transactions(&block) {
+                    tracing::debug!("Block has new transactions: {:?}", block_reference);
                     dag_state.insert_general_block(block.clone());
-                    updated_existing_with_statements.push(block);
+                    updated_existing_with_transactions.push(block);
                 }
                 continue;
             }
@@ -159,7 +159,7 @@ impl BlockManager {
 
         (
             newly_processed,
-            updated_existing_with_statements,
+            updated_existing_with_transactions,
             missing_references,
         )
     }

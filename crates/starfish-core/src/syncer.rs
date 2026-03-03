@@ -73,14 +73,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     ) {
         // todo: when block is updated we might return false here and it can make
         // committing longer
-        let (success, pending_blocks_with_statements, missing_parents, used_additional_blocks) =
+        let (success, pending_blocks_with_transactions, missing_parents, used_additional_blocks) =
             self.core.add_blocks(blocks);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
         }
         (
-            pending_blocks_with_statements,
+            pending_blocks_with_transactions,
             missing_parents,
             used_additional_blocks,
         )

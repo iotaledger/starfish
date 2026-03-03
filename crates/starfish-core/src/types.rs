@@ -64,7 +64,7 @@ pub struct BlockReference {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub enum BaseStatement {
+pub enum BaseTransaction {
     /// Authority Shares a transactions, without accepting it or not.
     Share(Transaction),
 }
@@ -119,7 +119,7 @@ pub struct BlockHeader {
     pub(crate) epoch_marker: EpochStatus,
     /// Signature by the block author over the header fields.
     pub(crate) signature: SignatureBytes,
-    /// Merkle root over encoded statements (Starfish) or raw statements
+    /// Merkle root over encoded transactions (Starfish) or raw transactions
     /// (Mysticeti).
     pub(crate) transactions_commitment: TransactionsCommitment,
     /// Starfish-S strong vote flag. None for non-StarfishS protocols.
@@ -267,20 +267,20 @@ fn compress_acknowledgments(
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransactionData {
-    pub(crate) statements: Vec<BaseStatement>,
+    pub(crate) transactions: Vec<BaseTransaction>,
 }
 
 impl TransactionData {
-    pub fn new(statements: Vec<BaseStatement>) -> Self {
-        Self { statements }
+    pub fn new(transactions: Vec<BaseTransaction>) -> Self {
+        Self { transactions }
     }
 
-    pub fn statements(&self) -> &Vec<BaseStatement> {
-        &self.statements
+    pub fn transactions(&self) -> &Vec<BaseTransaction> {
+        &self.transactions
     }
 
     pub fn number_transactions(&self) -> usize {
-        self.statements.len()
+        self.transactions.len()
     }
 }
 
@@ -389,7 +389,7 @@ impl VerifiedBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
-        statements: Vec<BaseStatement>,
+        transactions: Vec<BaseTransaction>,
         encoded_shard: Option<(Shard, usize)>,
         merkle_proof: Option<Vec<u8>>,
         merkle_root: TransactionsCommitment,
@@ -406,7 +406,7 @@ impl VerifiedBlock {
             reference: BlockReference {
                 authority,
                 round,
-                digest: BlockDigest::new_without_statements(
+                digest: BlockDigest::new_without_transactions(
                     authority,
                     round,
                     &block_references,
@@ -443,7 +443,7 @@ impl VerifiedBlock {
 
         Self {
             header,
-            transaction_data: Some(TransactionData::new(statements)),
+            transaction_data: Some(TransactionData::new(transactions)),
             shard_data,
             serialized_header: None,
             serialized_tx_data: None,
@@ -458,7 +458,7 @@ impl VerifiedBlock {
             reference: BlockReference {
                 authority,
                 round: GENESIS_ROUND,
-                digest: BlockDigest::new_without_statements(
+                digest: BlockDigest::new_without_transactions(
                     authority,
                     GENESIS_ROUND,
                     &block_refs,
@@ -499,8 +499,8 @@ impl VerifiedBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
-        statements: Vec<BaseStatement>,
-        encoded_statements: Option<Vec<Shard>>,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
         strong_vote: Option<bool>,
     ) -> Self {
@@ -508,14 +508,14 @@ impl VerifiedBlock {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishPull
             | ConsensusProtocol::StarfishS => {
-                TransactionsCommitment::new_from_encoded_statements(
-                    encoded_statements.as_ref().unwrap(),
+                TransactionsCommitment::new_from_encoded_transactions(
+                    encoded_transactions.as_ref().unwrap(),
                     authority as usize,
                 )
                 .0
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                TransactionsCommitment::new_from_statements(&statements)
+                TransactionsCommitment::new_from_transactions(&transactions)
             }
         };
         let (acknowledgment_intersection, extra_acknowledgment_references) =
@@ -544,7 +544,7 @@ impl VerifiedBlock {
             meta_creation_time_ns,
             epoch_marker,
             signature,
-            statements,
+            transactions,
             None,
             None,
             transactions_commitment,
@@ -632,9 +632,10 @@ impl VerifiedBlock {
         self.shard_data.as_ref()
     }
 
-    /// Compatibility: returns statements slice if transaction data is present.
-    pub fn statements(&self) -> Option<&Vec<BaseStatement>> {
-        self.transaction_data.as_ref().map(|td| &td.statements)
+    /// Compatibility: returns transactions slice if transaction data is
+    /// present.
+    pub fn transactions(&self) -> Option<&Vec<BaseTransaction>> {
+        self.transaction_data.as_ref().map(|td| &td.transactions)
     }
 
     pub fn number_transactions(&self) -> usize {
@@ -750,12 +751,12 @@ impl VerifiedBlock {
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<()> {
-        self.verify_statements(committee, own_id, peer_id, encoder, consensus_protocol)?;
+        self.verify_transactions(committee, own_id, peer_id, encoder, consensus_protocol)?;
         self.verify_block_structure(committee)
     }
 
-    /// Verify statement commitments and shard proofs (protocol-dependent).
-    fn verify_statements(
+    /// Verify transaction commitments and shard proofs (protocol-dependent).
+    fn verify_transactions(
         &mut self,
         committee: &Committee,
         own_id: usize,
@@ -771,11 +772,11 @@ impl VerifiedBlock {
                 let info_length = committee.info_length();
                 let parity_length = committee_size - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
-                    let encoded_statements =
-                        encoder.encode_statements(&td.statements, info_length, parity_length);
+                    let encoded_transactions =
+                        encoder.encode_transactions(&td.transactions, info_length, parity_length);
                     let (transactions_commitment, merkle_proof_bytes) =
-                        TransactionsCommitment::new_from_encoded_statements(
-                            &encoded_statements,
+                        TransactionsCommitment::new_from_encoded_transactions(
+                            &encoded_transactions,
                             own_id,
                         );
                     ensure!(
@@ -783,7 +784,7 @@ impl VerifiedBlock {
                         "Incorrect Merkle root"
                     );
                     self.shard_data = Some(ProvableShard::new(
-                        encoded_statements[own_id].clone(),
+                        encoded_transactions[own_id].clone(),
                         own_id,
                         merkle_proof_bytes,
                         self.header.transactions_commitment,
@@ -810,13 +811,13 @@ impl VerifiedBlock {
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 if let Some(td) = &self.transaction_data {
                     let transactions_commitment =
-                        TransactionsCommitment::new_from_statements(&td.statements);
+                        TransactionsCommitment::new_from_transactions(&td.transactions);
                     ensure!(
                         transactions_commitment == self.header.transactions_commitment,
                         "Incorrect Merkle root"
                     );
                 } else {
-                    bail!("The peer didn't include statements in block");
+                    bail!("The peer didn't include transactions in block");
                 }
             }
         }
@@ -1093,7 +1094,7 @@ mod tests {
     }
 }
 
-impl fmt::Debug for BaseStatement {
+impl fmt::Debug for BaseTransaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
@@ -1121,10 +1122,10 @@ impl CryptoHash for EpochStatus {
     }
 }
 
-impl CryptoHash for BaseStatement {
+impl CryptoHash for BaseTransaction {
     fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         match self {
-            BaseStatement::Share(tx) => {
+            BaseTransaction::Share(tx) => {
                 [0].crypto_hash(state);
                 tx.crypto_hash(state);
             }
@@ -1132,10 +1133,10 @@ impl CryptoHash for BaseStatement {
     }
 }
 
-impl fmt::Display for BaseStatement {
+impl fmt::Display for BaseTransaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BaseStatement::Share(_tx) => write!(f, "tx"),
+            BaseTransaction::Share(_tx) => write!(f, "tx"),
         }
     }
 }

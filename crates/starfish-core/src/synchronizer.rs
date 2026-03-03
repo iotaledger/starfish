@@ -665,6 +665,7 @@ where
                             to_whom_authority_index,
                             synchronizer_parameters.clone(),
                             sent_to_peer.clone(),
+                            &metrics,
                         )
                         .await?;
                     } else {
@@ -674,6 +675,7 @@ where
                             to_whom_authority_index,
                             synchronizer_parameters.clone(),
                             sent_to_peer.clone(),
+                            &metrics,
                         )
                         .await?;
                     }
@@ -697,6 +699,7 @@ where
                             to_whom_authority_index,
                             synchronizer_parameters.clone(),
                             sent_to_peer.clone(),
+                            &metrics,
                         )
                         .await?;
                     } else {
@@ -706,6 +709,7 @@ where
                             to_whom_authority_index,
                             synchronizer_parameters.clone(),
                             sent_to_peer.clone(),
+                            &metrics,
                         )
                         .await?;
                     }
@@ -753,6 +757,7 @@ async fn sending_batch_all_blocks<H, C>(
     to_whom_authority_index: AuthorityIndex,
     synchronizer_parameters: SynchronizerParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -794,6 +799,10 @@ where
             ck.useful_authors_bitmasks(current_round)
         })
         .unwrap_or((0, 0));
+    metrics
+        .useful_authorities
+        .with_label_values(&[&peer.to_string()])
+        .set((useful_headers | useful_shards).count_ones() as i64);
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
@@ -816,6 +825,7 @@ async fn sending_batch_starfish_blocks<H, C>(
     to_whom_authority_index: AuthorityIndex,
     synchronizer_parameters: SynchronizerParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
 ) -> Option<()>
 where
     C: 'static + CommitObserver,
@@ -845,6 +855,10 @@ where
         let (uh, us) = ck.useful_authors_bitmasks(current_round);
         (header_refs, shard_refs, uh, us)
     };
+    metrics
+        .useful_authorities
+        .with_label_values(&[&peer.to_string()])
+        .set((useful_headers | useful_shards).count_ones() as i64);
 
     let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
     let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);

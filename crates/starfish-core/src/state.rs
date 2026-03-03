@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use ahash::AHashSet;
 
 use crate::{
-    core::{MetaStatement, MetaStatement::Include},
+    core::{MetaTransaction, MetaTransaction::Include},
     dag_state::CommitData,
     store::Store,
     types::VerifiedBlock,
@@ -25,7 +25,7 @@ pub struct RecoveredState {
 
 #[derive(Default)]
 pub struct RecoveredStateBuilder {
-    pending: BTreeMap<u64, MetaStatement>, // Use sequence number instead of WalPosition
+    pending: BTreeMap<u64, MetaTransaction>, // Use sequence number instead of WalPosition
     unprocessed_blocks: Vec<Data<VerifiedBlock>>,
     last_committed_leader: Option<BlockReference>,
     committed_blocks: AHashSet<BlockReference>,

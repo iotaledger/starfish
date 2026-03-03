@@ -31,7 +31,7 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, BaseStatement, BlockReference, Encoder, ReconstructedTransactionData,
+        AuthorityIndex, BaseTransaction, BlockReference, Encoder, ReconstructedTransactionData,
         RoundNumber, Shard, VerifiedBlock,
     },
 };
@@ -45,7 +45,7 @@ macro_rules! timed {
 
 pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
-    pending: Vec<MetaStatement>,
+    pending: Vec<MetaTransaction>,
     pending_reconstructed_data: AHashMap<BlockReference, ReconstructedTransactionData>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
@@ -73,9 +73,9 @@ pub struct CoreOptions {
 }
 
 #[derive(Debug, Clone)]
-pub enum MetaStatement {
+pub enum MetaTransaction {
     Include(BlockReference),
-    Payload(Vec<BaseStatement>),
+    Payload(Vec<BaseTransaction>),
 }
 
 impl<H: BlockHandler> Core<H> {
@@ -120,12 +120,12 @@ impl<H: BlockHandler> Core<H> {
                 let reference = *block.reference();
                 threshold_clock.add_block(reference, &committee);
                 dag_state.insert_block_bounds(block.clone(), 0, committee_len);
-                pending.push(MetaStatement::Include(reference));
+                pending.push(MetaTransaction::Include(reference));
             }
 
             threshold_clock.add_block(*own_genesis_block.reference(), &committee);
             dag_state.insert_block_bounds(own_genesis_block.clone(), 0, committee_len);
-            pending.push(MetaStatement::Include(*own_genesis_block.reference()));
+            pending.push(MetaTransaction::Include(*own_genesis_block.reference()));
         } else {
             // Rebuild runtime-only state (pending frontier, threshold clock, and
             // last own block) from recovered DAG blocks.
@@ -152,11 +152,11 @@ impl<H: BlockHandler> Core<H> {
                 .max(threshold_clock.get_round().saturating_sub(1));
             for block in &unprocessed_blocks {
                 if block.round() >= pending_start_round {
-                    pending.push(MetaStatement::Include(*block.reference()));
+                    pending.push(MetaTransaction::Include(*block.reference()));
                 }
             }
             if pending.is_empty() {
-                pending.push(MetaStatement::Include(*last_own_block.block.reference()));
+                pending.push(MetaTransaction::Include(*last_own_block.block.reference()));
             }
         }
 
@@ -218,13 +218,13 @@ impl<H: BlockHandler> Core<H> {
     // This function attempts to add blocks to the local DAG.
     // It returns four values. First is bool which is true if any update was made
     // successfully. Second, it returns a vector of references for blocks with
-    // statements that are not added to the local DAG and remain
+    // transactions that are not added to the local DAG and remain
     // pending. For such blocks we need to send a missing history
     // request.
     // Third, it returns a set of parents that are still missing
     // and need to be requested.
     // Fourth, it returns a vector of references for blocks without
-    // statements that are added to the local DAG.
+    // transactions that are added to the local DAG.
     pub fn add_blocks(
         &mut self,
         blocks: Vec<Data<VerifiedBlock>>,
@@ -238,66 +238,66 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
-        let block_references_with_statements: Vec<_> = blocks
+        let block_references_with_transactions: Vec<_> = blocks
             .iter()
-            .filter(|b| b.statements().is_some())
+            .filter(|b| b.transactions().is_some())
             .map(|b| *b.reference())
             .collect();
-        let (processed, updated_existing_with_statements, missing_references) = timed!(
+        let (processed, updated_existing_with_transactions, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_blocks",
             self.block_manager.add_blocks(blocks)
         );
-        let mut processed_references_with_statements = AHashSet::new();
-        let mut processed_references_without_statements = Vec::new();
+        let mut processed_references_with_transactions = AHashSet::new();
+        let mut processed_references_without_transactions = Vec::new();
         for block in &processed {
-            if block.statements().is_some() {
-                processed_references_with_statements.insert(*block.reference());
+            if block.transactions().is_some() {
+                processed_references_with_transactions.insert(*block.reference());
             } else {
-                processed_references_without_statements.push(*block.reference());
+                processed_references_without_transactions.push(*block.reference());
             }
         }
-        for block in &updated_existing_with_statements {
-            if block.statements().is_some() {
-                processed_references_with_statements.insert(*block.reference());
+        for block in &updated_existing_with_transactions {
+            if block.transactions().is_some() {
+                processed_references_with_transactions.insert(*block.reference());
             }
         }
-        let not_processed_block_references_with_statements: Vec<_> =
-            block_references_with_statements
+        let not_processed_block_references_with_transactions: Vec<_> =
+            block_references_with_transactions
                 .iter()
                 .filter(|block_reference| {
-                    !processed_references_with_statements.contains(block_reference)
+                    !processed_references_with_transactions.contains(block_reference)
                 })
                 .copied()
                 .collect();
 
-        let success: bool = !processed.is_empty() || !updated_existing_with_statements.is_empty();
+        let success: bool = !processed.is_empty() || !updated_existing_with_transactions.is_empty();
         tracing::debug!("Processed new {:?}", processed);
         tracing::debug!(
-            "Processed existing blocks with upgraded statements {:?}",
-            updated_existing_with_statements
+            "Processed existing blocks with upgraded transactions {:?}",
+            updated_existing_with_transactions
         );
 
         for processed in &processed {
             self.threshold_clock
                 .add_block(*processed.reference(), &self.committee);
             self.pending
-                .push(MetaStatement::Include(*processed.reference()));
+                .push(MetaTransaction::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
         (
             success,
-            not_processed_block_references_with_statements,
+            not_processed_block_references_with_transactions,
             missing_references,
-            processed_references_without_statements,
+            processed_references_without_transactions,
         )
     }
 
-    /// Add header-only blocks to the DAG. Skips statement-related bookkeeping
-    /// that `add_blocks` performs (statement tracking, partitioning by
-    /// statement presence).
+    /// Add header-only blocks to the DAG. Skips transaction-related bookkeeping
+    /// that `add_blocks` performs (transaction tracking, partitioning by
+    /// transaction presence).
     pub fn add_headers(
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
@@ -317,7 +317,7 @@ impl<H: BlockHandler> Core<H> {
             self.threshold_clock
                 .add_block(*block.reference(), &self.committee);
             self.pending
-                .push(MetaStatement::Include(*block.reference()));
+                .push(MetaTransaction::Include(*block.reference()));
             self.attach_pending_transaction_data(block);
             processed_refs.push(*block.reference());
         }
@@ -373,24 +373,24 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::run_block_handler");
-        let statements = self.block_handler.handle_blocks(!self.epoch_changing());
-        let _serialized_statements =
-            bincode::serialize(&statements).expect("Payload serialization failed");
-        self.pending.push(MetaStatement::Payload(statements));
+        let transactions = self.block_handler.handle_blocks(!self.epoch_changing());
+        let _serialized_transactions =
+            bincode::serialize(&transactions).expect("Payload serialization failed");
+        self.pending.push(MetaTransaction::Payload(transactions));
     }
 
     fn sort_includes_in_pending(&mut self) {
         let mut include_positions = Vec::new();
         let mut includes = Vec::new();
         for (i, meta) in self.pending.iter().enumerate() {
-            if let MetaStatement::Include(r) = meta {
+            if let MetaTransaction::Include(r) = meta {
                 include_positions.push(i);
                 includes.push(*r);
             }
         }
         includes.sort_by_key(|r| r.round);
         for (pos, include) in include_positions.into_iter().zip(includes) {
-            self.pending[pos] = MetaStatement::Include(include);
+            self.pending[pos] = MetaTransaction::Include(include);
         }
     }
 
@@ -411,25 +411,25 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let pending_statements = timed!(
+        let pending_transactions = timed!(
             self.metrics,
-            "Core::new_block::get_pending_statements",
-            self.get_pending_statements(clock_round)
+            "Core::new_block::get_pending_transactions",
+            self.get_pending_transactions(clock_round)
         );
-        let (mut statements, block_references) = timed!(
+        let (mut transactions, block_references) = timed!(
             self.metrics,
-            "Core::new_block::collect_statements_and_references",
-            self.collect_statements_and_references(pending_statements)
+            "Core::new_block::collect_transactions_and_references",
+            self.collect_transactions_and_references(pending_transactions)
         );
         timed!(
             self.metrics,
             "Core::new_block::prepare_last_blocks",
             self.prepare_last_blocks()
         );
-        let mut encoded_statements = timed!(
+        let mut encoded_transactions = timed!(
             self.metrics,
-            "Core::new_block::prepare_encoded_statements",
-            self.prepare_encoded_statements(&statements)
+            "Core::new_block::prepare_encoded_transactions",
+            self.prepare_encoded_transactions(&transactions)
         );
         let acknowledgment_references =
             if self.dag_state.consensus_protocol.supports_acknowledgments() {
@@ -454,16 +454,16 @@ impl<H: BlockHandler> Core<H> {
             // Equivocators include their transactions only in first block, but leave other
             // empty to not overload the bandwidth
             if block_id == 1 {
-                statements = vec![];
-                encoded_statements = self.prepare_encoded_statements(&statements);
+                transactions = vec![];
+                encoded_transactions = self.prepare_encoded_transactions(&transactions);
             }
             let block_data = timed!(
                 self.metrics,
                 "Core::new_block::build_block",
                 self.build_block(
                     &block_references,
-                    &statements,
-                    &encoded_statements,
+                    &transactions,
+                    &encoded_transactions,
                     &acknowledgment_references,
                     clock_round,
                     block_id,
@@ -485,14 +485,14 @@ impl<H: BlockHandler> Core<H> {
         first_block
     }
 
-    fn get_pending_statements(&mut self, clock_round: RoundNumber) -> Vec<MetaStatement> {
+    fn get_pending_transactions(&mut self, clock_round: RoundNumber) -> Vec<MetaTransaction> {
         self.sort_includes_in_pending();
 
         let split_point = self
             .pending
             .iter()
-            .position(|statement| match statement {
-                MetaStatement::Include(block_ref) => block_ref.round >= clock_round,
+            .position(|meta_tx| match meta_tx {
+                MetaTransaction::Include(block_ref) => block_ref.round >= clock_round,
                 _ => false,
             })
             .unwrap_or(self.pending.len());
@@ -502,36 +502,39 @@ impl<H: BlockHandler> Core<H> {
         taken
     }
 
-    fn collect_statements_and_references(
+    fn collect_transactions_and_references(
         &self,
-        pending: Vec<MetaStatement>,
-    ) -> (Vec<BaseStatement>, Vec<BlockReference>) {
-        let mut statements = Vec::new();
+        pending: Vec<MetaTransaction>,
+    ) -> (Vec<BaseTransaction>, Vec<BlockReference>) {
+        let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
         let epoch_changing = self.epoch_changing();
-        for meta_statement in pending {
-            match meta_statement {
-                MetaStatement::Payload(payload) => {
+        for meta_transaction in pending {
+            match meta_transaction {
+                MetaTransaction::Payload(payload) => {
                     if !epoch_changing {
-                        statements.extend(payload);
+                        transactions.extend(payload);
                     }
                 }
-                MetaStatement::Include(include) => pending_refs.push(include),
+                MetaTransaction::Include(include) => pending_refs.push(include),
             }
         }
         let block_references = self.compress_pending_block_references(&pending_refs);
-        (statements, block_references)
+        (transactions, block_references)
     }
 
-    fn prepare_encoded_statements(&mut self, statements: &[BaseStatement]) -> Option<Vec<Shard>> {
+    fn prepare_encoded_transactions(
+        &mut self,
+        transactions: &[BaseTransaction],
+    ) -> Option<Vec<Shard>> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_statements(
-                statements,
+            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_transactions(
+                transactions,
                 info_length,
                 parity_length,
             )),
@@ -592,8 +595,8 @@ impl<H: BlockHandler> Core<H> {
     fn build_block(
         &self,
         block_references_without_own: &[BlockReference],
-        statements: &[BaseStatement],
-        encoded_statements: &Option<Vec<Shard>>,
+        transactions: &[BaseTransaction],
+        encoded_transactions: &Option<Vec<Shard>>,
         acknowledgment_references: &[BlockReference],
         clock_round: RoundNumber,
         block_id_in_round: usize,
@@ -621,8 +624,8 @@ impl<H: BlockHandler> Core<H> {
             time_ns,
             self.epoch_changing(),
             &self.signer,
-            statements.to_vec(),
-            encoded_statements.clone(),
+            transactions.to_vec(),
+            encoded_transactions.clone(),
             self.dag_state.consensus_protocol,
             strong_vote,
         );
@@ -717,20 +720,20 @@ impl<H: BlockHandler> Core<H> {
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
-        if let Some(statements) = block.statements() {
-            if statements.is_empty() {
+        if let Some(transactions) = block.transactions() {
+            if transactions.is_empty() {
                 self.metrics.proposed_transaction_size_bytes.observe(0);
             } else {
-                let total_bytes: usize = statements
+                let total_bytes: usize = transactions
                     .iter()
                     .map(|stmt| {
-                        let BaseStatement::Share(tx) = stmt;
+                        let BaseTransaction::Share(tx) = stmt;
                         tx.as_bytes().len()
                     })
                     .sum();
                 self.metrics
                     .proposed_transaction_size_bytes
-                    .observe(total_bytes / statements.len());
+                    .observe(total_bytes / transactions.len());
             }
         }
     }

@@ -60,6 +60,7 @@ impl ConsensusProtocol {
         matches!(
             self,
             ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
         )
@@ -552,8 +553,8 @@ impl DagState {
         refs.iter().map(|r| inner.is_data_available(r)).collect()
     }
 
-    pub fn contains_new_statements(&self, block: &VerifiedBlock) -> bool {
-        self.dag_state_inner.read().contains_new_statements(block)
+    pub fn contains_new_transactions(&self, block: &VerifiedBlock) -> bool {
+        self.dag_state_inner.read().contains_new_transactions(block)
     }
 
     /// Attach recovered transaction data to an existing header-only block.
@@ -859,13 +860,13 @@ impl DagStateInner {
         self.pending_not_available = pending;
     }
 
-    /// Check if the block has new statement data we don't already have.
-    pub fn contains_new_statements(&self, block: &VerifiedBlock) -> bool {
+    /// Check if the block has new transaction data we don't already have.
+    pub fn contains_new_transactions(&self, block: &VerifiedBlock) -> bool {
         let block_reference = block.reference();
         if self.data_availability[block_reference.authority as usize].contains(block_reference) {
             return false;
         }
-        block.statements().is_some()
+        block.transactions().is_some()
     }
 
     pub fn get_blocks_at_authority_round(
@@ -1098,7 +1099,7 @@ impl DagStateInner {
     pub fn update_data_availability(&mut self, block: &VerifiedBlock) {
         let r = block.reference();
         let auth = r.authority as usize;
-        if block.statements().is_some() && !self.data_availability[auth].contains(r) {
+        if block.transactions().is_some() && !self.data_availability[auth].contains(r) {
             self.data_availability[auth].insert(*r);
             if let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() {
                 pending_acknowledgment.push(*r);
@@ -1366,7 +1367,7 @@ mod tests {
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
-        assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
+        assert!(ConsensusProtocol::CordialMiners.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishPull.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());

@@ -49,7 +49,7 @@ pub enum ShardMessage {
         /// Block header needed to initialize the accumulator.
         block_header: Box<BlockHeader>,
     },
-    /// Full block with statements arrived — stop collecting shards.
+    /// Full block with transactions arrived — stop collecting shards.
     FullBlock(BlockReference),
 }
 
@@ -453,11 +453,11 @@ mod tests {
         crypto::Signer,
         dag_state::ConsensusProtocol,
         encoder::ShardEncoder,
-        types::{BaseStatement, Transaction, VerifiedBlock},
+        types::{BaseTransaction, Transaction, VerifiedBlock},
     };
 
     fn make_test_block_and_shards(
-        statements: Vec<BaseStatement>,
+        transactions: Vec<BaseTransaction>,
         authority: AuthorityIndex,
         committee: &Committee,
         encoder: &mut ReedSolomonEncoder,
@@ -465,7 +465,7 @@ mod tests {
     ) -> (VerifiedBlock, Vec<Shard>) {
         let info_length = committee.info_length();
         let parity_length = committee.len() - info_length;
-        let encoded = encoder.encode_statements(&statements, info_length, parity_length);
+        let encoded = encoder.encode_transactions(&transactions, info_length, parity_length);
         let block = VerifiedBlock::new_with_signer(
             authority,
             1,
@@ -474,7 +474,7 @@ mod tests {
             0,
             false,
             signer,
-            statements,
+            transactions,
             Some(encoded.clone()),
             ConsensusProtocol::Starfish,
             None,
@@ -492,9 +492,9 @@ mod tests {
         let info_length = committee.info_length();
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![1; 50]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![1; 50]))];
         let (block, shards) =
-            make_test_block_and_shards(statements, 0, &committee, &mut encoder, &signers[0]);
+            make_test_block_and_shards(transactions, 0, &committee, &mut encoder, &signers[0]);
 
         let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
         assert!(!acc.is_ready(info_length));
@@ -514,9 +514,9 @@ mod tests {
         let info_length = committee.info_length();
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![7; 30]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 30]))];
         let (block, shards) =
-            make_test_block_and_shards(statements, 0, &committee, &mut encoder, &signers[0]);
+            make_test_block_and_shards(transactions, 0, &committee, &mut encoder, &signers[0]);
 
         let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
         acc.update_with_shard(shards[0].clone(), 0);
@@ -544,9 +544,9 @@ mod tests {
             start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![7; 200]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 200]))];
         let (block, shards) = make_test_block_and_shards(
-            statements.clone(),
+            transactions.clone(),
             1,
             &committee,
             &mut encoder,
@@ -587,9 +587,9 @@ mod tests {
             "merkle root should match"
         );
         assert_eq!(
-            item.transaction_data.statements(),
-            &statements,
-            "statements should match"
+            item.transaction_data.transactions(),
+            &transactions,
+            "transactions should match"
         );
 
         handle.stop().await;
@@ -612,9 +612,9 @@ mod tests {
             start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);
 
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
-        let statements = vec![BaseStatement::Share(Transaction::new(vec![9; 50]))];
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![9; 50]))];
         let (block, shards) =
-            make_test_block_and_shards(statements, 1, &committee, &mut encoder, &signers[1]);
+            make_test_block_and_shards(transactions, 1, &committee, &mut encoder, &signers[1]);
 
         let block_ref = *block.reference();
         let sender = handle.shard_message_sender();
