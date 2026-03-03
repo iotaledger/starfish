@@ -414,16 +414,14 @@ impl ProvableShard {
 }
 
 // ---------------------------------------------------------------------------
-// VerifiedBlock — composite: header + optional payloads.
-// Used for serialization/storage/network. The in-memory DAG representation
-// stores headers and payloads separately.
+// VerifiedBlock — header + optional transaction payload.
+// Shards are now stored and transported as separate sidecars.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VerifiedBlock {
     pub(crate) header: BlockHeader,
     pub(crate) transaction_data: Option<TransactionData>,
-    pub(crate) shard_data: Option<ProvableShard>,
 }
 
 impl VerifiedBlock {
@@ -436,8 +434,6 @@ impl VerifiedBlock {
         epoch_marker: EpochStatus,
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
-        encoded_shard: Option<(Shard, usize)>,
-        merkle_proof: Option<Vec<u8>>,
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
     ) -> Self {
@@ -475,23 +471,9 @@ impl VerifiedBlock {
             serialized: None,
         };
 
-        let shard_data = match (encoded_shard, merkle_proof) {
-            (Some((shard, shard_index)), Some(proof)) => {
-                Some(ProvableShard::new(shard, shard_index, proof, merkle_root))
-            }
-            (Some((shard, shard_index)), None) => Some(ProvableShard::new(
-                shard,
-                shard_index,
-                Vec::new(),
-                merkle_root,
-            )),
-            _ => None,
-        };
-
         Self {
             header,
             transaction_data: Some(TransactionData::new(transactions)),
-            shard_data,
         }
     }
 
@@ -527,7 +509,6 @@ impl VerifiedBlock {
         let mut block = Self {
             header,
             transaction_data: None,
-            shard_data: None,
         };
         block.preserialize();
         Data::new(block)
@@ -587,8 +568,6 @@ impl VerifiedBlock {
             epoch_marker,
             signature,
             transactions,
-            None,
-            None,
             transactions_commitment,
             strong_vote,
         )
@@ -670,10 +649,6 @@ impl VerifiedBlock {
         self.transaction_data.as_ref()
     }
 
-    pub fn shard_data(&self) -> Option<&ProvableShard> {
-        self.shard_data.as_ref()
-    }
-
     /// Compatibility: returns transactions slice if transaction data is
     /// present.
     pub fn transactions(&self) -> Option<&Vec<BaseTransaction>> {
@@ -690,37 +665,29 @@ impl VerifiedBlock {
         self.transaction_data.is_some()
     }
 
-    pub fn has_shard_data(&self) -> bool {
-        self.shard_data.is_some()
-    }
-
-    /// Create a lightweight copy with only the header (no transaction data, no
-    /// shard).
+    /// Create a lightweight copy with only the header (no transaction data).
     pub fn as_header_only(&self) -> Self {
         Self {
             header: self.header.clone(),
             transaction_data: None,
-            shard_data: None,
         }
     }
 
     // --- Decomposition ---
 
     /// Extract the header, consuming self.
-    pub fn into_parts(self) -> (BlockHeader, Option<TransactionData>, Option<ProvableShard>) {
-        (self.header, self.transaction_data, self.shard_data)
+    pub fn into_parts(self) -> (BlockHeader, Option<TransactionData>) {
+        (self.header, self.transaction_data)
     }
 
-    /// Assemble from header + optional payloads.
+    /// Assemble from header + optional transaction data.
     pub fn from_parts(
         header: BlockHeader,
         transaction_data: Option<TransactionData>,
-        shard_data: Option<ProvableShard>,
     ) -> Self {
         Self {
             header,
             transaction_data,
-            shard_data,
         }
     }
 
@@ -732,9 +699,6 @@ impl VerifiedBlock {
         self.header.preserialize();
         if let Some(ref mut tx) = self.transaction_data {
             tx.preserialize();
-        }
-        if let Some(ref mut shard) = self.shard_data {
-            shard.preserialize();
         }
     }
 
@@ -748,10 +712,6 @@ impl VerifiedBlock {
             .and_then(|t| t.serialized_bytes())
     }
 
-    pub fn serialized_shard_data_bytes(&self) -> Option<&Bytes> {
-        self.shard_data.as_ref().and_then(|s| s.serialized_bytes())
-    }
-
     // --- Serialization ---
 
     pub fn from_bytes(bytes: Bytes) -> bincode::Result<Self> {
@@ -763,34 +723,37 @@ impl VerifiedBlock {
 
     // --- Verification ---
 
+    /// Verify the block and return the derived shard sidecar (if any).
     pub fn verify(
         &mut self,
         committee: &Committee,
         own_id: usize,
-        peer_id: usize,
+        _peer_id: usize,
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
-    ) -> eyre::Result<()> {
-        self.verify_transactions(committee, own_id, peer_id, encoder, consensus_protocol)?;
-        self.verify_block_structure(committee)
+    ) -> eyre::Result<Option<ProvableShard>> {
+        let shard =
+            self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
+        self.verify_block_structure(committee)?;
+        Ok(shard)
     }
 
     /// Verify transaction commitments and shard proofs (protocol-dependent).
+    /// Returns the own-shard sidecar when a full Starfish-style block is
+    /// verified.
     fn verify_transactions(
         &mut self,
         committee: &Committee,
         own_id: usize,
-        peer_id: usize,
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Option<ProvableShard>> {
         match consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS => {
-                let committee_size = committee.len();
                 let info_length = committee.info_length();
-                let parity_length = committee_size - info_length;
+                let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
                     let encoded_transactions =
                         encoder.encode_transactions(&td.transactions, info_length, parity_length);
@@ -803,30 +766,15 @@ impl VerifiedBlock {
                         transactions_commitment == self.header.transactions_commitment,
                         "Incorrect Merkle root"
                     );
-                    self.shard_data = Some(ProvableShard::new(
+                    return Ok(Some(ProvableShard::new(
                         encoded_transactions[own_id].clone(),
                         own_id,
                         merkle_proof_bytes,
                         self.header.transactions_commitment,
-                    ));
-                } else if let Some(sd) = self.shard_data.as_ref() {
-                    if sd.shard_index != peer_id {
-                        bail!("The peer delivers a wrong encoded chunk");
-                    }
-                    if sd.merkle_proof.is_empty() {
-                        bail!("The peer didn't include the proof for the encoded shard");
-                    }
-                    ensure!(
-                        TransactionsCommitment::check_correctness_merkle_leaf(
-                            sd.shard.clone(),
-                            self.header.transactions_commitment,
-                            sd.merkle_proof.clone(),
-                            committee_size,
-                            sd.shard_index
-                        ),
-                        "Merkle proof check failed"
-                    );
+                    )));
                 }
+                // Header-only blocks: shard sidecars are verified and carried
+                // externally via `process_standalone_shards`.
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 if let Some(td) = &self.transaction_data {
@@ -841,7 +789,7 @@ impl VerifiedBlock {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Verify digest, signature, includes, and threshold clock.
@@ -1041,8 +989,6 @@ impl fmt::Display for VerifiedBlock {
         write!(f, "](")?;
         if self.transaction_data.is_some() {
             write!(f, "ledger")?;
-        } else if self.shard_data.is_some() {
-            write!(f, "shard")?;
         } else {
             write!(f, "header")?;
         }
@@ -1081,8 +1027,6 @@ mod tests {
             false,
             SignatureBytes::default(),
             vec![],
-            None,
-            None,
             TransactionsCommitment::default(),
             None,
         );

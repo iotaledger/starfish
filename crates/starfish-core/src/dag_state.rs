@@ -131,6 +131,8 @@ struct DagStateInner {
     store: Arc<dyn Store>,
     /// Per-authority block storage. Vec index = authority.
     index: Vec<BTreeMap<RoundNumber, HashMap<BlockDigest, Data<VerifiedBlock>>>>,
+    /// Per-authority shard sidecar index. Vec index = authority.
+    shard_index: Vec<BTreeMap<RoundNumber, HashMap<BlockDigest, ProvableShard>>>,
     /// Per-authority data availability tracking. Vec index = authority.
     data_availability: Vec<BTreeSet<BlockReference>>,
     // Blocks for which we have transaction data and still need to acknowledge.
@@ -202,6 +204,7 @@ impl DagState {
             last_available_commit: 0,
             committee_size: n,
             index: (0..n).map(|_| BTreeMap::new()).collect(),
+            shard_index: (0..n).map(|_| BTreeMap::new()).collect(),
             data_availability: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_acknowledgment: consensus_protocol.supports_acknowledgments().then(Vec::new),
             own_blocks: (0..n).map(|_| BTreeMap::new()).collect(),
@@ -229,6 +232,18 @@ impl DagState {
 
             for block in blocks {
                 let block_ref = *block.reference();
+
+                // Recover shard sidecars into the shard index.
+                if let Some(shard) = store
+                    .get_shard_data(&block_ref)
+                    .expect("Failed to read shard data from storage")
+                {
+                    let auth = block_ref.authority as usize;
+                    inner.shard_index[auth]
+                        .entry(block_ref.round)
+                        .or_default()
+                        .insert(block_ref.digest, shard);
+                }
 
                 builder.block(current_round, block.clone());
                 block_count += 1;
@@ -548,19 +563,62 @@ impl DagState {
             .collect()
     }
 
-    /// Fetch shard payloads for the given references.
+    /// Fetch shard payloads for the given references from the shard sidecar
+    /// index, with store fallback.
     pub fn get_shard_payloads(&self, refs: &[BlockReference]) -> Vec<ShardPayload> {
-        let inner = self.dag_state_inner.read();
         refs.iter()
             .filter_map(|r| {
-                let block = inner.get_storage_block(*r)?;
-                let shard = block.shard_data()?.clone();
+                let shard = self.get_shard(r)?;
                 Some(ShardPayload {
                     block_reference: *r,
                     shard,
                 })
             })
             .collect()
+    }
+
+    /// Insert a shard into the sidecar index and persist to store.
+    /// Pre-serializes the shard internally.
+    pub fn insert_shard(&self, block_ref: BlockReference, mut shard: ProvableShard) {
+        shard.preserialize();
+        let shard_bytes = shard
+            .serialized_bytes()
+            .expect("shard should be preserialized");
+        self.store
+            .store_shard_data_bytes(&block_ref, shard_bytes)
+            .expect("Failed to store shard data");
+
+        let mut inner = self.dag_state_inner.write();
+        let auth = block_ref.authority as usize;
+        inner.shard_index[auth]
+            .entry(block_ref.round)
+            .or_default()
+            .insert(block_ref.digest, shard);
+    }
+
+    /// Check whether the shard index contains a shard for this block.
+    pub fn has_shard(&self, block_ref: &BlockReference) -> bool {
+        let inner = self.dag_state_inner.read();
+        let auth = block_ref.authority as usize;
+        inner.shard_index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest))
+    }
+
+    /// Retrieve a shard from the in-memory index, falling back to store.
+    pub fn get_shard(&self, block_ref: &BlockReference) -> Option<ProvableShard> {
+        let inner = self.dag_state_inner.read();
+        let auth = block_ref.authority as usize;
+        if let Some(shard) = inner.shard_index[auth]
+            .get(&block_ref.round)
+            .and_then(|m| m.get(&block_ref.digest))
+        {
+            return Some(shard.clone());
+        }
+        drop(inner);
+        self.store
+            .get_shard_data(block_ref)
+            .expect("Failed to read shard data from store")
     }
 
     /// Batch variant of `is_data_available` — single read lock for N lookups.
@@ -614,11 +672,16 @@ impl DagState {
             .store_shard_data_bytes(&block_ref, shard_bytes)
             .expect("Failed to store shard data");
 
-        // Rebuild the in-memory composite block (consumers expect Data<VerifiedBlock>).
+        // Shard goes to the sidecar index, not into the block.
+        inner.shard_index[auth]
+            .entry(block_ref.round)
+            .or_default()
+            .insert(block_ref.digest, shard_data.clone());
+
+        // Rebuild the in-memory block with tx only (shard is in shard_index).
         let updated = Data::new(VerifiedBlock::from_parts(
             header,
             Some(transaction_data.clone()),
-            Some(shard_data.clone()),
         ));
 
         // Replace in index (short-lived mutable borrow).
@@ -638,23 +701,28 @@ impl DagState {
         true
     }
 
-    /// Attach a shard to an existing DAG block that has no shard data yet.
+    /// Attach a shard to the sidecar index for an existing DAG block.
     /// Pre-serializes the shard internally. Returns true if the shard was
     /// attached (or was already present), false if the block doesn't exist.
     pub fn attach_shard_data(&self, block_ref: BlockReference, shard_data: &ProvableShard) -> bool {
         let mut inner = self.dag_state_inner.write();
         let auth = block_ref.authority as usize;
 
-        let (header, existing_tx) = {
-            let existing = inner.index[auth]
-                .get(&block_ref.round)
-                .and_then(|m| m.get(&block_ref.digest));
-            match existing {
-                Some(b) if b.shard_data().is_some() => return true,
-                Some(b) => (b.header().clone(), b.transaction_data().cloned()),
-                None => return false,
-            }
-        };
+        // Check block exists
+        let exists = inner.index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest));
+        if !exists {
+            return false;
+        }
+
+        // Already have this shard?
+        if inner.shard_index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest))
+        {
+            return true;
+        }
 
         let mut shard = shard_data.clone();
         shard.preserialize();
@@ -665,12 +733,10 @@ impl DagState {
             .store_shard_data_bytes(&block_ref, shard_bytes)
             .expect("Failed to store shard data");
 
-        let updated = Data::new(VerifiedBlock::from_parts(header, existing_tx, Some(shard)));
-        inner.index[auth]
-            .get_mut(&block_ref.round)
-            .unwrap()
-            .insert(block_ref.digest, updated);
-        *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
+        inner.shard_index[auth]
+            .entry(block_ref.round)
+            .or_default()
+            .insert(block_ref.digest, shard);
         true
     }
 
@@ -1040,6 +1106,7 @@ impl DagStateInner {
             self.evicted_rounds[auth] = threshold;
 
             self.index[auth] = self.index[auth].split_off(&threshold);
+            self.shard_index[auth] = self.shard_index[auth].split_off(&threshold);
             self.dag[auth] = self.dag[auth].split_off(&threshold);
 
             let split_ref = BlockReference {

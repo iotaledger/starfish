@@ -239,15 +239,6 @@ impl RocksStore {
             size += tx_bytes.len();
             batch.tx_data.insert(reference, tx_bytes);
         }
-        if let Some(_shard) = block.shard_data() {
-            let shard_bytes = block
-                .serialized_shard_data_bytes()
-                .expect("shard_data must be preserialized before store")
-                .to_vec();
-            size += shard_bytes.len();
-            batch.shard_data.insert(reference, shard_bytes);
-        }
-
         batch.total_size += size;
         Self::maybe_flush_batch(&mut batch, &self.pending_batches);
         Ok(())
@@ -363,10 +354,9 @@ impl RocksStore {
             }
         }
 
-        // 2. Iterate CF_HEADERS by round, assemble with tx/shard lookups.
+        // 2. Iterate CF_HEADERS by round, assemble with tx lookups.
         let cf_headers = self.cf(CF_HEADERS)?;
         let cf_tx_data = self.cf(CF_TX_DATA)?;
-        let cf_shard_data = self.cf(CF_SHARD_DATA)?;
 
         let seek_key = serialize(&BlockReference {
             round,
@@ -393,8 +383,7 @@ impl RocksStore {
             if !seen.contains(&reference) {
                 let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
                 let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
-                let shard = self.point_read_cf(&cf_shard_data, key_bytes)?;
-                blocks.push(Data::new(VerifiedBlock::from_parts(header, tx, shard)));
+                blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
                 seen.insert(reference);
             }
 
@@ -462,11 +451,7 @@ impl RocksStore {
         let header_bytes = ops.headers.get(reference)?;
         let header: BlockHeader = deserialize(header_bytes).ok()?;
         let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
-        let shard = ops
-            .shard_data
-            .get(reference)
-            .and_then(|b| deserialize(b).ok());
-        Some(Data::new(VerifiedBlock::from_parts(header, tx, shard)))
+        Some(Data::new(VerifiedBlock::from_parts(header, tx)))
     }
 
     /// Collect assembled blocks for a given round from batch ops.
@@ -487,11 +472,7 @@ impl RocksStore {
             if reference.round == round && seen.insert(*reference) {
                 let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
                 let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
-                let shard = ops
-                    .shard_data
-                    .get(reference)
-                    .and_then(|b| deserialize(b).ok());
-                out.push(Data::new(VerifiedBlock::from_parts(header, tx, shard)));
+                out.push(Data::new(VerifiedBlock::from_parts(header, tx)));
             }
         }
         Ok(())
@@ -512,13 +493,9 @@ impl RocksStore {
 
         let header: BlockHeader = deserialize(&header_bytes).map_err(io::Error::other)?;
         let cf_tx_data = self.cf(CF_TX_DATA)?;
-        let cf_shard_data = self.cf(CF_SHARD_DATA)?;
         let tx: Option<TransactionData> = self.point_read_cf(&cf_tx_data, key)?;
-        let shard: Option<ProvableShard> = self.point_read_cf(&cf_shard_data, key)?;
 
-        Ok(Some(Data::new(VerifiedBlock::from_parts(
-            header, tx, shard,
-        ))))
+        Ok(Some(Data::new(VerifiedBlock::from_parts(header, tx))))
     }
 
     /// Point-read and deserialize an optional value from a column family.
@@ -675,5 +652,28 @@ impl Store for RocksStore {
 
     fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
         self.do_store_shard_data_bytes(reference, bytes)
+    }
+
+    fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>> {
+        // Check in-memory batch first
+        let batch = self.batch.read();
+        if let Some(bytes) = batch.shard_data.get(reference) {
+            return deserialize(bytes).map(Some).map_err(io::Error::other);
+        }
+        drop(batch);
+
+        // Check pending batches
+        let pending = self.pending_batches.lock();
+        for ops in pending.iter().rev() {
+            if let Some(bytes) = ops.shard_data.get(reference) {
+                return deserialize(bytes).map(Some).map_err(io::Error::other);
+            }
+        }
+        drop(pending);
+
+        // Fall back to DB
+        let key = serialize(reference).map_err(io::Error::other)?;
+        let cf = self.cf(CF_SHARD_DATA)?;
+        self.point_read_cf(&cf, &key)
     }
 }
