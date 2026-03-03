@@ -177,7 +177,7 @@ impl ShardReconstructor {
         let info_length = committee.info_length();
         let committee_size = committee.len();
 
-        let (shard_tx, shard_rx) = mpsc::channel(10_000);
+        let (shard_tx, shard_rx) = mpsc::channel(100_000);
         let (ready_tx, ready_rx) = mpsc::channel(1000);
         let (result_tx, result_rx) = mpsc::channel(1000);
 
