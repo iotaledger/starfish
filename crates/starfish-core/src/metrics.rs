@@ -558,7 +558,8 @@ impl Metrics {
                     HistogramOpts::new(
                         "proposed_block_acks",
                         "Number of acknowledgment references in proposed blocks \
-                         (after compression)", // editorconfig-checker-disable-line
+                         (including virtual acknowledgments from block \
+                         references)", // editorconfig-checker-disable-line
                     )
                     .buckets(buckets),
                     registry,

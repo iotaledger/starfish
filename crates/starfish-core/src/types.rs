@@ -151,6 +151,14 @@ impl BlockHeader {
         )
     }
 
+    pub fn acknowledgment_count(&self) -> usize {
+        count_acknowledgments(
+            &self.block_references,
+            self.acknowledgment_intersection,
+            &self.acknowledgment_references,
+        )
+    }
+
     pub fn author(&self) -> AuthorityIndex {
         self.reference.authority
     }
@@ -207,6 +215,19 @@ fn expand_acknowledgments(
     let mut acknowledgments = block_references[start..].to_vec();
     acknowledgments.extend_from_slice(acknowledgment_references);
     acknowledgments
+}
+
+fn count_acknowledgments(
+    block_references: &[BlockReference],
+    acknowledgment_intersection: Option<u32>,
+    acknowledgment_references: &[BlockReference],
+) -> usize {
+    let Some(start) = acknowledgment_intersection else {
+        return acknowledgment_references.len();
+    };
+
+    let start = usize::min(start as usize, block_references.len());
+    (block_references.len() - start) + acknowledgment_references.len()
 }
 
 fn compress_acknowledgments(
@@ -535,6 +556,10 @@ impl VerifiedBlock {
 
     pub fn acknowledgments(&self) -> Vec<BlockReference> {
         self.header.acknowledgments()
+    }
+
+    pub fn acknowledgment_count(&self) -> usize {
+        self.header.acknowledgment_count()
     }
 
     pub fn author(&self) -> AuthorityIndex {
@@ -963,6 +988,7 @@ mod tests {
 
         assert_eq!(block.acknowledgment_intersection(), Some(2));
         assert_eq!(block.extra_acknowledgment_references(), &vec![d]);
+        assert_eq!(block.acknowledgment_count(), 2);
         assert_eq!(block.acknowledgments(), vec![c, d]);
     }
 
@@ -982,6 +1008,7 @@ mod tests {
             strong_vote: None,
         };
 
+        assert_eq!(header.acknowledgment_count(), 1);
         assert_eq!(header.acknowledgments(), vec![b]);
     }
 }
