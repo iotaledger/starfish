@@ -585,6 +585,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if send_to_core {
                 let mut storage_block = storage_block;
                 storage_block.preserialize();
+                debug_assert!(
+                    storage_block.serialized_header_bytes().is_some(),
+                    "header must be preserialized before entering core"
+                );
                 new_data_blocks.push(Data::new(storage_block));
             }
         }
@@ -687,6 +691,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .add_batch(vec![(block.digest(), Status::Full)]);
             let mut block = block;
             block.preserialize();
+            debug_assert!(
+                block.serialized_header_bytes().is_some(),
+                "header must be preserialized before entering core"
+            );
             verified_data_blocks.push(Data::new(block));
         }
 

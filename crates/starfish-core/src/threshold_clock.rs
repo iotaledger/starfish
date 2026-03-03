@@ -114,6 +114,7 @@ mod tests {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            serialized: None,
         }
     }
 

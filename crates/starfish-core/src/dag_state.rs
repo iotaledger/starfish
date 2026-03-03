@@ -559,14 +559,13 @@ impl DagState {
 
     /// Attach recovered transaction data to an existing header-only block.
     /// Bypasses the block manager — the header is already accepted and
-    /// connected.
+    /// connected. Components must carry pre-serialized bytes (via
+    /// `preserialize()`).
     pub fn attach_transaction_data(
         &self,
         block_ref: BlockReference,
         transaction_data: &TransactionData,
         shard_data: &ProvableShard,
-        serialized_tx_data: &[u8],
-        serialized_shard_data: &[u8],
     ) -> bool {
         let mut inner = self.dag_state_inner.write();
         let auth = block_ref.authority as usize;
@@ -585,12 +584,18 @@ impl DagState {
         };
 
         // Persist only the new components — the header is already stored.
-        // Bytes are pre-serialized off the core thread.
+        // Bytes are pre-serialized off the core thread (carried by the types).
+        let tx_bytes = transaction_data
+            .serialized_bytes()
+            .expect("tx_data should be preserialized before attach");
         self.store
-            .store_tx_data_bytes(&block_ref, serialized_tx_data)
+            .store_tx_data_bytes(&block_ref, tx_bytes)
             .expect("Failed to store transaction data");
+        let shard_bytes = shard_data
+            .serialized_bytes()
+            .expect("shard_data should be preserialized before attach");
         self.store
-            .store_shard_data_bytes(&block_ref, serialized_shard_data)
+            .store_shard_data_bytes(&block_ref, shard_bytes)
             .expect("Failed to store shard data");
 
         // Rebuild the in-memory composite block (consumers expect Data<VerifiedBlock>).

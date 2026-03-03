@@ -145,27 +145,27 @@ impl Store for TideHunterStore {
     fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
         let key = Self::encode_key(block.reference());
 
-        // Use pre-serialized bytes when available; fall back to serialization.
-        let header_bytes = match block.serialized_header_bytes() {
-            Some(b) => b.to_vec(),
-            None => bincode::serialize(block.header()).map_err(io::Error::other)?,
-        };
+        // All blocks must be pre-serialized before reaching the store.
+        let header_bytes = block
+            .serialized_header_bytes()
+            .expect("header must be preserialized before store")
+            .to_vec();
 
         let mut batch = self.db.write_batch();
         batch.write(self.ks_headers, key.to_vec(), header_bytes);
 
-        if let Some(tx) = block.transaction_data() {
-            let tx_bytes = match block.serialized_tx_data_bytes() {
-                Some(b) => b.to_vec(),
-                None => bincode::serialize(tx).map_err(io::Error::other)?,
-            };
+        if let Some(_tx) = block.transaction_data() {
+            let tx_bytes = block
+                .serialized_tx_data_bytes()
+                .expect("tx_data must be preserialized before store")
+                .to_vec();
             batch.write(self.ks_tx_data, key.to_vec(), tx_bytes);
         }
-        if let Some(shard) = block.shard_data() {
-            let shard_bytes = match block.serialized_shard_data_bytes() {
-                Some(b) => b.to_vec(),
-                None => bincode::serialize(shard).map_err(io::Error::other)?,
-            };
+        if let Some(_shard) = block.shard_data() {
+            let shard_bytes = block
+                .serialized_shard_data_bytes()
+                .expect("shard_data must be preserialized before store")
+                .to_vec();
             batch.write(self.ks_shard_data, key.to_vec(), shard_bytes);
         }
 
