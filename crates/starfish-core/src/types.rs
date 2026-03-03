@@ -681,10 +681,7 @@ impl VerifiedBlock {
     }
 
     /// Assemble from header + optional transaction data.
-    pub fn from_parts(
-        header: BlockHeader,
-        transaction_data: Option<TransactionData>,
-    ) -> Self {
+    pub fn from_parts(header: BlockHeader, transaction_data: Option<TransactionData>) -> Self {
         Self {
             header,
             transaction_data,
@@ -732,8 +729,7 @@ impl VerifiedBlock {
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<Option<ProvableShard>> {
-        let shard =
-            self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
+        let shard = self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
         self.verify_block_structure(committee)?;
         Ok(shard)
     }
@@ -1110,7 +1106,6 @@ impl Transaction {
     pub fn new(data: Vec<u8>) -> Self {
         Self { data }
     }
-
 }
 
 impl AsBytes for Transaction {

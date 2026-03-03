@@ -19,9 +19,7 @@ use crate::{
     runtime::{self, TimeInstant},
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
-    types::{
-        BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock,
-    },
+    types::{BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock},
 };
 
 pub trait BlockHandler: Send + Sync {

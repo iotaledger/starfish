@@ -307,7 +307,10 @@ where
 
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
-                let mut headers = self.inner.dag_state.get_header_only_blocks(&block_references);
+                let mut headers = self
+                    .inner
+                    .dag_state
+                    .get_header_only_blocks(&block_references);
                 headers.truncate(batch_block_size);
                 {
                     let mut sent = self.sent_to_peer.write();
@@ -850,10 +853,7 @@ where
     let useful_shards = 0;
     report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
 
-    tracing::debug!(
-        "Cordial Miners batch to {peer}: {} full",
-        full_blocks.len()
-    );
+    tracing::debug!("Cordial Miners batch to {peer}: {} full", full_blocks.len());
     let batch = BlockBatch {
         full_blocks,
         headers: Vec::new(),
@@ -897,7 +897,8 @@ where
     let ck = inner
         .cordial_knowledge
         .connection_knowledge(to_whom_authority_index)?;
-    let header_candidate_limit = batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+    let header_candidate_limit =
+        batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
     let (header_candidates, shard_refs, useful_headers, useful_shards) = {
         let mut ck = ck.write();
         let header_refs = ck.take_unsent_headers(header_candidate_limit);

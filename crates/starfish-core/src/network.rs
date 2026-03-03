@@ -2,10 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 
 use futures::{
     FutureExt,
