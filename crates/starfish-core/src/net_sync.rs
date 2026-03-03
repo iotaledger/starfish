@@ -714,7 +714,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
-                ck.mark_shard_useful_from_peer(*block.reference());
             }
             self.filter_for_blocks
                 .add_batch(vec![(block.digest(), Status::Full)]);
