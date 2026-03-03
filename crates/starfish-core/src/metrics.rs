@@ -72,6 +72,8 @@ pub struct Metrics {
     pub block_handler_cleanup_util: IntCounter,
 
     pub missing_blocks: IntGaugeVec,
+    pub block_manager_pending_blocks: IntGauge,
+    pub core_pending_reconstructed_data: IntGauge,
     pub block_sync_requests_sent: IntCounterVec,
     pub committed_blocks: IntCounterVec,
 
@@ -509,6 +511,18 @@ impl Metrics {
                 "missing_blocks",
                 "Number of missing blocks per authority",
                 &["authority"],
+                registry,
+            )
+            .unwrap(),
+            block_manager_pending_blocks: register_int_gauge_with_registry!(
+                "block_manager_pending_blocks",
+                "Blocks in BlockManager waiting for parent dependencies",
+                registry,
+            )
+            .unwrap(),
+            core_pending_reconstructed_data: register_int_gauge_with_registry!(
+                "core_pending_reconstructed_data",
+                "Reconstructed transaction data buffered waiting for headers",
                 registry,
             )
             .unwrap(),

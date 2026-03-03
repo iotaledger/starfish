@@ -18,6 +18,7 @@ use clap::Parser;
 use eyre::{Context, Result};
 use prettytable::format;
 use starfish_core::{
+    ByzantineStrategy,
     committee::Committee,
     config::{
         ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig, Parameters,
@@ -304,6 +305,14 @@ async fn local_benchmark(
     let committee = Committee::new_for_benchmarks(committee_size);
     load /= committee.len();
     let parameters = Parameters::almost_default(load);
+    // Equivocating Byzantine strategies must not generate transactions.
+    let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
+        .is_some_and(|s| s.is_equivocating())
+    {
+        Parameters::almost_default(0)
+    } else {
+        parameters.clone()
+    };
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
 
     // Create temporary directories for each validator
@@ -360,7 +369,7 @@ async fn local_benchmark(
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                parameters.clone(),
+                byzantine_parameters.clone(),
                 byzantine_strategy.clone(),
                 consensus_protocol.clone(),
             )

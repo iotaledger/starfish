@@ -89,6 +89,46 @@ pub struct ConnectionKnowledge {
 }
 
 impl ConnectionKnowledge {
+    fn take_unsent_refs(
+        maps: &mut [BTreeMap<RoundNumber, AHashSet<BlockReference>>],
+        limit: usize,
+        excluded_authority: Option<AuthorityIndex>,
+    ) -> Vec<BlockReference> {
+        let mut result = Vec::with_capacity(limit);
+        for (authority, authority_map) in maps.iter_mut().enumerate() {
+            if excluded_authority == Some(authority as AuthorityIndex) {
+                continue;
+            }
+            let mut empty_rounds = Vec::new();
+            for (&round, round_set) in authority_map.iter_mut() {
+                if result.len() >= limit {
+                    break;
+                }
+                let mut taken = Vec::new();
+                for block_ref in round_set.iter() {
+                    if result.len() >= limit {
+                        break;
+                    }
+                    result.push(*block_ref);
+                    taken.push(*block_ref);
+                }
+                for block_ref in &taken {
+                    round_set.remove(block_ref);
+                }
+                if round_set.is_empty() {
+                    empty_rounds.push(round);
+                }
+            }
+            for round in empty_rounds {
+                authority_map.remove(&round);
+            }
+            if result.len() >= limit {
+                break;
+            }
+        }
+        result
+    }
+
     pub fn new(peer: AuthorityIndex, committee_size: usize) -> Self {
         Self {
             peer,
@@ -164,71 +204,26 @@ impl ConnectionKnowledge {
     /// Drain the oldest unknown headers, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_headers(&mut self, limit: usize) -> Vec<BlockReference> {
-        let mut result = Vec::with_capacity(limit);
-        for authority_map in &mut self.headers_not_known {
-            let mut empty_rounds = Vec::new();
-            for (&round, round_set) in authority_map.iter_mut() {
-                if result.len() >= limit {
-                    break;
-                }
-                let mut taken = Vec::new();
-                for block_ref in round_set.iter() {
-                    if result.len() >= limit {
-                        break;
-                    }
-                    result.push(*block_ref);
-                    taken.push(*block_ref);
-                }
-                for block_ref in &taken {
-                    round_set.remove(block_ref);
-                }
-                if round_set.is_empty() {
-                    empty_rounds.push(round);
-                }
-            }
-            for round in empty_rounds {
-                authority_map.remove(&round);
-            }
-            if result.len() >= limit {
-                break;
-            }
-        }
-        result
+        Self::take_unsent_refs(&mut self.headers_not_known, limit, None)
+    }
+
+    /// Drain the oldest unknown headers, excluding a single authority.
+    pub fn take_unsent_headers_excluding_authority(
+        &mut self,
+        limit: usize,
+        excluded_authority: AuthorityIndex,
+    ) -> Vec<BlockReference> {
+        Self::take_unsent_refs(
+            &mut self.headers_not_known,
+            limit,
+            Some(excluded_authority),
+        )
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_shards(&mut self, limit: usize) -> Vec<BlockReference> {
-        let mut result = Vec::with_capacity(limit);
-        for authority_map in &mut self.shards_not_known {
-            let mut empty_rounds = Vec::new();
-            for (&round, round_set) in authority_map.iter_mut() {
-                if result.len() >= limit {
-                    break;
-                }
-                let mut taken = Vec::new();
-                for block_ref in round_set.iter() {
-                    if result.len() >= limit {
-                        break;
-                    }
-                    result.push(*block_ref);
-                    taken.push(*block_ref);
-                }
-                for block_ref in &taken {
-                    round_set.remove(block_ref);
-                }
-                if round_set.is_empty() {
-                    empty_rounds.push(round);
-                }
-            }
-            for round in empty_rounds {
-                authority_map.remove(&round);
-            }
-            if result.len() >= limit {
-                break;
-            }
-        }
-        result
+        Self::take_unsent_refs(&mut self.shards_not_known, limit, None)
     }
 
     /// Evict all entries below the given per-authority rounds.
@@ -266,11 +261,39 @@ impl ConnectionKnowledge {
         }
     }
 
+    /// Record that a header from this authority is currently useful to the
+    /// peer, based on an explicit request they sent us.
+    pub fn mark_header_useful_to_peer(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority < self.committee_size {
+            let entry = &mut self.last_useful_headers_to_peer_round[authority];
+            match entry {
+                Some(round) if block_ref.round > *round => *round = block_ref.round,
+                None => *entry = Some(block_ref.round),
+                _ => {}
+            }
+        }
+    }
+
     /// Record that a shard received from this peer was useful to us.
     pub fn mark_shard_useful_from_peer(&mut self, block_ref: BlockReference) {
         let authority = block_ref.authority as usize;
         if authority < self.committee_size {
             let entry = &mut self.last_useful_shards_from_peer_round[authority];
+            match entry {
+                Some(round) if block_ref.round > *round => *round = block_ref.round,
+                None => *entry = Some(block_ref.round),
+                _ => {}
+            }
+        }
+    }
+
+    /// Record that a shard from this authority is currently useful to the
+    /// peer, based on an explicit request they sent us.
+    pub fn mark_shard_useful_to_peer(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority < self.committee_size {
+            let entry = &mut self.last_useful_shards_to_peer_round[authority];
             match entry {
                 Some(round) if block_ref.round > *round => *round = block_ref.round,
                 None => *entry = Some(block_ref.round),
@@ -542,6 +565,23 @@ mod tests {
     }
 
     #[test]
+    fn test_take_unsent_headers_excluding_authority() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let own = block_ref(0, 5);
+        let other = block_ref(2, 5);
+
+        ck.new_header(own);
+        ck.new_header(other);
+
+        let drained = ck.take_unsent_headers_excluding_authority(10, 0);
+        assert_eq!(drained, vec![other]);
+        assert_eq!(ck.unknown_headers_count(), 1);
+
+        let remaining = ck.take_unsent_headers(10);
+        assert_eq!(remaining, vec![own]);
+    }
+
+    #[test]
     fn test_evict_below() {
         let mut ck = ConnectionKnowledge::new(1, 4);
         for round in 1..=10 {
@@ -591,6 +631,34 @@ mod tests {
         assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(15));
         // Shards for authority 0 unchanged (shards bitmask was 0)
         assert_eq!(ck.last_useful_shards_to_peer_round[0], Some(10));
+    }
+
+    #[test]
+    fn test_mark_header_useful_to_peer() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+
+        ck.mark_header_useful_to_peer(block_ref(2, 10));
+        assert_eq!(ck.last_useful_headers_to_peer_round[2], Some(10));
+
+        ck.mark_header_useful_to_peer(block_ref(2, 7));
+        assert_eq!(ck.last_useful_headers_to_peer_round[2], Some(10));
+
+        ck.mark_header_useful_to_peer(block_ref(2, 12));
+        assert_eq!(ck.last_useful_headers_to_peer_round[2], Some(12));
+    }
+
+    #[test]
+    fn test_mark_shard_useful_to_peer() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+
+        ck.mark_shard_useful_to_peer(block_ref(2, 10));
+        assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
+
+        ck.mark_shard_useful_to_peer(block_ref(2, 7));
+        assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
+
+        ck.mark_shard_useful_to_peer(block_ref(2, 12));
+        assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(12));
     }
 
     #[tokio::test]

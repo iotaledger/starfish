@@ -167,4 +167,8 @@ impl BlockManager {
     pub fn missing_blocks(&self) -> &[AHashSet<BlockReference>] {
         &self.missing
     }
+
+    pub fn pending_blocks_count(&self) -> usize {
+        self.blocks_pending.len()
+    }
 }

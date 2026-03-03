@@ -835,6 +835,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
+            if let Some(ck) = self
+                .inner
+                .cordial_knowledge
+                .connection_knowledge(self.peer_id)
+            {
+                let mut ck = ck.write();
+                for block_ref in &block_references {
+                    ck.mark_header_useful_to_peer(*block_ref);
+                }
+            }
             if self.inner.dag_state.byzantine_strategy.is_none()
                 && self
                     .disseminator
@@ -864,6 +874,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
+            if let Some(ck) = self
+                .inner
+                .cordial_knowledge
+                .connection_knowledge(self.peer_id)
+            {
+                let mut ck = ck.write();
+                for block_ref in &block_references {
+                    ck.mark_shard_useful_to_peer(*block_ref);
+                }
+            }
             if self.inner.dag_state.byzantine_strategy.is_none()
                 && self
                     .disseminator
