@@ -410,15 +410,6 @@ impl DagState {
         &self.genesis
     }
 
-    /// Add a block reference to the threshold clock, potentially advancing
-    /// the quorum round.
-    pub fn add_to_threshold_clock(&self, reference: BlockReference) {
-        self.dag_state_inner
-            .write()
-            .threshold_clock
-            .add_block(reference, &self.committee);
-    }
-
     /// Return the current quorum round from the threshold clock.
     pub fn threshold_clock_round(&self) -> RoundNumber {
         self.dag_state_inner.read().threshold_clock.get_round()
@@ -500,6 +491,8 @@ impl DagState {
 
         let (highest_round, lowest_round) = {
             let mut inner = self.dag_state_inner.write();
+            // Keep threshold clock mutation co-located with DAG insertion so
+            // runtime block acceptance and recovery use the same path.
             inner.threshold_clock.add_block(*block.reference(), &self.committee);
             inner.add_block(block, authority_index_start, authority_index_end);
             (inner.highest_round, inner.global_lowest_round())
