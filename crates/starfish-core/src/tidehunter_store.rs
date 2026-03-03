@@ -305,8 +305,7 @@ impl Store for TideHunterStore {
         for result in iter {
             let (_key_bytes, value) =
                 result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
-            let commit: CommitData =
-                bincode::deserialize(&value).map_err(io::Error::other)?;
+            let commit: CommitData = bincode::deserialize(&value).map_err(io::Error::other)?;
             if best
                 .as_ref()
                 .map(|b| commit.leader.round > b.leader.round)
