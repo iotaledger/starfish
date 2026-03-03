@@ -69,6 +69,12 @@ pub struct ConnectionKnowledge {
     headers_not_known: Vec<BTreeMap<RoundNumber, AHashSet<BlockReference>>>,
     /// `shards_not_known[authority]` = `{ round → set of block refs }`
     shards_not_known: Vec<BTreeMap<RoundNumber, AHashSet<BlockReference>>>,
+    /// Headers we know this peer already has, so later `NewHeader` events do
+    /// not re-queue them.
+    known_headers: AHashSet<BlockReference>,
+    /// Shards we know this peer already has, so later `NewShard` events do not
+    /// re-queue them.
+    known_shards: AHashSet<BlockReference>,
     /// Last round where this peer's headers were useful TO them (per
     /// authority).
     last_useful_headers_to_peer_round: Vec<Option<RoundNumber>>,
@@ -89,6 +95,8 @@ impl ConnectionKnowledge {
             committee_size,
             headers_not_known: vec![BTreeMap::new(); committee_size],
             shards_not_known: vec![BTreeMap::new(); committee_size],
+            known_headers: AHashSet::new(),
+            known_shards: AHashSet::new(),
             last_useful_headers_to_peer_round: vec![None; committee_size],
             last_useful_shards_to_peer_round: vec![None; committee_size],
             last_useful_headers_from_peer_round: vec![None; committee_size],
@@ -103,7 +111,7 @@ impl ConnectionKnowledge {
             return;
         }
         let authority = block_ref.authority as usize;
-        if authority < self.committee_size {
+        if authority < self.committee_size && !self.known_headers.contains(&block_ref) {
             self.headers_not_known[authority]
                 .entry(block_ref.round)
                 .or_default()
@@ -117,7 +125,7 @@ impl ConnectionKnowledge {
             return;
         }
         let authority = block_ref.authority as usize;
-        if authority < self.committee_size {
+        if authority < self.committee_size && !self.known_shards.contains(&block_ref) {
             self.shards_not_known[authority]
                 .entry(block_ref.round)
                 .or_default()
@@ -129,6 +137,7 @@ impl ConnectionKnowledge {
     pub fn mark_header_known(&mut self, block_ref: BlockReference) {
         let authority = block_ref.authority as usize;
         if authority < self.committee_size {
+            self.known_headers.insert(block_ref);
             if let Some(round_set) = self.headers_not_known[authority].get_mut(&block_ref.round) {
                 round_set.remove(&block_ref);
                 if round_set.is_empty() {
@@ -142,6 +151,7 @@ impl ConnectionKnowledge {
     pub fn mark_shard_known(&mut self, block_ref: BlockReference) {
         let authority = block_ref.authority as usize;
         if authority < self.committee_size {
+            self.known_shards.insert(block_ref);
             if let Some(round_set) = self.shards_not_known[authority].get_mut(&block_ref.round) {
                 round_set.remove(&block_ref);
                 if round_set.is_empty() {
@@ -233,24 +243,38 @@ impl ConnectionKnowledge {
             self.shards_not_known[authority] =
                 self.shards_not_known[authority].split_off(&split_round);
         }
+        self.known_headers.retain(|block_ref| {
+            let authority = block_ref.authority as usize;
+            authority >= rounds.len() || block_ref.round > rounds[authority]
+        });
+        self.known_shards.retain(|block_ref| {
+            let authority = block_ref.authority as usize;
+            authority >= rounds.len() || block_ref.round > rounds[authority]
+        });
     }
 
-    /// Process useful-authors feedback received from this peer's batch.
-    /// Updates `_from_peer` fields based on our local not-known frontiers.
-    #[allow(dead_code)]
-    pub fn update_useful_authors_from_peer(&mut self, headers_bitmask: u128, shards_bitmask: u128) {
-        for i in 0..self.committee_size {
-            if headers_bitmask & (1u128 << i) != 0 {
-                // Peer tells us they want headers from authority i — record
-                // the current frontier.
-                if let Some(latest) = self.headers_not_known[i].keys().next_back() {
-                    self.last_useful_headers_from_peer_round[i] = Some(*latest);
-                }
+    /// Record that a header received from this peer was useful to us.
+    pub fn mark_header_useful_from_peer(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority < self.committee_size {
+            let entry = &mut self.last_useful_headers_from_peer_round[authority];
+            match entry {
+                Some(round) if block_ref.round > *round => *round = block_ref.round,
+                None => *entry = Some(block_ref.round),
+                _ => {}
             }
-            if shards_bitmask & (1u128 << i) != 0 {
-                if let Some(latest) = self.shards_not_known[i].keys().next_back() {
-                    self.last_useful_shards_from_peer_round[i] = Some(*latest);
-                }
+        }
+    }
+
+    /// Record that a shard received from this peer was useful to us.
+    pub fn mark_shard_useful_from_peer(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority < self.committee_size {
+            let entry = &mut self.last_useful_shards_from_peer_round[authority];
+            match entry {
+                Some(round) if block_ref.round > *round => *round = block_ref.round,
+                None => *entry = Some(block_ref.round),
+                _ => {}
             }
         }
     }
@@ -292,12 +316,12 @@ impl ConnectionKnowledge {
         let mut headers_mask: u128 = 0;
         let mut shards_mask: u128 = 0;
         for i in 0..self.committee_size {
-            if let Some(round) = self.last_useful_headers_to_peer_round[i] {
+            if let Some(round) = self.last_useful_headers_from_peer_round[i] {
                 if round.saturating_add(MAX_ROUND_GAP_FOR_USEFUL_PARTS) >= current_round {
                     headers_mask |= 1u128 << i;
                 }
             }
-            if let Some(round) = self.last_useful_shards_to_peer_round[i] {
+            if let Some(round) = self.last_useful_shards_from_peer_round[i] {
                 if round.saturating_add(MAX_ROUND_GAP_FOR_USEFUL_PARTS) >= current_round {
                     shards_mask |= 1u128 << i;
                 }
@@ -503,6 +527,22 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_known_prevents_requeue() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let r = block_ref(0, 5);
+
+        ck.new_header(r);
+        ck.mark_header_known(r);
+        ck.new_header(r);
+        assert_eq!(ck.unknown_headers_count(), 0);
+
+        ck.new_shard(r);
+        ck.mark_shard_known(r);
+        ck.new_shard(r);
+        assert_eq!(ck.unknown_shards_count(), 0);
+    }
+
+    #[test]
     fn test_evict_below() {
         let mut ck = ConnectionKnowledge::new(1, 4);
         for round in 1..=10 {
@@ -521,9 +561,10 @@ mod tests {
     #[test]
     fn test_useful_authors_bitmask() {
         let mut ck = ConnectionKnowledge::new(1, 4);
-        ck.last_useful_shards_to_peer_round[2] = Some(10);
+        ck.mark_header_useful_from_peer(block_ref(0, 10));
+        ck.mark_shard_useful_from_peer(block_ref(2, 10));
         let (headers, shards) = ck.useful_authors_bitmasks(20);
-        assert_eq!(headers, 0);
+        assert_ne!(headers & (1u128 << 0), 0);
         // authority 2, round 10 + 40 >= 20 → still useful
         assert_ne!(shards & (1u128 << 2), 0);
     }
@@ -574,10 +615,6 @@ mod tests {
             let ck = ck.read();
             assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(10));
             assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
-            // Bitmask produces useful_authors_bitmasks output at round 20
-            let (h, s) = ck.useful_authors_bitmasks(20);
-            assert_ne!(h & (1u128 << 0), 0);
-            assert_ne!(s & (1u128 << 2), 0);
         }
 
         drop(handle);

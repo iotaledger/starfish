@@ -83,9 +83,8 @@ pub struct ShardPayload {
 /// A structured batch of block data, ordered by decreasing information density:
 /// full blocks first, then header-only blocks, then standalone shards.
 ///
-/// The `useful_*_authors` bitmasks provide bidirectional feedback: they tell
-/// the receiving peer which authorities' content the sender would find useful
-/// in return.
+/// The `useful_*_authors` bitmasks tell the receiving peer which authorities'
+/// content the sender would find useful in return on future transmissions.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockBatch {
     /// Full blocks (header + transactions + optional shard).
@@ -94,10 +93,10 @@ pub struct BlockBatch {
     pub headers: Vec<Data<VerifiedBlock>>,
     /// Verified shards for blocks the peer already has the header for.
     pub shards: Vec<ShardPayload>,
-    /// Bitmask: which authorities' headers would be useful FROM the receiving
+    /// Bitmask: which authorities' headers would be useful from the receiving
     /// peer.
     pub useful_headers_authors: u128,
-    /// Bitmask: which authorities' shards would be useful FROM the receiving
+    /// Bitmask: which authorities' shards would be useful from the receiving
     /// peer.
     pub useful_shards_authors: u128,
 }
