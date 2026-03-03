@@ -22,7 +22,7 @@ use crate::types::{AuthorityIndex, BlockReference, RoundNumber};
 const MAX_ROUND_GAP_FOR_USEFUL_PARTS: RoundNumber = 40;
 
 /// Channel capacity for the cordial knowledge actor.
-const CHANNEL_CAPACITY: usize = 10_000;
+const CHANNEL_CAPACITY: usize = 100_000;
 
 // ---------------------------------------------------------------------------
 // Messages
