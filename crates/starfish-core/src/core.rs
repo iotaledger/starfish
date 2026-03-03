@@ -274,8 +274,6 @@ impl<H: BlockHandler> Core<H> {
         );
 
         for processed in &processed {
-            self.dag_state
-                .add_to_threshold_clock(*processed.reference());
             self.pending
                 .push(MetaTransaction::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
@@ -310,8 +308,6 @@ impl<H: BlockHandler> Core<H> {
         let success = !processed.is_empty();
         let mut processed_refs = Vec::with_capacity(processed.len());
         for block in &processed {
-            self.dag_state
-                .add_to_threshold_clock(*block.reference());
             self.pending
                 .push(MetaTransaction::Include(*block.reference()));
             self.attach_pending_transaction_data(block);
@@ -707,8 +703,6 @@ impl<H: BlockHandler> Core<H> {
         authority_bounds: &[usize],
         block_id: usize,
     ) {
-        self.dag_state
-            .add_to_threshold_clock(*block_data.reference());
         self.block_handler
             .handle_proposal(block_data.number_transactions());
         self.proposed_block_stats(&block_data);
