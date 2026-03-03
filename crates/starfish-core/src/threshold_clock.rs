@@ -46,27 +46,23 @@ impl ThresholdClockAggregator {
     }
 
     pub fn add_block(&mut self, block: BlockReference, committee: &Committee) {
-        match block.round.cmp(&self.round) {
+        let reached_quorum = match block.round.cmp(&self.round) {
             // Blocks with round less than what we currently build are irrelevant here
-            Ordering::Less => {}
-            // If we processed block for round r, we also have stored 2f+1 blocks from r-1
+            Ordering::Less => return,
+            // Jump to the new round and start collecting stake there.
             Ordering::Greater => {
                 self.aggregator.clear();
-                self.aggregator.add(block.authority, committee);
                 self.round = block.round;
+                self.aggregator.add(block.authority, committee)
             }
-            Ordering::Equal => {
-                if self.aggregator.add(block.authority, committee) {
-                    self.aggregator.clear();
-                    // We have seen 2f+1 blocks for current round, advance
-                    self.round = block.round + 1;
-                    tracing::debug!("Advanced round to {}", self.round);
-                }
-            }
-        }
-        if block.round > self.round {
-            // If we processed block for round r, we also have stored 2f+1 blocks from r-1
-            self.round = block.round;
+            Ordering::Equal => self.aggregator.add(block.authority, committee),
+        };
+
+        if reached_quorum {
+            self.aggregator.clear();
+            // We have seen 2f+1 blocks (or stake) for current round, advance.
+            self.round = block.round + 1;
+            tracing::debug!("Advanced round to {}", self.round);
         }
     }
 
@@ -164,5 +160,34 @@ mod tests {
         assert_eq!(aggregator.get_round(), 2);
         aggregator.add_block(BlockReference::new_test(3, 1), &committee);
         assert_eq!(aggregator.get_round(), 2);
+    }
+
+    #[test]
+    fn test_threshold_clock_round_skip_then_quorum() {
+        let committee = Committee::new_test(vec![1, 1, 1, 1]);
+        let mut aggregator = ThresholdClockAggregator::new(0);
+
+        aggregator.add_block(BlockReference::new_test(0, 5), &committee);
+        assert_eq!(aggregator.get_round(), 5);
+
+        aggregator.add_block(BlockReference::new_test(1, 5), &committee);
+        assert_eq!(aggregator.get_round(), 5);
+
+        aggregator.add_block(BlockReference::new_test(2, 5), &committee);
+        assert_eq!(aggregator.get_round(), 6);
+    }
+
+    #[test]
+    fn test_threshold_clock_super_majority_round_skip() {
+        let committee = Committee::new_test(vec![5, 1, 1]);
+        let mut aggregator = ThresholdClockAggregator::new(0);
+
+        aggregator.add_block(BlockReference::new_test(0, 5), &committee);
+        assert_eq!(aggregator.get_round(), 6);
+
+        aggregator.add_block(BlockReference::new_test(1, 5), &committee);
+        assert_eq!(aggregator.get_round(), 6);
+        aggregator.add_block(BlockReference::new_test(2, 5), &committee);
+        assert_eq!(aggregator.get_round(), 6);
     }
 }

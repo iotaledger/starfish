@@ -250,12 +250,7 @@ impl DagState {
                 inner.evicted_rounds[i] = cr.saturating_sub(CACHED_ROUNDS);
                 inner.last_committed_rounds[i] = cr;
             }
-            let global_start = inner
-                .evicted_rounds
-                .iter()
-                .copied()
-                .min()
-                .unwrap_or(0);
+            let global_start = inner.evicted_rounds.iter().copied().min().unwrap_or(0);
 
             // Load blocks within the cached window.
             let blocks = store
@@ -376,7 +371,9 @@ impl DagState {
         if block_count == 0 {
             let committee_len = committee.len() as AuthorityIndex;
             for block in &genesis {
-                inner.threshold_clock.add_block(*block.reference(), &committee);
+                inner
+                    .threshold_clock
+                    .add_block(*block.reference(), &committee);
                 inner.add_block(block.clone(), 0, committee_len);
             }
         }
@@ -493,7 +490,9 @@ impl DagState {
             let mut inner = self.dag_state_inner.write();
             // Keep threshold clock mutation co-located with DAG insertion so
             // runtime block acceptance and recovery use the same path.
-            inner.threshold_clock.add_block(*block.reference(), &self.committee);
+            inner
+                .threshold_clock
+                .add_block(*block.reference(), &self.committee);
             inner.add_block(block, authority_index_start, authority_index_end);
             (inner.highest_round, inner.global_lowest_round())
         };

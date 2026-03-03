@@ -686,7 +686,9 @@ impl Store for RocksStore {
 
         // Reverse-iterate CF_COMMITS for the last (highest key) entry.
         let cf_commits = self.cf(CF_COMMITS)?;
-        let mut iter = self.db.raw_iterator_cf_opt(&cf_commits, Self::get_read_opts());
+        let mut iter = self
+            .db
+            .raw_iterator_cf_opt(&cf_commits, Self::get_read_opts());
         iter.seek_to_last();
         if iter.valid() {
             if let Some(value) = iter.value() {
@@ -738,10 +740,7 @@ impl Store for RocksStore {
                     if reference.round >= from_round && seen.insert(*reference) {
                         let header: BlockHeader =
                             deserialize(header_bytes).map_err(io::Error::other)?;
-                        let tx = ops
-                            .tx_data
-                            .get(reference)
-                            .and_then(|b| deserialize(b).ok());
+                        let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
                         blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
                     }
                 }
