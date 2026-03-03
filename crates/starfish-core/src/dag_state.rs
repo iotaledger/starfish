@@ -25,6 +25,7 @@ use crate::{
     rocks_store::RocksStore,
     state::{RecoveredState, RecoveredStateBuilder},
     store::Store,
+    threshold_clock::ThresholdClockAggregator,
     types::{
         AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, TransactionData,
         VerifiedBlock,
@@ -112,8 +113,12 @@ pub struct DagState {
     pub(crate) consensus_protocol: ConsensusProtocol,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
+    committee: Arc<Committee>,
     /// Version-gated cache of round block snapshots (outside the RwLock).
     round_block_cache: Arc<parking_lot::Mutex<RoundBlockCache>>,
+    /// Immutable genesis blocks, one per authority. Cached for the lifetime
+    /// of the node to prevent eviction.
+    genesis: Vec<Data<VerifiedBlock>>,
 }
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
@@ -158,6 +163,11 @@ struct DagStateInner {
     round_version: AHashMap<RoundNumber, u64>,
     // committed subdag which contains blocks with at least one unavailable transaction data
     pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
+    /// Per-authority highest committed round. Used for populating CommitData
+    /// and for windowed recovery on restart.
+    last_committed_rounds: Vec<RoundNumber>,
+    /// Threshold clock tracking quorum round advancement.
+    threshold_clock: ThresholdClockAggregator,
 }
 
 impl DagState {
@@ -165,7 +175,7 @@ impl DagState {
         authority: AuthorityIndex,
         path: impl AsRef<Path>,
         metrics: Arc<Metrics>,
-        committee: &Committee,
+        committee: Arc<Committee>,
         byzantine_strategy: String,
         consensus: String,
         storage_backend: &StorageBackend,
@@ -214,51 +224,133 @@ impl DagState {
             evicted_rounds: vec![0; n],
             pending_not_available: Vec::new(),
             round_version: AHashMap::new(),
+            last_committed_rounds: vec![0; n],
+            threshold_clock: ThresholdClockAggregator::new(0),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
         let mut block_count = 0u64;
-        let mut recovered_commit_leaders = AHashSet::new();
-        // Recover blocks from storage
-        let mut current_round = 0;
-        loop {
-            let blocks = store
-                .get_blocks_by_round(current_round)
-                .expect("Failed to read blocks from storage");
 
-            if blocks.is_empty() {
-                break;
+        // Try windowed recovery: load only a bounded window around the last
+        // committed frontier instead of replaying every round from 0.
+        let last_commit = store
+            .read_last_commit()
+            .expect("Failed to read last commit from storage");
+
+        let use_windowed = last_commit
+            .as_ref()
+            .map(|c| c.committed_rounds.len() == n)
+            .unwrap_or(false);
+
+        if use_windowed {
+            let committed_rounds = &last_commit.as_ref().unwrap().committed_rounds;
+
+            // Compute per-authority eviction rounds and the global scan start.
+            for (i, &cr) in committed_rounds.iter().enumerate() {
+                inner.evicted_rounds[i] = cr.saturating_sub(CACHED_ROUNDS);
+                inner.last_committed_rounds[i] = cr;
             }
+            let global_start = inner
+                .evicted_rounds
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0);
+
+            // Load blocks within the cached window.
+            let blocks = store
+                .scan_blocks_from_round(global_start)
+                .expect("Failed to scan blocks from storage");
 
             for block in blocks {
                 let block_ref = *block.reference();
+                let auth = block_ref.authority as usize;
 
-                // Recover shard sidecars into the shard index.
+                // Skip blocks outside the authority's cached window.
+                if block_ref.round <= inner.evicted_rounds[auth] {
+                    continue;
+                }
+
+                // Recover shard sidecars.
                 if let Some(shard) = store
                     .get_shard_data(&block_ref)
                     .expect("Failed to read shard data from storage")
                 {
-                    let auth = block_ref.authority as usize;
                     inner.shard_index[auth]
                         .entry(block_ref.round)
                         .or_default()
                         .insert(block_ref.digest, shard);
                 }
 
-                builder.block(current_round, block.clone());
+                inner.threshold_clock.add_block(block_ref, &committee);
+                builder.block(block_ref.round, block.clone());
                 block_count += 1;
                 inner.add_block(block, 0, committee.len() as AuthorityIndex);
-                if recovered_commit_leaders.insert(block_ref) {
-                    if let Some(commit_data) = store
-                        .get_commit(&block_ref)
-                        .expect("Failed to read commit data from storage")
-                    {
-                        builder.commit(commit_data);
-                    }
+
+                if let Some(commit_data) = store
+                    .get_commit(&block_ref)
+                    .expect("Failed to read commit data from storage")
+                {
+                    builder.commit(commit_data);
                 }
             }
 
-            current_round += 1;
+            tracing::info!(
+                "authority={} windowed recovery from round {}: {} blocks",
+                authority,
+                global_start,
+                block_count,
+            );
+        } else {
+            // Fallback: full replay from round 0 (pre-migration data or fresh start).
+            let mut recovered_commit_leaders = AHashSet::new();
+            let mut current_round = 0;
+            loop {
+                let blocks = store
+                    .get_blocks_by_round(current_round)
+                    .expect("Failed to read blocks from storage");
+
+                if blocks.is_empty() {
+                    break;
+                }
+
+                for block in blocks {
+                    let block_ref = *block.reference();
+
+                    // Recover shard sidecars into the shard index.
+                    if let Some(shard) = store
+                        .get_shard_data(&block_ref)
+                        .expect("Failed to read shard data from storage")
+                    {
+                        let auth = block_ref.authority as usize;
+                        inner.shard_index[auth]
+                            .entry(block_ref.round)
+                            .or_default()
+                            .insert(block_ref.digest, shard);
+                    }
+
+                    inner.threshold_clock.add_block(block_ref, &committee);
+                    builder.block(current_round, block.clone());
+                    block_count += 1;
+                    inner.add_block(block, 0, committee.len() as AuthorityIndex);
+                    if recovered_commit_leaders.insert(block_ref) {
+                        if let Some(commit_data) = store
+                            .get_commit(&block_ref)
+                            .expect("Failed to read commit data from storage")
+                        {
+                            // Rebuild last_committed_rounds from committed blocks.
+                            for r in &commit_data.sub_dag {
+                                let auth = r.authority as usize;
+                                inner.last_committed_rounds[auth] =
+                                    inner.last_committed_rounds[auth].max(r.round);
+                            }
+                            builder.commit(commit_data);
+                        }
+                    }
+                }
+
+                current_round += 1;
+            }
         }
 
         metrics.dag_state_entries.inc_by(block_count);
@@ -273,6 +365,22 @@ impl DagState {
             replay_started.elapsed(),
             inner.highest_round
         );
+        // Generate genesis blocks (one per authority).
+        let genesis: Vec<Data<VerifiedBlock>> = committee
+            .authorities()
+            .map(VerifiedBlock::new_genesis)
+            .collect();
+
+        // On clean start (no blocks recovered), insert genesis into the DAG
+        // and populate the threshold clock.
+        if block_count == 0 {
+            let committee_len = committee.len() as AuthorityIndex;
+            for block in &genesis {
+                inner.threshold_clock.add_block(*block.reference(), &committee);
+                inner.add_block(block.clone(), 0, committee_len);
+            }
+        }
+
         let byzantine_strategy = ByzantineStrategy::from_strategy_str(byzantine_strategy.as_str());
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
@@ -286,13 +394,34 @@ impl DagState {
         let dag_state = Self {
             store: store.clone(),
             byzantine_strategy,
+            committee_size: committee.len(),
+            committee,
             dag_state_inner: Arc::new(RwLock::new(inner)),
             metrics,
             consensus_protocol,
-            committee_size: committee.len(),
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
+            genesis,
         };
         builder.build(store, dag_state)
+    }
+
+    /// Returns the cached genesis blocks (one per authority, round 0).
+    pub fn genesis_blocks(&self) -> &[Data<VerifiedBlock>] {
+        &self.genesis
+    }
+
+    /// Add a block reference to the threshold clock, potentially advancing
+    /// the quorum round.
+    pub fn add_to_threshold_clock(&self, reference: BlockReference) {
+        self.dag_state_inner
+            .write()
+            .threshold_clock
+            .add_block(reference, &self.committee);
+    }
+
+    /// Return the current quorum round from the threshold clock.
+    pub fn threshold_clock_round(&self) -> RoundNumber {
+        self.dag_state_inner.read().threshold_clock.get_round()
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
@@ -776,6 +905,21 @@ impl DagState {
 
     pub fn last_available_commit(&self) -> RoundNumber {
         self.dag_state_inner.read().last_available_commit
+    }
+
+    /// Update last_committed_rounds for all authorities in a committed subdag.
+    pub fn update_last_committed_rounds(&self, commit: &CommittedSubDag) {
+        let mut inner = self.dag_state_inner.write();
+        for block in &commit.blocks {
+            let auth = block.author() as usize;
+            inner.last_committed_rounds[auth] =
+                inner.last_committed_rounds[auth].max(block.round());
+        }
+    }
+
+    /// Returns a snapshot of the per-authority last committed rounds.
+    pub fn last_committed_rounds(&self) -> Vec<RoundNumber> {
+        self.dag_state_inner.read().last_committed_rounds.clone()
     }
 
     pub fn cleanup(&self) {
@@ -1518,14 +1662,19 @@ pub struct CommitData {
     pub leader: BlockReference,
     // All committed blocks, including the leader
     pub sub_dag: Vec<BlockReference>,
+    /// Per-authority highest committed round at the time of this commit.
+    /// Used for windowed recovery on restart.
+    #[serde(default)]
+    pub committed_rounds: Vec<RoundNumber>,
 }
 
-impl From<&CommittedSubDag> for CommitData {
-    fn from(value: &CommittedSubDag) -> Self {
-        let sub_dag = value.blocks.iter().map(|b| *b.reference()).collect();
+impl CommitData {
+    pub fn new(commit: &CommittedSubDag, committed_rounds: Vec<RoundNumber>) -> Self {
+        let sub_dag = commit.blocks.iter().map(|b| *b.reference()).collect();
         Self {
-            leader: value.anchor,
+            leader: commit.anchor,
             sub_dag,
+            committed_rounds,
         }
     }
 }

@@ -46,4 +46,14 @@ pub trait Store: Send + Sync + 'static {
     fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
 
     fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>>;
+
+    /// Return the most recently stored commit (highest leader round).
+    fn read_last_commit(&self) -> io::Result<Option<CommitData>>;
+
+    /// Return all blocks from `from_round` onward (inclusive), across all
+    /// authorities.
+    fn scan_blocks_from_round(
+        &self,
+        from_round: RoundNumber,
+    ) -> io::Result<Vec<Data<VerifiedBlock>>>;
 }

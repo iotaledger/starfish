@@ -297,6 +297,76 @@ impl Store for TideHunterStore {
             .map_err(|e| io::Error::other(format!("TideHunter store shard_data: {e:?}")))
     }
 
+    fn read_last_commit(&self) -> io::Result<Option<CommitData>> {
+        // Forward-scan all commits, keep the one with the highest leader round.
+        let mut best: Option<CommitData> = None;
+
+        let iter = self.db.iterator(self.ks_commits);
+        for result in iter {
+            let (_key_bytes, value) =
+                result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
+            let commit: CommitData =
+                bincode::deserialize(&value).map_err(io::Error::other)?;
+            if best
+                .as_ref()
+                .map(|b| commit.leader.round > b.leader.round)
+                .unwrap_or(true)
+            {
+                best = Some(commit);
+            }
+        }
+
+        Ok(best)
+    }
+
+    fn scan_blocks_from_round(
+        &self,
+        from_round: RoundNumber,
+    ) -> io::Result<Vec<Data<VerifiedBlock>>> {
+        let mut blocks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let lower = Self::round_lower_bound(from_round);
+
+        // 1. Iterate component ks_headers from from_round onward.
+        let mut iter = self.db.iterator(self.ks_headers);
+        iter.set_lower_bound(lower.to_vec());
+
+        for result in iter {
+            let (key_bytes, header_bytes) =
+                result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
+            let header: BlockHeader =
+                bincode::deserialize(&header_bytes).map_err(io::Error::other)?;
+
+            let key: [u8; KEY_SIZE] = key_bytes[..KEY_SIZE]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid key length"))?;
+            let tx: Option<TransactionData> = self.point_read(self.ks_tx_data, &key)?;
+
+            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+            seen.insert(key);
+        }
+
+        // 2. Legacy fallback: ks_blocks.
+        let mut iter = self.db.iterator(self.ks_blocks);
+        iter.set_lower_bound(lower.to_vec());
+
+        for result in iter {
+            let (key_bytes, value) =
+                result.map_err(|e| io::Error::other(format!("TideHunter iter: {e:?}")))?;
+            let key: [u8; KEY_SIZE] = key_bytes[..KEY_SIZE]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid key length"))?;
+            if !seen.contains(&key) {
+                let block =
+                    Data::from_bytes(Bytes::from(value.to_vec())).map_err(io::Error::other)?;
+                blocks.push(block);
+            }
+        }
+
+        Ok(blocks)
+    }
+
     fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>> {
         let key = Self::encode_key(reference);
         self.point_read(self.ks_shard_data, &key)

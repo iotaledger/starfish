@@ -654,6 +654,162 @@ impl Store for RocksStore {
         self.do_store_shard_data_bytes(reference, bytes)
     }
 
+    fn read_last_commit(&self) -> io::Result<Option<CommitData>> {
+        // Check in-memory batches first (highest-round commit wins).
+        let mut best: Option<CommitData> = None;
+        {
+            let batch = self.batch.read();
+            for commit in batch.commits.values() {
+                if best
+                    .as_ref()
+                    .map(|b| commit.leader.round > b.leader.round)
+                    .unwrap_or(true)
+                {
+                    best = Some(commit.clone());
+                }
+            }
+        }
+        {
+            let pending = self.pending_batches.lock();
+            for ops in pending.iter() {
+                for commit in ops.commits.values() {
+                    if best
+                        .as_ref()
+                        .map(|b| commit.leader.round > b.leader.round)
+                        .unwrap_or(true)
+                    {
+                        best = Some(commit.clone());
+                    }
+                }
+            }
+        }
+
+        // Reverse-iterate CF_COMMITS for the last (highest key) entry.
+        let cf_commits = self.cf(CF_COMMITS)?;
+        let mut iter = self.db.raw_iterator_cf_opt(&cf_commits, Self::get_read_opts());
+        iter.seek_to_last();
+        if iter.valid() {
+            if let Some(value) = iter.value() {
+                let commit: CommitData = deserialize(value).map_err(io::Error::other)?;
+                if best
+                    .as_ref()
+                    .map(|b| commit.leader.round > b.leader.round)
+                    .unwrap_or(true)
+                {
+                    best = Some(commit);
+                }
+            }
+        }
+
+        Ok(best)
+    }
+
+    fn scan_blocks_from_round(
+        &self,
+        from_round: RoundNumber,
+    ) -> io::Result<Vec<Data<VerifiedBlock>>> {
+        let mut blocks = Vec::new();
+        let mut seen = AHashSet::new();
+
+        // 1. Collect from in-memory batches.
+        {
+            let batch = self.batch.read();
+            for (reference, header_bytes) in &batch.headers {
+                if reference.round >= from_round && seen.insert(*reference) {
+                    let header: BlockHeader =
+                        deserialize(header_bytes).map_err(io::Error::other)?;
+                    let tx = batch
+                        .tx_data
+                        .get(reference)
+                        .and_then(|b| deserialize(b).ok());
+                    blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+                }
+            }
+            for (reference, block) in &batch.blocks {
+                if reference.round >= from_round && seen.insert(*reference) {
+                    blocks.push(block.clone());
+                }
+            }
+        }
+        {
+            let pending = self.pending_batches.lock();
+            for ops in pending.iter() {
+                for (reference, header_bytes) in &ops.headers {
+                    if reference.round >= from_round && seen.insert(*reference) {
+                        let header: BlockHeader =
+                            deserialize(header_bytes).map_err(io::Error::other)?;
+                        let tx = ops
+                            .tx_data
+                            .get(reference)
+                            .and_then(|b| deserialize(b).ok());
+                        blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+                    }
+                }
+                for (reference, block) in &ops.blocks {
+                    if reference.round >= from_round && seen.insert(*reference) {
+                        blocks.push(block.clone());
+                    }
+                }
+            }
+        }
+
+        // 2. Iterate CF_HEADERS from from_round onward.
+        let cf_headers = self.cf(CF_HEADERS)?;
+        let cf_tx_data = self.cf(CF_TX_DATA)?;
+
+        let seek_key = serialize(&BlockReference {
+            round: from_round,
+            authority: 0,
+            digest: BlockDigest::default(),
+        })
+        .map_err(io::Error::other)?;
+
+        let read_opts = Self::get_read_opts();
+        let mut iter = self.db.raw_iterator_cf_opt(&cf_headers, read_opts);
+        iter.seek(&seek_key);
+
+        while iter.valid() {
+            let key_bytes = iter.key().ok_or_else(|| io::Error::other("Invalid key"))?;
+            let header_bytes = iter
+                .value()
+                .ok_or_else(|| io::Error::other("Invalid value"))?;
+
+            let reference: BlockReference = deserialize(key_bytes).map_err(io::Error::other)?;
+            if !seen.contains(&reference) {
+                let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
+                let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
+                blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+                seen.insert(reference);
+            }
+
+            iter.next();
+        }
+
+        // 3. Legacy fallback: CF_BLOCKS.
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        let mut iter = self
+            .db
+            .raw_iterator_cf_opt(&cf_blocks, Self::get_read_opts());
+        iter.seek(&seek_key);
+
+        while iter.valid() {
+            let key_bytes = iter.key().ok_or_else(|| io::Error::other("Invalid key"))?;
+            let value = iter
+                .value()
+                .ok_or_else(|| io::Error::other("Invalid value"))?;
+
+            let reference: BlockReference = deserialize(key_bytes).map_err(io::Error::other)?;
+            if !seen.contains(&reference) {
+                let block = Data::from_bytes(value.to_vec().into()).map_err(io::Error::other)?;
+                blocks.push(block);
+            }
+
+            iter.next();
+        }
+
+        Ok(blocks)
+    }
+
     fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>> {
         // Check in-memory batch first
         let batch = self.batch.read();
