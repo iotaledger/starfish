@@ -330,8 +330,10 @@ impl ConnectionKnowledge {
         (headers_mask, shards_mask)
     }
 
-    /// Number of unknown headers tracked for this peer (diagnostic).
-    #[allow(dead_code)]
+}
+
+#[cfg(test)]
+impl ConnectionKnowledge {
     pub fn unknown_headers_count(&self) -> usize {
         self.headers_not_known
             .iter()
@@ -339,8 +341,6 @@ impl ConnectionKnowledge {
             .sum()
     }
 
-    /// Number of unknown shards tracked for this peer (diagnostic).
-    #[allow(dead_code)]
     pub fn unknown_shards_count(&self) -> usize {
         self.shards_not_known
             .iter()
@@ -433,7 +433,7 @@ impl CordialKnowledgeHandle {
     /// Create the actor and its handle. Returns `(handle, actor)`.
     ///
     /// The caller should spawn `actor.run()` on a tokio runtime.
-    pub fn new(committee_size: usize, own_id: AuthorityIndex) -> (Self, CordialKnowledge) {
+    pub fn new(committee_size: usize) -> (Self, CordialKnowledge) {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
 
         let connection_knowledges: Vec<_> = (0..committee_size)
@@ -456,7 +456,6 @@ impl CordialKnowledgeHandle {
             receiver,
         };
 
-        let _ = own_id; // reserved for future use (skip own index in loops)
         (handle, actor)
     }
 
@@ -596,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_useful_authors_updates_to_peer() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, 0);
+        let (handle, actor) = CordialKnowledgeHandle::new(4);
         let actor_task = tokio::spawn(actor.run());
 
         // Peer 1 tells us authorities 0 and 2 are useful at round 10
@@ -623,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_new_header() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, 0);
+        let (handle, actor) = CordialKnowledgeHandle::new(4);
         let actor_task = tokio::spawn(actor.run());
 
         let r = block_ref(2, 5);

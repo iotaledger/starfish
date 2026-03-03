@@ -20,7 +20,7 @@ use crate::{
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
     types::{
-        AuthorityIndex, BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock,
+        BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock,
     },
 };
 
@@ -82,73 +82,6 @@ impl BlockHandler for RealBlockHandler {
     }
 
     fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseTransaction> {
-        let mut response = vec![];
-        if require_response {
-            while let Some(data) = self.receive_with_limit() {
-                for tx in data {
-                    response.push(BaseTransaction::Share(tx));
-                }
-            }
-        }
-        response
-    }
-}
-
-/// The max number of transactions per block for TestBlockHandler
-pub const SOFT_MAX_PROPOSED_PER_BLOCK: usize = 4 * 1000;
-
-// Immediately votes and generates new transactions
-#[allow(dead_code)]
-pub struct TestBlockHandler {
-    last_transaction: u64,
-    pending_transactions: usize,
-    committee: Arc<Committee>,
-    authority: AuthorityIndex,
-    receiver: mpsc::Receiver<Vec<Transaction>>,
-    metrics: Arc<Metrics>,
-}
-
-impl TestBlockHandler {
-    pub fn new(
-        last_transaction: u64,
-        committee: Arc<Committee>,
-        authority: AuthorityIndex,
-        metrics: Arc<Metrics>,
-    ) -> (Self, mpsc::Sender<Vec<Transaction>>) {
-        let (sender, receiver) = mpsc::channel(1024);
-        let this = Self {
-            last_transaction,
-            committee,
-            authority,
-            metrics,
-            pending_transactions: 0,
-            receiver,
-        };
-        (this, sender)
-    }
-
-    fn receive_with_limit(&mut self) -> Option<Vec<Transaction>> {
-        if self.pending_transactions >= SOFT_MAX_PROPOSED_PER_BLOCK {
-            return None;
-        }
-        let received = self.receiver.try_recv().ok()?;
-        self.pending_transactions += received.len();
-        Some(received)
-    }
-
-    pub fn make_transaction(i: u64) -> Transaction {
-        Transaction::new(i.to_le_bytes().to_vec())
-    }
-}
-
-impl BlockHandler for TestBlockHandler {
-    fn handle_proposal(&mut self, number_transactions: usize) {
-        self.pending_transactions -= number_transactions;
-    }
-
-    fn handle_blocks(&mut self, require_response: bool) -> Vec<BaseTransaction> {
-        // todo - this is ugly, but right now we need a way to recover
-        // self.last_transaction
         let mut response = vec![];
         if require_response {
             while let Some(data) = self.receive_with_limit() {

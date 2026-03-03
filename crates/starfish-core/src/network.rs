@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap, fs::File, io, io::Write, net::SocketAddr, ops::Range, sync::Arc,
+    collections::HashMap, io, net::SocketAddr, ops::Range, sync::Arc,
     time::Duration,
 };
 
@@ -267,28 +267,6 @@ impl Network {
             server_task,
         }
     }
-}
-
-#[allow(dead_code)]
-fn write_extra_latency_delays(latency_delays: Vec<Vec<f64>>) -> io::Result<()> {
-    // Open (or create) the file "latency_delays"
-    let mut file = File::create("extra_latency_delays.log")?;
-
-    // Write the header (optional)
-    writeln!(file, "Latency Delays")?;
-
-    // Iterate over the outer Vec<Vec<f64>> to write each inner Vec<f64> as a line
-    // in the file
-    for row in latency_delays {
-        let row_string: String = row
-            .iter()
-            .map(|x| x.to_string()) // Convert each f64 to a string
-            .collect::<Vec<String>>()
-            .join(", "); // Join them with a comma and space
-        writeln!(file, "{row_string}")?; // Write the row to the file
-    }
-
-    Ok(())
 }
 
 struct Server {

@@ -963,9 +963,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
 
         // Create CordialKnowledge actor for per-peer header/shard tracking
-        let own_id = dag_state.get_own_authority_index();
         let (cordial_knowledge_handle, cordial_knowledge_actor) =
-            CordialKnowledgeHandle::new(committee.len(), own_id);
+            CordialKnowledgeHandle::new(committee.len());
         let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
 
         let inner = Arc::new(NetworkSyncerInner {

@@ -116,7 +116,6 @@ struct DagStateInner {
     highest_round: RoundNumber,
     authority: AuthorityIndex,
     committee_size: usize,
-    consensus_protocol: ConsensusProtocol,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
     /// Per-authority DAG metadata. Vec index = authority.
@@ -176,7 +175,6 @@ impl DagState {
             last_seen_by_authority,
             last_available_commit: 0,
             committee_size: n,
-            consensus_protocol,
             index: (0..n).map(|_| BTreeMap::new()).collect(),
             data_availability: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_acknowledgment: consensus_protocol.supports_acknowledgments().then(Vec::new),
@@ -752,6 +750,20 @@ impl DagState {
             .get_unsent_own_blocks(sent, peer, batch_own_block_size)
     }
 
+    /// Keep only header references that are not already implied as known by
+    /// `peer` via the DAG's `known_by` bitmask. References missing from the
+    /// in-memory DAG are retained, since we cannot prove they are redundant.
+    pub fn filter_headers_unknown_to_peer(
+        &self,
+        refs: &[BlockReference],
+        peer: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<BlockReference> {
+        self.dag_state_inner
+            .read()
+            .filter_headers_unknown_to_peer(refs, peer, limit)
+    }
+
     pub fn get_unsent_other_blocks(
         &self,
         sent: &AHashSet<BlockReference>,
@@ -1043,7 +1055,6 @@ impl DagStateInner {
         self.update_dag(
             *reference,
             block.block_references().clone(),
-            block.acknowledgments(),
         );
         self.update_data_availability(&block);
     }
@@ -1084,17 +1095,12 @@ impl DagStateInner {
     }
 
     /// Insert a block into the DAG and propagate "known-by" bits along the
-    /// causal history.
-    ///
-    /// For StarfishS, `known_by` is propagated starting from `ack_refs`
-    /// (acknowledgment references) rather than `block_reference` itself.
-    /// Acknowledgment references prove data availability, whereas block
-    /// references only prove header knowledge.
+    /// causal history. `known_by` tracks only header knowledge; shard/data
+    /// availability is tracked separately in CordialKnowledge.
     pub fn update_dag(
         &mut self,
         block_reference: BlockReference,
         parents: Vec<BlockReference>,
-        ack_refs: Vec<BlockReference>,
     ) {
         if block_reference.round == 0 {
             return;
@@ -1107,32 +1113,22 @@ impl DagStateInner {
 
         let authority = block_reference.authority;
 
-        // For StarfishS: propagate known_by starting from acknowledged blocks
-        // (which prove data availability), not from the block itself (which
-        // only proves header knowledge via block_references).
-        let seeds = match self.consensus_protocol {
-            ConsensusProtocol::StarfishS => ack_refs,
-            _ => vec![block_reference],
-        };
-
-        for seed in seeds {
-            let mut buffer = vec![seed];
-            while let Some(r) = buffer.pop() {
-                let Some((parents, _)) = self.dag_get(&r).cloned() else {
+        let mut buffer = vec![block_reference];
+        while let Some(r) = buffer.pop() {
+            let Some((parents, _)) = self.dag_get(&r).cloned() else {
+                continue; // evicted
+            };
+            for parent in parents {
+                if parent.round == 0 {
+                    continue;
+                }
+                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
                     continue; // evicted
                 };
-                for parent in parents {
-                    if parent.round == 0 {
-                        continue;
-                    }
-                    let Some((_, known_by)) = self.dag_get_mut(&parent) else {
-                        continue; // evicted
-                    };
-                    let bit = 1u128 << authority;
-                    if *known_by & bit == 0 {
-                        *known_by |= bit;
-                        buffer.push(parent);
-                    }
+                let bit = 1u128 << authority;
+                if *known_by & bit == 0 {
+                    *known_by |= bit;
+                    buffer.push(parent);
                 }
             }
         }
@@ -1293,6 +1289,29 @@ impl DagStateInner {
                 .get_transmission_block(block_ref)
                 .unwrap_or_else(|| panic!("Block index corrupted, not found: {block_ref}"));
             result.push(block);
+        }
+
+        result
+    }
+
+    fn filter_headers_unknown_to_peer(
+        &self,
+        refs: &[BlockReference],
+        peer: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<BlockReference> {
+        let peer_bit = 1u128 << peer;
+        let mut result = Vec::with_capacity(limit.min(refs.len()));
+
+        for block_ref in refs {
+            if result.len() >= limit {
+                break;
+            }
+
+            match self.dag_get(block_ref) {
+                Some((_, known_by)) if known_by & peer_bit != 0 => {}
+                _ => result.push(*block_ref),
+            }
         }
 
         result

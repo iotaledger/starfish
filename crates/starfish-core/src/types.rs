@@ -1167,15 +1167,6 @@ impl Transaction {
         Self { data }
     }
 
-    #[allow(dead_code)]
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    #[allow(dead_code)]
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
-    }
 }
 
 impl AsBytes for Transaction {

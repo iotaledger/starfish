@@ -334,51 +334,6 @@ where
         Some(())
     }
 
-    #[allow(dead_code)]
-    pub async fn send_parents_storage_blocks(
-        &mut self,
-        peer_id: AuthorityIndex,
-        block_references: Vec<BlockReference>,
-    ) -> Option<()> {
-        let peer = format_authority_index(peer_id);
-        let own_index = self.inner.dag_state.get_own_authority_index();
-        let batch_block_size = self.parameters.batch_own_block_size;
-        let mut blocks = Vec::new();
-        let mut block_counter = 0;
-        for block_reference in block_references {
-            let block = self.inner.dag_state.get_storage_block(block_reference);
-            if let Some(block) = block {
-                for parent_reference in block.block_references() {
-                    let parent = self.inner.dag_state.get_storage_block(*parent_reference);
-                    if let Some(parent) = parent {
-                        block_counter += 1;
-                        if block_counter >= batch_block_size {
-                            break;
-                        }
-                        blocks.push(parent);
-                    }
-                }
-            }
-            if block_counter >= batch_block_size {
-                break;
-            }
-        }
-        {
-            let mut sent = self.sent_to_peer.write();
-            for block in blocks.iter() {
-                sent.insert(*block.reference());
-            }
-        }
-        tracing::debug!(
-            "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
-        );
-        self.sender
-            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-            .await
-            .ok()?;
-        Some(())
-    }
-
     pub async fn disseminate_own_blocks(&mut self, round: RoundNumber) {
         if let Some(existing) = self.own_blocks.take() {
             existing.abort();
@@ -732,6 +687,8 @@ fn report_useful_authorities(
         .set(useful_shards.count_ones() as i64);
 }
 
+const HEADER_PRUNE_OVERFETCH_FACTOR: usize = 4;
+
 /// Track sent references in `sent_to_peer`, evict stale entries, and send the
 /// batch.
 async fn send_batch_and_track<H, C>(
@@ -845,9 +802,10 @@ where
     let ck = inner
         .cordial_knowledge
         .connection_knowledge(to_whom_authority_index)?;
-    let (header_refs, shard_refs, useful_headers, useful_shards) = {
+    let header_candidate_limit = batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+    let (header_candidates, shard_refs, useful_headers, useful_shards) = {
         let mut ck = ck.write();
-        let header_refs = ck.take_unsent_headers(batch_other_block_size);
+        let header_refs = ck.take_unsent_headers(header_candidate_limit);
         let shard_refs = ck.take_unsent_shards(batch_shard_size);
         let current_round = inner.dag_state.highest_round();
         let (uh, us) = ck.useful_authors_bitmasks(current_round);
@@ -856,6 +814,11 @@ where
     let peer_label = peer.to_string();
     report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
 
+    let header_refs = inner.dag_state.filter_headers_unknown_to_peer(
+        &header_candidates,
+        to_whom_authority_index,
+        batch_other_block_size,
+    );
     let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
     let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
 
