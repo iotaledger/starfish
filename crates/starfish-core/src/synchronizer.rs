@@ -730,10 +730,6 @@ fn report_useful_authorities(
         .useful_authorities
         .with_label_values(&[peer, "shards"])
         .set(useful_shards.count_ones() as i64);
-    metrics
-        .useful_authorities
-        .with_label_values(&[peer, "total"])
-        .set((useful_headers | useful_shards).count_ones() as i64);
 }
 
 /// Track sent references in `sent_to_peer`, evict stale entries, and send the

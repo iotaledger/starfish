@@ -1978,7 +1978,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 85
+        "y": 77
       },
       "id": 206,
       "panels": [],
@@ -2049,7 +2049,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 86
+        "y": 78
       },
       "id": 207,
       "options": {
@@ -2158,7 +2158,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 86
+        "y": 78
       },
       "id": 209,
       "options": {
@@ -2197,7 +2197,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 86
       },
       "id": 202,
       "panels": [],
@@ -2268,7 +2268,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 87
       },
       "id": 14,
       "options": {
@@ -2365,7 +2365,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 95
+        "y": 87
       },
       "id": 13,
       "options": {
@@ -2462,7 +2462,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 103
+        "y": 95
       },
       "id": 16,
       "options": {
@@ -2555,7 +2555,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 103
+        "y": 95
       },
       "id": 25,
       "options": {
@@ -2665,7 +2665,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 111
+        "y": 103
       },
       "id": 26,
       "options": {
@@ -2709,7 +2709,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 111
       },
       "id": 203,
       "panels": [],
@@ -2780,7 +2780,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 112
       },
       "id": 12,
       "options": {
@@ -2881,7 +2881,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 112
       },
       "id": 5,
       "options": {
@@ -2965,7 +2965,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 128
+        "y": 120
       },
       "id": 21,
       "options": {
@@ -3044,7 +3044,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 128
+        "y": 120
       },
       "id": 22,
       "options": {
@@ -3140,7 +3140,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 136
+        "y": 128
       },
       "id": 210,
       "options": {
@@ -3236,7 +3236,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 136
+        "y": 128
       },
       "id": 211,
       "options": {
@@ -3333,7 +3333,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 144
+        "y": 136
       },
       "id": 212,
       "options": {
@@ -3431,7 +3431,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 144
+        "y": 136
       },
       "id": 213,
       "options": {
@@ -3528,7 +3528,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 152
+        "y": 144
       },
       "id": 9,
       "options": {
@@ -3725,102 +3725,6 @@
         "x": 12,
         "y": 69
       },
-      "id": 215,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.3.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "editorMode": "code",
-          "expr": "sum by (validator) (useful_authorities{validator=~\"$validator\", kind=\"total\"})",
-          "legendFormat": "{{validator}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Useful authorities total",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Fixed-UID-testbed"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 77
-      },
       "id": 216,
       "options": {
         "legend": {
@@ -3842,7 +3746,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator) (useful_authorities{validator=~\"$validator\", kind=\"headers\"})",
+          "expr": "max by (validator) (useful_authorities{validator=~\"$validator\", kind=\"headers\"})",
           "legendFormat": "{{validator}} headers",
           "range": true,
           "refId": "A"
@@ -3853,7 +3757,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator) (useful_authorities{validator=~\"$validator\", kind=\"shards\"})",
+          "expr": "max by (validator) (useful_authorities{validator=~\"$validator\", kind=\"shards\"})",
           "legendFormat": "{{validator}} shards",
           "range": true,
           "refId": "B"

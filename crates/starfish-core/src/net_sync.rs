@@ -493,6 +493,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         .mark_shard_useful_from_peer(payload.block_reference);
                 }
 
+                // Attach shard to DAG block for immediate relay.
+                if self
+                    .inner
+                    .dag_state
+                    .attach_shard_data(payload.block_reference, &payload.shard)
+                {
+                    self.inner
+                        .cordial_knowledge
+                        .send(CordialKnowledgeMessage::NewShard(payload.block_reference));
+                }
+
                 let _ = shard_tx
                     .send(ShardMessage::Shard {
                         block_reference: payload.block_reference,
@@ -590,6 +601,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     "header must be preserialized before entering core"
                 );
                 new_data_blocks.push(Data::new(storage_block));
+            } else if let Some(shard) = storage_block.shard_data() {
+                // Shard-bearing duplicate: attach shard to existing DAG block.
+                if self
+                    .inner
+                    .dag_state
+                    .attach_shard_data(*storage_block.reference(), shard)
+                {
+                    self.inner
+                        .cordial_knowledge
+                        .send(CordialKnowledgeMessage::NewShard(
+                            *storage_block.reference(),
+                        ));
+                }
             }
         }
 
