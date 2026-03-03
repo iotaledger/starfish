@@ -26,7 +26,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct SynchronizerParameters {
+pub struct BroadcasterParameters {
     /// The number of own blocks to send in a single batch.
     pub batch_own_block_size: usize,
     /// The number of other blocks to send in a single batch.
@@ -37,7 +37,7 @@ pub struct SynchronizerParameters {
     pub sample_timeout: Duration,
 }
 
-impl SynchronizerParameters {
+impl BroadcasterParameters {
     pub fn new(committee_size: usize, consensus_protocol: ConsensusProtocol) -> Self {
         match consensus_protocol {
             ConsensusProtocol::Mysticeti => Self {
@@ -59,7 +59,7 @@ impl SynchronizerParameters {
     }
 }
 
-impl Default for SynchronizerParameters {
+impl Default for BroadcasterParameters {
     fn default() -> Self {
         Self {
             batch_own_block_size: 8,
@@ -87,8 +87,8 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     response_push_blocks: Option<JoinHandle<Option<()>>>,
     /// The handles of tasks disseminating other nodes' blocks.
     other_blocks: Vec<JoinHandle<Option<()>>>,
-    /// The parameters of the synchronizer.
-    parameters: SynchronizerParameters,
+    /// The parameters of the broadcaster.
+    parameters: BroadcasterParameters,
     /// Metrics.
     metrics: Arc<Metrics>,
     /// Blocks sent to this peer during this connection.
@@ -103,7 +103,7 @@ pub struct DataRequester<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     /// The handle of the task disseminating our own blocks.
     data_requester: Option<JoinHandle<Option<()>>>,
-    parameters: SynchronizerParameters,
+    parameters: BroadcasterParameters,
 }
 
 impl<H, C> DataRequester<H, C>
@@ -115,7 +115,7 @@ where
         to_whom_authority_index: AuthorityIndex,
         sender: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        parameters: SynchronizerParameters,
+        parameters: BroadcasterParameters,
     ) -> Self {
         Self {
             to_whom_authority_index,
@@ -153,7 +153,7 @@ where
         peer_id: AuthorityIndex,
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        parameters: SynchronizerParameters,
+        parameters: BroadcasterParameters,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let own_id = inner.dag_state.get_own_authority_index();
@@ -209,7 +209,7 @@ where
         sender: mpsc::Sender<NetworkMessage>,
         universal_committer: UniversalCommitter,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        parameters: SynchronizerParameters,
+        parameters: BroadcasterParameters,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
@@ -402,14 +402,14 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         to: Sender<NetworkMessage>,
         peer_id: AuthorityIndex,
-        synchronizer_parameters: SynchronizerParameters,
+        broadcaster_parameters: BroadcasterParameters,
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
         let between_push_timeout = Duration::from_millis(100);
         loop {
-            let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
-            let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+            let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+            let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
             let blocks = {
                 let sent = sent_to_peer.read();
                 inner.dag_state.get_unsent_past_cone(
@@ -445,12 +445,12 @@ where
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
-        synchronizer_parameters: SynchronizerParameters,
+        broadcaster_parameters: BroadcasterParameters,
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let committee_size = inner.committee.len();
         let mut rng = StdRng::from_entropy();
-        let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+        let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
         let batch_byzantine_own_block_size = 50 * batch_own_block_size;
         let byzantine_strategy = inner.dag_state.byzantine_strategy;
         let own_authority_index = inner.dag_state.get_own_authority_index();
@@ -459,7 +459,7 @@ where
             .last_own_block_ref()
             .unwrap_or_default()
             .round();
-        let sample_timeout = synchronizer_parameters.sample_timeout;
+        let sample_timeout = broadcaster_parameters.sample_timeout;
         let withholding_timeout = Duration::from_millis(450);
         loop {
             let notified = inner.notify.notified();
@@ -622,11 +622,11 @@ where
         to_whom_authority_index: AuthorityIndex,
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        synchronizer_parameters: SynchronizerParameters,
+        broadcaster_parameters: BroadcasterParameters,
         metrics: Arc<Metrics>,
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
-        let sample_timeout = synchronizer_parameters.sample_timeout;
+        let sample_timeout = broadcaster_parameters.sample_timeout;
         loop {
             let notified = inner.notify.notified();
             let trigger = select! {
@@ -643,7 +643,7 @@ where
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
-                        synchronizer_parameters.clone(),
+                        broadcaster_parameters.clone(),
                         sent_to_peer.clone(),
                         &metrics,
                     )
@@ -654,7 +654,7 @@ where
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
-                        synchronizer_parameters.clone(),
+                        broadcaster_parameters.clone(),
                         sent_to_peer.clone(),
                         &metrics,
                     )
@@ -665,7 +665,7 @@ where
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
-                        synchronizer_parameters.clone(),
+                        broadcaster_parameters.clone(),
                         sent_to_peer.clone(),
                         &metrics,
                     )
@@ -757,7 +757,7 @@ async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
-    synchronizer_parameters: SynchronizerParameters,
+    broadcaster_parameters: BroadcasterParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     metrics: &Metrics,
 ) -> Option<()>
@@ -770,8 +770,8 @@ where
     let mut authorities_with_missing_blocks: AHashSet<AuthorityIndex> =
         (0..committee_size as AuthorityIndex).collect();
     authorities_with_missing_blocks.remove(&own_index);
-    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
-    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
     let blocks = {
         let sent = sent_to_peer.read();
@@ -807,7 +807,7 @@ async fn sending_batch_cordial_miners_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
-    synchronizer_parameters: SynchronizerParameters,
+    broadcaster_parameters: BroadcasterParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     metrics: &Metrics,
 ) -> Option<()>
@@ -815,8 +815,8 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
-    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
     let peer = format_authority_index(to_whom_authority_index);
 
     let own_blocks = {
@@ -872,7 +872,7 @@ async fn sending_batch_starfish_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
-    synchronizer_parameters: SynchronizerParameters,
+    broadcaster_parameters: BroadcasterParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     metrics: &Metrics,
 ) -> Option<()>
@@ -880,9 +880,9 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
-    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
-    let batch_shard_size = synchronizer_parameters.batch_shard_size;
+    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
+    let batch_shard_size = broadcaster_parameters.batch_shard_size;
     let peer = format_authority_index(to_whom_authority_index);
 
     // 1. Own blocks: send as full blocks
@@ -992,7 +992,7 @@ impl BlockFetcher {
 struct BlockFetcherWorker {
     receiver: mpsc::Receiver<BlockFetcherMessage>,
     senders: HashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>,
-    parameters: SynchronizerParameters,
+    parameters: BroadcasterParameters,
 }
 
 impl BlockFetcherWorker {

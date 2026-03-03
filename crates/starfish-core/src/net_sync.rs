@@ -33,7 +33,7 @@ use crate::{
     runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
     store::Store,
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    synchronizer::{BlockDisseminator, BlockFetcher, DataRequester, SynchronizerParameters},
+    broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     types::{
         AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
         format_authority_index,
@@ -237,8 +237,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
-        let synchronizer_parameters =
-            SynchronizerParameters::new(committee_size, consensus_protocol);
+        let broadcaster_parameters =
+            BroadcasterParameters::new(committee_size, consensus_protocol);
         let peer_id = connection.peer_id as AuthorityIndex;
 
         let disseminator = BlockDisseminator::new(
@@ -246,14 +246,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             connection.sender.clone(),
             universal_committer,
             inner.clone(),
-            synchronizer_parameters.clone(),
+            broadcaster_parameters.clone(),
             metrics.clone(),
         );
         let data_requester = DataRequester::new(
             peer_id,
             connection.sender.clone(),
             inner.clone(),
-            synchronizer_parameters,
+            broadcaster_parameters,
         );
 
         let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");

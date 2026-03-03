@@ -27,7 +27,7 @@ use crate::{
 };
 
 pub struct Validator {
-    network_synchronizer: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
+    network_broadcaster: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
     metrics_handle: JoinHandle<Result<(), std::io::Error>>,
     metrics: Arc<Metrics>,
     reporter: Arc<MetricReporter>,
@@ -129,9 +129,9 @@ impl Validator {
             metrics.clone(),
         )
         .await;
-        tracing::info!("Network is created. Starting synchronizer");
+        tracing::info!("Network is created. Starting broadcaster");
 
-        let network_synchronizer = NetworkSyncer::start(
+        let network_broadcaster = NetworkSyncer::start(
             network,
             core,
             commit_handler,
@@ -143,7 +143,7 @@ impl Validator {
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
 
         Ok(Self {
-            network_synchronizer,
+            network_broadcaster,
             metrics_handle,
             metrics,
             reporter,
@@ -164,13 +164,13 @@ impl Validator {
         Result<Result<(), std::io::Error>, JoinError>,
     ) {
         tokio::join!(
-            self.network_synchronizer.await_completion(),
+            self.network_broadcaster.await_completion(),
             self.metrics_handle
         )
     }
 
     pub async fn stop(self) {
-        self.network_synchronizer.shutdown().await;
+        self.network_broadcaster.shutdown().await;
         self.metrics_handle.abort();
         // Give time for background Worker tasks to detect channel closures and exit,
         // and for TCP sockets to fully release.

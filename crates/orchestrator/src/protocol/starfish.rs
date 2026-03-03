@@ -194,7 +194,7 @@ impl ProtocolCommands for StarfishProtocol {
                         "RUST_BACKTRACE=1 RUST_LOG=warn,starfish_core::block_manager=trace,\
                     starfish_core::block_handler=trace,starfish_core::consensus=trace,\
                     starfish_core::net_sync=DEBUG,starfish_core::core=DEBUG,\
-                    starfish_core::synchronizer=DEBUG,starfish_core::transactions_generator=DEBUG,\
+                    starfish_core::broadcaster=DEBUG,starfish_core::transactions_generator=DEBUG,\
                     starfish_core::validator=trace,starfish_core::network=trace,\
                     starfish_core::dag_state=trace,starfish_core::threshold_core=trace,\
                     starfish_core::syncer=trace";

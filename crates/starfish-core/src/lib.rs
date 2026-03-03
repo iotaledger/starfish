@@ -29,7 +29,7 @@ mod stat;
 mod state;
 pub(crate) mod store;
 mod syncer;
-mod synchronizer;
+mod broadcaster;
 mod threshold_clock;
 #[cfg(feature = "tidehunter")]
 mod tidehunter_store;

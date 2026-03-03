@@ -42,8 +42,8 @@ pub struct NodeParameters {
     pub rounds_in_epoch: RoundNumber,
     #[serde(default = "node_defaults::default_shutdown_grace_period")]
     pub shutdown_grace_period: Duration,
-    #[serde(default = "node_defaults::default_enable_synchronizer")]
-    pub enable_synchronizer: bool,
+    #[serde(default = "node_defaults::default_enable_broadcaster")]
+    pub enable_broadcaster: bool,
     #[serde(default = "node_defaults::default_mimic_latency")]
     pub mimic_latency: bool,
     #[serde(default = "node_defaults::default_uniform_latency_ms")]
@@ -70,7 +70,7 @@ pub mod node_defaults {
         std::time::Duration::from_secs(2)
     }
 
-    pub fn default_enable_synchronizer() -> bool {
+    pub fn default_enable_broadcaster() -> bool {
         false
     }
     pub fn default_mimic_latency() -> bool {
@@ -90,7 +90,7 @@ impl Default for NodeParameters {
             max_block_size: node_defaults::default_max_block_size(),
             rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
-            enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency: node_defaults::default_mimic_latency(),
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
         }
@@ -105,7 +105,7 @@ impl NodeParameters {
             max_block_size: node_defaults::default_max_block_size(),
             rounds_in_epoch: node_defaults::default_rounds_in_epoch(),
             shutdown_grace_period: node_defaults::default_shutdown_grace_period(),
-            enable_synchronizer: node_defaults::default_enable_synchronizer(),
+            enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency,
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
         }
