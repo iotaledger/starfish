@@ -309,28 +309,57 @@ where
         let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
 
-        let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
+        match self.inner.dag_state.consensus_protocol {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                let mut headers = self.inner.dag_state.get_header_only_blocks(&block_references);
+                headers.truncate(batch_block_size);
+                {
+                    let mut sent = self.sent_to_peer.write();
+                    for block in headers.iter() {
+                        sent.insert(*block.reference());
+                    }
+                }
+                tracing::debug!(
+                    "Requested missing parent headers {headers:?} are sent from {own_index:?} to {peer:?}"
+                );
+                self.sender
+                    .send(NetworkMessage::Batch(BlockBatch {
+                        full_blocks: Vec::new(),
+                        headers,
+                        shards: Vec::new(),
+                        useful_headers_authors: 0,
+                        useful_shards_authors: 0,
+                    }))
+                    .await
+                    .ok()?;
+            }
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::StarfishPull => {
+                let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
 
-        let mut blocks = Vec::new();
-        for block in all_blocks.into_iter().flatten() {
-            blocks.push(block);
-            if blocks.len() >= batch_block_size {
-                break;
+                let mut blocks = Vec::new();
+                for block in all_blocks.into_iter().flatten() {
+                    blocks.push(block);
+                    if blocks.len() >= batch_block_size {
+                        break;
+                    }
+                }
+                {
+                    let mut sent = self.sent_to_peer.write();
+                    for block in blocks.iter() {
+                        sent.insert(*block.reference());
+                    }
+                }
+                tracing::debug!(
+                    "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
+                );
+                self.sender
+                    .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+                    .await
+                    .ok()?;
             }
         }
-        {
-            let mut sent = self.sent_to_peer.write();
-            for block in blocks.iter() {
-                sent.insert(*block.reference());
-            }
-        }
-        tracing::debug!(
-            "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
-        );
-        self.sender
-            .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-            .await
-            .ok()?;
         Some(())
     }
 
@@ -599,11 +628,6 @@ where
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let sample_timeout = synchronizer_parameters.sample_timeout;
-        let use_starfish_dissemination = matches!(
-            inner.dag_state.consensus_protocol,
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
-        );
-
         loop {
             let notified = inner.notify.notified();
             let trigger = select! {
@@ -614,26 +638,40 @@ where
                 .utilization_timer
                 .utilization_timer("Broadcaster: send blocks");
             tracing::debug!("Disseminate to {to_whom_authority_index} after {trigger}");
-            if use_starfish_dissemination {
-                sending_batch_starfish_blocks(
-                    inner.clone(),
-                    to.clone(),
-                    to_whom_authority_index,
-                    synchronizer_parameters.clone(),
-                    sent_to_peer.clone(),
-                    &metrics,
-                )
-                .await?;
-            } else {
-                sending_batch_all_blocks(
-                    inner.clone(),
-                    to.clone(),
-                    to_whom_authority_index,
-                    synchronizer_parameters.clone(),
-                    sent_to_peer.clone(),
-                    &metrics,
-                )
-                .await?;
+            match inner.dag_state.consensus_protocol {
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                    sending_batch_starfish_blocks(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        synchronizer_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                    )
+                    .await?;
+                }
+                ConsensusProtocol::CordialMiners => {
+                    sending_batch_cordial_miners_blocks(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        synchronizer_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                    )
+                    .await?;
+                }
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
+                    sending_batch_all_blocks(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        synchronizer_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                    )
+                    .await?;
+                }
             }
             drop(timer);
         }
@@ -746,21 +784,82 @@ where
             authorities_with_missing_blocks,
         )
     };
-    // Populate useful-authors feedback bitmasks for the peer
-    let (useful_headers, useful_shards) = inner
-        .cordial_knowledge
-        .connection_knowledge(to_whom_authority_index)
-        .map(|ck| {
-            let ck = ck.read();
-            let current_round = inner.dag_state.highest_round();
-            ck.useful_authors_bitmasks(current_round)
-        })
-        .unwrap_or((0, 0));
+    // Full-block protocols do not advertise header/shard usefulness.
+    let useful_headers = 0;
+    let useful_shards = 0;
     report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
         full_blocks: blocks,
+        headers: Vec::new(),
+        shards: Vec::new(),
+        useful_headers_authors: useful_headers,
+        useful_shards_authors: useful_shards,
+    };
+    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
+}
+
+/// Cordial Miners-specific batch: own blocks as full blocks from the indexed
+/// own-block path, plus other full blocks selected from CordialKnowledge's
+/// per-peer queue and pruned against the DAG's `known_by` view.
+async fn sending_batch_cordial_miners_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    synchronizer_parameters: SynchronizerParameters,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let batch_own_block_size = synchronizer_parameters.batch_own_block_size;
+    let batch_other_block_size = synchronizer_parameters.batch_other_block_size;
+    let peer = format_authority_index(to_whom_authority_index);
+
+    let own_blocks = {
+        let sent = sent_to_peer.read();
+        inner
+            .dag_state
+            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
+    };
+
+    let own_authority = inner.dag_state.get_own_authority_index();
+    let ck = inner
+        .cordial_knowledge
+        .connection_knowledge(to_whom_authority_index)?;
+    let candidate_limit = batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+    let other_candidates = {
+        let mut ck = ck.write();
+        ck.take_unsent_headers_excluding_authority(candidate_limit, own_authority)
+    };
+    let other_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
+        &other_candidates,
+        to_whom_authority_index,
+        batch_other_block_size,
+    );
+    let mut full_blocks = own_blocks;
+    full_blocks.extend(
+        inner
+            .dag_state
+            .get_transmission_blocks(&other_refs)
+            .into_iter()
+            .flatten(),
+    );
+
+    let useful_headers = 0;
+    let useful_shards = 0;
+    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
+
+    tracing::debug!(
+        "Cordial Miners batch to {peer}: {} full",
+        full_blocks.len()
+    );
+    let batch = BlockBatch {
+        full_blocks,
         headers: Vec::new(),
         shards: Vec::new(),
         useful_headers_authors: useful_headers,
@@ -814,7 +913,7 @@ where
     let peer_label = peer.to_string();
     report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
 
-    let header_refs = inner.dag_state.filter_headers_unknown_to_peer(
+    let header_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
         &header_candidates,
         to_whom_authority_index,
         batch_other_block_size,

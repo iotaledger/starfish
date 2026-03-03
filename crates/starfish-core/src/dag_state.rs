@@ -78,6 +78,32 @@ pub enum ByzantineStrategy {
     ChainBomb,              // Fork bomb: withhold a chain of blocks and release it all at once
     EquivocatingChainsBomb, // Equivocation fork bomb: send different chains to each validator
 }
+
+impl ByzantineStrategy {
+    /// Strategies that create multiple equivocating blocks per round.
+    /// These must not generate transactions — encoding tx data for each
+    /// equivocating block is prohibitively expensive.
+    pub fn is_equivocating(&self) -> bool {
+        matches!(
+            self,
+            Self::EquivocatingChains | Self::EquivocatingTwoChains | Self::EquivocatingChainsBomb
+        )
+    }
+
+    pub fn from_strategy_str(s: &str) -> Option<Self> {
+        match s {
+            "timeout-leader" => Some(Self::TimeoutLeader),
+            "leader-withholding" => Some(Self::LeaderWithholding),
+            "equivocating-chains" => Some(Self::EquivocatingChains),
+            "equivocating-two-chains" => Some(Self::EquivocatingTwoChains),
+            "chain-bomb" => Some(Self::ChainBomb),
+            "equivocating-chains-bomb" => Some(Self::EquivocatingChainsBomb),
+            "random-drop" => Some(Self::RandomDrop),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DagState {
     dag_state_inner: Arc<RwLock<DagStateInner>>,
@@ -232,16 +258,7 @@ impl DagState {
             replay_started.elapsed(),
             inner.highest_round
         );
-        let byzantine_strategy = match byzantine_strategy.as_str() {
-            "timeout-leader" => Some(ByzantineStrategy::TimeoutLeader),
-            "leader-withholding" => Some(ByzantineStrategy::LeaderWithholding),
-            "equivocating-chains" => Some(ByzantineStrategy::EquivocatingChains),
-            "equivocating-two-chains" => Some(ByzantineStrategy::EquivocatingTwoChains),
-            "chain-bomb" => Some(ByzantineStrategy::ChainBomb),
-            "equivocating-chains-bomb" => Some(ByzantineStrategy::EquivocatingChainsBomb),
-            "random-drop" => Some(ByzantineStrategy::RandomDrop),
-            _ => None, // Default to honest behavior
-        };
+        let byzantine_strategy = ByzantineStrategy::from_strategy_str(byzantine_strategy.as_str());
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::StarfishPull => {
@@ -750,10 +767,11 @@ impl DagState {
             .get_unsent_own_blocks(sent, peer, batch_own_block_size)
     }
 
-    /// Keep only header references that are not already implied as known by
-    /// `peer` via the DAG's `known_by` bitmask. References missing from the
-    /// in-memory DAG are retained, since we cannot prove they are redundant.
-    pub fn filter_headers_unknown_to_peer(
+    /// Keep only block references whose headers are not already implied as
+    /// known by `peer` via the DAG's `known_by` bitmask. References missing
+    /// from the in-memory DAG are retained, since we cannot prove they are
+    /// redundant.
+    pub fn filter_block_refs_unknown_to_peer(
         &self,
         refs: &[BlockReference],
         peer: AuthorityIndex,
@@ -761,7 +779,7 @@ impl DagState {
     ) -> Vec<BlockReference> {
         self.dag_state_inner
             .read()
-            .filter_headers_unknown_to_peer(refs, peer, limit)
+            .filter_block_refs_unknown_to_peer(refs, peer, limit)
     }
 
     pub fn get_unsent_other_blocks(
@@ -1294,7 +1312,7 @@ impl DagStateInner {
         result
     }
 
-    fn filter_headers_unknown_to_peer(
+    fn filter_block_refs_unknown_to_peer(
         &self,
         refs: &[BlockReference],
         peer: AuthorityIndex,

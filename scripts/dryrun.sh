@@ -14,7 +14,7 @@ NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, equivocating-chains-bomb, random-drop
 BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains}
-TEST_TIME=${TEST_TIME:-300}
+TEST_TIME=${TEST_TIME:-3000}
 # Optional: set to use uniform latency (ms)
 # instead of AWS RTT table
 # UNIFORM_LATENCY_MS=100
@@ -288,9 +288,16 @@ EOH
         VALIDATOR_IP="172.28.0.$LAST_OCTET"
 
         if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
-            LOAD=0
             ((BYZANTINE_COUNT++))
             EXTRA_FLAGS="--byzantine-strategy $BYZANTINE_STRATEGY"
+            # Equivocating strategies create multiple blocks per round;
+            # encoding transactions for each is too expensive.
+            case "$BYZANTINE_STRATEGY" in
+                equivocating-chains|equivocating-two-chains|equivocating-chains-bomb)
+                    LOAD=0 ;;
+                *)
+                    LOAD=$TPS_PER_VALIDATOR ;;
+            esac
         else
             LOAD=$TPS_PER_VALIDATOR
             EXTRA_FLAGS=""

@@ -287,6 +287,7 @@ impl<H: BlockHandler> Core<H> {
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
+        self.update_pending_metrics();
         (
             success,
             not_processed_block_references_with_transactions,
@@ -322,6 +323,7 @@ impl<H: BlockHandler> Core<H> {
             processed_refs.push(*block.reference());
         }
         self.run_block_handler();
+        self.update_pending_metrics();
         (success, missing_references, processed_refs)
     }
 
@@ -332,6 +334,7 @@ impl<H: BlockHandler> Core<H> {
         for item in items {
             self.attach_or_buffer_transaction_data(item);
         }
+        self.update_pending_metrics();
     }
 
     fn attach_or_buffer_transaction_data(&mut self, item: ReconstructedTransactionData) {
@@ -343,6 +346,21 @@ impl<H: BlockHandler> Core<H> {
             self.pending_reconstructed_data
                 .insert(item.block_reference, item);
         }
+    }
+
+    fn update_pending_metrics(&self) {
+        self.metrics
+            .block_manager_pending_blocks
+            .set(self.block_manager.pending_blocks_count() as i64);
+        for (i, missing_set) in self.block_manager.missing_blocks().iter().enumerate() {
+            self.metrics
+                .missing_blocks
+                .with_label_values(&[&i.to_string()])
+                .set(missing_set.len() as i64);
+        }
+        self.metrics
+            .core_pending_reconstructed_data
+            .set(self.pending_reconstructed_data.len() as i64);
     }
 
     fn attach_pending_transaction_data(&mut self, block: &Data<VerifiedBlock>) {
@@ -759,6 +777,7 @@ impl<H: BlockHandler> Core<H> {
         self.pending_reconstructed_data
             .retain(|block_ref, _| block_ref.round >= threshold);
         self.committer.cleanup(threshold);
+        self.update_pending_metrics();
         threshold
     }
 

@@ -12,6 +12,7 @@ pub mod core;
 mod core_thread;
 mod crypto;
 mod dag_state;
+pub use dag_state::ByzantineStrategy;
 mod data;
 mod decoder;
 mod encoder;
