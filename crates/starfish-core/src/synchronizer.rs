@@ -275,20 +275,16 @@ where
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.dag_state.get_own_authority_index();
 
-        let all_blocks = self
-            .inner
-            .dag_state
-            .get_transmission_blocks(&block_references);
-
-        let mut shards = Vec::new();
-        for block in all_blocks.into_iter().flatten() {
-            if let Some(shard) = block.shard_data() {
-                shards.push(ShardPayload {
-                    block_reference: *block.reference(),
-                    shard: shard.clone(),
-                });
-            }
-        }
+        let shards: Vec<ShardPayload> = block_references
+            .iter()
+            .filter_map(|r| {
+                let shard = self.inner.dag_state.get_shard(r)?;
+                Some(ShardPayload {
+                    block_reference: *r,
+                    shard,
+                })
+            })
+            .collect();
         tracing::debug!(
             "Sending {} shards for missing tx data from {own_index:?} to {peer:?}",
             shards.len(),

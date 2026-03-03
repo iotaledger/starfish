@@ -35,7 +35,7 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     synchronizer::{BlockDisseminator, BlockFetcher, DataRequester, SynchronizerParameters},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock,
+        AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
         format_authority_index,
     },
 };
@@ -54,11 +54,9 @@ enum Status {
     Header,
 }
 impl Status {
-    fn get_status(block: &VerifiedBlock, peer: usize) -> Self {
+    fn get_status(block: &VerifiedBlock) -> Self {
         if block.transactions().is_some() {
             Status::Full
-        } else if block.has_shard_data() {
-            Status::Shard(peer)
         } else {
             Status::Header
         }
@@ -392,10 +390,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             for block in full_blocks.iter().chain(headers.iter()) {
                 // Peer knows this block's header (they sent it to us)
                 ck.mark_header_known(*block.reference());
-                // Only an actual shard payload proves the peer has this shard.
-                if block.shard_data().is_some() {
-                    ck.mark_shard_known(*block.reference());
-                }
                 // Peer knows the header of every parent (causal history)
                 for parent_ref in block.block_references() {
                     ck.mark_header_known(*parent_ref);
@@ -531,10 +525,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .connection_knowledge(self.peer_id);
         let incoming_statuses: Vec<_> = blocks
             .iter()
-            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
+            .map(|block| (block.digest(), Status::get_status(block)))
             .collect();
         let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
-        let mut verified_blocks = Vec::new();
+        // (block, shard sidecar from verify)
+        let mut verified_blocks: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
 
         for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
             if !is_needed {
@@ -543,24 +538,27 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            if let Err(e) = block.verify(
+            let shard = match block.verify(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
             ) {
-                tracing::warn!(
-                    "Rejected incorrect block {} from {}: {:?}",
-                    block.reference(),
-                    self.peer,
-                    e
-                );
-                break;
-            }
+                Ok(shard) => shard,
+                Err(e) => {
+                    tracing::warn!(
+                        "Rejected incorrect block {} from {}: {:?}",
+                        block.reference(),
+                        self.peer,
+                        e
+                    );
+                    break;
+                }
+            };
 
             // Send shard to reconstructor for off-critical-path decoding
-            if let Some(provable_shard) = block.shard_data() {
+            if let Some(provable_shard) = shard.as_ref() {
                 let maybe_tx = self.inner.shard_tx.lock().clone();
                 if let Some(shard_tx) = maybe_tx {
                     let _ = shard_tx
@@ -576,24 +574,36 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
-                if block.shard_data().is_some() {
+                if shard.is_some() {
                     ck.mark_shard_useful_from_peer(*block.reference());
                 }
             }
-            verified_blocks.push(block);
+            verified_blocks.push((block, shard));
         }
 
         // Partition verified blocks: only the very first appearance of a block
         // (not yet in filter) goes to core. Once the filter has an entry — even
         // as Shards or Full — subsequent arrivals only go to the reconstructor.
         let mut new_data_blocks = Vec::new();
+        let mut new_block_shards: Vec<Option<ProvableShard>> = Vec::new();
         let mut batch_with_status = Vec::new();
-        for storage_block in verified_blocks {
+        for (storage_block, shard) in verified_blocks {
             let digest = storage_block.digest();
-            let status = Status::get_status(&storage_block, self.peer_usize);
+            let has_shard = shard.is_some();
+            let status = if has_shard {
+                Status::Shard(self.peer_usize)
+            } else {
+                Status::Header
+            };
             let send_to_core = !self.filter_for_blocks.contains(&digest);
             batch_with_status.push((digest, status));
             if send_to_core {
+                // Insert shard into sidecar index before block enters core
+                if let Some(s) = shard.as_ref() {
+                    self.inner
+                        .dag_state
+                        .insert_shard(*storage_block.reference(), s.clone());
+                }
                 let mut storage_block = storage_block;
                 storage_block.preserialize();
                 debug_assert!(
@@ -601,12 +611,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     "header must be preserialized before entering core"
                 );
                 new_data_blocks.push(Data::new(storage_block));
-            } else if let Some(shard) = storage_block.shard_data() {
+                new_block_shards.push(shard);
+            } else if let Some(s) = shard {
                 // Shard-bearing duplicate: attach shard to existing DAG block.
                 if self
                     .inner
                     .dag_state
-                    .attach_shard_data(*storage_block.reference(), shard)
+                    .attach_shard_data(*storage_block.reference(), &s)
                 {
                     self.inner
                         .cordial_knowledge
@@ -633,11 +644,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         // already went to the shard reconstructor above).
         if !new_data_blocks.is_empty() {
             // Notify CordialKnowledge about new headers (and shards) entering the DAG
-            for block in &new_data_blocks {
+            for (block, shard) in new_data_blocks.iter().zip(new_block_shards.iter()) {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-                if block.shard_data().is_some() {
+                if shard.is_some() {
                     self.inner
                         .cordial_knowledge
                         .send(CordialKnowledgeMessage::NewShard(*block.reference()));
@@ -674,10 +685,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .connection_knowledge(self.peer_id);
         let incoming_statuses: Vec<_> = blocks
             .iter()
-            .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
+            .map(|block| (block.digest(), Status::get_status(block)))
             .collect();
         let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
         let mut verified_data_blocks = Vec::new();
+        let mut verified_has_shard = Vec::new();
         let shard_tx = self.inner.shard_tx.lock().clone();
 
         for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
@@ -687,21 +699,30 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            if let Err(e) = block.verify(
+            let shard = match block.verify(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
             ) {
-                tracing::warn!(
-                    "Rejected incorrect block {} from {}: {:?}",
-                    block.reference(),
-                    self.peer,
-                    e
-                );
-                // todo: Terminate connection upon receiving incorrect block.
-                break;
+                Ok(shard) => shard,
+                Err(e) => {
+                    tracing::warn!(
+                        "Rejected incorrect block {} from {}: {:?}",
+                        block.reference(),
+                        self.peer,
+                        e
+                    );
+                    // todo: Terminate connection upon receiving incorrect block.
+                    break;
+                }
+            };
+            // Insert shard sidecar into DAG index
+            if let Some(s) = shard.as_ref() {
+                self.inner
+                    .dag_state
+                    .insert_shard(*block.reference(), s.clone());
             }
             // Notify reconstructor to stop collecting shards for this block
             if let Some(shard_tx) = shard_tx.as_ref() {
@@ -714,9 +735,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
+                if shard.is_some() {
+                    ck.mark_shard_useful_from_peer(*block.reference());
+                }
             }
             self.filter_for_blocks
                 .add_batch(vec![(block.digest(), Status::Full)]);
+            let has_shard = shard.is_some();
             let mut block = block;
             block.preserialize();
             debug_assert!(
@@ -724,6 +749,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 "header must be preserialized before entering core"
             );
             verified_data_blocks.push(Data::new(block));
+            verified_has_shard.push(has_shard);
         }
 
         tracing::debug!(
@@ -734,11 +760,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         );
         if !verified_data_blocks.is_empty() {
             // Notify CordialKnowledge about new headers (and shards) entering the DAG
-            for block in &verified_data_blocks {
+            for (block, &has_shard) in verified_data_blocks
+                .iter()
+                .zip(verified_has_shard.iter())
+            {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-                if block.shard_data().is_some() {
+                if has_shard {
                     self.inner
                         .cordial_knowledge
                         .send(CordialKnowledgeMessage::NewShard(*block.reference()));

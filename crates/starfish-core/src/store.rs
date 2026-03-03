@@ -6,7 +6,7 @@ use std::io;
 use crate::{
     dag_state::CommitData,
     data::Data,
-    types::{BlockReference, RoundNumber, VerifiedBlock},
+    types::{BlockReference, ProvableShard, RoundNumber, VerifiedBlock},
 };
 
 /// Backend-agnostic storage interface for consensus blocks and commit data.
@@ -44,4 +44,6 @@ pub trait Store: Send + Sync + 'static {
     fn store_tx_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
 
     fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
+
+    fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>>;
 }

@@ -134,10 +134,7 @@ impl TideHunterStore {
             return Ok(None);
         };
         let tx: Option<TransactionData> = self.point_read(self.ks_tx_data, key)?;
-        let shard: Option<ProvableShard> = self.point_read(self.ks_shard_data, key)?;
-        Ok(Some(Data::new(VerifiedBlock::from_parts(
-            header, tx, shard,
-        ))))
+        Ok(Some(Data::new(VerifiedBlock::from_parts(header, tx))))
     }
 }
 
@@ -161,14 +158,6 @@ impl Store for TideHunterStore {
                 .to_vec();
             batch.write(self.ks_tx_data, key.to_vec(), tx_bytes);
         }
-        if let Some(_shard) = block.shard_data() {
-            let shard_bytes = block
-                .serialized_shard_data_bytes()
-                .expect("shard_data must be preserialized before store")
-                .to_vec();
-            batch.write(self.ks_shard_data, key.to_vec(), shard_bytes);
-        }
-
         batch
             .commit()
             .map_err(|e| io::Error::other(format!("TideHunter store block: {e:?}")))
@@ -217,9 +206,8 @@ impl Store for TideHunterStore {
                 .try_into()
                 .map_err(|_| io::Error::other("invalid key length"))?;
             let tx: Option<TransactionData> = self.point_read(self.ks_tx_data, &key)?;
-            let shard: Option<ProvableShard> = self.point_read(self.ks_shard_data, &key)?;
 
-            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx, shard)));
+            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
             seen.insert(key);
         }
 
@@ -307,5 +295,10 @@ impl Store for TideHunterStore {
         self.db
             .insert(self.ks_shard_data, key, bytes.to_vec())
             .map_err(|e| io::Error::other(format!("TideHunter store shard_data: {e:?}")))
+    }
+
+    fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>> {
+        let key = Self::encode_key(reference);
+        self.point_read(self.ks_shard_data, &key)
     }
 }
