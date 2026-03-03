@@ -120,7 +120,7 @@ pub struct Metrics {
     pub subscribed_to_peers: IntGauge,
     pub subscribed_by_peers: IntGauge,
 
-    // per-peer useful-authorities count
+    // per-peer useful-authorities counts by kind
     pub useful_authorities: IntGaugeVec,
 }
 
@@ -399,8 +399,8 @@ impl Metrics {
             .unwrap(),
             useful_authorities: register_int_gauge_vec_with_registry!(
                 "useful_authorities",
-                "Number of useful authorities per peer",
-                &["peer"],
+                "Number of useful authorities per peer by kind",
+                &["peer", "kind"],
                 registry,
             )
             .unwrap(),

@@ -1768,14 +1768,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_transaction_size_bytes{v=\"p50\", validator=~\"$validator\"}",
+          "expr": "proposed_transaction_size_bytes{v=\"sum\", validator=~\"$validator\"} / clamp_min(proposed_transaction_size_bytes{v=\"count\", validator=~\"$validator\"}, 1)",
           "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Transaction payload size (p50)",
+      "title": "Transaction payload per block (avg)",
       "type": "timeseries"
     },
     {
@@ -3746,13 +3746,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "useful_authorities{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} \u2014 peer {{peer}}",
+          "expr": "sum by (validator) (useful_authorities{validator=~\"$validator\", kind=\"total\"})",
+          "legendFormat": "{{validator}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Useful authorities per peer",
+      "title": "Useful authorities total",
       "type": "timeseries"
     }
   ],

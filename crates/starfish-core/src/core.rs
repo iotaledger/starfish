@@ -733,7 +733,7 @@ impl<H: BlockHandler> Core<H> {
                     .sum();
                 self.metrics
                     .proposed_transaction_size_bytes
-                    .observe(total_bytes / transactions.len());
+                    .observe(total_bytes);
             }
         }
     }

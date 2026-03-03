@@ -751,6 +751,26 @@ where
     Some(())
 }
 
+fn report_useful_authorities(
+    metrics: &Metrics,
+    peer: &str,
+    useful_headers: u128,
+    useful_shards: u128,
+) {
+    metrics
+        .useful_authorities
+        .with_label_values(&[peer, "headers"])
+        .set(useful_headers.count_ones() as i64);
+    metrics
+        .useful_authorities
+        .with_label_values(&[peer, "shards"])
+        .set(useful_shards.count_ones() as i64);
+    metrics
+        .useful_authorities
+        .with_label_values(&[peer, "total"])
+        .set((useful_headers | useful_shards).count_ones() as i64);
+}
+
 async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
@@ -799,10 +819,8 @@ where
             ck.useful_authors_bitmasks(current_round)
         })
         .unwrap_or((0, 0));
-    metrics
-        .useful_authorities
-        .with_label_values(&[&peer.to_string()])
-        .set((useful_headers | useful_shards).count_ones() as i64);
+    let peer_label = peer.to_string();
+    report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
@@ -855,10 +873,8 @@ where
         let (uh, us) = ck.useful_authors_bitmasks(current_round);
         (header_refs, shard_refs, uh, us)
     };
-    metrics
-        .useful_authorities
-        .with_label_values(&[&peer.to_string()])
-        .set((useful_headers | useful_shards).count_ones() as i64);
+    let peer_label = peer.to_string();
+    report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
 
     let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
     let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);

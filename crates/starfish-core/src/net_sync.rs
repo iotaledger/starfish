@@ -392,18 +392,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             for block in full_blocks.iter().chain(headers.iter()) {
                 // Peer knows this block's header (they sent it to us)
                 ck.mark_header_known(*block.reference());
-                if block.transactions().is_some() || block.shard_data().is_some() {
+                // Only an actual shard payload proves the peer has this shard.
+                if block.shard_data().is_some() {
                     ck.mark_shard_known(*block.reference());
                 }
                 // Peer knows the header of every parent (causal history)
                 for parent_ref in block.block_references() {
                     ck.mark_header_known(*parent_ref);
                 }
-                // Acknowledgments prove the peer knows both the header and the
-                // shard of each acknowledged block.
+                // Acknowledgments only prove the peer knows the acknowledged
+                // block headers.
                 for ack_ref in block.acknowledgments() {
                     ck.mark_header_known(ack_ref);
-                    ck.mark_shard_known(ack_ref);
                 }
             }
             for shard in &shards {
@@ -454,7 +454,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         let maybe_tx = self.inner.shard_tx.lock().clone();
         let Some(shard_tx) = maybe_tx else { return };
-        let connection_knowledge = self.inner.cordial_knowledge.connection_knowledge(self.peer_id);
+        let connection_knowledge = self
+            .inner
+            .cordial_knowledge
+            .connection_knowledge(self.peer_id);
         let committee_size = self.inner.committee.len();
 
         for payload in shards {
@@ -486,7 +489,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
 
                 if let Some(ck) = connection_knowledge.as_ref() {
-                    ck.write().mark_shard_useful_from_peer(payload.block_reference);
+                    ck.write()
+                        .mark_shard_useful_from_peer(payload.block_reference);
                 }
 
                 let _ = shard_tx
@@ -510,7 +514,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     async fn process_blocks_without_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         use crate::shard_reconstructor::ShardMessage;
 
-        let connection_knowledge = self.inner.cordial_knowledge.connection_knowledge(self.peer_id);
+        let connection_knowledge = self
+            .inner
+            .cordial_knowledge
+            .connection_knowledge(self.peer_id);
         let incoming_statuses: Vec<_> = blocks
             .iter()
             .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
@@ -628,7 +635,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn process_blocks_with_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
-        let connection_knowledge = self.inner.cordial_knowledge.connection_knowledge(self.peer_id);
+        let connection_knowledge = self
+            .inner
+            .cordial_knowledge
+            .connection_knowledge(self.peer_id);
         let incoming_statuses: Vec<_> = blocks
             .iter()
             .map(|block| (block.digest(), Status::get_status(block, self.peer_usize)))
