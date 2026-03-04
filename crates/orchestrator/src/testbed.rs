@@ -2,7 +2,10 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Duration;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use futures::future::try_join_all;
 use prettytable::{Table, row};
@@ -29,6 +32,8 @@ pub struct Testbed<C> {
 }
 
 impl<C: ServerProviderClient> Testbed<C> {
+    const MAX_CONCURRENT_CREATES: usize = 5;
+
     /// Create a new testbed instance with the specified settings and client.
     pub async fn new(settings: Settings, client: C) -> TestbedResult<Self> {
         let public_key = settings.load_ssh_public_key()?;
@@ -128,15 +133,10 @@ impl<C: ServerProviderClient> Testbed<C> {
     /// region. The total number of instances created is thus the specified
     /// amount x the number of regions.
     pub async fn deploy(&mut self, quantity: usize, region: Option<String>) -> TestbedResult<()> {
-        display::action(format!("Deploying instances ({quantity} per region)"));
-
-        // Run one-time per-region setup (security groups, image IDs, etc.)
-        self.client.prepare_deploy().await?;
-
-        // AWS RunInstances has a request token bucket of 5 (refill 2/s).
-        // Cap concurrency to avoid RequestLimitExceeded throttling.
-        const MAX_CONCURRENT_CREATES: usize = 5;
-
+        let description = match region.as_ref() {
+            Some(region) => format!("Deploying instances ({quantity} in {region})"),
+            None => format!("Deploying instances ({quantity} per region)"),
+        };
         let regions: Vec<String> = match region {
             Some(x) => std::iter::repeat_n(x, quantity).collect(),
             None => self
@@ -146,6 +146,124 @@ impl<C: ServerProviderClient> Testbed<C> {
                 .flat_map(|region| std::iter::repeat_n(region.clone(), quantity))
                 .collect(),
         };
+        self.deploy_regions(regions, description).await
+    }
+
+    /// Ensure there are at least `required_total` active instances matching
+    /// the settings, starting stopped instances first and only creating the
+    /// remaining missing capacity.
+    pub async fn ensure_active_instances(&mut self, required_total: usize) -> TestbedResult<()> {
+        let active = self
+            .instances()
+            .into_iter()
+            .filter(|instance| instance.is_active())
+            .count();
+        if active >= required_total {
+            display::config(
+                "Testbed capacity",
+                format!("{active}/{required_total} active instances already available"),
+            );
+            return Ok(());
+        }
+
+        let mut missing = required_total - active;
+        let inactive: Vec<_> = self
+            .instances()
+            .into_iter()
+            .filter(|instance| !instance.is_terminated() && !instance.is_active())
+            .collect();
+        let to_start: Vec<_> = inactive.into_iter().take(missing).collect();
+        if !to_start.is_empty() {
+            display::action(format!(
+                "Starting {} existing instances to reach benchmark capacity",
+                to_start.len()
+            ));
+            self.client.start_instances(to_start.iter()).await?;
+            if cfg!(not(test)) {
+                self.wait_until_reachable(to_start.iter()).await?;
+            }
+            self.instances = self.client.list_instances().await?;
+            display::done();
+        }
+
+        let active = self
+            .instances()
+            .into_iter()
+            .filter(|instance| instance.is_active())
+            .count();
+        if active >= required_total {
+            display::config(
+                "Testbed capacity",
+                format!("{active}/{required_total} active instances ready"),
+            );
+            return Ok(());
+        }
+
+        missing = required_total - active;
+        let regions: Vec<_> = self
+            .settings
+            .regions
+            .iter()
+            .cycle()
+            .take(missing)
+            .cloned()
+            .collect();
+        self.deploy_regions(regions, format!("Deploying {missing} additional instances"))
+            .await
+    }
+
+    /// Select exactly `required_total` active instances matching the settings,
+    /// distributing the selection across regions in round-robin order.
+    pub fn select_active_instances(&self, required_total: usize) -> TestbedResult<Vec<Instance>> {
+        let mut available: Vec<_> = self
+            .instances()
+            .into_iter()
+            .filter(|instance| instance.is_active())
+            .collect();
+        available.sort_by(|a, b| a.region.cmp(&b.region).then(a.id.cmp(&b.id)));
+
+        if available.len() < required_total {
+            return Err(TestbedError::InsufficientCapacity(
+                required_total - available.len(),
+            ));
+        }
+
+        let mut instances_by_region: HashMap<String, VecDeque<Instance>> = HashMap::new();
+        for instance in available {
+            instances_by_region
+                .entry(instance.region.clone())
+                .or_default()
+                .push_back(instance);
+        }
+
+        let mut selected = Vec::with_capacity(required_total);
+        for region in self.settings.regions.iter().cycle() {
+            if selected.len() == required_total {
+                break;
+            }
+            if let Some(regional_instances) = instances_by_region.get_mut(region) {
+                if let Some(instance) = regional_instances.pop_front() {
+                    selected.push(instance);
+                }
+            }
+        }
+
+        Ok(selected)
+    }
+
+    async fn deploy_regions(
+        &mut self,
+        regions: Vec<String>,
+        description: String,
+    ) -> TestbedResult<()> {
+        if regions.is_empty() {
+            return Ok(());
+        }
+
+        display::action(description);
+
+        // Run one-time per-region setup (security groups, image IDs, etc.)
+        self.client.prepare_deploy().await?;
 
         let total = regions.len();
         let start = Instant::now();
@@ -155,10 +273,10 @@ impl<C: ServerProviderClient> Testbed<C> {
 
         // Process in batches to respect AWS API rate limits while keeping
         // progress tracking.
-        for chunk in regions.chunks(MAX_CONCURRENT_CREATES) {
+        for chunk in regions.chunks(Self::MAX_CONCURRENT_CREATES) {
             let batch: Vec<_> = chunk
                 .iter()
-                .map(|region| self.client.create_instance(region.clone(), quantity))
+                .map(|region| self.client.create_instance(region.clone(), 1))
                 .collect();
             for result in try_join_all(batch).await? {
                 instances.push(result);
@@ -371,5 +489,53 @@ mod test {
         testbed.stop().await.unwrap();
 
         assert!(testbed.instances.iter().all(|x| x.is_inactive()))
+    }
+
+    #[tokio::test]
+    async fn ensure_active_instances_reuses_stopped_capacity() {
+        let mut settings = Settings::new_for_test();
+        settings.regions = vec!["test-region".into()];
+        let region_count = settings.number_of_regions();
+        let client = TestClient::new(settings.clone());
+        let mut testbed = Testbed::new(settings, client).await.unwrap();
+        testbed.deploy(1, None).await.unwrap();
+        testbed.stop().await.unwrap();
+
+        testbed.ensure_active_instances(region_count).await.unwrap();
+
+        let active = testbed.instances.iter().filter(|x| x.is_active()).count();
+        assert_eq!(active, region_count);
+        assert_eq!(testbed.instances.len(), region_count);
+    }
+
+    #[tokio::test]
+    async fn ensure_active_instances_deploys_missing_capacity() {
+        let mut settings = Settings::new_for_test();
+        settings.regions = vec!["test-region".into()];
+        let region_count = settings.number_of_regions();
+        let client = TestClient::new(settings.clone());
+        let mut testbed = Testbed::new(settings, client).await.unwrap();
+
+        testbed
+            .ensure_active_instances(region_count + 2)
+            .await
+            .unwrap();
+
+        let active = testbed.instances.iter().filter(|x| x.is_active()).count();
+        assert_eq!(active, region_count + 2);
+    }
+
+    #[tokio::test]
+    async fn select_active_instances_returns_exact_capacity() {
+        let mut settings = Settings::new_for_test();
+        settings.regions = vec!["a".into(), "b".into()];
+        let client = TestClient::new(settings.clone());
+        let mut testbed = Testbed::new(settings, client).await.unwrap();
+        testbed.deploy(2, None).await.unwrap();
+
+        let selected = testbed.select_active_instances(3).unwrap();
+
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|instance| instance.is_active()));
     }
 }

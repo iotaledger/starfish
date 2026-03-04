@@ -16,7 +16,11 @@ use prettytable::{Table, row};
 use prometheus_parse::Scrape;
 use serde::{Deserialize, Serialize};
 
-use crate::{benchmark::BenchmarkParameters, display, protocol::ProtocolMetrics};
+use crate::{
+    benchmark::{BenchmarkParameters, BenchmarkRunSummary, PercentileSummary},
+    display,
+    protocol::ProtocolMetrics,
+};
 
 /// The identifier of prometheus latency buckets.
 type BucketId = String;
@@ -38,6 +42,9 @@ pub struct Measurement {
     count: usize,
     /// Sum of the squares of the latencies of all finalized transactions
     squared_sum: f64,
+    /// Scalar value for simple counters or gauges.
+    #[serde(default)]
+    scalar: f64,
 }
 
 impl Measurement {
@@ -157,12 +164,20 @@ impl Measurement {
                 x if x == "bytes_received_total" => match sample.value {
                     prometheus_parse::Value::Counter(value) => {
                         measurement.count = value as usize;
+                        measurement.scalar = value;
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
                 x if x == "bytes_sent_total" => match sample.value {
                     prometheus_parse::Value::Counter(value) => {
                         measurement.count = value as usize;
+                        measurement.scalar = value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
+                x if x == "process_cpu_seconds_total" => match sample.value {
+                    prometheus_parse::Value::Counter(value) => {
+                        measurement.scalar = value;
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
@@ -192,31 +207,6 @@ impl Measurement {
     /// Compute the average latency.
     pub fn average_latency(&self) -> Duration {
         self.sum.checked_div(self.count as u32).unwrap_or_default()
-    }
-
-    /// Compute the standard deviation from the sum of squared latencies:
-    /// `stdev = sqrt( (squared_sum / count) - avg^2 )`
-    pub fn stdev_latency(&self) -> Duration {
-        // Compute `squared_sum / count`.
-        let first_term = if self.count == 0 {
-            return Duration::from_secs(0);
-        } else {
-            self.squared_sum / self.count as f64
-        };
-
-        // Compute `avg^2`.
-        let squared_avg = self.average_latency().as_micros().pow(2) as f64;
-
-        // Compute `squared_sum / count - avg^2`.
-        let variance = if squared_avg > first_term {
-            0.0
-        } else {
-            first_term - squared_avg
-        };
-
-        // Compute `sqrt( squared_sum / count - avg^2 )`.
-        let stdev = variance.sqrt();
-        Duration::from_micros(stdev as u64)
     }
 }
 
@@ -260,35 +250,27 @@ impl MeasurementsCollection {
             .push(measurement);
     }
 
-    /// Get all measurements associated with the specified label.
-    pub fn all_measurements(&self, label: &Label) -> Vec<Vec<Measurement>> {
-        self.data
-            .get(label)
-            .map(|data| {
-                let keys: Vec<&ScraperId> = data.keys().sorted().collect();
-                let mut result = Vec::with_capacity(keys.len());
-                for key in keys {
-                    result.push(data[key].clone());
-                }
-                result
-            })
-            .unwrap_or_default()
-    }
-
     /// Get all labels.
     pub fn labels(&self) -> impl Iterator<Item = &Label> {
         self.data.keys()
     }
 
+    fn latest_measurements(&self, label: &str) -> Vec<&Measurement> {
+        self.data
+            .get(label)
+            .map(|data| {
+                data.keys()
+                    .sorted()
+                    .filter_map(|key| data.get(key).and_then(|samples| samples.last()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get the maximum result of a function applied to the measurements.
-    fn max_result<T: Default + Ord>(
-        &self,
-        label: &Label,
-        function: impl Fn(&Measurement) -> T,
-    ) -> T {
-        self.all_measurements(label)
-            .iter()
-            .filter_map(|x| x.last())
+    fn max_result<T: Default + Ord>(&self, label: &str, function: impl Fn(&Measurement) -> T) -> T {
+        self.latest_measurements(label)
+            .into_iter()
             .map(function)
             .max()
             .unwrap_or_default()
@@ -303,83 +285,159 @@ impl MeasurementsCollection {
             .unwrap_or_default()
     }
 
-    /// Aggregate the tps of multiple data points.
-    pub fn aggregate_tps(&self, label: &Label) -> u64 {
-        self.max_result(label, |x| x.count)
-            // TODO: transactions are injected in blocks after
-            // a timeout (10 sec)
-            .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize))
-            .unwrap_or_default() as u64
+    fn aggregate_rate(&self, label: &str) -> f64 {
+        let duration_secs = self.max_result(label, |x| x.timestamp).as_secs_f64();
+        if duration_secs == 0.0 {
+            return 0.0;
+        }
+
+        self.max_result(label, |x| x.count) as f64 / duration_secs
     }
 
-    /// Aggregate the average latency of multiple data points by taking the
-    /// average.
-    pub fn aggregate_bandwidth(&self, label: &Label) -> Vec<usize> {
-        let all_measurements = self.all_measurements(label);
-        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
-        last_data_points
-            .iter()
-            .map(|x| {
-                x.count
-                    .checked_div(self.max_result(label, |x| x.timestamp.as_secs_f64() as usize))
-                    .unwrap_or_default()
+    /// Aggregate the per-scraper bandwidth in bytes per second.
+    pub fn aggregate_bandwidth(&self, label: &str) -> Vec<f64> {
+        let duration_secs = self.max_result(label, |x| x.timestamp).as_secs_f64();
+        if duration_secs == 0.0 {
+            return Vec::new();
+        }
+
+        self.latest_measurements(label)
+            .into_iter()
+            .map(|measurement| {
+                let total = if measurement.scalar > 0.0 {
+                    measurement.scalar
+                } else {
+                    measurement.count as f64
+                };
+                total / duration_secs
             })
             .collect()
     }
 
-    /// Aggregate the average latency of multiple data points by taking the
-    /// average.
-    pub fn aggregate_average_latency(&self, label: &Label) -> Duration {
-        let all_measurements = self.all_measurements(label);
-        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
-        last_data_points
-            .iter()
-            .map(|x| x.average_latency())
-            .sum::<Duration>()
-            .checked_div(last_data_points.len() as u32)
-            .unwrap_or_default()
+    fn percentile(values: &[f64], percentile: f64) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+
+        let last_index = sorted.len() - 1;
+        if last_index == 0 {
+            return sorted[0];
+        }
+
+        let position = percentile.clamp(0.0, 1.0) * last_index as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        if lower == upper {
+            return sorted[lower];
+        }
+
+        let weight = position - lower as f64;
+        sorted[lower] + (sorted[upper] - sorted[lower]) * weight
     }
 
-    /// Aggregate the buckets of multiple data points.
-    pub fn aggregate_latency_buckets(&self, label: &Label) -> HashMap<Label, Vec<Duration>> {
-        let all_measurements = self.all_measurements(label);
-        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
-        last_data_points.iter().map(|x| x.buckets.clone()).fold(
-            HashMap::new(),
-            |mut acc: HashMap<BucketId, Vec<Duration>>, val| {
-                for (key, value) in val {
-                    let sum = acc.entry(key).or_default();
-                    sum.push(value);
+    fn percentile_summary(values: &[f64]) -> PercentileSummary {
+        PercentileSummary {
+            p25: Self::percentile(values, 0.25),
+            p50: Self::percentile(values, 0.50),
+            p75: Self::percentile(values, 0.75),
+        }
+    }
+
+    fn median_latency_bucket_ms(&self, label: &str, bucket: &str) -> f64 {
+        let values: Vec<_> = self
+            .latest_measurements(label)
+            .into_iter()
+            .filter_map(|measurement| measurement.buckets.get(bucket))
+            .map(|duration| duration.as_secs_f64() * 1_000.0)
+            .collect();
+        Self::percentile(&values, 0.50)
+    }
+
+    fn tps(&self) -> f64 {
+        let rate = self.aggregate_rate("transaction_committed_latency");
+        if rate > 0.0 {
+            rate
+        } else {
+            self.aggregate_rate("sequenced_transactions_total")
+        }
+    }
+
+    fn bps(&self) -> f64 {
+        self.aggregate_rate("block_committed_latency")
+    }
+
+    fn total_bandwidth_samples(&self) -> Vec<f64> {
+        let sent = self.aggregate_bandwidth("bytes_sent_total");
+        let received = self.aggregate_bandwidth("bytes_received_total");
+        if sent.is_empty() {
+            return received;
+        }
+        if received.is_empty() {
+            return sent;
+        }
+
+        sent.into_iter()
+            .zip(received)
+            .map(|(sent, received)| sent + received)
+            .collect()
+    }
+
+    fn cpu_samples(&self) -> Vec<f64> {
+        self.latest_measurements("process_cpu_seconds_total")
+            .into_iter()
+            .filter_map(|measurement| {
+                let duration_secs = measurement.timestamp.as_secs_f64();
+                (duration_secs > 0.0).then_some(measurement.scalar / duration_secs)
+            })
+            .collect()
+    }
+
+    pub fn benchmark_run_summary(&self) -> BenchmarkRunSummary {
+        let duration_secs = self.benchmark_duration().as_secs_f64();
+        let tps = self.tps();
+        let bps = self.bps();
+        let bandwidth_samples = self.total_bandwidth_samples();
+        let transaction_size = self.parameters.client_parameters.transaction_size.max(1) as f64;
+        let efficiency_samples: Vec<_> = bandwidth_samples
+            .iter()
+            .map(|bytes_per_sec| {
+                if tps == 0.0 {
+                    0.0
+                } else {
+                    bytes_per_sec / (tps * transaction_size)
                 }
-
-                acc
-            },
-        )
-    }
-
-    /// Aggregate the count buckets of multiple data points.
-    pub fn aggregate_count_buckets(&self, label: &Label) -> HashMap<Label, Vec<usize>> {
-        let all_measurements = self.all_measurements(label);
-        let last_data_points: Vec<_> = all_measurements.iter().filter_map(|x| x.last()).collect();
-        last_data_points
+            })
+            .collect();
+        let bandwidth_per_round_samples: Vec<_> = bandwidth_samples
             .iter()
-            .map(|x| x.count_buckets.clone())
-            .fold(
-                HashMap::new(),
-                |mut acc: HashMap<BucketId, Vec<usize>>, val| {
-                    for (key, value) in val {
-                        let sum = acc.entry(key).or_default();
-                        sum.push(value);
-                    }
+            .map(|bytes_per_sec| if bps == 0.0 { 0.0 } else { bytes_per_sec / bps })
+            .collect();
 
-                    acc
-                },
-            )
-    }
-
-    /// Aggregate the stdev latency of multiple data points by taking the max.
-    pub fn max_stdev_latency(&self, label: &Label) -> Duration {
-        self.max_result(label, |x| x.stdev_latency())
+        BenchmarkRunSummary {
+            protocol: self.parameters.consensus_protocol.clone(),
+            committee: self.parameters.nodes,
+            load: self.parameters.load,
+            transaction_size_bytes: self.parameters.client_parameters.transaction_size,
+            duration_secs,
+            tps,
+            bps,
+            transaction_latency_ms: PercentileSummary {
+                p25: self.median_latency_bucket_ms("transaction_committed_latency", "p25"),
+                p50: self.median_latency_bucket_ms("transaction_committed_latency", "p50"),
+                p75: self.median_latency_bucket_ms("transaction_committed_latency", "p75"),
+            },
+            block_latency_ms: PercentileSummary {
+                p25: self.median_latency_bucket_ms("block_committed_latency", "p25"),
+                p50: self.median_latency_bucket_ms("block_committed_latency", "p50"),
+                p75: self.median_latency_bucket_ms("block_committed_latency", "p75"),
+            },
+            bandwidth_efficiency: Self::percentile_summary(&efficiency_samples),
+            bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
+            cpu_cores: Self::percentile_summary(&self.cpu_samples()),
+        }
     }
 
     /// Save the collection of measurements as a json file.
@@ -396,9 +454,11 @@ impl MeasurementsCollection {
         table.set_format(display::default_table_format());
 
         let duration = self.benchmark_duration();
+        let summary = self.benchmark_run_summary();
         table.set_titles(row![bH2->"Benchmark Summary"]);
         table.add_row(row![b->"Benchmark type:", self.parameters.node_parameters]);
         table.add_row(row![bH2->""]);
+        table.add_row(row![b->"Protocol:", self.parameters.consensus_protocol]);
         table.add_row(row![b->"Nodes:", self.parameters.nodes]);
         table.add_row(row![b->"Byzantine strategy:", self.parameters.byzantine_strategy]);
         table.add_row(row![b->"Byzantine nodes:", self.parameters.byzantine_nodes]);
@@ -407,113 +467,54 @@ impl MeasurementsCollection {
         );
         table.add_row(row![b->"Faults:", self.parameters.settings.faults]);
         table.add_row(row![b->"Load:", format!("{} tx/s", self.parameters.load)]);
-        table.add_row(row![b->"Duration:", format!("{} s", duration.as_secs())]);
-
-        let mut labels: Vec<_> = self.labels().collect();
-        labels.sort_unstable_by(Ord::cmp);
-        labels.reverse();
-        let mut tps_value = 0.01;
-        for label in labels {
-            let total_tps = self.aggregate_tps(label);
-            let average_latency = self.aggregate_average_latency(label);
-            let stdev_latency = self.max_stdev_latency(label);
-            let buckets_latency = self.aggregate_latency_buckets(label);
-            let _count_buckets = self.aggregate_count_buckets(label);
-
-            table.add_row(row![bH2->""]);
-            table.add_row(row![b->"Workload:", label]);
-            match label.as_str() {
-                "block_committed_latency" => {
-                    table.add_row(row![
-                        b->"BPS:",
-                        format!("{total_tps} blocks/s")
-                    ]);
-                    table.add_row(row![
-                        b->"Block latency (avg):",
-                        format!("{} ms", average_latency.as_millis())
-                    ]);
-                    table.add_row(row![
-                        b->"Block latency (stdev):",
-                        format!("{} ms", stdev_latency.as_millis())
-                    ]);
-                    for (label, latency_vec) in buckets_latency {
-                        let vals: Vec<String> = latency_vec
-                            .iter()
-                            .map(|x| format!("{} ms", x.as_millis()))
-                            .collect();
-                        table.add_row(row![
-                            b->format!("Block latency ({}):", label),
-                            vals.join(", ")
-                        ]);
-                    }
-                }
-                "transaction_committed_latency" => {
-                    tps_value = total_tps as f64;
-                    table.add_row(row![
-                        b->"TPS:",
-                        format!("{total_tps} tx/s")
-                    ]);
-                    table.add_row(row![
-                        b->"Transaction latency (avg):",
-                        format!(
-                            "{} ms",
-                            average_latency.as_millis()
-                        )
-                    ]);
-                    table.add_row(row![
-                        b->"Transaction latency (stdev):",
-                        format!(
-                            "{} ms",
-                            stdev_latency.as_millis()
-                        )
-                    ]);
-                    for (label, latency_vec) in buckets_latency {
-                        let vals: Vec<String> = latency_vec
-                            .iter()
-                            .map(|x| format!("{} ms", x.as_millis()))
-                            .collect();
-                        table.add_row(row![
-                            b->format!(
-                                "Transaction latency ({}):",
-                                label
-                            ),
-                            vals.join(", ")
-                        ]);
-                    }
-                }
-                "sequenced_transactions_total" => {
-                    tps_value = total_tps as f64;
-                    table.add_row(row![b->"TPS:", format!("{total_tps} tx/s")]);
-                }
-                "bytes_sent_total" | "bytes_received_total" => {
-                    let bandwidth = self.aggregate_bandwidth(label);
-                    let average_bandwidth_bytes =
-                        bandwidth.iter().sum::<usize>() as f64 / bandwidth.len() as f64;
-                    let avg_bandwidth = average_bandwidth_bytes / 1024.0 / 1024.0;
-                    table.add_row(row![
-                        b->"Bandwidth:",
-                        format!("{:.2} MB/s", avg_bandwidth)
-                    ]);
-                    let efficiency = average_bandwidth_bytes / tps_value / 512.0;
-                    table.add_row(row![
-                        b->"Bandwidth efficiency:",
-                        format!("{:.2} ", efficiency)
-                    ]);
-                }
-
-                // "committed_leaders_total" => {
-                //     for (label, count) in count_buckets {
-                //         table.add_row(row![
-                //                 b->format!("Committed leaders ({}):", label),
-                //                 count.iter().map(|x| format!("{}",
-                // x)).collect::<Vec<String>>().join(", ")         ]);
-                //     }
-                // }
-                _ => {
-                    table.add_row(row![b->"Unknown metric", ""]);
-                }
-            }
-        }
+        table.add_row(row![b->"Duration:", format!("{:.1} s", duration.as_secs_f64())]);
+        table.add_row(row![b->"TPS:", format!("{:.2} tx/s", summary.tps)]);
+        table.add_row(row![b->"BPS:", format!("{:.2} blocks/s", summary.bps)]);
+        table.add_row(row![
+            b->"End-to-end latency:",
+            format!(
+                "p25={:.2} ms, p50={:.2} ms, p75={:.2} ms",
+                summary.transaction_latency_ms.p25,
+                summary.transaction_latency_ms.p50,
+                summary.transaction_latency_ms.p75
+            )
+        ]);
+        table.add_row(row![
+            b->"Block latency:",
+            format!(
+                "p25={:.2} ms, p50={:.2} ms, p75={:.2} ms",
+                summary.block_latency_ms.p25,
+                summary.block_latency_ms.p50,
+                summary.block_latency_ms.p75
+            )
+        ]);
+        table.add_row(row![
+            b->"Bandwidth efficiency:",
+            format!(
+                "p25={:.4}, p50={:.4}, p75={:.4}",
+                summary.bandwidth_efficiency.p25,
+                summary.bandwidth_efficiency.p50,
+                summary.bandwidth_efficiency.p75
+            )
+        ]);
+        table.add_row(row![
+            b->"Bandwidth / round:",
+            format!(
+                "p25={:.2} B, p50={:.2} B, p75={:.2} B",
+                summary.bandwidth_per_round_bytes.p25,
+                summary.bandwidth_per_round_bytes.p50,
+                summary.bandwidth_per_round_bytes.p75
+            )
+        ]);
+        table.add_row(row![
+            b->"CPU usage:",
+            format!(
+                "p25={:.3}, p50={:.3}, p75={:.3} cores",
+                summary.cpu_cores.p25,
+                summary.cpu_cores.p50,
+                summary.cpu_cores.p75
+            )
+        ]);
 
         display::newline();
         table.printstd();
@@ -537,6 +538,7 @@ mod test {
             sum: Duration::from_secs(2),
             count: 100,
             squared_sum: 0.0,
+            scalar: 0.0,
         };
 
         assert_eq!(data.average_latency(), Duration::from_millis(20));
@@ -674,6 +676,66 @@ bytes_sent_total 6284648
         let data = &bytes_sent_total[0];
         assert_eq!(data.count, 6284648);
         assert_eq!(data.timestamp.as_secs(), 300);
+    }
+
+    #[test]
+    fn benchmark_run_summary_includes_cpu_and_percentiles() {
+        let report = r#"
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration 200
+# HELP block_committed_latency block_committed_latency
+# TYPE block_committed_latency gauge
+block_committed_latency{v="count"} 1000
+block_committed_latency{v="p25"} 200000
+block_committed_latency{v="p50"} 300000
+block_committed_latency{v="p75"} 400000
+block_committed_latency{v="sum"} 300000000
+# HELP block_committed_latency_squared_micros Squared latency
+# TYPE block_committed_latency_squared_micros counter
+block_committed_latency_squared_micros 90000000000
+# HELP transaction_committed_latency transaction latency
+# TYPE transaction_committed_latency gauge
+transaction_committed_latency{v="count"} 40000
+transaction_committed_latency{v="p25"} 500000
+transaction_committed_latency{v="p50"} 750000
+transaction_committed_latency{v="p75"} 1000000
+transaction_committed_latency{v="sum"} 28000000000
+# HELP transaction_committed_latency_squared_micros Squared latency
+# TYPE transaction_committed_latency_squared_micros counter
+transaction_committed_latency_squared_micros 20000000000000
+# HELP bytes_sent_total Total number of bytes sent
+# TYPE bytes_sent_total counter
+bytes_sent_total 6000000
+# HELP bytes_received_total Total number of bytes received
+# TYPE bytes_received_total counter
+bytes_received_total 14000000
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 320
+        "#;
+
+        let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+        let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
+        for (label, measurement) in measurements {
+            aggregator.add(0, label, measurement);
+        }
+
+        let summary = aggregator.benchmark_run_summary();
+        assert_eq!(summary.protocol, "starfish");
+        assert_eq!(summary.load, 500);
+        assert_eq!(summary.transaction_latency_ms.p25, 500.0);
+        assert_eq!(summary.transaction_latency_ms.p50, 750.0);
+        assert_eq!(summary.transaction_latency_ms.p75, 1000.0);
+        assert_eq!(summary.block_latency_ms.p25, 200.0);
+        assert_eq!(summary.block_latency_ms.p50, 300.0);
+        assert_eq!(summary.block_latency_ms.p75, 400.0);
+        assert_eq!(summary.cpu_cores.p50, 1.6);
+        assert_eq!(summary.tps, 200.0);
+        assert_eq!(summary.bps, 5.0);
+        assert_eq!(summary.bandwidth_per_round_bytes.p50, 20_000.0);
+        let expected_efficiency = 100_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
+        assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
     }
 
     #[test]

@@ -4,9 +4,9 @@
 
 //! Orchestrator entry point.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command, time::Duration};
 
-use benchmark::BenchmarkParameters;
+use benchmark::{BenchmarkParameters, LatencyThroughputSweepPlan};
 use clap::Parser;
 use client::{Instance, ServerProviderClient, aws::AwsClient, vultr::VultrClient};
 use eyre::Context;
@@ -117,6 +117,16 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,
 
+        /// Protocols to benchmark in order. When specified, the orchestrator
+        /// runs each listed protocol.
+        #[clap(long, value_name = "[STRING]", global = true)]
+        protocols: Vec<String>,
+
+        /// Automatically destroy the testbed after a successful benchmark or
+        /// benchmark sequence.
+        #[clap(long, action, default_value_t = false, global = true)]
+        destroy_testbed_after: bool,
+
         /// Flag indicating whether nodes should advertise
         /// their internal or public IP address for inter-node
         /// communication. When running the simulation in
@@ -130,6 +140,93 @@ pub enum Operation {
 
         /// Flag indicating whether nodes use log traces or not, this is useful
         /// for debugging
+        #[clap(long, action, default_value_t = false, global = true)]
+        enable_tracing: bool,
+
+        /// Storage backend for the DAG. Overrides the value from the
+        /// parameters file. Available options: rocksdb | tidehunter
+        #[clap(long, value_name = "STRING", global = true)]
+        storage_backend: Option<String>,
+
+        /// Transaction payload mode. Overrides the value from the
+        /// parameters file. Available options: all_zero | random
+        #[clap(long, value_name = "STRING", global = true)]
+        transaction_mode: Option<String>,
+    },
+    /// One-click adaptive latency-throughput sweep. This command ensures the
+    /// required testbed capacity, then benchmarks each protocol until the
+    /// end-to-end p50 latency reaches the target.
+    BenchmarkSweep {
+        /// The committee size to deploy.
+        #[clap(long, value_name = "INT", default_value_t = 4, global = true)]
+        committee: usize,
+
+        /// The number of byzantine nodes to deploy.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        byzantine_nodes: usize,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
+        byzantine_strategy: String,
+
+        /// Whether to add synthetic network latency to node defaults.
+        #[clap(long, action, default_value_t = false, global = true)]
+        mimic_extra_latency: bool,
+
+        /// Whether to skip testbed updates before running benchmarks.
+        #[clap(long, action, default_value_t = false, global = true)]
+        skip_testbed_update: bool,
+
+        /// Whether to skip testbed configuration before running benchmarks.
+        #[clap(long, action, default_value_t = false, global = true)]
+        skip_testbed_configuration: bool,
+
+        /// Default protocol if `--protocols` is not provided.
+        #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
+        consensus: String,
+
+        /// Protocols to benchmark in order.
+        #[clap(long, value_name = "[STRING]", global = true)]
+        protocols: Vec<String>,
+
+        /// Initial load for latency-throughput sweep mode.
+        #[clap(long, value_name = "INT", default_value_t = 2_000, global = true)]
+        sweep_initial_load: usize,
+
+        /// Stop a protocol sweep when end-to-end p50 latency reaches this
+        /// target.
+        #[clap(long, value_name = "INT", default_value_t = 2_000, global = true)]
+        sweep_latency_goal_ms: u64,
+
+        /// Switch from coarse to fine load increases when end-to-end p50
+        /// latency reaches this threshold.
+        #[clap(long, value_name = "INT", default_value_t = 1_000, global = true)]
+        sweep_refine_latency_ms: u64,
+
+        /// Multiplicative load increase while latency is still comfortably
+        /// below the refinement threshold.
+        #[clap(long, value_name = "FLOAT", default_value_t = 4.0, global = true)]
+        sweep_coarse_multiplier: f64,
+
+        /// Multiplicative load increase once latency approaches the target.
+        #[clap(long, value_name = "FLOAT", default_value_t = 1.25, global = true)]
+        sweep_fine_multiplier: f64,
+
+        /// Safety cap on the number of points collected for each protocol in
+        /// sweep mode.
+        #[clap(long, value_name = "INT", default_value_t = 12, global = true)]
+        sweep_max_points: usize,
+
+        /// Automatically destroy the testbed after a successful sweep.
+        #[clap(long, action, default_value_t = false, global = true)]
+        destroy_testbed_after: bool,
+
+        /// Flag indicating whether nodes should advertise
+        /// their internal or public IP address for inter-node communication.
+        #[clap(long, action, default_value_t = false, global = true)]
+        use_internal_ip_addresses: bool,
+
+        /// Flag indicating whether nodes use log traces or not.
         #[clap(long, action, default_value_t = false, global = true)]
         enable_tracing: bool,
 
@@ -272,6 +369,79 @@ fn docker_build_and_extract() -> eyre::Result<PathBuf> {
 
     display::done();
     Ok(PathBuf::from(DOCKER_BINARY_OUTPUT))
+}
+
+fn maybe_auto_detect_prebuilt_binary(settings: &mut Settings) {
+    if settings.pre_built_binary.is_none() && std::path::Path::new(DOCKER_BINARY_OUTPUT).exists() {
+        display::config("Auto-detected pre-built binary", DOCKER_BINARY_OUTPUT);
+        settings.pre_built_binary = Some(DOCKER_BINARY_OUTPUT.into());
+    }
+}
+
+fn required_benchmark_instances(settings: &Settings, committee: usize) -> usize {
+    let cloud_monitoring = usize::from(settings.monitoring && !settings.is_external_monitoring());
+    committee + settings.dedicated_clients + cloud_monitoring
+}
+
+fn load_benchmark_configs(
+    settings: &Settings,
+    mimic_extra_latency: bool,
+    storage_backend: &Option<String>,
+    transaction_mode: &Option<String>,
+) -> eyre::Result<(NodeParameters, ClientParameters)> {
+    let node_parameters = match &settings.node_parameters_path {
+        Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
+        None => NodeParameters::default_with_latency(mimic_extra_latency),
+    };
+    let mut client_parameters = match &settings.parameters_path {
+        Some(path) => ClientParameters::load(path).wrap_err("Failed to load parameters")?,
+        None => ClientParameters::default(),
+    };
+    if let Some(ref backend) = storage_backend {
+        client_parameters.storage_backend = match backend.as_str() {
+            "rocksdb" => starfish_core::config::StorageBackend::Rocksdb,
+            "tidehunter" => starfish_core::config::StorageBackend::Tidehunter,
+            other => {
+                eyre::bail!("Unknown storage backend '{other}'. Use 'rocksdb' or 'tidehunter'.")
+            }
+        };
+    }
+    if let Some(ref mode) = transaction_mode {
+        client_parameters.transaction_mode = match mode.as_str() {
+            "all_zero" => starfish_core::config::TransactionMode::AllZero,
+            "random" => starfish_core::config::TransactionMode::Random,
+            other => eyre::bail!("Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."),
+        };
+    }
+
+    Ok((node_parameters, client_parameters))
+}
+
+async fn maybe_destroy_after_result<C: ServerProviderClient>(
+    testbed: &mut Testbed<C>,
+    destroy_testbed_after: bool,
+    result: eyre::Result<()>,
+    operation_name: &str,
+) -> eyre::Result<()> {
+    if !destroy_testbed_after {
+        return result;
+    }
+
+    match result {
+        Ok(()) => testbed
+            .destroy()
+            .await
+            .wrap_err_with(|| format!("Failed to destroy testbed after {operation_name}")),
+        Err(err) => match testbed.destroy().await {
+            Ok(()) => Err(err)
+                .wrap_err_with(|| format!("{operation_name} failed; the testbed was destroyed")),
+            Err(destroy_err) => Err(err).wrap_err_with(|| {
+                format!(
+                    "{operation_name} failed, and destroying the testbed also failed: {destroy_err}"
+                )
+            }),
+        },
+    }
 }
 
 fn select_monitoring_instance(
@@ -459,6 +629,8 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             consensus: consensus_protocol,
+            protocols,
+            destroy_testbed_after,
             mimic_extra_latency,
             use_internal_ip_addresses,
             loads,
@@ -470,82 +642,220 @@ async fn run<C: ServerProviderClient>(
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
-            if settings.pre_built_binary.is_none()
-                && std::path::Path::new(DOCKER_BINARY_OUTPUT).exists()
-            {
-                display::config("Auto-detected pre-built binary", DOCKER_BINARY_OUTPUT);
-                settings.pre_built_binary = Some(DOCKER_BINARY_OUTPUT.into());
-            }
+            maybe_auto_detect_prebuilt_binary(&mut settings);
+            let required_instances = required_benchmark_instances(&settings, committee);
 
-            // Create a new orchestrator to instruct the testbed.
-            let username = testbed.username();
-            let private_key_file = settings.ssh_private_key_file.clone();
-            let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
-                .with_timeout(settings.ssh_timeout)
-                .with_retries(settings.ssh_retries);
+            let (node_parameters, client_parameters) = load_benchmark_configs(
+                &settings,
+                mimic_extra_latency,
+                &storage_backend,
+                &transaction_mode,
+            )?;
 
-            let instances = testbed.instances();
-
-            let setup_commands = testbed
-                .setup_commands()
-                .await
-                .wrap_err("Failed to load testbed setup commands")?;
-
-            let protocol_commands = Protocol::new(&settings);
-            let node_parameters = match &settings.node_parameters_path {
-                Some(path) => {
-                    NodeParameters::load(path).wrap_err("Failed to load node's parameters")?
-                }
-                None => NodeParameters::default_with_latency(mimic_extra_latency),
+            let protocols = if protocols.is_empty() {
+                vec![consensus_protocol]
+            } else {
+                protocols
             };
-            let mut client_parameters = match &settings.parameters_path {
-                Some(path) => ClientParameters::load(path).wrap_err("Failed to load parameters")?,
-                None => ClientParameters::default(),
-            };
-            if let Some(ref backend) = storage_backend {
-                client_parameters.storage_backend = match backend.as_str() {
-                    "rocksdb" => starfish_core::config::StorageBackend::Rocksdb,
-                    "tidehunter" => starfish_core::config::StorageBackend::Tidehunter,
-                    other => eyre::bail!(
-                        "Unknown storage backend '{other}'. Use 'rocksdb' or 'tidehunter'."
-                    ),
-                };
-            }
-            if let Some(ref mode) = transaction_mode {
-                client_parameters.transaction_mode = match mode.as_str() {
-                    "all_zero" => starfish_core::config::TransactionMode::AllZero,
-                    "random" => starfish_core::config::TransactionMode::Random,
-                    other => eyre::bail!(
-                        "Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."
-                    ),
-                };
-            }
 
-            let set_of_benchmark_parameters = BenchmarkParameters::new_from_loads(
+            let base_parameters = BenchmarkParameters::new(
                 settings.clone(),
                 node_parameters,
                 client_parameters,
                 committee,
                 use_internal_ip_addresses,
-                loads,
-                consensus_protocol,
+                *loads.first().unwrap_or(&0),
+                protocols
+                    .first()
+                    .cloned()
+                    .expect("protocol list is non-empty"),
                 byzantine_nodes,
                 byzantine_strategy,
                 enable_tracing,
             );
 
-            Orchestrator::new(
-                settings,
-                instances,
-                setup_commands,
-                protocol_commands,
-                ssh_manager,
+            let set_of_benchmark_parameters = if protocols.len() == 1 {
+                BenchmarkParameters::new_from_loads(
+                    base_parameters.settings.clone(),
+                    base_parameters.node_parameters.clone(),
+                    base_parameters.client_parameters.clone(),
+                    base_parameters.nodes,
+                    base_parameters.use_internal_ip_address,
+                    loads,
+                    protocols[0].clone(),
+                    base_parameters.byzantine_nodes,
+                    base_parameters.byzantine_strategy.clone(),
+                    base_parameters.enable_tracing,
+                )
+            } else {
+                BenchmarkParameters::new_from_protocols_and_loads(
+                    base_parameters.settings.clone(),
+                    base_parameters.node_parameters.clone(),
+                    base_parameters.client_parameters.clone(),
+                    base_parameters.nodes,
+                    base_parameters.use_internal_ip_address,
+                    protocols,
+                    loads,
+                    base_parameters.byzantine_nodes,
+                    base_parameters.byzantine_strategy.clone(),
+                    base_parameters.enable_tracing,
+                )
+            };
+
+            let benchmark_result: eyre::Result<()> = async {
+                let username = testbed.username();
+                let private_key_file = settings.ssh_private_key_file.clone();
+                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+                    .with_timeout(settings.ssh_timeout)
+                    .with_retries(settings.ssh_retries);
+
+                let instances = testbed
+                    .select_active_instances(required_instances)
+                    .wrap_err("Not enough active instances for benchmark")?;
+
+                let setup_commands = testbed
+                    .setup_commands()
+                    .await
+                    .wrap_err("Failed to load testbed setup commands")?;
+
+                let protocol_commands = Protocol::new(&settings);
+                Orchestrator::new(
+                    settings,
+                    instances,
+                    setup_commands,
+                    protocol_commands,
+                    ssh_manager,
+                )
+                .skip_testbed_update(skip_testbed_update)
+                .skip_testbed_configuration(skip_testbed_configuration)
+                .run_benchmarks(set_of_benchmark_parameters)
+                .await
+                .wrap_err("Failed to run benchmarks")
+            }
+            .await;
+
+            maybe_destroy_after_result(
+                &mut testbed,
+                destroy_testbed_after,
+                benchmark_result,
+                "Benchmark",
             )
-            .skip_testbed_update(skip_testbed_update)
-            .skip_testbed_configuration(skip_testbed_configuration)
-            .run_benchmarks(set_of_benchmark_parameters)
-            .await
-            .wrap_err("Failed to run benchmarks")?;
+            .await?;
+        }
+
+        Operation::BenchmarkSweep {
+            committee,
+            byzantine_nodes,
+            byzantine_strategy,
+            consensus: consensus_protocol,
+            protocols,
+            sweep_initial_load,
+            sweep_latency_goal_ms,
+            sweep_refine_latency_ms,
+            sweep_coarse_multiplier,
+            sweep_fine_multiplier,
+            sweep_max_points,
+            destroy_testbed_after,
+            mimic_extra_latency,
+            use_internal_ip_addresses,
+            skip_testbed_update,
+            skip_testbed_configuration,
+            enable_tracing,
+            storage_backend,
+            transaction_mode,
+        } => {
+            let mut settings = settings;
+            maybe_auto_detect_prebuilt_binary(&mut settings);
+            let required_instances = required_benchmark_instances(&settings, committee);
+            let (node_parameters, client_parameters) = load_benchmark_configs(
+                &settings,
+                mimic_extra_latency,
+                &storage_backend,
+                &transaction_mode,
+            )?;
+
+            let protocols = if protocols.is_empty() {
+                vec![consensus_protocol]
+            } else {
+                protocols
+            };
+
+            let base_parameters = BenchmarkParameters::new(
+                settings.clone(),
+                node_parameters,
+                client_parameters,
+                committee,
+                use_internal_ip_addresses,
+                sweep_initial_load,
+                protocols
+                    .first()
+                    .cloned()
+                    .expect("protocol list is non-empty"),
+                byzantine_nodes,
+                byzantine_strategy,
+                enable_tracing,
+            );
+
+            eyre::ensure!(
+                base_parameters.settings.benchmark_duration > Duration::ZERO,
+                "Latency-throughput sweep requires a non-zero benchmark_duration",
+            );
+
+            let sweep_plan = LatencyThroughputSweepPlan::new(
+                protocols,
+                sweep_initial_load,
+                Duration::from_millis(sweep_latency_goal_ms),
+                Duration::from_millis(sweep_refine_latency_ms),
+                sweep_coarse_multiplier,
+                sweep_fine_multiplier,
+                sweep_max_points,
+            )
+            .wrap_err("Invalid latency-throughput sweep configuration")?;
+
+            let sweep_result: eyre::Result<()> = async {
+                testbed
+                    .ensure_active_instances(required_instances)
+                    .await
+                    .wrap_err("Failed to ensure benchmark capacity")?;
+
+                let username = testbed.username();
+                let private_key_file = settings.ssh_private_key_file.clone();
+                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+                    .with_timeout(settings.ssh_timeout)
+                    .with_retries(settings.ssh_retries);
+
+                let instances = testbed
+                    .select_active_instances(required_instances)
+                    .wrap_err("Failed to reserve instances for benchmark sweep")?;
+
+                let setup_commands = testbed
+                    .setup_commands()
+                    .await
+                    .wrap_err("Failed to load testbed setup commands")?;
+
+                let protocol_commands = Protocol::new(&settings);
+                Orchestrator::new(
+                    settings,
+                    instances,
+                    setup_commands,
+                    protocol_commands,
+                    ssh_manager,
+                )
+                .skip_testbed_update(skip_testbed_update)
+                .skip_testbed_configuration(skip_testbed_configuration)
+                .run_latency_throughput_sweep(base_parameters, sweep_plan)
+                .await
+                .wrap_err("Failed to run latency-throughput sweep")
+            }
+            .await;
+
+            maybe_destroy_after_result(
+                &mut testbed,
+                destroy_testbed_after,
+                sweep_result,
+                "Benchmark sweep",
+            )
+            .await?;
         }
 
         // Print a summary of the specified measurements collection.

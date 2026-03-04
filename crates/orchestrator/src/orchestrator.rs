@@ -6,12 +6,13 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::time::{self, Instant};
 
 use crate::{
-    benchmark::BenchmarkParameters,
+    benchmark::{BenchmarkParameters, LatencyThroughputSweepPlan, LatencyThroughputSweepReport},
     client::Instance,
     display, ensure,
     error::{TestbedError, TestbedResult},
@@ -686,11 +687,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .expect("At least one log parser"))
     }
 
-    /// Run all the benchmarks specified by the benchmark generator.
-    pub async fn run_benchmarks(
-        &mut self,
-        set_of_parameters: Vec<BenchmarkParameters>,
-    ) -> TestbedResult<()> {
+    async fn prepare_benchmark_suite(&mut self) -> TestbedResult<()> {
         display::header("Preparing testbed");
         if let Some(binary) = &self.settings.pre_built_binary {
             display::config("Pre-built binary", binary);
@@ -713,53 +710,159 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             )?;
         }
 
+        Ok(())
+    }
+
+    async fn run_benchmark_once(
+        &mut self,
+        parameters: &BenchmarkParameters,
+    ) -> TestbedResult<Option<MeasurementsCollection>> {
+        // Cleanup the testbed (in case the previous run was not completed).
+        self.cleanup(true).await?;
+        // Start the instance monitoring tools.
+        self.start_monitoring(parameters).await?;
+
+        // Reconfigure before each run because benchmark parameters such as
+        // per-node load are written into the generated config files.
+        if !self.skip_testbed_configuration {
+            self.configure(parameters).await?;
+        }
+
+        // Deploy the validators.
+        self.run_nodes(parameters).await?;
+        if parameters.settings.benchmark_duration.as_secs() == 0 {
+            return Ok(None);
+        }
+
+        // Deploy the load generators.
+        self.run_clients(parameters).await?;
+
+        // Wait for the benchmark to terminate. Then save the results.
+        let aggregator = self.run(parameters).await?;
+
+        // Kill the nodes and clients (without deleting the log files).
+        self.cleanup(false).await?;
+
+        // Download the log files.
+        if self.settings.log_processing {
+            let error_counter = self.download_logs(parameters).await?;
+            error_counter.print_summary();
+        }
+
+        Ok(Some(aggregator))
+    }
+
+    fn save_sweep_report(&self, report: &LatencyThroughputSweepReport, stem: &str) {
+        let commit = &self.settings.repository.commit;
+        let path = self
+            .settings
+            .results_dir
+            .join(format!("results-{commit}"))
+            .join("sweeps");
+        fs::create_dir_all(&path).expect("Failed to create sweep results directory");
+
+        let json = serde_json::to_string_pretty(report).expect("Cannot serialize sweep report");
+        fs::write(path.join(format!("{stem}.json")), json).expect("Failed to write sweep report");
+        fs::write(path.join(format!("{stem}.csv")), report.to_csv())
+            .expect("Failed to write sweep CSV report");
+    }
+
+    /// Run all the benchmarks specified by the benchmark generator.
+    pub async fn run_benchmarks(
+        &mut self,
+        set_of_parameters: Vec<BenchmarkParameters>,
+    ) -> TestbedResult<()> {
+        self.prepare_benchmark_suite().await?;
+
         // Run all benchmarks.
         let mut i = 1;
-        let mut latest_committee_size = 0;
         for parameters in set_of_parameters {
             display::header(format!("Starting benchmark {i}"));
             display::config("Node Parameters", &parameters.node_parameters);
             display::config("Benchmark Parameters", &parameters);
             display::newline();
 
-            // Cleanup the testbed (in case the previous run was not completed).
-            self.cleanup(true).await?;
-            // Start the instance monitoring tools.
-            self.start_monitoring(&parameters).await?;
-
-            // Configure all instances (if needed).
-            if !self.skip_testbed_configuration && latest_committee_size != parameters.nodes {
-                self.configure(&parameters).await?;
-                latest_committee_size = parameters.nodes;
-            }
-
-            // Deploy the validators.
-            self.run_nodes(&parameters).await?;
-            if parameters.settings.benchmark_duration.as_secs() == 0 {
+            let Some(aggregator) = self.run_benchmark_once(&parameters).await? else {
                 return Ok(());
-            }
-
-            // Deploy the load generators.
-            self.run_clients(&parameters).await?;
-
-            // Wait for the benchmark to terminate. Then save the results and print a
-            // summary.
-            let aggregator = self.run(&parameters).await?;
+            };
             aggregator.display_summary();
-
-            // Kill the nodes and clients (without deleting the log files).
-            self.cleanup(false).await?;
-
-            // Download the log files.
-            if self.settings.log_processing {
-                let error_counter = self.download_logs(&parameters).await?;
-                error_counter.print_summary();
-            }
 
             i += 1;
         }
 
         display::header("Benchmark completed");
+        Ok(())
+    }
+
+    pub async fn run_latency_throughput_sweep(
+        &mut self,
+        base_parameters: BenchmarkParameters,
+        plan: LatencyThroughputSweepPlan,
+    ) -> TestbedResult<()> {
+        self.prepare_benchmark_suite().await?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let stem = format!("latency-throughput-sweep-{timestamp}");
+        let mut summaries = Vec::new();
+
+        for protocol in &plan.protocols {
+            let mut current_load = plan.initial_load;
+            let mut point_index = 0;
+
+            loop {
+                point_index += 1;
+                let parameters =
+                    base_parameters.with_load_and_consensus(current_load, protocol.clone());
+                display::header(format!("Sweep {} point {}", protocol, point_index));
+                display::config("Node Parameters", &parameters.node_parameters);
+                display::config("Benchmark Parameters", &parameters);
+                display::newline();
+
+                let Some(aggregator) = self.run_benchmark_once(&parameters).await? else {
+                    return Ok(());
+                };
+                aggregator.display_summary();
+
+                let summary = aggregator.benchmark_run_summary();
+                let reached_goal = plan.reached_latency_goal(summary.transaction_latency_ms.p50);
+                summaries.push(summary.clone());
+
+                let report = LatencyThroughputSweepReport {
+                    generated_at_unix_secs: timestamp,
+                    plan: plan.clone(),
+                    points: summaries.clone(),
+                };
+                self.save_sweep_report(&report, &stem);
+
+                if reached_goal {
+                    display::config(
+                        "Sweep progress",
+                        format!(
+                            "{} reached the {} ms goal at load {}",
+                            protocol, plan.latency_goal_ms, current_load
+                        ),
+                    );
+                    break;
+                }
+
+                if point_index >= plan.max_points_per_protocol {
+                    display::warn(format!(
+                        "Stopping {} after {} points without hitting the {} ms goal",
+                        protocol, plan.max_points_per_protocol, plan.latency_goal_ms
+                    ));
+                    break;
+                }
+
+                current_load = plan
+                    .next_load(current_load, summary.transaction_latency_ms.p50)
+                    .unwrap_or(current_load);
+            }
+        }
+
+        display::header("Latency-throughput sweep completed");
         Ok(())
     }
 }
