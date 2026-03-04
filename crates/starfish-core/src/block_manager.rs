@@ -53,6 +53,8 @@ impl BlockManager {
         let mut blocks: VecDeque<Data<VerifiedBlock>> = blocks.into();
         let mut newly_processed: Vec<Data<VerifiedBlock>> = vec![];
         let mut updated_existing_with_transactions: Vec<Data<VerifiedBlock>> = vec![];
+        // Blocks to insert into the DAG in a single batched write lock.
+        let mut blocks_to_insert: Vec<Data<VerifiedBlock>> = vec![];
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
@@ -73,7 +75,7 @@ impl BlockManager {
                 // Block already in store — check if this version brings new transaction data
                 if self.dag_state.contains_new_transactions(&block) {
                     tracing::debug!("Block has new transactions: {:?}", block_reference);
-                    dag_state.insert_general_block(block.clone());
+                    blocks_to_insert.push(block.clone());
                     updated_existing_with_transactions.push(block);
                 }
                 continue;
@@ -118,8 +120,8 @@ impl BlockManager {
             } else {
                 let block_reference = *block_reference;
 
-                // Block can be processed. So need to update indexes etc
-                dag_state.insert_general_block(block.clone());
+                // Defer DAG insertion — will be done in batch after the loop.
+                blocks_to_insert.push(block.clone());
                 block_exists_cache.insert(block_reference, true);
                 newly_processed.push(block);
 
@@ -156,6 +158,9 @@ impl BlockManager {
                 }
             }
         }
+
+        // Batch-insert all collected blocks under a single DAG write lock.
+        dag_state.insert_general_blocks(blocks_to_insert);
 
         (
             newly_processed,

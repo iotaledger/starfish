@@ -260,22 +260,6 @@ impl Store for TideHunterStore {
         }
     }
 
-    fn flush(&self) -> io::Result<()> {
-        // TideHunter's WAL is the permanent storage — no separate flush needed.
-        Ok(())
-    }
-
-    fn flush_pending_batches(&self) -> io::Result<()> {
-        // No external batching layer — writes go directly to TideHunter's WAL.
-        Ok(())
-    }
-
-    fn sync(&self) -> io::Result<()> {
-        // Writes are durable after insert()/commit() returns — WAL is the source of
-        // truth.
-        Ok(())
-    }
-
     fn store_header_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
         let key = Self::encode_key(reference);
         self.db

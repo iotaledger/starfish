@@ -15,7 +15,7 @@ use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
-    core::{Core, CoreOptions},
+    core::Core,
     dag_state::DagState,
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
@@ -118,7 +118,6 @@ impl Validator {
             &public_config,
             metrics.clone(),
             recovered,
-            CoreOptions::default(),
         );
         tracing::info!("Core");
 

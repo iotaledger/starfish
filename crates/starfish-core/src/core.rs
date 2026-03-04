@@ -55,7 +55,6 @@ pub struct Core<H: BlockHandler> {
     last_commit_leader: BlockReference,
     dag_state: DagState,
     pub(crate) metrics: Arc<Metrics>,
-    options: CoreOptions,
     signer: Signer,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
@@ -64,10 +63,6 @@ pub struct Core<H: BlockHandler> {
     rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
     pub(crate) encoder: Encoder,
-}
-
-pub struct CoreOptions {
-    fsync: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +81,6 @@ impl<H: BlockHandler> Core<H> {
         public_config: &NodePublicConfig,
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
-        options: CoreOptions,
     ) -> Self {
         let RecoveredState {
             dag_state,
@@ -177,7 +171,6 @@ impl<H: BlockHandler> Core<H> {
             last_commit_leader: last_committed_leader.unwrap_or_default(),
             dag_state,
             metrics,
-            options,
             signer: private_config.keypair,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
@@ -203,11 +196,6 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn get_universal_committer(&self) -> UniversalCommitter {
         self.committer.clone()
-    }
-
-    pub fn with_options(mut self, options: CoreOptions) -> Self {
-        self.options = options;
-        self
     }
 
     // This function attempts to add blocks to the local DAG.
@@ -482,8 +470,6 @@ impl<H: BlockHandler> Core<H> {
                 self.store_block(block_data, &authority_bounds, block_id)
             );
         }
-
-        self.persist_to_storage("Core::new_block");
 
         first_block
     }
@@ -823,7 +809,7 @@ impl<H: BlockHandler> Core<H> {
         true
     }
 
-    pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>, any_decided: bool) {
+    pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>, _any_decided: bool) {
         let mut commit_data = vec![];
         for commit in &committed {
             self.dag_state
@@ -844,25 +830,6 @@ impl<H: BlockHandler> Core<H> {
             .store_commits_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
-        if any_decided {
-            self.persist_to_storage("Core::commit");
-        }
-    }
-
-    fn persist_to_storage(&self, label: &str) {
-        if self.options.fsync {
-            let _t = self
-                .metrics
-                .utilization_timer
-                .utilization_timer(&format!("{label}::sync_with_disk"));
-            self.store.sync().expect("Storage sync failed");
-        } else {
-            let _t = self
-                .metrics
-                .utilization_timer
-                .utilization_timer(&format!("{label}::flush_to_buffer"));
-            self.store.flush().expect("Storage flush failed");
-        }
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
@@ -927,21 +894,5 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn epoch_closing_time(&self) -> Arc<AtomicU64> {
         self.epoch_manager.closing_time()
-    }
-}
-
-impl Default for CoreOptions {
-    fn default() -> Self {
-        Self::test()
-    }
-}
-
-impl CoreOptions {
-    pub fn test() -> Self {
-        Self { fsync: false }
-    }
-
-    pub fn production() -> Self {
-        Self { fsync: true }
     }
 }

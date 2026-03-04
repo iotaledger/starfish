@@ -1,21 +1,15 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashMap, VecDeque},
-    io,
-    path::Path,
-    sync::Arc,
-};
+use std::{io, path::Path, sync::Arc};
 
 use ahash::AHashSet;
 
 use bincode::{deserialize, serialize};
-use parking_lot::RwLock;
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options, ReadOptions, WriteOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, Options, ReadOptions,
+    WriteOptions,
 };
-use tokio::{sync::watch, time::Instant};
 
 use crate::{
     crypto::BlockDigest,
@@ -33,64 +27,10 @@ const CF_HEADERS: &str = "headers";
 const CF_TX_DATA: &str = "tx_data";
 const CF_SHARD_DATA: &str = "shard_data";
 const CF_COMMITS: &str = "commits";
-const BATCH_SIZE_THRESHOLD: usize = 2 * 1024 * 1024; // target batch size
-
-// Keep the batched operations in memory
-#[derive(Default)]
-struct BatchedOperations {
-    // Legacy composite blocks — no longer written to, but may exist in pending
-    // batches from before a rolling upgrade.
-    blocks: HashMap<BlockReference, Data<VerifiedBlock>>,
-    // Component maps for the new separated storage.
-    headers: HashMap<BlockReference, Vec<u8>>,
-    tx_data: HashMap<BlockReference, Vec<u8>>,
-    shard_data: HashMap<BlockReference, Vec<u8>>,
-    commits: HashMap<BlockReference, CommitData>,
-    total_size: usize,
-}
-
-impl BatchedOperations {
-    fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-            && self.headers.is_empty()
-            && self.tx_data.is_empty()
-            && self.shard_data.is_empty()
-            && self.commits.is_empty()
-    }
-}
 
 pub struct RocksStore {
     db: Arc<DB>,
     write_opts: WriteOptions,
-    batch: Arc<RwLock<BatchedOperations>>,
-    pending_batches: Arc<parking_lot::Mutex<VecDeque<BatchedOperations>>>,
-    last_flush: Arc<RwLock<Instant>>,
-    last_sync: Arc<RwLock<Instant>>,
-    shutdown: Arc<watch::Sender<bool>>,
-}
-
-impl Clone for RocksStore {
-    fn clone(&self) -> Self {
-        let mut write_opts = WriteOptions::default();
-        write_opts.set_sync(false);
-        write_opts.disable_wal(true); // Might be problems when crashed
-
-        Self {
-            db: self.db.clone(),
-            write_opts,
-            batch: self.batch.clone(),
-            last_flush: self.last_flush.clone(),
-            pending_batches: self.pending_batches.clone(),
-            last_sync: Arc::new(RwLock::new(Instant::now())),
-            shutdown: self.shutdown.clone(),
-        }
-    }
-}
-
-impl Drop for RocksStore {
-    fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
-    }
 }
 
 impl RocksStore {
@@ -107,6 +47,44 @@ impl RocksStore {
         block_opts.set_bloom_filter(10.0, false);
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
         block_opts
+    }
+
+    /// Default per-CF options for metadata column families (commits, blocks).
+    fn metadata_cf_options() -> Options {
+        let mut opts = Options::default();
+        opts.set_target_file_size_base(128 * 1024 * 1024);
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_max_write_buffer_number(6);
+
+        // Level compaction with aligned L0 triggers.
+        let l0_trigger = 4;
+        opts.set_level_zero_file_num_compaction_trigger(l0_trigger);
+        opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 12);
+        opts.set_level_zero_stop_writes_trigger(l0_trigger * 16);
+
+        opts.set_block_based_table_factory(&Self::block_options(128, 16 << 10));
+        opts.set_memtable_prefix_bloom_ratio(0.02);
+        opts
+    }
+
+    /// Per-CF options for data column families (headers, tx_data, shard_data).
+    /// Uses universal compaction and larger block cache / block size.
+    fn data_cf_options() -> Options {
+        let mut opts = Options::default();
+        opts.set_target_file_size_base(128 * 1024 * 1024);
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_max_write_buffer_number(6);
+
+        // Universal compaction for append-heavy data CFs.
+        opts.set_compaction_style(DBCompactionStyle::Universal);
+        opts.set_level_zero_file_num_compaction_trigger(80);
+        opts.set_level_zero_slowdown_writes_trigger(96);
+        opts.set_level_zero_stop_writes_trigger(128);
+
+        // Larger block cache and block size for bulk data.
+        opts.set_block_based_table_factory(&Self::block_options(512, 128 << 10));
+        opts.set_memtable_prefix_bloom_ratio(0.02);
+        opts
     }
 
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -133,167 +111,48 @@ impl RocksStore {
         opts.set_max_write_buffer_number(6);
 
         // L0 compaction triggers with backpressure
-        let l0_trigger = 8;
+        let l0_trigger = 4;
         opts.set_level_zero_file_num_compaction_trigger(l0_trigger);
         opts.set_level_zero_slowdown_writes_trigger(l0_trigger * 12);
         opts.set_level_zero_stop_writes_trigger(l0_trigger * 16);
 
         // WAL limit
-        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1 GB
+        opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2 GB
 
         // Parallelism
         opts.increase_parallelism(8);
-        opts.set_max_subcompactions(4);
 
         // Sync and I/O settings
-        opts.set_bytes_per_sync(32 * 1048576);
         opts.set_use_fsync(false); // fdatasync is sufficient
         opts.set_writable_file_max_buffer_size(64 * 1048576);
-        opts.set_use_direct_io_for_flush_and_compaction(true);
 
         // Compaction tuning
-        opts.set_level_compaction_dynamic_level_bytes(true);
         opts.set_target_file_size_base(128 * 1024 * 1024);
 
         // Write performance
         opts.set_enable_pipelined_write(true);
-        opts.set_allow_concurrent_memtable_write(true);
-        opts.set_enable_write_thread_adaptive_yield(true);
 
-        // Explicit block options instead of optimize_for_point_lookup
-        // (optimize_for_point_lookup silently overwrites block settings)
+        // Default block options
         opts.set_block_based_table_factory(&Self::block_options(128, 16 << 10));
         opts.set_memtable_prefix_bloom_ratio(0.02);
 
-        // Per-CF options
-        let mut cf_opts = Options::default();
-        cf_opts.set_target_file_size_base(128 * 1024 * 1024);
-        cf_opts.set_write_buffer_size(256 * 1024 * 1024);
-
         let cf_descriptors = vec![
-            ColumnFamilyDescriptor::new(CF_BLOCKS, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_HEADERS, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_TX_DATA, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_SHARD_DATA, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_COMMITS, cf_opts),
+            ColumnFamilyDescriptor::new(CF_BLOCKS, Self::metadata_cf_options()),
+            ColumnFamilyDescriptor::new(CF_HEADERS, Self::data_cf_options()),
+            ColumnFamilyDescriptor::new(CF_TX_DATA, Self::data_cf_options()),
+            ColumnFamilyDescriptor::new(CF_SHARD_DATA, Self::data_cf_options()),
+            ColumnFamilyDescriptor::new(CF_COMMITS, Self::metadata_cf_options()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(io::Error::other)?;
 
         let mut write_opts = WriteOptions::default();
-        write_opts.set_sync(false); // Async writes for better performance
+        write_opts.set_sync(false);
 
-        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        let store = Self {
+        Ok(Self {
             db: Arc::new(db),
             write_opts,
-            pending_batches: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
-            batch: Arc::new(RwLock::new(BatchedOperations::default())),
-            last_flush: Arc::new(RwLock::new(Instant::now())),
-            last_sync: Arc::new(RwLock::new(Instant::now())),
-            shutdown: Arc::new(shutdown_tx),
-        };
-
-        Ok(store)
-    }
-
-    fn do_flush(&self) -> io::Result<()> {
-        self.drain_pending_batches()?;
-
-        // Quick check with read lock
-        {
-            let batch_read = self.batch.read();
-            if batch_read.is_empty() {
-                return Ok(());
-            }
-        }
-
-        let ops = {
-            let mut batch_ops = self.batch.write();
-            std::mem::take(&mut *batch_ops)
-        };
-
-        self.write_batch_ops(ops, &self.write_opts)?;
-        *self.last_flush.write() = Instant::now();
-        Ok(())
-    }
-
-    fn do_store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
-        let reference = *block.reference();
-
-        // All blocks must be pre-serialized before reaching the store.
-        let header_bytes = block
-            .serialized_header_bytes()
-            .expect("header must be preserialized before store")
-            .to_vec();
-        let mut size = header_bytes.len();
-
-        let mut batch = self.batch.write();
-        batch.headers.insert(reference, header_bytes);
-
-        if let Some(_tx) = block.transaction_data() {
-            let tx_bytes = block
-                .serialized_tx_data_bytes()
-                .expect("tx_data must be preserialized before store")
-                .to_vec();
-            size += tx_bytes.len();
-            batch.tx_data.insert(reference, tx_bytes);
-        }
-        batch.total_size += size;
-        Self::maybe_flush_batch(&mut batch, &self.pending_batches);
-        Ok(())
-    }
-
-    fn drain_pending_batches(&self) -> io::Result<()> {
-        loop {
-            let ops = self.pending_batches.lock().pop_front();
-            let Some(ops) = ops else { break };
-            self.write_batch_ops(ops, &self.write_opts)?;
-        }
-        Ok(())
-    }
-
-    /// Write all buffered operations in a single atomic RocksDB WriteBatch.
-    fn write_batch_ops(&self, ops: BatchedOperations, write_opts: &WriteOptions) -> io::Result<()> {
-        if ops.is_empty() {
-            return Ok(());
-        }
-
-        let mut wb = rocksdb::WriteBatch::default();
-
-        let cf_headers = self.cf(CF_HEADERS)?;
-        let cf_tx_data = self.cf(CF_TX_DATA)?;
-        let cf_shard_data = self.cf(CF_SHARD_DATA)?;
-        let cf_commits = self.cf(CF_COMMITS)?;
-
-        // Legacy composite blocks (from pending batches created before upgrade).
-        if !ops.blocks.is_empty() {
-            let cf_blocks = self.cf(CF_BLOCKS)?;
-            for (reference, block) in &ops.blocks {
-                let key = serialize(reference).map_err(io::Error::other)?;
-                wb.put_cf(&cf_blocks, key, block.serialized_bytes().as_ref());
-            }
-        }
-
-        for (reference, bytes) in &ops.headers {
-            let key = serialize(reference).map_err(io::Error::other)?;
-            wb.put_cf(&cf_headers, &key, bytes);
-        }
-        for (reference, bytes) in &ops.tx_data {
-            let key = serialize(reference).map_err(io::Error::other)?;
-            wb.put_cf(&cf_tx_data, &key, bytes);
-        }
-        for (reference, bytes) in &ops.shard_data {
-            let key = serialize(reference).map_err(io::Error::other)?;
-            wb.put_cf(&cf_shard_data, &key, bytes);
-        }
-        for (anchor, commit_data) in &ops.commits {
-            let key = serialize(anchor).map_err(io::Error::other)?;
-            let value = serialize(commit_data).map_err(io::Error::other)?;
-            wb.put_cf(&cf_commits, key, value);
-        }
-
-        self.db.write_opt(wb, write_opts).map_err(io::Error::other)
+        })
     }
 
     fn cf(&self, name: &str) -> io::Result<Arc<rocksdb::BoundColumnFamily<'_>>> {
@@ -302,29 +161,81 @@ impl RocksStore {
             .ok_or_else(|| io::Error::other(format!("Column family '{name}' not found")))
     }
 
-    fn do_store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
-        let mut batch = self.batch.write();
-        for committed_sub_dag in committed_sub_dags {
-            batch
-                .commits
-                .insert(committed_sub_dag.leader, committed_sub_dag);
+    /// Point-read and deserialize an optional value from a column family.
+    fn point_read_cf<T: serde::de::DeserializeOwned>(
+        &self,
+        cf: &impl rocksdb::AsColumnFamilyRef,
+        key: &[u8],
+    ) -> io::Result<Option<T>> {
+        match self
+            .db
+            .get_cf_opt(cf, key, &Self::get_read_opts())
+            .map_err(io::Error::other)?
+        {
+            Some(bytes) => deserialize(&bytes).map(Some).map_err(io::Error::other),
+            None => Ok(None),
         }
-        Ok(())
     }
 
-    fn do_get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
-        // 1. Check in-memory batches (current + pending) for component data.
-        if let Some(block) = self.assemble_from_batches(reference) {
-            return Ok(Some(block));
+    /// Assemble a block from the component column families in the DB.
+    fn assemble_from_db(&self, key: &[u8]) -> io::Result<Option<Data<VerifiedBlock>>> {
+        let cf_headers = self.cf(CF_HEADERS)?;
+        let read_opts = Self::get_read_opts();
+        let header_bytes = self
+            .db
+            .get_cf_opt(&cf_headers, key, &read_opts)
+            .map_err(io::Error::other)?;
+
+        let Some(header_bytes) = header_bytes else {
+            return Ok(None);
+        };
+
+        let header: BlockHeader = deserialize(&header_bytes).map_err(io::Error::other)?;
+        let cf_tx_data = self.cf(CF_TX_DATA)?;
+        let tx: Option<TransactionData> = self.point_read_cf(&cf_tx_data, key)?;
+
+        Ok(Some(Data::new(VerifiedBlock::from_parts(header, tx))))
+    }
+}
+
+impl Store for RocksStore {
+    fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
+        let reference = *block.reference();
+        let key = serialize(&reference).map_err(io::Error::other)?;
+
+        // All blocks must be pre-serialized before reaching the store.
+        let header_bytes = block
+            .serialized_header_bytes()
+            .expect("header must be preserialized before store")
+            .to_vec();
+
+        let mut wb = rocksdb::WriteBatch::default();
+        let cf_headers = self.cf(CF_HEADERS)?;
+        wb.put_cf(&cf_headers, &key, header_bytes);
+
+        if let Some(_tx) = block.transaction_data() {
+            let tx_bytes = block
+                .serialized_tx_data_bytes()
+                .expect("tx_data must be preserialized before store")
+                .to_vec();
+            let cf_tx_data = self.cf(CF_TX_DATA)?;
+            wb.put_cf(&cf_tx_data, &key, tx_bytes);
         }
 
-        // 2. Try component CFs in DB.
+        self.db
+            .write_opt(wb, &self.write_opts)
+            .map_err(io::Error::other)
+    }
+
+    fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
         let key = serialize(reference).map_err(io::Error::other)?;
+
+        // Try component CFs first.
         if let Some(block) = self.assemble_from_db(&key)? {
             return Ok(Some(block));
         }
 
-        // 3. Legacy fallback: CF_BLOCKS.
+        // Legacy fallback: CF_BLOCKS.
         let cf_blocks = self.cf(CF_BLOCKS)?;
         match self
             .db
@@ -338,25 +249,9 @@ impl RocksStore {
         }
     }
 
-    fn do_get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
+    fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
         let mut blocks = Vec::new();
         let mut seen = AHashSet::new();
-
-        // 1. Check in-memory batch for components at this round.
-        {
-            let batch = self.batch.read();
-            Self::collect_round_from_ops(&batch, round, &mut blocks, &mut seen)?;
-        }
-        {
-            let pending = self.pending_batches.lock();
-            for ops in pending.iter() {
-                Self::collect_round_from_ops(ops, round, &mut blocks, &mut seen)?;
-            }
-        }
-
-        // 2. Iterate CF_HEADERS by round, assemble with tx lookups.
-        let cf_headers = self.cf(CF_HEADERS)?;
-        let cf_tx_data = self.cf(CF_TX_DATA)?;
 
         let seek_key = serialize(&BlockReference {
             round,
@@ -364,6 +259,10 @@ impl RocksStore {
             digest: BlockDigest::default(),
         })
         .map_err(io::Error::other)?;
+
+        // 1. Iterate CF_HEADERS by round, assemble with tx lookups.
+        let cf_headers = self.cf(CF_HEADERS)?;
+        let cf_tx_data = self.cf(CF_TX_DATA)?;
 
         let read_opts = Self::get_read_opts();
         let mut iter = self.db.raw_iterator_cf_opt(&cf_headers, read_opts);
@@ -380,17 +279,15 @@ impl RocksStore {
                 break;
             }
 
-            if !seen.contains(&reference) {
-                let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
-                let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
-                blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
-                seen.insert(reference);
-            }
+            let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
+            let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
+            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+            seen.insert(reference);
 
             iter.next();
         }
 
-        // 3. Legacy fallback: iterate CF_BLOCKS for any not yet found.
+        // 2. Legacy fallback: iterate CF_BLOCKS for any not yet found.
         let cf_blocks = self.cf(CF_BLOCKS)?;
         let mut iter = self
             .db
@@ -419,117 +316,22 @@ impl RocksStore {
         Ok(blocks)
     }
 
-    /// Assemble a block from in-memory batch component maps.
-    fn assemble_from_batches(&self, reference: &BlockReference) -> Option<Data<VerifiedBlock>> {
-        // Check current batch.
-        let batch = self.batch.read();
-        if let Some(block) = Self::assemble_from_ops(&batch, reference) {
-            return Some(block);
+    fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
+        let mut wb = rocksdb::WriteBatch::default();
+        let cf_commits = self.cf(CF_COMMITS)?;
+        for commit_data in &committed_sub_dags {
+            let key = serialize(&commit_data.leader).map_err(io::Error::other)?;
+            let value = serialize(commit_data).map_err(io::Error::other)?;
+            wb.put_cf(&cf_commits, key, value);
         }
-        drop(batch);
-
-        // Check pending batches.
-        let pending = self.pending_batches.lock();
-        for ops in pending.iter() {
-            if let Some(block) = Self::assemble_from_ops(ops, reference) {
-                return Some(block);
-            }
-        }
-        None
+        self.db
+            .write_opt(wb, &self.write_opts)
+            .map_err(io::Error::other)
     }
 
-    /// Try to assemble a block from a single BatchedOperations.
-    fn assemble_from_ops(
-        ops: &BatchedOperations,
-        reference: &BlockReference,
-    ) -> Option<Data<VerifiedBlock>> {
-        // Legacy composite entry takes priority.
-        if let Some(block) = ops.blocks.get(reference) {
-            return Some(block.clone());
-        }
-        // Try component maps.
-        let header_bytes = ops.headers.get(reference)?;
-        let header: BlockHeader = deserialize(header_bytes).ok()?;
-        let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
-        Some(Data::new(VerifiedBlock::from_parts(header, tx)))
-    }
-
-    /// Collect assembled blocks for a given round from batch ops.
-    fn collect_round_from_ops(
-        ops: &BatchedOperations,
-        round: RoundNumber,
-        out: &mut Vec<Data<VerifiedBlock>>,
-        seen: &mut AHashSet<BlockReference>,
-    ) -> io::Result<()> {
-        // Legacy composite entries.
-        for (reference, block) in &ops.blocks {
-            if reference.round == round && seen.insert(*reference) {
-                out.push(block.clone());
-            }
-        }
-        // Component entries.
-        for (reference, header_bytes) in &ops.headers {
-            if reference.round == round && seen.insert(*reference) {
-                let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
-                let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
-                out.push(Data::new(VerifiedBlock::from_parts(header, tx)));
-            }
-        }
-        Ok(())
-    }
-
-    /// Assemble a block from the component column families in the DB.
-    fn assemble_from_db(&self, key: &[u8]) -> io::Result<Option<Data<VerifiedBlock>>> {
-        let cf_headers = self.cf(CF_HEADERS)?;
-        let read_opts = Self::get_read_opts();
-        let header_bytes = self
-            .db
-            .get_cf_opt(&cf_headers, key, &read_opts)
-            .map_err(io::Error::other)?;
-
-        let Some(header_bytes) = header_bytes else {
-            return Ok(None);
-        };
-
-        let header: BlockHeader = deserialize(&header_bytes).map_err(io::Error::other)?;
-        let cf_tx_data = self.cf(CF_TX_DATA)?;
-        let tx: Option<TransactionData> = self.point_read_cf(&cf_tx_data, key)?;
-
-        Ok(Some(Data::new(VerifiedBlock::from_parts(header, tx))))
-    }
-
-    /// Point-read and deserialize an optional value from a column family.
-    fn point_read_cf<T: serde::de::DeserializeOwned>(
-        &self,
-        cf: &impl rocksdb::AsColumnFamilyRef,
-        key: &[u8],
-    ) -> io::Result<Option<T>> {
-        match self
-            .db
-            .get_cf_opt(cf, key, &Self::get_read_opts())
-            .map_err(io::Error::other)?
-        {
-            Some(bytes) => deserialize(&bytes).map(Some).map_err(io::Error::other),
-            None => Ok(None),
-        }
-    }
-
-    fn do_get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
-        // Check in-memory batch first
-        let batch = self.batch.read();
-        if let Some(commit) = batch.commits.get(reference) {
-            return Ok(Some(commit.clone()));
-        }
-        drop(batch);
-
-        // If not in batch, check DB
+    fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
         let key = serialize(reference).map_err(io::Error::other)?;
-
-        let cf_commits = self
-            .db
-            .cf_handle(CF_COMMITS)
-            .ok_or_else(|| io::Error::other("Column family not found"))?;
-
+        let cf_commits = self.cf(CF_COMMITS)?;
         match self
             .db
             .get_cf_opt(&cf_commits, key, &Self::get_read_opts())
@@ -537,154 +339,37 @@ impl RocksStore {
         {
             Some(value) => {
                 let commit_data: CommitData = deserialize(&value).map_err(io::Error::other)?;
-                Ok(Some(commit_data.clone()))
+                Ok(Some(commit_data))
             }
             None => Ok(None),
         }
     }
 
-    fn do_sync(&self) -> io::Result<()> {
-        {
-            let batch_read = self.batch.read();
-            if batch_read.is_empty() {
-                return Ok(());
-            }
-        }
-
-        self.drain_pending_batches()?;
-
-        let mut sync_opts = WriteOptions::default();
-        sync_opts.set_sync(true);
-
-        let ops = {
-            let mut batch_ops = self.batch.write();
-            std::mem::take(&mut *batch_ops)
-        };
-
-        self.write_batch_ops(ops, &sync_opts)?;
-        tracing::debug!("Data is synced with disk");
-        *self.last_sync.write() = Instant::now();
-        Ok(())
-    }
-
-    fn do_store_header_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
-        let size = bytes.len();
-        let mut batch = self.batch.write();
-        batch.headers.insert(*reference, bytes.to_vec());
-        batch.total_size += size;
-        Self::maybe_flush_batch(&mut batch, &self.pending_batches);
-        Ok(())
-    }
-
-    fn do_store_tx_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
-        let size = bytes.len();
-        let mut batch = self.batch.write();
-        batch.tx_data.insert(*reference, bytes.to_vec());
-        batch.total_size += size;
-        Self::maybe_flush_batch(&mut batch, &self.pending_batches);
-        Ok(())
-    }
-
-    fn do_store_shard_data_bytes(
-        &self,
-        reference: &BlockReference,
-        bytes: &[u8],
-    ) -> io::Result<()> {
-        let size = bytes.len();
-        let mut batch = self.batch.write();
-        batch.shard_data.insert(*reference, bytes.to_vec());
-        batch.total_size += size;
-        Self::maybe_flush_batch(&mut batch, &self.pending_batches);
-        Ok(())
-    }
-
-    fn maybe_flush_batch(
-        batch: &mut BatchedOperations,
-        pending: &parking_lot::Mutex<VecDeque<BatchedOperations>>,
-    ) {
-        if batch.total_size >= BATCH_SIZE_THRESHOLD {
-            let ops = std::mem::take(batch);
-            pending.lock().push_back(ops);
-        }
-    }
-}
-
-impl Store for RocksStore {
-    fn store_block(&self, block: Data<VerifiedBlock>) -> io::Result<()> {
-        self.do_store_block(block)
-    }
-
-    fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>> {
-        self.do_get_block(reference)
-    }
-
-    fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
-        self.do_get_blocks_by_round(round)
-    }
-
-    fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()> {
-        self.do_store_commits(committed_sub_dags)
-    }
-
-    fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
-        self.do_get_commit(reference)
-    }
-
-    fn flush(&self) -> io::Result<()> {
-        self.do_flush()
-    }
-
-    fn flush_pending_batches(&self) -> io::Result<()> {
-        self.drain_pending_batches()
-    }
-
-    fn sync(&self) -> io::Result<()> {
-        self.do_sync()
-    }
-
     fn store_header_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
-        self.do_store_header_bytes(reference, bytes)
+        let key = serialize(reference).map_err(io::Error::other)?;
+        let cf = self.cf(CF_HEADERS)?;
+        self.db
+            .put_cf_opt(&cf, key, bytes, &self.write_opts)
+            .map_err(io::Error::other)
     }
 
     fn store_tx_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
-        self.do_store_tx_data_bytes(reference, bytes)
+        let key = serialize(reference).map_err(io::Error::other)?;
+        let cf = self.cf(CF_TX_DATA)?;
+        self.db
+            .put_cf_opt(&cf, key, bytes, &self.write_opts)
+            .map_err(io::Error::other)
     }
 
     fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()> {
-        self.do_store_shard_data_bytes(reference, bytes)
+        let key = serialize(reference).map_err(io::Error::other)?;
+        let cf = self.cf(CF_SHARD_DATA)?;
+        self.db
+            .put_cf_opt(&cf, key, bytes, &self.write_opts)
+            .map_err(io::Error::other)
     }
 
     fn read_last_commit(&self) -> io::Result<Option<CommitData>> {
-        // Check in-memory batches first (highest-round commit wins).
-        let mut best: Option<CommitData> = None;
-        {
-            let batch = self.batch.read();
-            for commit in batch.commits.values() {
-                if best
-                    .as_ref()
-                    .map(|b| commit.leader.round > b.leader.round)
-                    .unwrap_or(true)
-                {
-                    best = Some(commit.clone());
-                }
-            }
-        }
-        {
-            let pending = self.pending_batches.lock();
-            for ops in pending.iter() {
-                for commit in ops.commits.values() {
-                    if best
-                        .as_ref()
-                        .map(|b| commit.leader.round > b.leader.round)
-                        .unwrap_or(true)
-                    {
-                        best = Some(commit.clone());
-                    }
-                }
-            }
-        }
-
-        // Reverse-iterate CF_COMMITS for the last (highest key) entry.
         let cf_commits = self.cf(CF_COMMITS)?;
         let mut iter = self
             .db
@@ -693,17 +378,10 @@ impl Store for RocksStore {
         if iter.valid() {
             if let Some(value) = iter.value() {
                 let commit: CommitData = deserialize(value).map_err(io::Error::other)?;
-                if best
-                    .as_ref()
-                    .map(|b| commit.leader.round > b.leader.round)
-                    .unwrap_or(true)
-                {
-                    best = Some(commit);
-                }
+                return Ok(Some(commit));
             }
         }
-
-        Ok(best)
+        Ok(None)
     }
 
     fn scan_blocks_from_round(
@@ -713,55 +391,16 @@ impl Store for RocksStore {
         let mut blocks = Vec::new();
         let mut seen = AHashSet::new();
 
-        // 1. Collect from in-memory batches.
-        {
-            let batch = self.batch.read();
-            for (reference, header_bytes) in &batch.headers {
-                if reference.round >= from_round && seen.insert(*reference) {
-                    let header: BlockHeader =
-                        deserialize(header_bytes).map_err(io::Error::other)?;
-                    let tx = batch
-                        .tx_data
-                        .get(reference)
-                        .and_then(|b| deserialize(b).ok());
-                    blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
-                }
-            }
-            for (reference, block) in &batch.blocks {
-                if reference.round >= from_round && seen.insert(*reference) {
-                    blocks.push(block.clone());
-                }
-            }
-        }
-        {
-            let pending = self.pending_batches.lock();
-            for ops in pending.iter() {
-                for (reference, header_bytes) in &ops.headers {
-                    if reference.round >= from_round && seen.insert(*reference) {
-                        let header: BlockHeader =
-                            deserialize(header_bytes).map_err(io::Error::other)?;
-                        let tx = ops.tx_data.get(reference).and_then(|b| deserialize(b).ok());
-                        blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
-                    }
-                }
-                for (reference, block) in &ops.blocks {
-                    if reference.round >= from_round && seen.insert(*reference) {
-                        blocks.push(block.clone());
-                    }
-                }
-            }
-        }
-
-        // 2. Iterate CF_HEADERS from from_round onward.
-        let cf_headers = self.cf(CF_HEADERS)?;
-        let cf_tx_data = self.cf(CF_TX_DATA)?;
-
         let seek_key = serialize(&BlockReference {
             round: from_round,
             authority: 0,
             digest: BlockDigest::default(),
         })
         .map_err(io::Error::other)?;
+
+        // 1. Iterate CF_HEADERS from from_round onward.
+        let cf_headers = self.cf(CF_HEADERS)?;
+        let cf_tx_data = self.cf(CF_TX_DATA)?;
 
         let read_opts = Self::get_read_opts();
         let mut iter = self.db.raw_iterator_cf_opt(&cf_headers, read_opts);
@@ -774,17 +413,15 @@ impl Store for RocksStore {
                 .ok_or_else(|| io::Error::other("Invalid value"))?;
 
             let reference: BlockReference = deserialize(key_bytes).map_err(io::Error::other)?;
-            if !seen.contains(&reference) {
-                let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
-                let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
-                blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
-                seen.insert(reference);
-            }
+            let header: BlockHeader = deserialize(header_bytes).map_err(io::Error::other)?;
+            let tx = self.point_read_cf(&cf_tx_data, key_bytes)?;
+            blocks.push(Data::new(VerifiedBlock::from_parts(header, tx)));
+            seen.insert(reference);
 
             iter.next();
         }
 
-        // 3. Legacy fallback: CF_BLOCKS.
+        // 2. Legacy fallback: CF_BLOCKS.
         let cf_blocks = self.cf(CF_BLOCKS)?;
         let mut iter = self
             .db
@@ -810,23 +447,6 @@ impl Store for RocksStore {
     }
 
     fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>> {
-        // Check in-memory batch first
-        let batch = self.batch.read();
-        if let Some(bytes) = batch.shard_data.get(reference) {
-            return deserialize(bytes).map(Some).map_err(io::Error::other);
-        }
-        drop(batch);
-
-        // Check pending batches
-        let pending = self.pending_batches.lock();
-        for ops in pending.iter().rev() {
-            if let Some(bytes) = ops.shard_data.get(reference) {
-                return deserialize(bytes).map(Some).map_err(io::Error::other);
-            }
-        }
-        drop(pending);
-
-        // Fall back to DB
         let key = serialize(reference).map_err(io::Error::other)?;
         let cf = self.cf(CF_SHARD_DATA)?;
         self.point_read_cf(&cf, &key)

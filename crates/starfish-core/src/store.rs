@@ -26,15 +26,6 @@ pub trait Store: Send + Sync + 'static {
 
     fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>>;
 
-    /// Flush buffered writes to the storage backend (non-blocking).
-    fn flush(&self) -> io::Result<()>;
-
-    /// Flush any pending batched operations.
-    fn flush_pending_batches(&self) -> io::Result<()>;
-
-    /// Sync data to disk (blocking, ensures durability).
-    fn sync(&self) -> io::Result<()>;
-
     // -- Component-level writes (pre-serialized) --
     // Accept raw bincode bytes produced off the core thread by
     // `VerifiedBlock::preserialize()` or shard reconstructor workers.

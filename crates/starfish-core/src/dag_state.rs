@@ -230,6 +230,7 @@ impl DagState {
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
         let mut block_count = 0u64;
+        let mut bfs_buf = Vec::new();
 
         // Try windowed recovery: load only a bounded window around the last
         // committed frontier instead of replaying every round from 0.
@@ -280,7 +281,7 @@ impl DagState {
                 inner.threshold_clock.add_block(block_ref, &committee);
                 builder.block(block_ref.round, block.clone());
                 block_count += 1;
-                inner.add_block(block, 0, committee.len() as AuthorityIndex);
+                inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
 
                 if let Some(commit_data) = store
                     .get_commit(&block_ref)
@@ -327,7 +328,7 @@ impl DagState {
                     inner.threshold_clock.add_block(block_ref, &committee);
                     builder.block(current_round, block.clone());
                     block_count += 1;
-                    inner.add_block(block, 0, committee.len() as AuthorityIndex);
+                    inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
                     if recovered_commit_leaders.insert(block_ref) {
                         if let Some(commit_data) = store
                             .get_commit(&block_ref)
@@ -374,7 +375,7 @@ impl DagState {
                 inner
                     .threshold_clock
                     .add_block(*block.reference(), &committee);
-                inner.add_block(block.clone(), 0, committee_len);
+                inner.add_block(block.clone(), 0, committee_len, &mut bfs_buf);
             }
         }
 
@@ -493,7 +494,13 @@ impl DagState {
             inner
                 .threshold_clock
                 .add_block(*block.reference(), &self.committee);
-            inner.add_block(block, authority_index_start, authority_index_end);
+            let mut bfs_buf = Vec::new();
+            inner.add_block(
+                block,
+                authority_index_start,
+                authority_index_end,
+                &mut bfs_buf,
+            );
             (inner.highest_round, inner.global_lowest_round())
         };
         self.metrics.dag_highest_round.set(highest_round as i64);
@@ -504,6 +511,58 @@ impl DagState {
         let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(block, authority_index_start, authority_index_end);
+    }
+
+    /// Batch-insert multiple blocks, persisting all to the store first, then
+    /// acquiring the DAG write lock once for all in-memory mutations.
+    pub fn insert_general_blocks(&self, blocks: Vec<Data<VerifiedBlock>>) {
+        if blocks.is_empty() {
+            return;
+        }
+        let authority_index_start = 0;
+        let authority_index_end = self.committee_size as AuthorityIndex;
+
+        // Phase 1: persist all blocks to the store batch (no DAG lock needed).
+        for block in &blocks {
+            let store_start = std::time::Instant::now();
+            if block.has_transaction_data() {
+                self.store
+                    .store_block(block.clone())
+                    .expect("Failed to store block");
+            } else {
+                let header_bytes = block
+                    .serialized_header_bytes()
+                    .expect("header should be preserialized before entering core thread");
+                self.store
+                    .store_header_bytes(block.reference(), header_bytes)
+                    .expect("Failed to store header");
+            }
+            self.metrics
+                .store_block_latency_us
+                .inc_by(store_start.elapsed().as_micros() as u64);
+            self.metrics.store_block_count.inc();
+            self.metrics.dag_state_entries.inc();
+        }
+
+        // Phase 2: single write lock for all DAG mutations.
+        let (highest_round, lowest_round) = {
+            let mut inner = self.dag_state_inner.write();
+            let mut bfs_buf = Vec::new();
+            for block in blocks {
+                inner
+                    .threshold_clock
+                    .add_block(*block.reference(), &self.committee);
+                inner.add_block(
+                    block,
+                    authority_index_start,
+                    authority_index_end,
+                    &mut bfs_buf,
+                );
+            }
+            (inner.highest_round, inner.global_lowest_round())
+        };
+        self.metrics.dag_highest_round.set(highest_round as i64);
+        self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
 
     // Insert own blocks is primarily needed to capture Byzantine behavior with
@@ -763,12 +822,11 @@ impl DagState {
         transaction_data: &TransactionData,
         shard_data: &ProvableShard,
     ) -> bool {
-        let mut inner = self.dag_state_inner.write();
         let auth = block_ref.authority as usize;
 
-        // Clone the header from the existing block (immutable borrow, dropped at block
-        // end).
+        // Phase 1: read lock — check block existence and get header.
         let header = {
+            let inner = self.dag_state_inner.read();
             let existing = inner.index[auth]
                 .get(&block_ref.round)
                 .and_then(|m| m.get(&block_ref.digest));
@@ -779,8 +837,7 @@ impl DagState {
             }
         };
 
-        // Persist only the new components — the header is already stored.
-        // Bytes are pre-serialized off the core thread (carried by the types).
+        // Phase 2: store writes outside any DAG lock.
         let tx_bytes = transaction_data
             .serialized_bytes()
             .expect("tx_data should be preserialized before attach");
@@ -793,6 +850,19 @@ impl DagState {
         self.store
             .store_shard_data_bytes(&block_ref, shard_bytes)
             .expect("Failed to store shard data");
+
+        // Phase 3: write lock — update in-memory indexes only.
+        let mut inner = self.dag_state_inner.write();
+
+        // Re-check under write lock: another thread may have attached data
+        // between our read lock release and write lock acquisition.
+        if inner.index[auth]
+            .get(&block_ref.round)
+            .and_then(|m| m.get(&block_ref.digest))
+            .is_some_and(|b| b.has_transaction_data())
+        {
+            return true;
+        }
 
         // Shard goes to the sidecar index, not into the block.
         inner.shard_index[auth]
@@ -827,25 +897,26 @@ impl DagState {
     /// Pre-serializes the shard internally. Returns true if the shard was
     /// attached (or was already present), false if the block doesn't exist.
     pub fn attach_shard_data(&self, block_ref: BlockReference, shard_data: &ProvableShard) -> bool {
-        let mut inner = self.dag_state_inner.write();
         let auth = block_ref.authority as usize;
 
-        // Check block exists
-        let exists = inner.index[auth]
-            .get(&block_ref.round)
-            .is_some_and(|m| m.contains_key(&block_ref.digest));
-        if !exists {
-            return false;
-        }
-
-        // Already have this shard?
-        if inner.shard_index[auth]
-            .get(&block_ref.round)
-            .is_some_and(|m| m.contains_key(&block_ref.digest))
+        // Phase 1: read lock — check block and shard existence.
         {
-            return true;
+            let inner = self.dag_state_inner.read();
+            let exists = inner.index[auth]
+                .get(&block_ref.round)
+                .is_some_and(|m| m.contains_key(&block_ref.digest));
+            if !exists {
+                return false;
+            }
+            if inner.shard_index[auth]
+                .get(&block_ref.round)
+                .is_some_and(|m| m.contains_key(&block_ref.digest))
+            {
+                return true;
+            }
         }
 
+        // Phase 2: store write outside any DAG lock.
         let mut shard = shard_data.clone();
         shard.preserialize();
         let shard_bytes = shard
@@ -855,6 +926,8 @@ impl DagState {
             .store_shard_data_bytes(&block_ref, shard_bytes)
             .expect("Failed to store shard data");
 
+        // Phase 3: write lock — update in-memory shard index only.
+        let mut inner = self.dag_state_inner.write();
         inner.shard_index[auth]
             .entry(block_ref.round)
             .or_default()
@@ -1262,6 +1335,7 @@ impl DagStateInner {
         block: Data<VerifiedBlock>,
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
+        bfs_buffer: &mut Vec<BlockReference>,
     ) {
         let reference = block.reference();
         let auth = reference.authority as usize;
@@ -1274,7 +1348,7 @@ impl DagStateInner {
         map.insert(reference.digest, block.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(*reference, block.block_references().clone());
+        self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
     }
 
@@ -1316,7 +1390,15 @@ impl DagStateInner {
     /// Insert a block into the DAG and propagate "known-by" bits along the
     /// causal history. `known_by` tracks only header knowledge; shard/data
     /// availability is tracked separately in CordialKnowledge.
-    pub fn update_dag(&mut self, block_reference: BlockReference, parents: Vec<BlockReference>) {
+    ///
+    /// `bfs_buffer` is a reusable work queue to avoid per-call allocation.
+    /// It will be cleared before use.
+    pub fn update_dag(
+        &mut self,
+        block_reference: BlockReference,
+        parents: Vec<BlockReference>,
+        bfs_buffer: &mut Vec<BlockReference>,
+    ) {
         if block_reference.round == 0 {
             return;
         }
@@ -1327,23 +1409,29 @@ impl DagStateInner {
         self.dag_insert(block_reference, (parents, known_by));
 
         let authority = block_reference.authority;
+        let bit = 1u128 << authority;
 
-        let mut buffer = vec![block_reference];
-        while let Some(r) = buffer.pop() {
-            let Some((parents, _)) = self.dag_get(&r).cloned() else {
+        bfs_buffer.clear();
+        bfs_buffer.push(block_reference);
+        // Reusable buffer to copy parent refs without cloning the Vec.
+        let mut parents_buf = Vec::new();
+        while let Some(r) = bfs_buffer.pop() {
+            parents_buf.clear();
+            if let Some((parents, _)) = self.dag_get(&r) {
+                parents_buf.extend_from_slice(parents);
+            } else {
                 continue; // evicted
-            };
-            for parent in parents {
+            }
+            for &parent in &parents_buf {
                 if parent.round == 0 {
                     continue;
                 }
                 let Some((_, known_by)) = self.dag_get_mut(&parent) else {
                     continue; // evicted
                 };
-                let bit = 1u128 << authority;
                 if *known_by & bit == 0 {
                     *known_by |= bit;
-                    buffer.push(parent);
+                    bfs_buffer.push(parent);
                 }
             }
         }

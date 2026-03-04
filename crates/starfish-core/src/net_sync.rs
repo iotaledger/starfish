@@ -16,7 +16,7 @@ use futures::future::join_all;
 use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::{
     select,
-    sync::{Notify, mpsc, oneshot},
+    sync::{Notify, mpsc},
 };
 
 use crate::{
@@ -32,7 +32,6 @@ use crate::{
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage},
     runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
-    store::Store,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
@@ -870,8 +869,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     main_task: JoinHandle<()>,
-    syncer_task: oneshot::Receiver<()>,
-    flusher_task: oneshot::Receiver<()>,
     stop: mpsc::Receiver<()>,
     bridge_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
@@ -905,7 +902,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
         let dag_state = core.dag_state().clone();
-        let store = core.store();
+        let _store = core.store();
         let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(core, notify.clone(), commit_observer, metrics.clone());
@@ -990,14 +987,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
         ));
-        let syncer_task = AsyncStoreSyncer::start(stop_sender.clone(), epoch_sender, store.clone());
-        let flusher_task = AsyncStoreFlusher::start(stop_sender, store);
         Self {
             inner,
             main_task,
             stop: stop_receiver,
-            syncer_task,
-            flusher_task,
             bridge_task,
             cordial_knowledge_task,
         }
@@ -1007,8 +1000,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         drop(self.stop);
         // todo - wait for network shutdown as well
         self.main_task.await.ok();
-        self.syncer_task.await.ok();
-        self.flusher_task.await.ok();
         // Close the shard reconstructor channel so the bridge task can exit
         // and release its Arc reference.
         self.inner.shard_tx.lock().take();
@@ -1283,104 +1274,5 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<
 impl SyncerSignals for Arc<Notify> {
     fn new_block_ready(&mut self) {
         self.notify_waiters();
-    }
-}
-
-pub struct AsyncStoreSyncer {
-    stop: mpsc::Sender<()>,
-    epoch_signal: mpsc::Sender<()>,
-    store: Arc<dyn Store>,
-    runtime: tokio::runtime::Handle,
-}
-
-pub struct AsyncStoreFlusher {
-    stop: mpsc::Sender<()>,
-    store: Arc<dyn Store>,
-    runtime: tokio::runtime::Handle,
-}
-
-impl AsyncStoreSyncer {
-    pub fn start(
-        stop: mpsc::Sender<()>,
-        epoch_signal: mpsc::Sender<()>,
-        store: Arc<dyn Store>,
-    ) -> oneshot::Receiver<()> {
-        let (_sender, receiver) = oneshot::channel();
-        let this = Self {
-            stop,
-            epoch_signal,
-            store,
-            runtime: tokio::runtime::Handle::current(),
-        };
-        std::thread::Builder::new()
-            .name("store-syncer".to_string())
-            .spawn(move || this.run())
-            .expect("Failed to spawn store-syncer");
-        receiver
-    }
-
-    pub fn run(mut self) {
-        let runtime = self.runtime.clone();
-        loop {
-            if runtime.block_on(self.wait_next()) {
-                return;
-            }
-            self.store.sync().expect("Failed to sync store");
-        }
-    }
-
-    async fn wait_next(&mut self) -> bool {
-        const SYNC_INTERVAL_MS: u64 = 1000;
-        select! {
-            _wait = sleep(Duration::from_millis(SYNC_INTERVAL_MS)) => {
-                false
-            }
-            _signal = self.stop.send(()) => {
-                true
-            }
-            _ = self.epoch_signal.send(()) => {
-                false
-            }
-        }
-    }
-}
-
-impl AsyncStoreFlusher {
-    pub fn start(stop: mpsc::Sender<()>, store: Arc<dyn Store>) -> oneshot::Receiver<()> {
-        let (_sender, receiver) = oneshot::channel();
-        let this = Self {
-            stop,
-            store,
-            runtime: tokio::runtime::Handle::current(),
-        };
-        std::thread::Builder::new()
-            .name("store-flusher".to_string())
-            .spawn(move || this.run())
-            .expect("Failed to spawn store-flusher");
-        receiver
-    }
-
-    pub fn run(mut self) {
-        let runtime = self.runtime.clone();
-        loop {
-            if runtime.block_on(self.wait_next()) {
-                return;
-            }
-            self.store
-                .flush_pending_batches()
-                .expect("Failed to flush store");
-        }
-    }
-
-    async fn wait_next(&mut self) -> bool {
-        const FLUSH_INTERVAL_MS: u64 = 20;
-        select! {
-            _wait = sleep(Duration::from_millis(FLUSH_INTERVAL_MS)) => {
-                false
-            }
-            _signal = self.stop.send(()) => {
-                true
-            }
-        }
     }
 }
