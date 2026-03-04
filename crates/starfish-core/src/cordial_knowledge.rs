@@ -247,7 +247,12 @@ impl ConnectionKnowledge {
         limit: usize,
         allowed_authorities: u128,
     ) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.headers_not_known, limit, None, allowed_authorities)
+        Self::take_unsent_refs(
+            &mut self.headers_not_known,
+            limit,
+            None,
+            allowed_authorities,
+        )
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block

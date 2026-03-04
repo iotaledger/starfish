@@ -13,6 +13,7 @@ mod core_thread;
 mod crypto;
 mod dag_state;
 pub use dag_state::ByzantineStrategy;
+mod broadcaster;
 mod data;
 mod decoder;
 mod encoder;
@@ -29,7 +30,6 @@ mod stat;
 mod state;
 pub(crate) mod store;
 mod syncer;
-mod broadcaster;
 mod threshold_clock;
 #[cfg(feature = "tidehunter")]
 mod tidehunter_store;

@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use futures::future::join_all;
 use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::{
@@ -21,6 +21,7 @@ use tokio::{
 
 use crate::{
     block_handler::BlockHandler,
+    broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     committee::Committee,
     consensus::universal_committer::UniversalCommitter,
     cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage},
@@ -33,7 +34,6 @@ use crate::{
     runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
     store::Store,
     syncer::{CommitObserver, Syncer, SyncerSignals},
-    broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     types::{
         AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
         format_authority_index,
@@ -43,85 +43,66 @@ use crate::{
 const MAX_FILTER_SIZE: usize = 100_000;
 
 struct FilterForBlocks {
-    info_length: usize,
-    digests: parking_lot::RwLock<AHashMap<BlockDigest, StatusFilter>>,
+    digests: parking_lot::RwLock<AHashSet<BlockDigest>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
-}
-#[derive(Clone, Copy)]
-enum Status {
-    Full,
-    Shard(usize),
-    Header,
-}
-impl Status {
-    fn get_status(block: &VerifiedBlock) -> Self {
-        if block.transactions().is_some() {
-            Status::Full
-        } else {
-            Status::Header
-        }
-    }
-}
-#[derive(Clone, Copy)]
-enum StatusFilter {
-    Full,
-    Shards { count: usize, bitmap: u128 },
-    Header,
-}
-
-impl StatusFilter {
-    fn from_status(status: &Status) -> Self {
-        match status {
-            Status::Full => StatusFilter::Full,
-            Status::Shard(peer) => StatusFilter::Shards {
-                count: 1,
-                bitmap: 1u128 << peer,
-            },
-            Status::Header => StatusFilter::Header,
-        }
-    }
-
-    /// Apply an incoming status. Returns `true` if this digest was already
-    /// fully covered.
-    fn transition(&mut self, status: &Status, info_length: usize) -> bool {
-        match (status, &*self) {
-            // Full blocks always pass — they carry transactions we may need
-            // even if we already counted enough shards.
-            (Status::Full, _) => {
-                *self = StatusFilter::Full;
-                false
-            }
-            (_, StatusFilter::Full) => true,
-            (Status::Header, _) => true,
-            (Status::Shard(peer), StatusFilter::Shards { count, bitmap }) => {
-                let mask = 1u128 << peer;
-                if *bitmap & mask != 0 {
-                    return true;
-                }
-                let new_count = *count + 1;
-                let new_bitmap = *bitmap | mask;
-                if new_count >= info_length {
-                    *self = StatusFilter::Full;
-                } else {
-                    *self = StatusFilter::Shards {
-                        count: new_count,
-                        bitmap: new_bitmap,
-                    };
-                }
-                false
-            }
-            (Status::Shard(peer), StatusFilter::Header) => {
-                *self = StatusFilter::Shards {
-                    count: 1,
-                    bitmap: 1u128 << peer,
-                };
-                false
-            }
-        }
-    }
 }
 
 impl FilterForBlocks {
+    fn new() -> Self {
+        Self {
+            digests: parking_lot::RwLock::new(AHashSet::new()),
+            queue: parking_lot::RwLock::new(VecDeque::new()),
+        }
+    }
+
+    /// Returns `true` if the digest is already tracked in the filter.
+    fn contains(&self, digest: &BlockDigest) -> bool {
+        self.digests.read().contains(digest)
+    }
+
+    fn insert_batch(&self, new_digests: &[BlockDigest]) {
+        let mut digests = self.digests.write();
+        let mut queue = self.queue.write();
+
+        for digest in new_digests {
+            if digests.insert(*digest) {
+                queue.push_back(*digest);
+            }
+        }
+
+        while queue.len() > MAX_FILTER_SIZE {
+            if let Some(removed) = queue.pop_front() {
+                digests.remove(&removed);
+            }
+        }
+    }
+
+    /// For each header digest, returns `true` if the digest has not been seen
+    /// before (neither in the filter nor earlier in this batch).
+    fn needed_headers(&self, batch: &[BlockDigest]) -> Vec<bool> {
+        let digests = self.digests.read();
+        let mut seen_in_batch = AHashSet::with_capacity(batch.len());
+
+        batch
+            .iter()
+            .map(|digest| !digests.contains(digest) && seen_in_batch.insert(*digest))
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ShardStatus {
+    count: usize,
+    bitmap: u128,
+}
+
+struct FilterForShards {
+    info_length: usize,
+    digests: parking_lot::RwLock<AHashMap<BlockDigest, ShardStatus>>,
+    queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
+}
+
+impl FilterForShards {
     fn new(info_length: usize) -> Self {
         Self {
             info_length,
@@ -130,83 +111,54 @@ impl FilterForBlocks {
         }
     }
 
-    fn add_batch(&self, new_digests: Vec<(BlockDigest, Status)>) -> Vec<BlockDigest> {
-        let mut already_inserted = Vec::new();
-        let mut queue_updates = Vec::new();
-
-        {
-            let mut digests = self.digests.write();
-
-            for (digest, status) in &new_digests {
-                if let Some(existing) = digests.get_mut(digest) {
-                    if existing.transition(status, self.info_length) {
-                        already_inserted.push(*digest);
-                    }
-                } else {
-                    digests.insert(*digest, StatusFilter::from_status(status));
-                    queue_updates.push(*digest);
-                }
-            }
-        }
-
-        {
-            let mut queue = self.queue.write();
-            for digest in queue_updates {
-                queue.push_back(digest);
-            }
-
-            while queue.len() > MAX_FILTER_SIZE {
-                if let Some(removed) = queue.pop_front() {
-                    self.digests.write().remove(&removed);
-                }
-            }
-        }
-
-        already_inserted
-    }
-
-    fn preview_next_status(
-        &self,
-        current: Option<StatusFilter>,
-        status: Status,
-    ) -> Option<StatusFilter> {
-        match current {
-            Some(mut existing) => {
-                if existing.transition(&status, self.info_length) {
-                    None
-                } else {
-                    Some(existing)
-                }
-            }
-            None => Some(StatusFilter::from_status(&status)),
-        }
-    }
-
-    /// Returns `true` if the digest is already tracked in the filter.
-    fn contains(&self, digest: &BlockDigest) -> bool {
-        self.digests.read().contains_key(digest)
-    }
-
-    /// Checks whether the batch is needed based on each digest and status,
-    /// taking a single read lock while simulating in-batch transitions locally.
-    fn needed_batch(&self, batch: &[(BlockDigest, Status)]) -> Vec<bool> {
+    /// Returns `true` if this shard is still needed for reconstruction.
+    fn needed(&self, digest: &BlockDigest, shard_index: usize) -> bool {
         let digests = self.digests.read();
-        let mut seen_in_batch = AHashMap::with_capacity(batch.len());
+        match digests.get(digest) {
+            Some(status) => {
+                status.count < self.info_length && (status.bitmap & (1u128 << shard_index)) == 0
+            }
+            None => true,
+        }
+    }
 
-        batch
-            .iter()
-            .map(|(digest, status)| {
-                let current = seen_in_batch
-                    .get(digest)
-                    .copied()
-                    .or_else(|| digests.get(digest).copied());
-                let Some(next) = self.preview_next_status(current, *status) else {
-                    return false;
-                };
-                seen_in_batch.insert(*digest, next);
-                true
-            })
-            .collect()
+    fn add(&self, digest: BlockDigest, shard_index: usize) {
+        let mut digests = self.digests.write();
+        let mut queue = self.queue.write();
+
+        let entry = digests.entry(digest).or_insert_with(|| {
+            queue.push_back(digest);
+            ShardStatus {
+                count: 0,
+                bitmap: 0,
+            }
+        });
+        let mask = 1u128 << shard_index;
+        if entry.bitmap & mask == 0 {
+            entry.bitmap |= mask;
+            entry.count += 1;
+        }
+
+        while queue.len() > MAX_FILTER_SIZE {
+            if let Some(removed) = queue.pop_front() {
+                digests.remove(&removed);
+            }
+        }
+    }
+
+    /// Mark a digest as fully available (stop accepting further shards).
+    fn mark_full(&self, digest: BlockDigest) {
+        let mut digests = self.digests.write();
+        let mut queue = self.queue.write();
+
+        let entry = digests.entry(digest).or_insert_with(|| {
+            queue.push_back(digest);
+            ShardStatus {
+                count: 0,
+                bitmap: 0,
+            }
+        });
+        entry.count = self.info_length;
     }
 }
 
@@ -217,11 +169,11 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     inner: Arc<NetworkSyncerInner<H, C>>,
     metrics: Arc<Metrics>,
     filter_for_blocks: Arc<FilterForBlocks>,
+    filter_for_shards: Arc<FilterForShards>,
     disseminator: BlockDisseminator<H, C>,
     data_requester: DataRequester<H, C>,
     encoder: ReedSolomonEncoder,
     peer_id: AuthorityIndex,
-    peer_usize: usize,
     peer: char,
     own_id: AuthorityIndex,
     sender: mpsc::Sender<NetworkMessage>,
@@ -234,11 +186,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         inner: Arc<NetworkSyncerInner<H, C>>,
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
+        filter_for_shards: Arc<FilterForShards>,
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
-        let broadcaster_parameters =
-            BroadcasterParameters::new(committee_size, consensus_protocol);
+        let broadcaster_parameters = BroadcasterParameters::new(committee_size, consensus_protocol);
         let peer_id = connection.peer_id as AuthorityIndex;
 
         let disseminator = BlockDisseminator::new(
@@ -265,11 +217,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             inner,
             metrics,
             filter_for_blocks,
+            filter_for_shards,
             disseminator,
             data_requester,
             encoder,
             peer_id,
-            peer_usize: peer_id as usize,
             peer,
             own_id,
             sender: connection.sender.clone(),
@@ -455,6 +407,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         let committee_size = self.inner.committee.len();
 
         for payload in shards {
+            if !self
+                .filter_for_shards
+                .needed(&payload.block_reference.digest, payload.shard.shard_index())
+            {
+                continue;
+            }
+
             // Verify the Merkle proof against the embedded transactions commitment.
             if !payload.shard.verify(committee_size) {
                 tracing::warn!(
@@ -506,6 +465,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         block_header: Box::new(block.header().clone()),
                     })
                     .await;
+                self.filter_for_shards
+                    .add(payload.block_reference.digest, payload.shard.shard_index());
             } else {
                 tracing::debug!(
                     "Standalone shard for unknown block {:?} from {} — dropped",
@@ -523,11 +484,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .inner
             .cordial_knowledge
             .connection_knowledge(self.peer_id);
-        let incoming_statuses: Vec<_> = blocks
-            .iter()
-            .map(|block| (block.digest(), Status::get_status(block)))
-            .collect();
-        let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
+        let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
+        let needed_before_verify = self.filter_for_blocks.needed_headers(&incoming_digests);
         // (block, shard sidecar from verify)
         let mut verified_blocks: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
 
@@ -581,22 +539,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_blocks.push((block, shard));
         }
 
-        // Partition verified blocks: only the very first appearance of a block
-        // (not yet in filter) goes to core. Once the filter has an entry — even
-        // as Shards or Full — subsequent arrivals only go to the reconstructor.
         let mut new_data_blocks = Vec::new();
         let mut new_block_shards: Vec<Option<ProvableShard>> = Vec::new();
-        let mut batch_with_status = Vec::new();
+        let mut digests_to_insert = Vec::new();
         for (storage_block, shard) in verified_blocks {
             let digest = storage_block.digest();
-            let has_shard = shard.is_some();
-            let status = if has_shard {
-                Status::Shard(self.peer_usize)
-            } else {
-                Status::Header
-            };
             let send_to_core = !self.filter_for_blocks.contains(&digest);
-            batch_with_status.push((digest, status));
+            digests_to_insert.push(digest);
             if send_to_core {
                 // Insert shard into sidecar index before block enters core
                 if let Some(s) = shard.as_ref() {
@@ -628,10 +577,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
 
-        // Always update the filter for all verified blocks (shards count
-        // toward reconstruction threshold).
-        if !batch_with_status.is_empty() {
-            self.filter_for_blocks.add_batch(batch_with_status);
+        if !digests_to_insert.is_empty() {
+            self.filter_for_blocks.insert_batch(&digests_to_insert);
         }
 
         tracing::debug!(
@@ -683,20 +630,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .inner
             .cordial_knowledge
             .connection_knowledge(self.peer_id);
-        let incoming_statuses: Vec<_> = blocks
-            .iter()
-            .map(|block| (block.digest(), Status::get_status(block)))
-            .collect();
-        let needed_before_verify = self.filter_for_blocks.needed_batch(&incoming_statuses);
         let mut verified_data_blocks = Vec::new();
         let mut verified_has_shard = Vec::new();
         let shard_tx = self.inner.shard_tx.lock().clone();
 
-        for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
-            if !is_needed {
-                self.metrics.filtered_blocks_total.inc();
-                continue;
-            }
+        for data_block in blocks {
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
             let shard = match block.verify(
@@ -739,8 +677,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     ck.mark_shard_useful_from_peer(*block.reference());
                 }
             }
-            self.filter_for_blocks
-                .add_batch(vec![(block.digest(), Status::Full)]);
+            self.filter_for_blocks.insert_batch(&[block.digest()]);
+            self.filter_for_shards.mark_full(block.digest());
             let has_shard = shard.is_some();
             let mut block = block;
             block.preserialize();
@@ -1109,7 +1047,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shutdown_grace_period,
         ));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
-        let filter_for_blocks = Arc::new(FilterForBlocks::new(inner.committee.info_length()));
+        let filter_for_blocks = Arc::new(FilterForBlocks::new());
+        let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
             let peer_id = connection.peer_id;
             if let Some(task) = connections.remove(&peer_id) {
@@ -1128,6 +1067,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 block_fetcher.clone(),
                 metrics.clone(),
                 filter_for_blocks.clone(),
+                filter_for_shards.clone(),
             ));
             connections.insert(peer_id, task);
         }
@@ -1152,6 +1092,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
+        filter_for_shards: Arc<FilterForShards>,
     ) -> Option<()> {
         let gc_round = inner.dag_state.gc_round();
         connection
@@ -1166,6 +1107,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             metrics,
             filter_for_blocks,
+            filter_for_shards,
         );
         handler.start().await;
 
