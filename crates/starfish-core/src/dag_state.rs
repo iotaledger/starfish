@@ -863,6 +863,15 @@ impl DagState {
         {
             return true;
         }
+        // Block may have been evicted between phase 1 and phase 3.
+        // Treat this as a terminal success: bytes are already persisted and
+        // there is no in-memory block left to mutate.
+        if !inner.index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest))
+        {
+            return true;
+        }
 
         // Shard goes to the sidecar index, not into the block.
         inner.shard_index[auth]
@@ -877,10 +886,11 @@ impl DagState {
         ));
 
         // Replace in index (short-lived mutable borrow).
-        inner.index[auth]
-            .get_mut(&block_ref.round)
-            .unwrap()
-            .insert(block_ref.digest, updated);
+        if let Some(round_map) = inner.index[auth].get_mut(&block_ref.round) {
+            round_map.insert(block_ref.digest, updated);
+        } else {
+            return true;
+        }
 
         // Mark data-available + queue acknowledgment.
         if !inner.data_availability[auth].contains(&block_ref) {
@@ -928,6 +938,21 @@ impl DagState {
 
         // Phase 3: write lock — update in-memory shard index only.
         let mut inner = self.dag_state_inner.write();
+        // Block may have been evicted between phase 1 and phase 3.
+        // Treat this as success: shard bytes are already persisted.
+        if !inner.index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest))
+        {
+            return true;
+        }
+        // Another thread may have inserted shard data while we were writing to storage.
+        if inner.shard_index[auth]
+            .get(&block_ref.round)
+            .is_some_and(|m| m.contains_key(&block_ref.digest))
+        {
+            return true;
+        }
         inner.shard_index[auth]
             .entry(block_ref.round)
             .or_default()
