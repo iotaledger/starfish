@@ -600,23 +600,30 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         .send(CordialKnowledgeMessage::NewShard(*block.reference()));
                 }
             }
-            let (missing_parents, processed_additional_refs) =
+            let input_refs: Vec<BlockReference> =
+                new_data_blocks.iter().map(|b| *b.reference()).collect();
+            let (_missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
             if matches!(
                 self.consensus_protocol,
                 ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
-            ) && !missing_parents.is_empty()
-            {
-                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
-                tracing::debug!(
-                    "Make request missing parents of header/shard blocks {:?} from peer {:?}",
-                    missing_parents,
-                    self.peer
-                );
-                self.sender
-                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
-                    .await
-                    .ok();
+            ) {
+                let processed_set: AHashSet<_> =
+                    processed_additional_refs.iter().copied().collect();
+                let max_round_ref = input_refs
+                    .into_iter()
+                    .filter(|r| !processed_set.contains(r))
+                    .max_by_key(|r| r.round());
+                if let Some(block_ref) = max_round_ref {
+                    tracing::debug!(
+                        "Make request missing history of header block {:?} from peer {:?}",
+                        block_ref,
+                        self.peer
+                    );
+                    if let Ok(permit) = self.sender.try_reserve() {
+                        permit.send(NetworkMessage::MissingHistoryRequest(block_ref));
+                    }
+                }
             }
             self.metrics
                 .used_additional_blocks_total
@@ -717,7 +724,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 );
             }
             match self.consensus_protocol {
-                ConsensusProtocol::StarfishPull => {
+                ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS => {
                     let max_round_ref = pending_block_references
                         .into_iter()
                         .max_by_key(|r| r.round());
@@ -732,23 +741,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         }
                     }
                 }
-                ConsensusProtocol::Mysticeti => {
-                    if !missing_parents.is_empty() {
-                        let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
-                        tracing::debug!(
-                            "Make request missing parents of blocks {:?} from peer {:?}",
-                            missing_parents,
-                            self.peer
-                        );
-                        self.sender
-                            .send(NetworkMessage::MissingParentsRequest(missing_parents))
-                            .await
-                            .ok();
-                    }
-                }
-                ConsensusProtocol::CordialMiners
-                | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS => {
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                     if !missing_parents.is_empty() {
                         let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                         tracing::debug!(
@@ -767,7 +760,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn handle_missing_history_request(&mut self, block_reference: BlockReference) {
-        if self.consensus_protocol == ConsensusProtocol::StarfishPull {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+        ) {
             tracing::debug!(
                 "Received request missing history for block {:?} from peer {:?}",
                 block_reference,
@@ -788,10 +786,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> bool {
         if matches!(
             self.consensus_protocol,
-            ConsensusProtocol::Mysticeti
-                | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::CordialMiners
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
