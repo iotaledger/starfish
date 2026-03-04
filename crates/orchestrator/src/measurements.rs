@@ -205,6 +205,7 @@ impl Measurement {
     }
 
     /// Compute the average latency.
+    #[cfg(test)]
     pub fn average_latency(&self) -> Duration {
         self.sum.checked_div(self.count as u32).unwrap_or_default()
     }
