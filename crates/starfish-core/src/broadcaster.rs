@@ -286,31 +286,39 @@ where
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishPull => {
-                let mut refs_to_send = block_references.clone();
-                let mut included = AHashSet::with_capacity(refs_to_send.len());
-                included.extend(refs_to_send.iter().copied());
+                let mut refs_to_send = block_references;
+                let remaining_extra_budget = batch_other_block_size.saturating_sub(refs_to_send.len());
 
-                if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
-                    let current_round = self.inner.dag_state.highest_round();
-                    let header_candidate_limit =
-                        batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
-                    let extra_candidates = {
-                        let mut ck = ck.write();
-                        let (useful_headers_to_peer, _) =
-                            ck.useful_authors_to_peer_bitmasks(current_round);
-                        ck.take_unsent_headers_for_authorities(
-                            header_candidate_limit,
-                            useful_headers_to_peer,
-                        )
-                    };
-                    let extra_refs = self.inner.dag_state.filter_block_refs_unknown_to_peer(
-                        &extra_candidates,
-                        peer_id,
-                        batch_other_block_size,
-                    );
-                    for r in extra_refs {
-                        if included.insert(r) {
-                            refs_to_send.push(r);
+                if remaining_extra_budget > 0 {
+                    if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
+                        let current_round = self.inner.dag_state.highest_round();
+                        let header_candidate_limit = remaining_extra_budget
+                            .saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+                        let extra_candidates = {
+                            let mut ck = ck.write();
+                            let (useful_headers_to_peer, _) =
+                                ck.useful_authors_to_peer_bitmasks(current_round);
+                            ck.take_unsent_headers_for_authorities(
+                                header_candidate_limit,
+                                useful_headers_to_peer,
+                            )
+                        };
+                        let extra_refs = self.inner.dag_state.filter_block_refs_unknown_to_peer(
+                            &extra_candidates,
+                            peer_id,
+                            remaining_extra_budget,
+                        );
+                        if !extra_refs.is_empty() {
+                            let mut included = AHashSet::with_capacity(
+                                refs_to_send.len().saturating_add(extra_refs.len()),
+                            );
+                            included.extend(refs_to_send.iter().copied());
+                            refs_to_send.reserve(extra_refs.len());
+                            for r in extra_refs {
+                                if included.insert(r) {
+                                    refs_to_send.push(r);
+                                }
+                            }
                         }
                     }
                 }
