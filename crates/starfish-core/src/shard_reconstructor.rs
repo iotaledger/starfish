@@ -469,6 +469,7 @@ mod tests {
             0,
             false,
             signer,
+            None,
             transactions,
             Some(encoded.clone()),
             ConsensusProtocol::Starfish,

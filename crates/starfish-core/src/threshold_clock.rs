@@ -110,6 +110,10 @@ mod tests {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            bls_round_signature: None,
+            bls_leader_signature: None,
+            bls_aggregate_round_signature: None,
+            bls_aggregate_leader_signature: None,
             serialized: None,
         }
     }

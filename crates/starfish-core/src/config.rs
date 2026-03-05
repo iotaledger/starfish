@@ -12,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    crypto::{Signer, dummy_signer},
+    crypto::{BlsPublicKey, BlsSigner, Signer, dummy_bls_signer, dummy_signer},
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
 
@@ -117,6 +117,7 @@ impl ImportExport for NodeParameters {}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NodeIdentifier {
     pub public_key: PublicKey,
+    pub bls_public_key: BlsPublicKey,
     pub network_address: SocketAddr,
     pub metrics_address: SocketAddr,
 }
@@ -133,17 +134,25 @@ impl NodePublicConfig {
 
     pub fn new_for_tests(committee_size: usize) -> Self {
         let keys = Signer::new_for_test(committee_size);
+        let bls_keys = BlsSigner::new_for_test(committee_size);
         let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
         let benchmark_port_offset = ips.len() as u16;
         let mut identifiers = Vec::new();
-        for (i, (ip, key)) in ips.into_iter().zip(keys.into_iter()).enumerate() {
+        for (i, ((ip, key), bls_key)) in ips
+            .into_iter()
+            .zip(keys.into_iter())
+            .zip(bls_keys.into_iter())
+            .enumerate()
+        {
             let public_key = key.public_key();
+            let bls_public_key = bls_key.public_key();
             let network_port = Self::PORT_OFFSET_FOR_TESTS + i as u16;
             let metrics_port = benchmark_port_offset + network_port;
             let network_address = SocketAddr::new(ip, network_port);
             let metrics_address = SocketAddr::new(ip, metrics_port);
             identifiers.push(NodeIdentifier {
                 public_key,
+                bls_public_key,
                 network_address,
                 metrics_address,
             });
@@ -212,6 +221,7 @@ impl ImportExport for NodePublicConfig {}
 pub struct NodePrivateConfig {
     authority: AuthorityIndex,
     pub keypair: Signer,
+    pub bls_keypair: BlsSigner,
     pub storage_path: PathBuf,
 }
 
@@ -220,20 +230,25 @@ impl NodePrivateConfig {
         Self {
             authority: index,
             keypair: dummy_signer(),
+            bls_keypair: dummy_bls_signer(),
             storage_path: PathBuf::from("storage"),
         }
     }
 
     pub fn new_for_benchmarks(working_dir: &Path, committee_size: usize) -> Vec<Self> {
-        Signer::new_for_test(committee_size)
+        let signers = Signer::new_for_test(committee_size);
+        let bls_signers = BlsSigner::new_for_test(committee_size);
+        signers
             .into_iter()
+            .zip(bls_signers)
             .enumerate()
-            .map(|(i, keypair)| {
+            .map(|(i, (keypair, bls_keypair))| {
                 let authority = i as AuthorityIndex;
                 let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
                 Self {
                     authority,
                     keypair,
+                    bls_keypair,
                     storage_path: path,
                 }
             })

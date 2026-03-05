@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ImportExport,
-    crypto::{PublicKey, Signer, dummy_public_key},
+    crypto::{BlsPublicKey, BlsSigner, PublicKey, Signer, dummy_bls_public_key, dummy_public_key},
     data::Data,
     types::{AuthorityIndex, AuthoritySet, Stake, VerifiedBlock},
 };
@@ -90,6 +90,12 @@ impl Committee {
             .map(Authority::public_key)
     }
 
+    pub fn get_bls_public_key(&self, authority: AuthorityIndex) -> Option<&BlsPublicKey> {
+        self.authorities
+            .get(authority as usize)
+            .map(Authority::bls_public_key)
+    }
+
     pub fn known_authority(&self, authority: AuthorityIndex) -> bool {
         authority < self.len() as AuthorityIndex
     }
@@ -151,12 +157,16 @@ impl Committee {
     }
 
     pub fn new_for_benchmarks(committee_size: usize) -> Arc<Self> {
+        let signers = Signer::new_for_test(committee_size);
+        let bls_signers = BlsSigner::new_for_test(committee_size);
         Self::new(
-            Signer::new_for_test(committee_size)
+            signers
                 .into_iter()
-                .map(|keypair| Authority {
+                .zip(bls_signers)
+                .map(|(keypair, bls_keypair)| Authority {
                     stake: 1,
                     public_key: keypair.public_key(),
+                    bls_public_key: bls_keypair.public_key(),
                 })
                 .collect(),
         )
@@ -167,6 +177,7 @@ impl Committee {
 pub struct Authority {
     stake: Stake,
     public_key: PublicKey,
+    bls_public_key: BlsPublicKey,
 }
 
 impl Authority {
@@ -174,6 +185,7 @@ impl Authority {
         Self {
             stake,
             public_key: dummy_public_key(),
+            bls_public_key: dummy_bls_public_key(),
         }
     }
 
@@ -183,6 +195,10 @@ impl Authority {
 
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
+    }
+
+    pub fn bls_public_key(&self) -> &BlsPublicKey {
+        &self.bls_public_key
     }
 }
 

@@ -1570,6 +1570,95 @@ impl DagStateInner {
             .collect()
     }
 
+    /// Collect unsent blocks with a round-first, authority-fair policy:
+    /// within each round, drain approximately equally across authorities.
+    fn collect_unsent_blocks_round_fair(
+        &self,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
+        filter: impl Fn(&BlockReference) -> bool,
+        limit: usize,
+    ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let peer_bit = 1u128 << peer;
+        let mut per_authority: Vec<Vec<BlockReference>> = vec![Vec::new(); self.committee_size];
+
+        for (auth_idx, auth_dag) in self.dag.iter().enumerate() {
+            for (round, entries) in auth_dag {
+                for (digest, (_, known_by)) in entries {
+                    let r = BlockReference {
+                        authority: auth_idx as AuthorityIndex,
+                        round: *round,
+                        digest: *digest,
+                    };
+                    if known_by & peer_bit == 0 && !sent.contains(&r) && filter(&r) {
+                        per_authority[auth_idx].push(r);
+                    }
+                }
+            }
+        }
+
+        for refs in &mut per_authority {
+            refs.sort_by_key(|r| r.round);
+        }
+
+        let mut positions = vec![0usize; per_authority.len()];
+        let mut selected: Vec<(BlockReference, RoundNumber)> = Vec::with_capacity(limit);
+
+        while selected.len() < limit {
+            let min_round = per_authority
+                .iter()
+                .enumerate()
+                .filter_map(|(auth, refs)| refs.get(positions[auth]).map(|r| r.round))
+                .min();
+            let Some(min_round) = min_round else {
+                break;
+            };
+
+            loop {
+                let mut made_progress = false;
+                for auth in 0..per_authority.len() {
+                    if selected.len() >= limit {
+                        break;
+                    }
+                    let idx = positions[auth];
+                    if let Some(next_ref) = per_authority[auth].get(idx) {
+                        if next_ref.round == min_round {
+                            selected.push((*next_ref, next_ref.round));
+                            positions[auth] += 1;
+                            made_progress = true;
+                        }
+                    }
+                }
+
+                if selected.len() >= limit {
+                    break;
+                }
+
+                let round_has_more = per_authority.iter().enumerate().any(|(auth, refs)| {
+                    refs.get(positions[auth])
+                        .is_some_and(|next_ref| next_ref.round == min_round)
+                });
+                if !made_progress || !round_has_more {
+                    break;
+                }
+            }
+        }
+
+        selected
+            .into_iter()
+            .map(|(r, round)| {
+                let block = self
+                    .get_block(r)
+                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
+                (block, round)
+            })
+            .collect()
+    }
+
     fn into_sorted_blocks(
         mut blocks: Vec<(Data<VerifiedBlock>, RoundNumber)>,
     ) -> Vec<Data<VerifiedBlock>> {
@@ -1699,7 +1788,7 @@ impl DagStateInner {
             |r| r.authority == auth && r.round < max,
             batch_own_block_size,
         );
-        let other = self.collect_unsent_blocks(
+        let other = self.collect_unsent_blocks_round_fair(
             sent,
             peer,
             |r| r.authority != auth && r.round < max,

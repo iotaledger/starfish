@@ -4,6 +4,7 @@
 
 pub mod block_handler;
 mod block_manager;
+pub mod bls_batch_verifier;
 pub mod committee;
 pub mod config;
 pub mod consensus;

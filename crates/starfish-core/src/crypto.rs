@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use blst::min_pk as bls;
 use ed25519_consensus::Signature;
 use rand::{SeedableRng, rngs::StdRng};
 use rs_merkle::{Hasher, MerkleProof, MerkleTree};
@@ -177,7 +178,7 @@ impl BlockDigest {
         Self(hasher.finalize().into())
     }
 
-    fn digest_without_signature(
+    pub(crate) fn digest_without_signature(
         hasher: &mut Blake3Hasher,
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -489,4 +490,309 @@ pub fn dummy_signer() -> Signer {
 
 pub fn dummy_public_key() -> PublicKey {
     dummy_signer().public_key()
+}
+
+// ---------------------------------------------------------------------------
+// BLS12-381 types (min_pk variant: 48-byte G1 public keys, 96-byte G2
+// signatures).
+// ---------------------------------------------------------------------------
+
+pub const BLS_SIGNATURE_SIZE: usize = 96;
+pub const BLS_PUBLIC_KEY_SIZE: usize = 48;
+
+/// Domain separation tag for BLS signatures in Starfish.
+pub(crate) const BLS_DST: &[u8] = b"STARFISH_BLS_SIG";
+
+#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Hash)]
+pub struct BlsSignatureBytes(pub(crate) [u8; BLS_SIGNATURE_SIZE]);
+
+impl Default for BlsSignatureBytes {
+    fn default() -> Self {
+        Self([0u8; BLS_SIGNATURE_SIZE])
+    }
+}
+
+#[derive(Clone)]
+pub struct BlsPublicKey(bls::PublicKey);
+
+/// BLS secret key. Boxed to avoid stack copies of key material.
+#[derive(Clone)]
+pub struct BlsSigner(Box<bls::SecretKey>);
+
+// --- BlsSignatureBytes impls ---
+
+impl AsBytes for BlsSignatureBytes {
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for BlsSignatureBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl ByteRepr for BlsSignatureBytes {
+    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
+        if v.len() != BLS_SIGNATURE_SIZE {
+            return Err(E::custom(format!(
+                "Invalid BLS signature length: {}",
+                v.len()
+            )));
+        }
+        let mut inner = [0u8; BLS_SIGNATURE_SIZE];
+        inner.copy_from_slice(v);
+        Ok(Self(inner))
+    }
+}
+
+impl Serialize for BlsSignatureBytes {
+    #[inline]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for BlsSignatureBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_bytes(BytesVisitor::new())
+    }
+}
+
+impl fmt::Debug for BlsSignatureBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlsSig({})", &hex::encode(&self.0[..4]))
+    }
+}
+
+// --- BlsPublicKey impls ---
+
+impl BlsPublicKey {
+    pub fn verify(
+        &self,
+        digest: &[u8; 32],
+        sig: &BlsSignatureBytes,
+    ) -> Result<(), blst::BLST_ERROR> {
+        let signature =
+            bls::Signature::from_bytes(&sig.0).map_err(|_| blst::BLST_ERROR::BLST_BAD_ENCODING)?;
+        let result = signature.verify(true, digest, BLS_DST, &[], &self.0, true);
+        if result == blst::BLST_ERROR::BLST_SUCCESS {
+            Ok(())
+        } else {
+            Err(result)
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; BLS_PUBLIC_KEY_SIZE] {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8; BLS_PUBLIC_KEY_SIZE]) -> Result<Self, blst::BLST_ERROR> {
+        bls::PublicKey::from_bytes(bytes).map(Self)
+    }
+
+    /// Access the inner `blst::min_pk::PublicKey`.
+    pub fn inner(&self) -> &bls::PublicKey {
+        &self.0
+    }
+}
+
+impl PartialEq for BlsPublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bytes() == other.0.to_bytes()
+    }
+}
+impl Eq for BlsPublicKey {}
+
+impl Serialize for BlsPublicKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.to_bytes())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlsPublicKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BlsPkVisitor;
+        impl<'de> de::Visitor<'de> for BlsPkVisitor {
+            type Value = BlsPublicKey;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("48-byte BLS public key")
+            }
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() != BLS_PUBLIC_KEY_SIZE {
+                    return Err(E::custom(format!(
+                        "Invalid BLS public key length: {}",
+                        v.len()
+                    )));
+                }
+                let mut buf = [0u8; BLS_PUBLIC_KEY_SIZE];
+                buf.copy_from_slice(v);
+                BlsPublicKey::from_bytes(&buf)
+                    .map_err(|e| E::custom(format!("Invalid BLS public key: {:?}", e)))
+            }
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                self.visit_bytes(&v)
+            }
+        }
+        deserializer.deserialize_bytes(BlsPkVisitor)
+    }
+}
+
+impl fmt::Debug for BlsPublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlsPk({})", &hex::encode(&self.to_bytes()[..4]))
+    }
+}
+
+// --- BlsSigner impls ---
+
+impl BlsSigner {
+    /// Deterministic keygen for tests. Generates `n` signers from sequential
+    /// seeds.
+    pub fn new_for_test(n: usize) -> Vec<Self> {
+        (0..n)
+            .map(|i| {
+                let mut ikm = [0u8; 32];
+                ikm[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let sk = bls::SecretKey::key_gen(&ikm, &[]).expect("BLS keygen");
+                Self(Box::new(sk))
+            })
+            .collect()
+    }
+
+    /// Sign a 32-byte digest using BLS with the Starfish DST.
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> BlsSignatureBytes {
+        let sig = self.0.sign(digest, BLS_DST, &[]);
+        BlsSignatureBytes(sig.to_bytes())
+    }
+
+    pub fn public_key(&self) -> BlsPublicKey {
+        BlsPublicKey(self.0.sk_to_pk())
+    }
+
+    /// Access the inner `blst::min_pk::SecretKey`.
+    pub fn inner(&self) -> &bls::SecretKey {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BlsSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlsSigner(pk={:?})", self.public_key())
+    }
+}
+
+impl fmt::Display for BlsSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlsSigner(pk={:?})", self.public_key())
+    }
+}
+
+impl Serialize for BlsSigner {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0.to_bytes())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlsSigner {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BlsSkVisitor;
+        impl<'de> de::Visitor<'de> for BlsSkVisitor {
+            type Value = BlsSigner;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("32-byte BLS secret key")
+            }
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() != 32 {
+                    return Err(E::custom(format!(
+                        "Invalid BLS secret key length: {}",
+                        v.len()
+                    )));
+                }
+                let mut buf = [0u8; 32];
+                buf.copy_from_slice(v);
+                let sk = bls::SecretKey::from_bytes(&buf)
+                    .map_err(|e| E::custom(format!("Invalid BLS secret key: {:?}", e)))?;
+                Ok(BlsSigner(Box::new(sk)))
+            }
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                self.visit_bytes(&v)
+            }
+        }
+        deserializer.deserialize_bytes(BlsSkVisitor)
+    }
+}
+
+impl Drop for BlsSigner {
+    fn drop(&mut self) {
+        // Zeroize the secret key material. blst::SecretKey stores a 32-byte
+        // scalar internally. We rewrite it with a dummy key from zeroed IKM.
+        let zero_sk = bls::SecretKey::key_gen(&[0u8; 32], &[]).expect("BLS keygen");
+        *self.0 = zero_sk;
+    }
+}
+
+pub fn dummy_bls_signer() -> BlsSigner {
+    let ikm = [0u8; 32];
+    let sk = bls::SecretKey::key_gen(&ikm, &[]).expect("BLS keygen");
+    BlsSigner(Box::new(sk))
+}
+
+pub fn dummy_bls_public_key() -> BlsPublicKey {
+    dummy_bls_signer().public_key()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bls_sign_verify_roundtrip() {
+        let signers = BlsSigner::new_for_test(3);
+        for signer in &signers {
+            let msg = [0xABu8; 32];
+            let sig = signer.sign_digest(&msg);
+            let pk = signer.public_key();
+            assert!(pk.verify(&msg, &sig).is_ok());
+        }
+    }
+
+    #[test]
+    fn bls_wrong_key_rejects() {
+        let signers = BlsSigner::new_for_test(2);
+        let msg = [0xCDu8; 32];
+        let sig = signers[0].sign_digest(&msg);
+        let wrong_pk = signers[1].public_key();
+        assert!(wrong_pk.verify(&msg, &sig).is_err());
+    }
+
+    #[test]
+    fn bls_wrong_message_rejects() {
+        let signers = BlsSigner::new_for_test(1);
+        let msg = [1u8; 32];
+        let sig = signers[0].sign_digest(&msg);
+        let pk = signers[0].public_key();
+        let wrong_msg = [2u8; 32];
+        assert!(pk.verify(&wrong_msg, &sig).is_err());
+    }
+
+    #[test]
+    fn bls_serde_roundtrip() {
+        let signers = BlsSigner::new_for_test(1);
+        let pk = signers[0].public_key();
+        let bytes = pk.to_bytes();
+        let pk2 = BlsPublicKey::from_bytes(&bytes).unwrap();
+        assert_eq!(pk, pk2);
+    }
+
+    #[test]
+    fn bls_signature_bytes_serde_roundtrip() {
+        let signers = BlsSigner::new_for_test(1);
+        let msg = [42u8; 32];
+        let sig = signers[0].sign_digest(&msg);
+        let encoded = bincode::serialize(&sig).unwrap();
+        let decoded: BlsSignatureBytes = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(sig, decoded);
+    }
 }

@@ -95,38 +95,44 @@ impl ConnectionKnowledge {
         excluded_authority: Option<AuthorityIndex>,
         allowed_authorities: u128,
     ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
         let mut result = Vec::with_capacity(limit);
-        for (authority, authority_map) in maps.iter_mut().enumerate() {
-            if excluded_authority == Some(authority as AuthorityIndex) {
-                continue;
-            }
-            if allowed_authorities & (1u128 << authority) == 0 {
-                continue;
-            }
-            let mut empty_rounds = Vec::new();
-            for (&round, round_set) in authority_map.iter_mut() {
+        // Fair draining across authorities: take at most one ref per authority
+        // per pass to avoid starving useful authorities when one authority has a
+        // deep backlog (e.g. under equivocation).
+        while result.len() < limit {
+            let mut made_progress = false;
+            for (authority, authority_map) in maps.iter_mut().enumerate() {
+                if excluded_authority == Some(authority as AuthorityIndex) {
+                    continue;
+                }
+                if allowed_authorities & (1u128 << authority) == 0 {
+                    continue;
+                }
+
+                let picked = authority_map
+                    .iter()
+                    .next()
+                    .and_then(|(&round, refs)| refs.iter().next().copied().map(|r| (round, r)));
+                let Some((round, block_ref)) = picked else {
+                    continue;
+                };
+
+                if let Some(round_set) = authority_map.get_mut(&round) {
+                    round_set.remove(&block_ref);
+                    if round_set.is_empty() {
+                        authority_map.remove(&round);
+                    }
+                }
+                result.push(block_ref);
+                made_progress = true;
                 if result.len() >= limit {
                     break;
                 }
-                let mut taken = Vec::new();
-                for block_ref in round_set.iter() {
-                    if result.len() >= limit {
-                        break;
-                    }
-                    result.push(*block_ref);
-                    taken.push(*block_ref);
-                }
-                for block_ref in &taken {
-                    round_set.remove(block_ref);
-                }
-                if round_set.is_empty() {
-                    empty_rounds.push(round);
-                }
             }
-            for round in empty_rounds {
-                authority_map.remove(&round);
-            }
-            if result.len() >= limit {
+            if !made_progress {
                 break;
             }
         }

@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{AsBytes, Signer},
+    crypto::{AsBytes, BlsSigner, Signer},
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
@@ -56,6 +56,8 @@ pub struct Core<H: BlockHandler> {
     dag_state: DagState,
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
+    #[allow(dead_code)] // Will be used by future BLS-based protocols
+    bls_signer: BlsSigner,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
@@ -172,6 +174,7 @@ impl<H: BlockHandler> Core<H> {
             dag_state,
             metrics,
             signer: private_config.keypair,
+            bls_signer: private_config.bls_keypair,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
             epoch_manager,
@@ -613,6 +616,7 @@ impl<H: BlockHandler> Core<H> {
             time_ns,
             self.epoch_changing(),
             &self.signer,
+            None, // BLS signing not used by current protocols
             transactions.to_vec(),
             encoded_transactions.clone(),
             self.dag_state.consensus_protocol,

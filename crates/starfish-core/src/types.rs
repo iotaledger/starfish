@@ -36,7 +36,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     committee::Committee,
     crypto,
-    crypto::{AsBytes, CryptoHash, SignatureBytes, Signer, TransactionsCommitment},
+    crypto::{
+        AsBytes, BlsSignatureBytes, BlsSigner, CryptoHash, SignatureBytes, Signer,
+        TransactionsCommitment,
+    },
     dag_state::ConsensusProtocol,
     data::{Data, IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
     encoder::ShardEncoder,
@@ -124,6 +127,14 @@ pub struct BlockHeader {
     pub(crate) transactions_commitment: TransactionsCommitment,
     /// Starfish-S strong vote flag. None for non-StarfishS protocols.
     pub(crate) strong_vote: Option<bool>,
+    /// BLS round signature (block author signs the digest).
+    pub(crate) bls_round_signature: Option<BlsSignatureBytes>,
+    /// BLS leader signature.
+    pub(crate) bls_leader_signature: Option<BlsSignatureBytes>,
+    /// Aggregate BLS round signature (populated by protocol layer).
+    pub(crate) bls_aggregate_round_signature: Option<BlsSignatureBytes>,
+    /// Aggregate BLS leader signature (populated by protocol layer).
+    pub(crate) bls_aggregate_leader_signature: Option<BlsSignatureBytes>,
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
     /// core thread so that store writes are zero-serialization on the critical
     /// path.
@@ -204,6 +215,22 @@ impl BlockHeader {
 
     pub fn strong_vote(&self) -> Option<bool> {
         self.strong_vote
+    }
+
+    pub fn bls_round_signature(&self) -> Option<&BlsSignatureBytes> {
+        self.bls_round_signature.as_ref()
+    }
+
+    pub fn bls_leader_signature(&self) -> Option<&BlsSignatureBytes> {
+        self.bls_leader_signature.as_ref()
+    }
+
+    pub fn bls_aggregate_round_signature(&self) -> Option<&BlsSignatureBytes> {
+        self.bls_aggregate_round_signature.as_ref()
+    }
+
+    pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsSignatureBytes> {
+        self.bls_aggregate_leader_signature.as_ref()
     }
 
     pub fn preserialize(&mut self) {
@@ -436,6 +463,7 @@ impl VerifiedBlock {
         transactions: Vec<BaseTransaction>,
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
+        bls_round_signature: Option<BlsSignatureBytes>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
@@ -468,6 +496,10 @@ impl VerifiedBlock {
             signature,
             transactions_commitment: merkle_root,
             strong_vote,
+            bls_round_signature,
+            bls_leader_signature: None,
+            bls_aggregate_round_signature: None,
+            bls_aggregate_leader_signature: None,
             serialized: None,
         };
 
@@ -504,6 +536,10 @@ impl VerifiedBlock {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            bls_round_signature: None,
+            bls_leader_signature: None,
+            bls_aggregate_round_signature: None,
+            bls_aggregate_leader_signature: None,
             serialized: None,
         };
         let mut block = Self {
@@ -522,6 +558,7 @@ impl VerifiedBlock {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
         signer: &Signer,
+        bls_signer: Option<&BlsSigner>,
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
@@ -559,6 +596,24 @@ impl VerifiedBlock {
             strong_vote,
         );
 
+        // Optionally compute BLS round signature over the digest.
+        let bls_round_sig = bls_signer.map(|bs| {
+            let mut bls_hasher = crypto::Blake3Hasher::new();
+            crypto::BlockDigest::digest_without_signature(
+                &mut bls_hasher,
+                authority,
+                round,
+                &block_references,
+                &acknowledgments,
+                meta_creation_time_ns,
+                epoch_marker,
+                transactions_commitment,
+                strong_vote,
+            );
+            let bls_digest: [u8; 32] = bls_hasher.finalize().into();
+            bs.sign_digest(&bls_digest)
+        });
+
         Self::new(
             authority,
             round,
@@ -570,6 +625,7 @@ impl VerifiedBlock {
             transactions,
             transactions_commitment,
             strong_vote,
+            bls_round_sig,
         )
     }
 
@@ -1025,6 +1081,7 @@ mod tests {
             vec![],
             TransactionsCommitment::default(),
             None,
+            None,
         );
 
         assert_eq!(block.acknowledgment_intersection(), Some(2));
@@ -1047,6 +1104,10 @@ mod tests {
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             strong_vote: None,
+            bls_round_signature: None,
+            bls_leader_signature: None,
+            bls_aggregate_round_signature: None,
+            bls_aggregate_leader_signature: None,
             serialized: None,
         };
 
