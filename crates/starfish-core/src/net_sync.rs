@@ -771,6 +771,47 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_reference,
                 self.peer
             );
+            // Reuse the same unsent-past-cone selection to derive which authors
+            // are currently useful for this peer, so push dissemination can
+            // prioritize them in subsequent batches.
+            if let Some(ck) = self
+                .inner
+                .cordial_knowledge
+                .connection_knowledge(self.peer_id)
+            {
+                let parameters =
+                    BroadcasterParameters::new(self.inner.committee.len(), self.consensus_protocol);
+                let mut sent_snapshot = self.disseminator.sent_to_peer.read().clone();
+                let mut latest_missing_by_authority: Vec<Option<BlockReference>> =
+                    vec![None; self.inner.committee.len()];
+                loop {
+                    let missing = self.inner.dag_state.get_unsent_past_cone(
+                        &sent_snapshot,
+                        self.peer_id,
+                        block_reference,
+                        parameters.batch_own_block_size,
+                        parameters.batch_other_block_size,
+                    );
+                    if missing.is_empty() {
+                        break;
+                    }
+                    for block in missing {
+                        let block_ref = *block.reference();
+                        sent_snapshot.insert(block_ref);
+                        let authority = block_ref.authority as usize;
+                        if let Some(slot) = latest_missing_by_authority.get_mut(authority) {
+                            match slot {
+                                Some(existing) if existing.round >= block_ref.round => {}
+                                _ => *slot = Some(block_ref),
+                            }
+                        }
+                    }
+                }
+                let mut ck = ck.write();
+                for block_ref in latest_missing_by_authority.into_iter().flatten() {
+                    ck.mark_header_useful_to_peer(block_ref);
+                }
+            }
             if self.inner.dag_state.byzantine_strategy.is_none() {
                 self.disseminator
                     .push_block_history_with_shards(block_reference)
