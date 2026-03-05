@@ -140,9 +140,6 @@ pub enum NetworkMessage {
     SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     /// A structured batch of block data.
     Batch(BlockBatch),
-    /// Request a potentially missing history of a given block (only shards are
-    /// sent)
-    MissingHistoryRequest(BlockReference),
     /// Request specific block (blocks with full data are sent)
     MissingParentsRequest(Vec<BlockReference>),
     /// Request a tx data for a few specific block references (only shards are
@@ -155,7 +152,6 @@ impl NetworkMessage {
         match self {
             Self::SubscribeBroadcastRequest(_) => "subscribe_broadcast",
             Self::Batch(_) => "batch",
-            Self::MissingHistoryRequest(_) => "missing_history",
             Self::MissingParentsRequest(_) => "missing_parents",
             Self::MissingTxDataRequest(_) => "missing_tx_data",
         }

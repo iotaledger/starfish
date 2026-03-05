@@ -205,8 +205,7 @@ impl<H: BlockHandler> Core<H> {
     // It returns four values. First is bool which is true if any update was made
     // successfully. Second, it returns a vector of references for blocks with
     // transactions that are not added to the local DAG and remain
-    // pending. For such blocks we need to send a missing history
-    // request.
+    // pending. For such blocks we need to send a missing parents request.
     // Third, it returns a set of parents that are still missing
     // and need to be requested.
     // Fourth, it returns a vector of references for blocks without

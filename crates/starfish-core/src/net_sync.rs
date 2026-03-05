@@ -251,9 +251,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             NetworkMessage::Batch(blocks) => {
                 self.handle_batch(blocks).await;
             }
-            NetworkMessage::MissingHistoryRequest(block_ref) => {
-                self.handle_missing_history_request(block_ref).await;
-            }
             NetworkMessage::MissingParentsRequest(refs) => {
                 return self.handle_missing_parents_request(refs).await;
             }
@@ -600,30 +597,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         .send(CordialKnowledgeMessage::NewShard(*block.reference()));
                 }
             }
-            let input_refs: Vec<BlockReference> =
-                new_data_blocks.iter().map(|b| *b.reference()).collect();
-            let (_missing_parents, processed_additional_refs) =
+            let (missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
-            if matches!(
-                self.consensus_protocol,
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS
-            ) {
-                let processed_set: AHashSet<_> =
-                    processed_additional_refs.iter().copied().collect();
-                let max_round_ref = input_refs
-                    .into_iter()
-                    .filter(|r| !processed_set.contains(r))
-                    .max_by_key(|r| r.round());
-                if let Some(block_ref) = max_round_ref {
-                    tracing::debug!(
-                        "Make request missing history of header block {:?} from peer {:?}",
-                        block_ref,
-                        self.peer
-                    );
-                    if let Ok(permit) = self.sender.try_reserve() {
-                        permit.send(NetworkMessage::MissingHistoryRequest(block_ref));
-                    }
-                }
+            if !missing_parents.is_empty() {
+                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                tracing::debug!(
+                    "Make request missing parents of header/shard blocks {:?} from peer {:?}",
+                    missing_parents,
+                    self.peer
+                );
+                self.sender
+                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                    .await
+                    .ok();
             }
             self.metrics
                 .used_additional_blocks_total
@@ -714,7 +700,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                         .send(CordialKnowledgeMessage::NewShard(*block.reference()));
                 }
             }
-            let (pending_block_references, missing_parents, _processed_additional_blocks) =
+            let (_pending_block_references, missing_parents, _processed_additional_blocks) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
             if !missing_parents.is_empty() {
                 tracing::debug!(
@@ -723,99 +709,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     missing_parents
                 );
             }
-            match self.consensus_protocol {
-                ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS => {
-                    let max_round_ref = pending_block_references
-                        .into_iter()
-                        .max_by_key(|r| r.round());
-                    if let Some(block_ref) = max_round_ref {
-                        tracing::debug!(
-                            "Make request missing history of block {:?} from peer {:?}",
-                            block_ref,
-                            self.peer
-                        );
-                        if let Ok(permit) = self.sender.try_reserve() {
-                            permit.send(NetworkMessage::MissingHistoryRequest(block_ref));
-                        }
-                    }
-                }
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                    if !missing_parents.is_empty() {
-                        let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
-                        tracing::debug!(
-                            "Make request missing parents of blocks {:?} from peer {:?}",
-                            missing_parents,
-                            self.peer
-                        );
-                        self.sender
-                            .send(NetworkMessage::MissingParentsRequest(missing_parents))
-                            .await
-                            .ok();
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_missing_history_request(&mut self, block_reference: BlockReference) {
-        if matches!(
-            self.consensus_protocol,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-        ) {
-            tracing::debug!(
-                "Received request missing history for block {:?} from peer {:?}",
-                block_reference,
-                self.peer
-            );
-            // Reuse the same unsent-past-cone selection to derive which authors
-            // are currently useful for this peer, so push dissemination can
-            // prioritize them in subsequent batches.
-            if let Some(ck) = self
-                .inner
-                .cordial_knowledge
-                .connection_knowledge(self.peer_id)
-            {
-                let parameters =
-                    BroadcasterParameters::new(self.inner.committee.len(), self.consensus_protocol);
-                let mut sent_snapshot = self.disseminator.sent_to_peer.read().clone();
-                let mut latest_missing_by_authority: Vec<Option<BlockReference>> =
-                    vec![None; self.inner.committee.len()];
-                loop {
-                    let missing = self.inner.dag_state.get_unsent_past_cone(
-                        &sent_snapshot,
-                        self.peer_id,
-                        block_reference,
-                        parameters.batch_own_block_size,
-                        parameters.batch_other_block_size,
-                    );
-                    if missing.is_empty() {
-                        break;
-                    }
-                    for block in missing {
-                        let block_ref = *block.reference();
-                        sent_snapshot.insert(block_ref);
-                        let authority = block_ref.authority as usize;
-                        if let Some(slot) = latest_missing_by_authority.get_mut(authority) {
-                            match slot {
-                                Some(existing) if existing.round >= block_ref.round => {}
-                                _ => *slot = Some(block_ref),
-                            }
-                        }
-                    }
-                }
-                let mut ck = ck.write();
-                for block_ref in latest_missing_by_authority.into_iter().flatten() {
-                    ck.mark_header_useful_to_peer(block_ref);
-                }
-            }
-            if self.inner.dag_state.byzantine_strategy.is_none() {
-                self.disseminator
-                    .push_block_history_with_shards(block_reference)
-                    .await;
+            if !missing_parents.is_empty() {
+                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                tracing::debug!(
+                    "Make request missing parents of blocks {:?} from peer {:?}",
+                    missing_parents,
+                    self.peer
+                );
+                self.sender
+                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                    .await
+                    .ok();
             }
         }
     }
@@ -827,7 +731,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> bool {
         if matches!(
             self.consensus_protocol,
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners
+            ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
@@ -840,8 +748,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .connection_knowledge(self.peer_id)
             {
                 let mut ck = ck.write();
+                let mut useful_headers_mask = 0u128;
                 for block_ref in &block_references {
-                    ck.mark_header_useful_to_peer(*block_ref);
+                    useful_headers_mask |= 1u128 << block_ref.authority;
+                }
+                if useful_headers_mask != 0 {
+                    let current_round = self.inner.dag_state.highest_round();
+                    ck.update_useful_authors_to_peer(useful_headers_mask, 0, current_round);
                 }
             }
             if self.inner.dag_state.byzantine_strategy.is_none()

@@ -83,8 +83,6 @@ pub struct BlockDisseminator<H: BlockHandler, C: CommitObserver> {
     own_blocks: Option<JoinHandle<Option<()>>>,
     /// The handle of the task disseminating all unknown blocks.
     push_blocks: Option<JoinHandle<Option<()>>>,
-    /// The handle of the task disseminating all unknown blocks.
-    response_push_blocks: Option<JoinHandle<Option<()>>>,
     /// The handles of tasks disseminating other nodes' blocks.
     other_blocks: Vec<JoinHandle<Option<()>>>,
     /// The parameters of the broadcaster.
@@ -219,7 +217,6 @@ where
             inner,
             own_blocks: None,
             push_blocks: None,
-            response_push_blocks: None,
             other_blocks: Vec::new(),
             parameters,
             metrics,
@@ -237,32 +234,11 @@ where
             handle.abort();
             waiters.push(handle);
         }
-        if let Some(handle) = self.response_push_blocks.take() {
-            handle.abort();
-            waiters.push(handle);
-        }
         for handle in self.other_blocks {
             handle.abort();
             waiters.push(handle);
         }
         join_all(waiters).await;
-    }
-
-    pub async fn push_block_history_with_shards(&mut self, block_reference: BlockReference) {
-        if let Some(existing) = self.response_push_blocks.take() {
-            existing.abort();
-            existing.await.ok();
-        }
-
-        let handle = Handle::current().spawn(Self::response_push_blocks(
-            block_reference,
-            self.inner.clone(),
-            self.sender.clone(),
-            self.to_whom_authority_index,
-            self.parameters.clone(),
-            self.sent_to_peer.clone(),
-        ));
-        self.response_push_blocks = Some(handle);
     }
 
     pub async fn send_transmission_blocks(
@@ -304,14 +280,42 @@ where
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.dag_state.get_own_authority_index();
         let batch_block_size = self.parameters.batch_own_block_size;
+        let batch_other_block_size = self.parameters.batch_other_block_size;
 
         match self.inner.dag_state.consensus_protocol {
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
-                let mut headers = self
-                    .inner
-                    .dag_state
-                    .get_header_only_blocks(&block_references);
-                headers.truncate(batch_block_size);
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishPull => {
+                let mut refs_to_send = block_references.clone();
+                let mut included = AHashSet::with_capacity(refs_to_send.len());
+                included.extend(refs_to_send.iter().copied());
+
+                if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
+                    let current_round = self.inner.dag_state.highest_round();
+                    let header_candidate_limit =
+                        batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+                    let extra_candidates = {
+                        let mut ck = ck.write();
+                        let (useful_headers_to_peer, _) =
+                            ck.useful_authors_to_peer_bitmasks(current_round);
+                        ck.take_unsent_headers_for_authorities(
+                            header_candidate_limit,
+                            useful_headers_to_peer,
+                        )
+                    };
+                    let extra_refs = self.inner.dag_state.filter_block_refs_unknown_to_peer(
+                        &extra_candidates,
+                        peer_id,
+                        batch_other_block_size,
+                    );
+                    for r in extra_refs {
+                        if included.insert(r) {
+                            refs_to_send.push(r);
+                        }
+                    }
+                }
+
+                let headers = self.inner.dag_state.get_header_only_blocks(&refs_to_send);
                 {
                     let mut sent = self.sent_to_peer.write();
                     for block in headers.iter() {
@@ -319,7 +323,8 @@ where
                     }
                 }
                 tracing::debug!(
-                    "Requested missing parent headers {headers:?} are sent from {own_index:?} to {peer:?}"
+                    "Requested missing parent headers (and extra potentially-missing headers) {:?} are sent from {own_index:?} to {peer:?}",
+                    headers
                 );
                 self.sender
                     .send(NetworkMessage::Batch(BlockBatch {
@@ -332,9 +337,7 @@ where
                     .await
                     .ok()?;
             }
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::StarfishPull => {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
 
                 let mut blocks = Vec::new();
@@ -395,48 +398,6 @@ where
             self.sent_to_peer.clone(),
         ));
         self.push_blocks = Some(handle);
-    }
-
-    async fn response_push_blocks(
-        block_reference: BlockReference,
-        inner: Arc<NetworkSyncerInner<H, C>>,
-        to: Sender<NetworkMessage>,
-        peer_id: AuthorityIndex,
-        broadcaster_parameters: BroadcasterParameters,
-        sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-    ) -> Option<()> {
-        let peer = format_authority_index(peer_id);
-        let between_push_timeout = Duration::from_millis(100);
-        loop {
-            let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-            let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
-            let blocks = {
-                let sent = sent_to_peer.read();
-                inner.dag_state.get_unsent_past_cone(
-                    &sent,
-                    peer_id,
-                    block_reference,
-                    batch_own_block_size,
-                    batch_other_block_size,
-                )
-            };
-            {
-                let mut sent = sent_to_peer.write();
-                for block in &blocks {
-                    sent.insert(*block.reference());
-                }
-            }
-            tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-            if !blocks.is_empty() {
-                to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-                    .await
-                    .ok()?;
-            } else {
-                break;
-            }
-            let _sleep = sleep(between_push_timeout).await;
-        }
-        Some(())
     }
 
     async fn stream_only_own_blocks(
