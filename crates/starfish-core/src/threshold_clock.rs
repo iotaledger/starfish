@@ -114,6 +114,7 @@ mod tests {
             bls_leader_signature: None,
             bls_aggregate_round_signature: None,
             bls_aggregate_leader_signature: None,
+            acknowledgment_bls_signatures: vec![],
             serialized: None,
         }
     }

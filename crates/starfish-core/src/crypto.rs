@@ -733,6 +733,36 @@ impl Drop for BlsSigner {
     }
 }
 
+/// Aggregate N partial BLS signatures into one 96-byte signature.
+#[allow(dead_code)]
+pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
+    assert!(!sigs.is_empty(), "Cannot aggregate zero signatures");
+    let parsed: Vec<bls::Signature> = sigs
+        .iter()
+        .map(|s| bls::Signature::from_bytes(&s.0).expect("valid BLS signature bytes"))
+        .collect();
+    let refs: Vec<&bls::Signature> = parsed.iter().collect();
+    let agg = bls::AggregateSignature::aggregate(&refs, true).expect("BLS aggregation");
+    BlsSignatureBytes(agg.to_signature().to_bytes())
+}
+
+/// Verify an aggregate signature against multiple public keys (all signed same
+/// message).
+#[allow(dead_code)]
+pub fn bls_fast_aggregate_verify(
+    message: &[u8],
+    agg_sig: &BlsSignatureBytes,
+    pubkeys: &[&BlsPublicKey],
+) -> bool {
+    let sig = match bls::Signature::from_bytes(&agg_sig.0) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let pks: Vec<&bls::PublicKey> = pubkeys.iter().map(|pk| &pk.0).collect();
+    let result = sig.fast_aggregate_verify(true, message, BLS_DST, &pks);
+    result == blst::BLST_ERROR::BLST_SUCCESS
+}
+
 pub fn dummy_bls_signer() -> BlsSigner {
     let ikm = [0u8; 32];
     let sk = bls::SecretKey::key_gen(&ikm, &[]).expect("BLS keygen");

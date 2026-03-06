@@ -524,7 +524,8 @@ impl<H: BlockHandler> Core<H> {
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_transactions(
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => Some(self.encoder.encode_transactions(
                 transactions,
                 info_length,
                 parity_length,

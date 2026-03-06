@@ -135,6 +135,10 @@ pub struct BlockHeader {
     pub(crate) bls_aggregate_round_signature: Option<BlsSignatureBytes>,
     /// Aggregate BLS leader signature (populated by protocol layer).
     pub(crate) bls_aggregate_leader_signature: Option<BlsSignatureBytes>,
+    /// BLS aggregate DAC signatures, parallel to acknowledgment_references.
+    /// `acknowledgment_bls_signatures[i]` is the BLS DAC proof for
+    /// `acknowledgment_references[i]`. Only populated for StarfishL.
+    pub(crate) acknowledgment_bls_signatures: Vec<BlsSignatureBytes>,
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
     /// core thread so that store writes are zero-serialization on the critical
     /// path.
@@ -231,6 +235,10 @@ impl BlockHeader {
 
     pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsSignatureBytes> {
         self.bls_aggregate_leader_signature.as_ref()
+    }
+
+    pub fn acknowledgment_bls_signatures(&self) -> &[BlsSignatureBytes] {
+        &self.acknowledgment_bls_signatures
     }
 
     pub fn preserialize(&mut self) {
@@ -500,6 +508,7 @@ impl VerifiedBlock {
             bls_leader_signature: None,
             bls_aggregate_round_signature: None,
             bls_aggregate_leader_signature: None,
+            acknowledgment_bls_signatures: vec![],
             serialized: None,
         };
 
@@ -540,6 +549,7 @@ impl VerifiedBlock {
             bls_leader_signature: None,
             bls_aggregate_round_signature: None,
             bls_aggregate_leader_signature: None,
+            acknowledgment_bls_signatures: vec![],
             serialized: None,
         };
         let mut block = Self {
@@ -567,7 +577,8 @@ impl VerifiedBlock {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 TransactionsCommitment::new_from_encoded_transactions(
                     encoded_transactions.as_ref().unwrap(),
                     authority as usize,
@@ -803,7 +814,8 @@ impl VerifiedBlock {
         match consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 let info_length = committee.info_length();
                 let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
@@ -1108,6 +1120,7 @@ mod tests {
             bls_leader_signature: None,
             bls_aggregate_round_signature: None,
             bls_aggregate_leader_signature: None,
+            acknowledgment_bls_signatures: vec![],
             serialized: None,
         };
 

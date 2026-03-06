@@ -43,6 +43,7 @@ pub enum ConsensusProtocol {
     CordialMiners,
     Starfish,
     StarfishS,
+    StarfishL,
 }
 
 impl ConsensusProtocol {
@@ -52,6 +53,7 @@ impl ConsensusProtocol {
             "starfish-pull" => ConsensusProtocol::StarfishPull,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish" => ConsensusProtocol::Starfish,
+            "starfish-l" => ConsensusProtocol::StarfishL,
             "starfish-s" => ConsensusProtocol::StarfishS,
             _ => ConsensusProtocol::StarfishPull, // Default to Starfish
         }
@@ -63,6 +65,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::StarfishS
         )
     }
@@ -386,6 +389,7 @@ impl DagState {
                 tracing::info!("Starting Starfish-Pull protocol")
             }
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
+            ConsensusProtocol::StarfishL => tracing::info!("Starting Starfish-L protocol"),
             ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
@@ -1885,5 +1889,6 @@ mod tests {
         assert!(ConsensusProtocol::StarfishPull.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
     }
 }
