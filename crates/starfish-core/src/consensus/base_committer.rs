@@ -425,7 +425,8 @@ impl BaseCommitter {
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 if self.decide_skip_starfish(voting_round, leader, voter_info) {
                     return LeaderStatus::Skip(leader, leader_round);
                 }

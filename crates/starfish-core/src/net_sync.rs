@@ -236,6 +236,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
         ) {
             self.data_requester.start().await;
         }
@@ -276,6 +277,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::CordialMiners => {
                     self.disseminator.disseminate_all_blocks_push().await;
                 }
@@ -374,6 +376,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
         ) {
             self.process_blocks_without_transactions(blocks_without_transactions)
                 .await;
@@ -736,6 +739,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
@@ -780,6 +784,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
@@ -871,6 +876,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             dag_state.consensus_protocol,
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::StarfishPull
         );
         let gc_round = Arc::new(AtomicU64::new(dag_state.gc_round()));

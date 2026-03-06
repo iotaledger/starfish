@@ -49,6 +49,7 @@ impl BroadcasterParameters {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL
             | ConsensusProtocol::CordialMiners => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
@@ -285,15 +286,17 @@ where
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL
             | ConsensusProtocol::StarfishPull => {
                 let mut refs_to_send = block_references;
-                let remaining_extra_budget = batch_other_block_size.saturating_sub(refs_to_send.len());
+                let remaining_extra_budget =
+                    batch_other_block_size.saturating_sub(refs_to_send.len());
 
                 if remaining_extra_budget > 0 {
                     if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
                         let current_round = self.inner.dag_state.highest_round();
-                        let header_candidate_limit = remaining_extra_budget
-                            .saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+                        let header_candidate_limit =
+                            remaining_extra_budget.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
                         let extra_candidates = {
                             let mut ck = ck.write();
                             let (useful_headers_to_peer, _) =
@@ -607,7 +610,9 @@ where
                 .utilization_timer("Broadcaster: send blocks");
             tracing::debug!("Disseminate to {to_whom_authority_index} after {trigger}");
             match inner.dag_state.consensus_protocol {
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL => {
                     sending_batch_starfish_blocks(
                         inner.clone(),
                         to.clone(),
