@@ -472,6 +472,8 @@ impl VerifiedBlock {
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
         bls_round_signature: Option<BlsSignatureBytes>,
+        bls_leader_signature: Option<BlsSignatureBytes>,
+        acknowledgment_bls_signatures: Vec<BlsSignatureBytes>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
@@ -505,10 +507,10 @@ impl VerifiedBlock {
             transactions_commitment: merkle_root,
             strong_vote,
             bls_round_signature,
-            bls_leader_signature: None,
+            bls_leader_signature,
             bls_aggregate_round_signature: None,
             bls_aggregate_leader_signature: None,
-            acknowledgment_bls_signatures: vec![],
+            acknowledgment_bls_signatures,
             serialized: None,
         };
 
@@ -569,6 +571,8 @@ impl VerifiedBlock {
         epoch_marker: EpochStatus,
         signer: &Signer,
         bls_signer: Option<&BlsSigner>,
+        committee: Option<&Committee>,
+        ack_commitments: &[(BlockReference, TransactionsCommitment)],
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
@@ -625,6 +629,39 @@ impl VerifiedBlock {
             bs.sign_digest(&bls_digest)
         });
 
+        // Compute BLS leader signature if we include the previous-round leader.
+        let bls_leader_sig = bls_signer.and_then(|bs| {
+            let committee = committee?;
+            let leader_round = round.checked_sub(1)?;
+            if leader_round == 0 {
+                return None;
+            }
+            let leader = committee.elect_leader(leader_round);
+            let leader_ref = block_references
+                .iter()
+                .find(|r| r.round == leader_round && r.authority == leader)?;
+            let msg = crypto::bls_leader_message(leader_ref);
+            Some(bs.sign_digest(&msg))
+        });
+
+        // Compute DAC BLS signatures over each acknowledged block's commitment.
+        let ack_bls_sigs = if let Some(bs) = bls_signer {
+            acknowledgments
+                .iter()
+                .map(|ack_ref| {
+                    let commitment = ack_commitments
+                        .iter()
+                        .find(|(r, _)| r == ack_ref)
+                        .map(|(_, c)| *c)
+                        .unwrap_or_default();
+                    let msg = crypto::bls_dac_message(ack_ref, commitment);
+                    bs.sign_digest(&msg)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         Self::new(
             authority,
             round,
@@ -637,6 +674,8 @@ impl VerifiedBlock {
             transactions_commitment,
             strong_vote,
             bls_round_sig,
+            bls_leader_sig,
+            ack_bls_sigs,
         )
     }
 
@@ -1094,6 +1133,8 @@ mod tests {
             TransactionsCommitment::default(),
             None,
             None,
+            None,
+            vec![],
         );
 
         assert_eq!(block.acknowledgment_intersection(), Some(2));

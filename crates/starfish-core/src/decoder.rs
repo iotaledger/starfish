@@ -160,6 +160,8 @@ mod tests {
             false,
             signer,
             None,
+            None,
+            &[],
             transactions,
             Some(encoded.clone()),
             ConsensusProtocol::Starfish,

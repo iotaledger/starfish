@@ -274,6 +274,7 @@ mod smoke_tests {
     #[test_case("cordial-miners", 40)]
     #[test_case("starfish", 60)]
     #[test_case("starfish-s", 80)]
+    #[test_case("starfish-l", 100)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -365,6 +366,7 @@ mod smoke_tests {
     #[test_case("cordial-miners", 140)]
     #[test_case("starfish", 160)]
     #[test_case("starfish-s", 180)]
+    #[test_case("starfish-l", 200)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
@@ -427,6 +429,7 @@ mod smoke_tests {
     #[test_case("cordial-miners", 240)]
     #[test_case("starfish", 260)]
     #[test_case("starfish-s", 280)]
+    #[test_case("starfish-l", 300)]
     #[tokio::test]
     async fn validator_crash_faults(consensus: &str, port_offset: u16) {
         run_crash_faults_test(consensus, port_offset).await;
@@ -626,6 +629,7 @@ mod smoke_tests {
     #[test_case("cordial-miners", 540)]
     #[test_case("starfish", 560)]
     #[test_case("starfish-s", 580)]
+    #[test_case("starfish-l", 600)]
     #[tokio::test(flavor = "multi_thread")]
     async fn validator_lifecycle_and_recovery(consensus: &str, port_offset: u16) {
         run_lifecycle_test(consensus, port_offset).await;

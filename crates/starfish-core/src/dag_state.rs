@@ -171,6 +171,10 @@ struct DagStateInner {
     last_committed_rounds: Vec<RoundNumber>,
     /// Threshold clock tracking quorum round advancement.
     threshold_clock: ThresholdClockAggregator,
+    /// Leader references with confirmed BLS leader certificates (StarfishL).
+    leader_certificates: AHashSet<BlockReference>,
+    /// Block references with confirmed BLS DAC certificates (StarfishL).
+    dac_certificates: AHashSet<BlockReference>,
 }
 
 impl DagState {
@@ -229,6 +233,8 @@ impl DagState {
             round_version: AHashMap::new(),
             last_committed_rounds: vec![0; n],
             threshold_clock: ThresholdClockAggregator::new(0),
+            leader_certificates: AHashSet::new(),
+            dac_certificates: AHashSet::new(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -581,6 +587,49 @@ impl DagState {
 
     pub fn get_storage_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
         self.dag_state_inner.read().get_storage_block(reference)
+    }
+
+    /// Look up the `transactions_commitment` for a block in the DAG.
+    pub fn get_transactions_commitment(
+        &self,
+        reference: &BlockReference,
+    ) -> Option<crate::crypto::TransactionsCommitment> {
+        self.dag_state_inner
+            .read()
+            .get_storage_block(*reference)
+            .map(|b| b.merkle_root())
+    }
+
+    /// Mark a leader block as having a confirmed BLS leader certificate.
+    pub fn mark_leader_certified(&self, leader_ref: BlockReference) {
+        self.dag_state_inner
+            .write()
+            .leader_certificates
+            .insert(leader_ref);
+    }
+
+    /// Mark a block as having a confirmed BLS DAC certificate.
+    pub fn mark_dac_certified(&self, block_ref: BlockReference) {
+        self.dag_state_inner
+            .write()
+            .dac_certificates
+            .insert(block_ref);
+    }
+
+    /// Check whether the given leader has a confirmed BLS leader certificate.
+    pub fn has_leader_certificate(&self, leader_ref: &BlockReference) -> bool {
+        self.dag_state_inner
+            .read()
+            .leader_certificates
+            .contains(leader_ref)
+    }
+
+    /// Check whether the given block has a confirmed BLS DAC certificate.
+    pub fn has_dac_certificate(&self, block_ref: &BlockReference) -> bool {
+        self.dag_state_inner
+            .read()
+            .dac_certificates
+            .contains(block_ref)
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
