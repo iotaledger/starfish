@@ -20,6 +20,26 @@ use crate::{
     },
 };
 
+/// Build the 32-byte message that validators sign (BLS) to certify a leader.
+/// Domain separation: `b"leader" || leader_ref` fields.
+pub fn bls_leader_message(leader_ref: &BlockReference) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"leader");
+    leader_ref.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
+/// Build the 32-byte message that validators sign (BLS) to certify data
+/// availability for an acknowledged block.
+/// Domain separation: `b"dac" || ack_ref || commitment`.
+pub fn bls_dac_message(ack_ref: &BlockReference, commitment: TransactionsCommitment) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"dac");
+    ack_ref.crypto_hash(&mut hasher);
+    commitment.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 

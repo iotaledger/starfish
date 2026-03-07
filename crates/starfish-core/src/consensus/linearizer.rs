@@ -126,6 +126,7 @@ impl Linearizer {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
         let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
+        let use_dac_gating = dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
         let mut buffer = vec![leader_block];
         let mut blocks_transaction_data_quorum = vec![];
         while let Some(x) = buffer.pop() {
@@ -135,9 +136,20 @@ impl Linearizer {
                 if ack_ref.round < min_round {
                     continue;
                 }
-                let s = self.votes.entry(ack_ref).or_default();
-                if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
-                    blocks_transaction_data_quorum.push(ack_ref);
+                if use_dac_gating {
+                    // StarfishL: only include blocks with DAC certificates.
+                    if dag_state.has_dac_certificate(&ack_ref) {
+                        let s = self.votes.entry(ack_ref).or_default();
+                        if !s.is_quorum(&self.committee) {
+                            s.add(who_votes, &self.committee);
+                            blocks_transaction_data_quorum.push(ack_ref);
+                        }
+                    }
+                } else {
+                    let s = self.votes.entry(ack_ref).or_default();
+                    if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
+                        blocks_transaction_data_quorum.push(ack_ref);
+                    }
                 }
             }
             self.traversed_blocks.insert(*x.reference());
@@ -168,19 +180,18 @@ impl Linearizer {
         let mut to_commit: Vec<_> = to_commit
             .into_iter()
             .map(|block| {
-                // Assuming block has `round`, `author`, and `digest` methods/properties
                 let round = block.round();
-                let author = block.author(); // Adjust if `author` is not cloneable
-                let digest = block.digest(); // Adjust if `digest` is not cloneable
-                (round, author, digest, block) // Store the original block as part of the tuple
+                let author = block.author();
+                let digest = block.digest();
+                (round, author, digest, block)
             })
             .collect();
 
         // Sort by (round, author, digest)
         to_commit.sort_by(|a, b| {
-            a.0.cmp(&b.0) // Sort by round
-                .then(a.1.cmp(&b.1)) // Then by author
-                .then(a.2.cmp(&b.2)) // Finally by digest
+            a.0.cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then(a.2.cmp(&b.2))
         });
 
         // Select at most one block per (round, author), persisting across subdags
