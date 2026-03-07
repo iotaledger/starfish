@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SignatureBytes, TransactionsCommitment},
-        types::BlockDigest,
+        types::{AckFields, BlockDigest},
     };
 
     fn make_header(authority: u64, round: u64, refs: &[(u64, u64)]) -> BlockHeader {
@@ -103,18 +103,16 @@ mod tests {
                 ),
             },
             block_references,
-            acknowledgment_intersection: None,
-            acknowledgment_references: ack_refs,
             meta_creation_time_ns: 0,
             epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
+            ack: AckFields {
+                intersection: None,
+                extra_references: ack_refs,
+            },
             strong_vote: None,
-            bls_round_signature: None,
-            bls_leader_signature: None,
-            bls_aggregate_round_signature: None,
-            bls_aggregate_leader_signature: None,
-            acknowledgment_bls_signatures: vec![],
+            bls: None,
             serialized: None,
         }
     }
