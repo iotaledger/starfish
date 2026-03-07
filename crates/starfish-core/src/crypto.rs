@@ -15,8 +15,8 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BaseTransaction, BlockHeader, BlockReference, EpochStatus, RoundNumber,
-        Shard, TimestampNs,
+        AuthorityIndex, BaseTransaction, BlockHeader, BlockReference, RoundNumber, Shard,
+        TimestampNs,
     },
 };
 
@@ -150,7 +150,6 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         signature: &SignatureBytes,
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
@@ -163,7 +162,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            epoch_marker,
             merkle_root,
             strong_vote,
         );
@@ -177,7 +175,6 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         signature: &SignatureBytes,
         transactions_commitment: TransactionsCommitment,
         strong_vote: Option<bool>,
@@ -190,7 +187,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            epoch_marker,
             transactions_commitment,
             strong_vote,
         );
@@ -205,7 +201,6 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
         strong_vote: Option<bool>,
     ) {
@@ -218,7 +213,6 @@ impl BlockDigest {
             block_ref.crypto_hash(hasher);
         }
         meta_creation_time_ns.crypto_hash(hasher);
-        epoch_marker.crypto_hash(hasher);
         transactions_commitment.crypto_hash(hasher);
         // Conditional hashing: only hash when Some for backward compatibility
         if let Some(sv) = strong_vote {
@@ -292,7 +286,6 @@ impl PublicKey {
             header.block_references(),
             &acknowledgments,
             header.meta_creation_time_ns(),
-            header.epoch_changed(),
             header.merkle_root(),
             header.strong_vote(),
         );
@@ -316,7 +309,6 @@ impl Signer {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         transactions_commitment: TransactionsCommitment,
         strong_vote: Option<bool>,
     ) -> SignatureBytes {
@@ -328,7 +320,6 @@ impl Signer {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            epoch_marker,
             transactions_commitment,
             strong_vote,
         );

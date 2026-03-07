@@ -31,7 +31,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage},
-    runtime::{Handle, JoinError, JoinHandle, sleep, timestamp_utc},
+    runtime::{Handle, JoinError, JoinHandle, sleep},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
@@ -834,8 +834,6 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub notify: Arc<Notify>,
     pub committee: Arc<Committee>,
     stop: mpsc::Sender<()>,
-    epoch_close_signal: mpsc::Sender<()>,
-    pub epoch_closing_time: Arc<AtomicU64>,
     pub gc_round: Arc<AtomicU64>,
     pub shard_tx:
         parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
@@ -847,7 +845,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         network: Network,
         mut core: Core<H>,
         mut commit_observer: C,
-        shutdown_grace_period: Duration,
         metrics: Arc<Metrics>,
     ) -> Self {
         let handle = Handle::current();
@@ -857,7 +854,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let committee = core.committee().clone();
         let dag_state = core.dag_state().clone();
         let _store = core.store();
-        let epoch_closing_time = core.epoch_closing_time();
         let universal_committer = core.get_universal_committer();
         let mut syncer = Syncer::new(core, notify.clone(), commit_observer, metrics.clone());
         syncer.force_new_block(0);
@@ -866,11 +862,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Occupy the only available permit, so that all other
         // calls to send() will block.
         stop_sender.try_send(()).unwrap();
-        let (epoch_sender, epoch_receiver) = mpsc::channel(1);
-        // Occupy the only available permit, so that all other
-        // calls to send() will block.
-        epoch_sender.try_send(()).unwrap();
-
         // Conditionally prepare shard reconstructor channels for Starfish protocols
         let is_starfish = matches!(
             dag_state.consensus_protocol,
@@ -909,8 +900,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             dag_state,
             committee,
             stop: stop_sender.clone(),
-            epoch_close_signal: epoch_sender.clone(),
-            epoch_closing_time,
             gc_round,
             shard_tx: parking_lot::Mutex::new(shard_tx),
             cordial_knowledge: cordial_knowledge_handle,
@@ -937,8 +926,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             network,
             universal_committer,
             inner.clone(),
-            epoch_receiver,
-            shutdown_grace_period,
             block_fetcher,
             metrics.clone(),
         ));
@@ -975,23 +962,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut network: Network,
         universal_committer: UniversalCommitter,
         inner: Arc<NetworkSyncerInner<H, C>>,
-        epoch_close_signal: mpsc::Receiver<()>,
-        shutdown_grace_period: Duration,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
     ) {
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
-        let leader_timeout_task = handle.spawn(Self::leader_timeout_task(
-            inner.clone(),
-            epoch_close_signal,
-            shutdown_grace_period,
-        ));
+        let leader_timeout_task = handle.spawn(Self::leader_timeout_task(inner.clone()));
 
-        let commit_timeout_task = handle.spawn(Self::commit_timeout_task(
-            inner.clone(),
-            shutdown_grace_period,
-        ));
+        let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
@@ -1079,11 +1057,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         None
     }
 
-    async fn leader_timeout_task(
-        inner: Arc<NetworkSyncerInner<H, C>>,
-        mut epoch_close_signal: mpsc::Receiver<()>,
-        shutdown_grace_period: Duration,
-    ) -> Option<()> {
+    async fn leader_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let leader_timeout = Duration::from_millis(600);
         loop {
             let notified = inner.notify.notified();
@@ -1092,17 +1066,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 .last_own_block_ref()
                 .map(|b| b.round())
                 .unwrap_or_default();
-            let closing_time = inner.epoch_closing_time.load(Ordering::Relaxed);
-            let shutdown_duration = if closing_time != 0 {
-                shutdown_grace_period.saturating_sub(
-                    timestamp_utc().saturating_sub(Duration::from_millis(closing_time)),
-                )
-            } else {
-                Duration::MAX
-            };
-            if Duration::is_zero(&shutdown_duration) {
-                return None;
-            }
             select! {
                 _sleep = sleep(leader_timeout) => {
                     tracing::debug!("Timeout in round {round}");
@@ -1113,10 +1076,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 _notified = notified => {
                     // restart loop
                 }
-                _epoch_shutdown = sleep(shutdown_duration) => {
-                    tracing::info!("Shutting down sync after epoch close");
-                    epoch_close_signal.close();
-                }
                 _stopped = inner.stopped() => {
                     return None;
                 }
@@ -1124,10 +1083,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
-    async fn commit_timeout_task(
-        inner: Arc<NetworkSyncerInner<H, C>>,
-        shutdown_grace_period: Duration,
-    ) -> Option<()> {
+    async fn commit_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let commit_timeout = Duration::from_millis(10);
         loop {
             let notified = inner.notify.notified();
@@ -1136,17 +1092,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 .last_own_block_ref()
                 .map(|b| b.round())
                 .unwrap_or_default();
-            let closing_time = inner.epoch_closing_time.load(Ordering::Relaxed);
-            let shutdown_duration = if closing_time != 0 {
-                shutdown_grace_period.saturating_sub(
-                    timestamp_utc().saturating_sub(Duration::from_millis(closing_time)),
-                )
-            } else {
-                Duration::MAX
-            };
-            if Duration::is_zero(&shutdown_duration) {
-                return None;
-            }
             select! {
                 _sleep = sleep(commit_timeout) => {
                     tracing::debug!("Commit timeout in round {round}");
@@ -1204,10 +1149,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<
                 assert!(stopped.is_err());
                 None
             }
-            closed = self.epoch_close_signal.send(()) => {
-                assert!(closed.is_err());
-                None
-            }
             data = channel.recv() => {
                 data
             }
@@ -1215,14 +1156,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<
     }
 
     async fn stopped(&self) {
-        select! {
-            stopped = self.stop.send(()) => {
-                assert!(stopped.is_err());
-            }
-            closed = self.epoch_close_signal.send(()) => {
-                assert!(closed.is_err());
-            }
-        }
+        let _ = self.stop.send(()).await;
     }
 }
 

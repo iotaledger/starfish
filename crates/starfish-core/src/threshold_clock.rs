@@ -96,7 +96,6 @@ mod tests {
                     &block_references,
                     &ack_refs,
                     0,
-                    false,
                     &SignatureBytes::default(),
                     TransactionsCommitment::default(),
                     None,
@@ -104,7 +103,6 @@ mod tests {
             },
             block_references,
             meta_creation_time_ns: 0,
-            epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             ack: AckFields {
