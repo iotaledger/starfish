@@ -188,11 +188,7 @@ impl Linearizer {
             .collect();
 
         // Sort by (round, author, digest)
-        to_commit.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then(a.1.cmp(&b.1))
-                .then(a.2.cmp(&b.2))
-        });
+        to_commit.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
         // Select at most one block per (round, author), persisting across subdags
         let to_commit: Vec<_> = to_commit

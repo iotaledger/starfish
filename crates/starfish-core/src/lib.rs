@@ -19,7 +19,6 @@ mod broadcaster;
 mod data;
 mod decoder;
 mod encoder;
-mod epoch_close;
 pub mod metrics;
 pub mod net_sync;
 pub mod network;

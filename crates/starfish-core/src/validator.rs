@@ -115,7 +115,6 @@ impl Validator {
             authority,
             committee.clone(),
             private_config,
-            &public_config,
             metrics.clone(),
             recovered,
         );
@@ -130,13 +129,8 @@ impl Validator {
         .await;
         tracing::info!("Network is created. Starting broadcaster");
 
-        let network_broadcaster = NetworkSyncer::start(
-            network,
-            core,
-            commit_handler,
-            public_config.parameters.shutdown_grace_period,
-            metrics.clone(),
-        );
+        let network_broadcaster =
+            NetworkSyncer::start(network, core, commit_handler, metrics.clone());
 
         tracing::info!("Validator {authority} listening on {network_address}");
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");

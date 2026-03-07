@@ -145,10 +145,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .metrics
             .utilization_timer
             .utilization_timer("Syncer::try_new_commit");
-        // No need to commit after epoch is safe to close
-        if self.core.epoch_closed() {
-            return;
-        };
         let timer_core_commit = self
             .metrics
             .utilization_timer

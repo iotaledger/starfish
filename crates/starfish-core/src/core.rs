@@ -2,20 +2,17 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    mem,
-    sync::{Arc, atomic::AtomicU64},
-};
+use std::{mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
 
 use crate::{
-    bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     block_handler::BlockHandler,
     block_manager::BlockManager,
+    bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     committee::Committee,
-    config::{NodePrivateConfig, NodePublicConfig},
+    config::NodePrivateConfig,
     consensus::{
         CommitMetastate,
         linearizer::CommittedSubDag,
@@ -25,7 +22,6 @@ use crate::{
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
-    epoch_close::EpochManager,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
     state::RecoveredState,
@@ -62,8 +58,6 @@ pub struct Core<H: BlockHandler> {
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
-    epoch_manager: EpochManager,
-    rounds_in_epoch: RoundNumber,
     committer: UniversalCommitter,
     pub(crate) encoder: Encoder,
 }
@@ -81,7 +75,6 @@ impl<H: BlockHandler> Core<H> {
         authority: AuthorityIndex,
         committee: Arc<Committee>,
         private_config: NodePrivateConfig,
-        public_config: &NodePublicConfig,
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
     ) -> Self {
@@ -155,47 +148,44 @@ impl<H: BlockHandler> Core<H> {
 
         let block_manager = BlockManager::new(dag_state.clone(), &committee);
 
-        let epoch_manager = EpochManager::new();
-
         let committer =
             UniversalCommitterBuilder::new(committee.clone(), dag_state.clone(), metrics.clone())
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
-        let bls_cert_aggregator =
-            if dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-                let mut aggregator = BlsCertificateAggregator::new(committee.clone());
-                // Build a local commitment map for recovery replay (blocks
-                // are not yet in DagState at this point).
-                let recovery_commitments: AHashMap<BlockReference, _> = unprocessed_blocks
-                    .iter()
-                    .map(|b| (*b.reference(), b.merkle_root()))
-                    .collect();
-                // Replay recovered blocks through the aggregator to rebuild
-                // certificate state (in-memory only — not persisted).
-                for block in &unprocessed_blocks {
-                    let events = aggregator.add_block(block, |ack_ref| {
-                        recovery_commitments
-                            .get(ack_ref)
-                            .copied()
-                            .unwrap_or_default()
-                    });
-                    for event in events {
-                        match event {
-                            CertificateEvent::Leader(leader_ref, _) => {
-                                dag_state.mark_leader_certified(leader_ref);
-                            }
-                            CertificateEvent::Dac(block_ref, _) => {
-                                dag_state.mark_dac_certified(block_ref);
-                            }
-                            CertificateEvent::Round(..) => {}
+        let bls_cert_aggregator = if dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+            let mut aggregator = BlsCertificateAggregator::new(committee.clone());
+            // Build a local commitment map for recovery replay (blocks
+            // are not yet in DagState at this point).
+            let recovery_commitments: AHashMap<BlockReference, _> = unprocessed_blocks
+                .iter()
+                .map(|b| (*b.reference(), b.merkle_root()))
+                .collect();
+            // Replay recovered blocks through the aggregator to rebuild
+            // certificate state (in-memory only — not persisted).
+            for block in &unprocessed_blocks {
+                let events = aggregator.add_block(block, |ack_ref| {
+                    recovery_commitments
+                        .get(ack_ref)
+                        .copied()
+                        .unwrap_or_default()
+                });
+                for event in events {
+                    match event {
+                        CertificateEvent::Leader(leader_ref, _) => {
+                            dag_state.mark_leader_certified(leader_ref);
                         }
+                        CertificateEvent::Dac(block_ref, _) => {
+                            dag_state.mark_dac_certified(block_ref);
+                        }
+                        CertificateEvent::Round(..) => {}
                     }
                 }
-                Some(aggregator)
-            } else {
-                None
-            };
+            }
+            Some(aggregator)
+        } else {
+            None
+        };
 
         let this = Self {
             block_manager,
@@ -214,8 +204,6 @@ impl<H: BlockHandler> Core<H> {
             bls_cert_aggregator,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
-            epoch_manager,
-            rounds_in_epoch: public_config.parameters.rounds_in_epoch,
             committer,
             encoder,
         };
@@ -408,8 +396,7 @@ impl<H: BlockHandler> Core<H> {
         if let Some(ref mut aggregator) = self.bls_cert_aggregator {
             let dag = &self.dag_state;
             let events = aggregator.add_block(block, |ack_ref| {
-                dag.get_transactions_commitment(ack_ref)
-                    .unwrap_or_default()
+                dag.get_transactions_commitment(ack_ref).unwrap_or_default()
             });
             for event in events {
                 match event {
@@ -430,7 +417,7 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::run_block_handler");
-        let transactions = self.block_handler.handle_blocks(!self.epoch_changing());
+        let transactions = self.block_handler.handle_blocks(true);
         self.pending.push(MetaTransaction::Payload(transactions));
     }
 
@@ -561,13 +548,10 @@ impl<H: BlockHandler> Core<H> {
     ) -> (Vec<BaseTransaction>, Vec<BlockReference>) {
         let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
-        let epoch_changing = self.epoch_changing();
         for meta_transaction in pending {
             match meta_transaction {
                 MetaTransaction::Payload(payload) => {
-                    if !epoch_changing {
-                        transactions.extend(payload);
-                    }
+                    transactions.extend(payload);
                 }
                 MetaTransaction::Include(include) => pending_refs.push(include),
             }
@@ -670,8 +654,7 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let is_starfish_l =
-            self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
+        let is_starfish_l = self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
         let bls_signer_opt = if is_starfish_l {
             Some(&self.bls_signer)
         } else {
@@ -704,7 +687,6 @@ impl<H: BlockHandler> Core<H> {
             block_references,
             acknowledgment_references.to_vec(),
             time_ns,
-            self.epoch_changing(),
             &self.signer,
             bls_signer_opt,
             committee_opt,
@@ -834,11 +816,6 @@ impl<H: BlockHandler> Core<H> {
             self.last_commit_leader = *last.reference();
         }
 
-        // todo: should ideally come from execution result of epoch smart contract
-        if self.last_commit_leader.round() > self.rounds_in_epoch {
-            self.epoch_manager.epoch_change_begun();
-        }
-
         (sequence, any_decided)
     }
 
@@ -914,10 +891,6 @@ impl<H: BlockHandler> Core<H> {
             self.dag_state
                 .update_last_available_commit(commit.anchor.round);
             self.dag_state.update_last_committed_rounds(commit);
-            for block in &commit.blocks {
-                self.epoch_manager
-                    .observe_committed_block(block, &self.committee);
-            }
             let committed_rounds = self.dag_state.last_committed_rounds();
             commit_data.push(CommitData::new(commit, committed_rounds));
         }
@@ -981,17 +954,5 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn committee(&self) -> &Arc<Committee> {
         &self.committee
-    }
-
-    pub fn epoch_closed(&self) -> bool {
-        self.epoch_manager.closed()
-    }
-
-    pub fn epoch_changing(&self) -> bool {
-        self.epoch_manager.changing()
-    }
-
-    pub fn epoch_closing_time(&self) -> Arc<AtomicU64> {
-        self.epoch_manager.closing_time()
     }
 }

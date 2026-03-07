@@ -111,7 +111,6 @@ impl BlsCertificateAggregator {
                     block.block_references(),
                     &block.acknowledgments(),
                     block.meta_creation_time_ns(),
-                    block.epoch_changed(),
                     block.merkle_root(),
                     block.strong_vote(),
                 );
@@ -259,7 +258,6 @@ mod tests {
             block_refs,
             ack_refs,
             0,
-            false,
             signer,
             Some(bls_signer),
             Some(committee),

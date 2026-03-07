@@ -46,19 +46,6 @@ use crate::{
     threshold_clock::threshold_clock_valid_block_header,
 };
 
-pub type EpochStatus = bool;
-
-#[derive(PartialEq, Default, Clone, Copy, Serialize, Deserialize)]
-pub enum InternalEpochStatus {
-    #[default]
-    Open,
-    /// Change is triggered by an external deterministic mechanism
-    BeginChange,
-    /// Epoch is safe to close -- committed blocks from >= 2f+1 stake indicate
-    /// epoch change
-    SafeToClose,
-}
-
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct BlockReference {
     pub round: RoundNumber,
@@ -105,11 +92,12 @@ impl PartialOrd for BlockReference {
 // Protocol-specific field groups.
 // ---------------------------------------------------------------------------
 
-/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL, StarfishPull).
+/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL,
+/// StarfishPull).
 ///
-/// Acknowledgments are a compressed representation: a suffix of `block_references`
-/// is shared with the acknowledgment list (`intersection`), and any remaining
-/// acknowledged references are stored in `extra_references`.
+/// Acknowledgments are a compressed representation: a suffix of
+/// `block_references` is shared with the acknowledgment list (`intersection`),
+/// and any remaining acknowledged references are stored in `extra_references`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AckFields {
     /// Index into `block_references` where the shared acknowledgment suffix
@@ -123,10 +111,11 @@ pub struct AckFields {
 
 /// BLS certificate data (StarfishL only).
 ///
-/// `round_signature` is always present — every StarfishL block signs the digest.
-/// `leader_signature` is present when the block includes the previous-round leader.
-/// Aggregate fields are populated by the protocol layer once quorum is reached.
-/// `acknowledgment_signatures` is parallel to the block's acknowledgment list.
+/// `round_signature` is always present — every StarfishL block signs the
+/// digest. `leader_signature` is present when the block includes the
+/// previous-round leader. Aggregate fields are populated by the protocol layer
+/// once quorum is reached. `acknowledgment_signatures` is parallel to the
+/// block's acknowledgment list.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlsFields {
     /// BLS round signature (block author signs the digest).
@@ -157,7 +146,6 @@ pub struct BlockHeader {
     pub(crate) block_references: Vec<BlockReference>,
     /// Creation time as reported by creator (currently not enforced).
     pub(crate) meta_creation_time_ns: TimestampNs,
-    pub(crate) epoch_marker: EpochStatus,
     /// Signature by the block author over the header fields.
     pub(crate) signature: SignatureBytes,
     /// Merkle root over encoded transactions (Starfish) or raw transactions
@@ -242,10 +230,6 @@ impl BlockHeader {
         let secs = self.meta_creation_time_ns / NANOS_IN_SEC;
         let nanos = self.meta_creation_time_ns % NANOS_IN_SEC;
         Duration::new(secs as u64, nanos as u32)
-    }
-
-    pub fn epoch_changed(&self) -> EpochStatus {
-        self.epoch_marker
     }
 
     pub fn merkle_root(&self) -> TransactionsCommitment {
@@ -512,7 +496,6 @@ impl VerifiedBlock {
         block_references: Vec<BlockReference>,
         acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
         merkle_root: TransactionsCommitment,
@@ -536,7 +519,6 @@ impl VerifiedBlock {
                     &block_references,
                     &acknowledgments,
                     meta_creation_time_ns,
-                    epoch_marker,
                     &signature,
                     merkle_root,
                     strong_vote,
@@ -544,7 +526,6 @@ impl VerifiedBlock {
             },
             block_references,
             meta_creation_time_ns,
-            epoch_marker,
             signature,
             transactions_commitment: merkle_root,
             ack: AckFields {
@@ -575,7 +556,6 @@ impl VerifiedBlock {
                     &block_refs,
                     &ack_refs,
                     0,
-                    false,
                     &SignatureBytes::default(),
                     TransactionsCommitment::default(),
                     None,
@@ -583,7 +563,6 @@ impl VerifiedBlock {
             },
             block_references: block_refs,
             meta_creation_time_ns: 0,
-            epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             ack: AckFields {
@@ -602,13 +581,13 @@ impl VerifiedBlock {
         Data::new(block)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_signer(
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: Vec<BlockReference>,
         acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
-        epoch_marker: EpochStatus,
         signer: &Signer,
         bls_signer: Option<&BlsSigner>,
         committee: Option<&Committee>,
@@ -646,7 +625,6 @@ impl VerifiedBlock {
             &block_references,
             &acknowledgments,
             meta_creation_time_ns,
-            epoch_marker,
             transactions_commitment,
             strong_vote,
         );
@@ -662,7 +640,6 @@ impl VerifiedBlock {
                 &block_references,
                 &acknowledgments,
                 meta_creation_time_ns,
-                epoch_marker,
                 transactions_commitment,
                 strong_vote,
             );
@@ -713,7 +690,6 @@ impl VerifiedBlock {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            epoch_marker,
             signature,
             transactions,
             transactions_commitment,
@@ -778,10 +754,6 @@ impl VerifiedBlock {
 
     pub fn meta_creation_time(&self) -> Duration {
         self.header.meta_creation_time()
-    }
-
-    pub fn epoch_changed(&self) -> EpochStatus {
-        self.header.epoch_changed()
     }
 
     pub fn merkle_root(&self) -> TransactionsCommitment {
@@ -956,7 +928,6 @@ impl VerifiedBlock {
             &self.header.block_references,
             &acknowledgments,
             self.header.meta_creation_time_ns,
-            self.header.epoch_marker,
             &self.header.signature,
             self.header.transactions_commitment,
             self.header.strong_vote,
@@ -1170,7 +1141,6 @@ mod tests {
             vec![a, b, c],
             vec![d, c],
             0,
-            false,
             SignatureBytes::default(),
             vec![],
             TransactionsCommitment::default(),
@@ -1192,7 +1162,6 @@ mod tests {
             reference: BlockReference::new_test(0, 2),
             block_references: vec![a],
             meta_creation_time_ns: 0,
-            epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
             ack: AckFields {
@@ -1226,14 +1195,6 @@ impl CryptoHash for BlockReference {
 impl CryptoHash for Shard {
     fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
         state.update(self);
-    }
-}
-impl CryptoHash for EpochStatus {
-    fn crypto_hash(&self, state: &mut crypto::Blake3Hasher) {
-        match self {
-            false => [0].crypto_hash(state),
-            true => [1].crypto_hash(state),
-        }
     }
 }
 
