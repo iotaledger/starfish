@@ -7,6 +7,8 @@ use std::{mem, sync::Arc};
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
 
+use tokio::sync::mpsc;
+
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
@@ -18,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{AsBytes, BlsSigner, Signer},
+    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
@@ -55,6 +57,7 @@ pub struct Core<H: BlockHandler> {
     signer: Signer,
     bls_signer: BlsSigner,
     bls_cert_aggregator: Option<BlsCertificateAggregator>,
+    dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
@@ -77,6 +80,7 @@ impl<H: BlockHandler> Core<H> {
         private_config: NodePrivateConfig,
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
+        dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
     ) -> Self {
         let RecoveredState {
             dag_state,
@@ -202,6 +206,7 @@ impl<H: BlockHandler> Core<H> {
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
             bls_cert_aggregator,
+            dac_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
             committer,
@@ -293,6 +298,9 @@ impl<H: BlockHandler> Core<H> {
                 .push(MetaTransaction::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
             self.feed_aggregator(processed);
+            if processed.transactions().is_some() {
+                self.sign_and_enqueue_dac(processed.reference());
+            }
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
@@ -340,7 +348,9 @@ impl<H: BlockHandler> Core<H> {
     /// connected.
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         for item in items {
+            let block_ref = item.block_reference;
             self.attach_or_buffer_transaction_data(item);
+            self.sign_and_enqueue_dac(&block_ref);
         }
         self.update_pending_metrics();
     }
@@ -381,11 +391,13 @@ impl<H: BlockHandler> Core<H> {
             return;
         }
 
-        if !self.dag_state.attach_transaction_data(
+        if self.dag_state.attach_transaction_data(
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
         ) {
+            self.sign_and_enqueue_dac(&block_ref);
+        } else {
             self.pending_reconstructed_data.insert(block_ref, item);
         }
     }
@@ -407,6 +419,44 @@ impl<H: BlockHandler> Core<H> {
                         self.dag_state.mark_dac_certified(block_ref);
                     }
                     CertificateEvent::Round(..) => {}
+                }
+            }
+        }
+    }
+
+    /// Sign and enqueue a standalone DAC partial signature for a remote block.
+    /// No-op for non-StarfishL or own blocks.
+    fn sign_and_enqueue_dac(&self, block_ref: &BlockReference) {
+        if block_ref.authority == self.authority {
+            return;
+        }
+        let Some(ref outbox) = self.dac_sig_outbox else {
+            return;
+        };
+        let Some(commitment) = self.dag_state.get_transactions_commitment(block_ref) else {
+            return;
+        };
+        let digest = crypto::bls_dac_message(block_ref, commitment);
+        let sig = self.bls_signer.sign_digest(&digest);
+        let _ = outbox.send((*block_ref, sig));
+    }
+
+    /// Handle a standalone DAC partial signature received from a peer.
+    pub fn add_dac_partial_sig(
+        &mut self,
+        block_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) {
+        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
+            let commitment = self
+                .dag_state
+                .get_transactions_commitment(&block_ref)
+                .unwrap_or_default();
+            let events = aggregator.add_standalone_dac_sig(block_ref, signer, sig, commitment);
+            for event in events {
+                if let CertificateEvent::Dac(ref r, _) = event {
+                    self.dag_state.mark_dac_certified(*r);
                 }
             }
         }

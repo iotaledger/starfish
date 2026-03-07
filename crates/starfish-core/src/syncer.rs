@@ -10,6 +10,7 @@ use crate::{
     block_handler::BlockHandler,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
+    crypto::BlsSignatureBytes,
     dag_state::DagState,
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -104,6 +105,15 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         self.core.add_transaction_data(items);
         self.try_new_block();
+    }
+
+    pub fn add_dac_partial_sig(
+        &mut self,
+        block_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) {
+        self.core.add_dac_partial_sig(block_ref, signer, sig);
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {

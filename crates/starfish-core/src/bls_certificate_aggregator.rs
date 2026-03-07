@@ -214,6 +214,34 @@ impl BlsCertificateAggregator {
         self.dac_certs.retain(|r, _| r.round >= round);
     }
 
+    /// Process a standalone DAC partial signature received directly from a
+    /// peer (not embedded in a block). Same verification + accumulation +
+    /// quorum logic as the embedded path in `add_block`.
+    pub fn add_standalone_dac_sig(
+        &mut self,
+        block_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+        commitment: crate::crypto::TransactionsCommitment,
+    ) -> Vec<CertificateEvent> {
+        let mut events = Vec::new();
+        if self.dac_certs.contains_key(&block_ref) {
+            return events;
+        }
+        let digest = crypto::bls_dac_message(&block_ref, commitment);
+        if self.verify_sig(signer, &digest, &sig) {
+            let sigs = self.dac_partial_sigs.entry(block_ref).or_default();
+            sigs.entry(signer).or_insert(sig);
+            let stake = self.dac_stake.entry(block_ref).or_default();
+            if stake.add(signer, &self.committee) {
+                let agg = self.aggregate_dac(&block_ref);
+                self.dac_certs.insert(block_ref, agg);
+                events.push(CertificateEvent::Dac(block_ref, agg));
+            }
+        }
+        events
+    }
+
     fn aggregate_round(&self, round: RoundNumber) -> BlsSignatureBytes {
         let sigs = &self.round_partial_sigs[&round];
         let sig_refs: Vec<&BlsSignatureBytes> = sigs.values().collect();

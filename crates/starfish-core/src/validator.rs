@@ -11,19 +11,22 @@ use std::{
 use ::prometheus::Registry;
 use eyre::{Context, Result, eyre};
 
+use tokio::sync::mpsc;
+
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
-    dag_state::DagState,
+    crypto::BlsSignatureBytes,
+    dag_state::{ConsensusProtocol, DagState},
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::AuthorityIndex,
+    types::{AuthorityIndex, BlockReference},
 };
 
 pub struct Validator {
@@ -110,6 +113,14 @@ impl Validator {
             RealCommitHandler::new_with_handler(committee.clone(), metrics.clone());
         tracing::info!("Commit handler");
 
+        let is_starfish_l = recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
+        let (dac_outbox_tx, dac_outbox_rx) = if is_starfish_l {
+            let (tx, rx) = mpsc::unbounded_channel::<(BlockReference, BlsSignatureBytes)>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let core = Core::open(
             block_handler,
             authority,
@@ -117,6 +128,7 @@ impl Validator {
             private_config,
             metrics.clone(),
             recovered,
+            dac_outbox_tx,
         );
         tracing::info!("Core");
 
@@ -129,8 +141,13 @@ impl Validator {
         .await;
         tracing::info!("Network is created. Starting broadcaster");
 
-        let network_broadcaster =
-            NetworkSyncer::start(network, core, commit_handler, metrics.clone());
+        let network_broadcaster = NetworkSyncer::start(
+            network,
+            core,
+            commit_handler,
+            metrics.clone(),
+            dac_outbox_rx,
+        );
 
         tracing::info!("Validator {authority} listening on {network_address}");
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
