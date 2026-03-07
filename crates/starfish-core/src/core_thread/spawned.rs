@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     block_handler::BlockHandler,
+    crypto::BlsSignatureBytes,
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
@@ -51,6 +52,13 @@ enum CoreThreadCommand {
     ConnectionDropped(AuthorityIndex, oneshot::Sender<()>),
     /// A peer has subscribed to us (sent us SubscribeBroadcastRequest).
     PeerSubscribed(AuthorityIndex, oneshot::Sender<()>),
+    /// A standalone DAC partial signature received from a peer.
+    AddDacPartialSig(
+        BlockReference,
+        AuthorityIndex,
+        BlsSignatureBytes,
+        oneshot::Sender<()>,
+    ),
 }
 
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
@@ -138,6 +146,21 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         };
         self.send(status).await;
         receiver.await.expect("core thread is not expected to stop")
+    }
+
+    /// Forward a standalone DAC partial signature to Core for aggregation.
+    pub async fn add_dac_partial_sig(
+        &self,
+        block_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::AddDacPartialSig(
+            block_ref, signer, sig, sender,
+        ))
+        .await;
+        receiver.await.expect("core thread is not expected to stop");
     }
 
     /// Record that a peer has sent us a SubscribeBroadcastRequest.
@@ -263,6 +286,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .metrics
                         .subscribed_by_peers
                         .set(self.syncer.subscribed_by_authorities.len() as i64);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::AddDacPartialSig(block_ref, signer, sig, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["add_dac_partial_sig"])
+                        .inc();
+                    self.syncer.add_dac_partial_sig(block_ref, signer, sig);
                     sender.send(()).ok();
                 }
             }

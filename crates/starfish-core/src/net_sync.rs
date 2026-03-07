@@ -27,6 +27,7 @@ use crate::{
     cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
     core_thread::CoreThreadDispatcher,
+    crypto::BlsSignatureBytes,
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -257,6 +258,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::MissingTxDataRequest(refs) => {
                 return self.handle_missing_tx_data_request(refs).await;
+            }
+            NetworkMessage::DacPartialSig(block_ref, signer, sig) => {
+                if signer == self.peer_id {
+                    self.inner
+                        .syncer
+                        .add_dac_partial_sig(block_ref, signer, sig)
+                        .await;
+                }
             }
         }
         true
@@ -825,6 +834,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     main_task: JoinHandle<()>,
     stop: mpsc::Receiver<()>,
     bridge_task: Option<JoinHandle<()>>,
+    dac_routing_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -838,6 +848,8 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub shard_tx:
         parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
     pub cordial_knowledge: CordialKnowledgeHandle,
+    /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
+    pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -846,6 +858,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut core: Core<H>,
         mut commit_observer: C,
         metrics: Arc<Metrics>,
+        dac_outbox_rx: Option<mpsc::UnboundedReceiver<(BlockReference, BlsSignatureBytes)>>,
     ) -> Self {
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
@@ -897,12 +910,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let inner = Arc::new(NetworkSyncerInner {
             notify,
             syncer,
-            dag_state,
+            dag_state: dag_state.clone(),
             committee,
             stop: stop_sender.clone(),
             gc_round,
             shard_tx: parking_lot::Mutex::new(shard_tx),
             cordial_knowledge: cordial_knowledge_handle,
+            peer_senders: parking_lot::RwLock::new(AHashMap::new()),
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
@@ -921,6 +935,24 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             })
         });
+        // Spawn DAC routing task: drains Core's outbox and routes DAC partial
+        // sigs to the target block author via peer_senders.
+        let dac_routing_task = dac_outbox_rx.map(|mut rx| {
+            let routing_inner = inner.clone();
+            handle.spawn(async move {
+                while let Some((block_ref, sig)) = rx.recv().await {
+                    let target = block_ref.authority;
+                    let msg = NetworkMessage::DacPartialSig(
+                        block_ref,
+                        routing_inner.dag_state.get_own_authority_index(),
+                        sig,
+                    );
+                    if let Some(sender) = routing_inner.peer_senders.read().get(&target) {
+                        let _ = sender.try_send(msg);
+                    }
+                }
+            })
+        });
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(
             network,
@@ -934,6 +966,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             main_task,
             stop: stop_receiver,
             bridge_task,
+            dac_routing_task,
             cordial_knowledge_task,
         }
     }
@@ -948,6 +981,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Wait for the bridge task to observe channel closure and exit.
         if let Some(bridge_task) = self.bridge_task {
             bridge_task.await.ok();
+        }
+        // The DAC routing task exits when Core's outbox sender is dropped.
+        if let Some(dac_task) = self.dac_routing_task {
+            dac_task.await.ok();
         }
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
@@ -1037,6 +1074,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let peer_id = handler.peer_id;
         let own_id = handler.own_id;
+
+        // Register peer sender for direct unicast messages (DAC partial sigs).
+        inner
+            .peer_senders
+            .write()
+            .insert(peer_id, connection.sender.clone());
+
         inner.syncer.authority_connection(peer_id, true).await;
 
         tracing::debug!(
@@ -1051,6 +1095,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
 
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
+        inner.peer_senders.write().remove(&peer_id);
         inner.syncer.authority_connection(peer_id, false).await;
         handler.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
