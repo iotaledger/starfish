@@ -425,7 +425,8 @@ impl BaseCommitter {
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 if self.decide_skip_starfish(voting_round, leader, voter_info) {
                     return LeaderStatus::Skip(leader, leader_round);
                 }
@@ -448,7 +449,14 @@ impl BaseCommitter {
 
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|l| self.enough_leader_support(certifying_round, l, voter_info))
+            .filter(|l| {
+                if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                    // StarfishL: require BLS leader certificate instead of DAG-edge quorum.
+                    self.dag_state.has_leader_certificate(l.reference())
+                } else {
+                    self.enough_leader_support(certifying_round, l, voter_info)
+                }
+            })
             .map(|l| {
                 let metastate = self.determine_metastate(&l, voting_round, voter_info);
                 LeaderStatus::Commit(l, metastate)

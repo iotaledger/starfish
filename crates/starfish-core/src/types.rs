@@ -101,22 +101,60 @@ impl PartialOrd for BlockReference {
 // sign_block().
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Protocol-specific field groups.
+// ---------------------------------------------------------------------------
+
+/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL, StarfishPull).
+///
+/// Acknowledgments are a compressed representation: a suffix of `block_references`
+/// is shared with the acknowledgment list (`intersection`), and any remaining
+/// acknowledged references are stored in `extra_references`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AckFields {
+    /// Index into `block_references` where the shared acknowledgment suffix
+    /// starts. `None` for legacy blocks where `extra_references` stores the
+    /// full logical acknowledgment list.
+    pub(crate) intersection: Option<u32>,
+    /// Acknowledged references not covered by the trailing
+    /// `block_references` suffix.
+    pub(crate) extra_references: Vec<BlockReference>,
+}
+
+/// BLS certificate data (StarfishL only).
+///
+/// `round_signature` is always present — every StarfishL block signs the digest.
+/// `leader_signature` is present when the block includes the previous-round leader.
+/// Aggregate fields are populated by the protocol layer once quorum is reached.
+/// `acknowledgment_signatures` is parallel to the block's acknowledgment list.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BlsFields {
+    /// BLS round signature (block author signs the digest).
+    pub(crate) round_signature: BlsSignatureBytes,
+    /// BLS leader signature (present when the block includes the leader ref).
+    pub(crate) leader_signature: Option<BlsSignatureBytes>,
+    /// Aggregate BLS round signature (populated by protocol layer).
+    pub(crate) aggregate_round_signature: Option<BlsSignatureBytes>,
+    /// Aggregate BLS leader signature (populated by protocol layer).
+    pub(crate) aggregate_leader_signature: Option<BlsSignatureBytes>,
+    /// BLS DAC signatures, parallel to the acknowledgment list.
+    pub(crate) acknowledgment_signatures: Vec<BlsSignatureBytes>,
+}
+
+// ---------------------------------------------------------------------------
+// BlockHeader — signed, content-addressed block identity.
+// Contains exactly the fields that feed into BlockDigest::new() and
+// sign_block().
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
+    // -- Base fields (all protocols) ------------------------------------------
     pub(crate) reference: BlockReference,
     /// Causal history — references to blocks this block includes.
     /// Order matters: the first reference for a given (round, authority) is the
     /// vote.
     pub(crate) block_references: Vec<BlockReference>,
-    /// Start of the trailing `block_references` suffix that is also
-    /// acknowledged.
-    ///
-    /// `None` preserves backward compatibility for legacy blocks where
-    /// `acknowledgment_references` stores the full logical acknowledgment list.
-    pub(crate) acknowledgment_intersection: Option<u32>,
-    /// Additional acknowledged references not covered by the trailing
-    /// `block_references` suffix.
-    pub(crate) acknowledgment_references: Vec<BlockReference>,
     /// Creation time as reported by creator (currently not enforced).
     pub(crate) meta_creation_time_ns: TimestampNs,
     pub(crate) epoch_marker: EpochStatus,
@@ -125,16 +163,17 @@ pub struct BlockHeader {
     /// Merkle root over encoded transactions (Starfish) or raw transactions
     /// (Mysticeti).
     pub(crate) transactions_commitment: TransactionsCommitment,
-    /// Starfish-S strong vote flag. None for non-StarfishS protocols.
+
+    // -- Acknowledgment fields (Starfish variants) ----------------------------
+    pub(crate) ack: AckFields,
+
+    // -- Protocol-specific extensions -----------------------------------------
+    /// Strong vote flag (StarfishS only). None for all other protocols.
     pub(crate) strong_vote: Option<bool>,
-    /// BLS round signature (block author signs the digest).
-    pub(crate) bls_round_signature: Option<BlsSignatureBytes>,
-    /// BLS leader signature.
-    pub(crate) bls_leader_signature: Option<BlsSignatureBytes>,
-    /// Aggregate BLS round signature (populated by protocol layer).
-    pub(crate) bls_aggregate_round_signature: Option<BlsSignatureBytes>,
-    /// Aggregate BLS leader signature (populated by protocol layer).
-    pub(crate) bls_aggregate_leader_signature: Option<BlsSignatureBytes>,
+    /// BLS certificate fields (StarfishL only). None for all other protocols.
+    pub(crate) bls: Option<Box<BlsFields>>,
+
+    // -- Cache (not serialized) -----------------------------------------------
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
     /// core thread so that store writes are zero-serialization on the critical
     /// path.
@@ -152,26 +191,26 @@ impl BlockHeader {
     }
 
     pub fn acknowledgment_intersection(&self) -> Option<usize> {
-        self.acknowledgment_intersection.map(|start| start as usize)
+        self.ack.intersection.map(|start| start as usize)
     }
 
     pub fn extra_acknowledgment_references(&self) -> &Vec<BlockReference> {
-        &self.acknowledgment_references
+        &self.ack.extra_references
     }
 
     pub fn acknowledgments(&self) -> Vec<BlockReference> {
         expand_acknowledgments(
             &self.block_references,
-            self.acknowledgment_intersection,
-            &self.acknowledgment_references,
+            self.ack.intersection,
+            &self.ack.extra_references,
         )
     }
 
     pub fn acknowledgment_count(&self) -> usize {
         count_acknowledgments(
             &self.block_references,
-            self.acknowledgment_intersection,
-            &self.acknowledgment_references,
+            self.ack.intersection,
+            &self.ack.extra_references,
         )
     }
 
@@ -217,20 +256,35 @@ impl BlockHeader {
         self.strong_vote
     }
 
+    pub fn bls(&self) -> Option<&BlsFields> {
+        self.bls.as_deref()
+    }
+
     pub fn bls_round_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls_round_signature.as_ref()
+        self.bls.as_ref().map(|b| &b.round_signature)
     }
 
     pub fn bls_leader_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls_leader_signature.as_ref()
+        self.bls.as_ref().and_then(|b| b.leader_signature.as_ref())
     }
 
     pub fn bls_aggregate_round_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls_aggregate_round_signature.as_ref()
+        self.bls
+            .as_ref()
+            .and_then(|b| b.aggregate_round_signature.as_ref())
     }
 
     pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls_aggregate_leader_signature.as_ref()
+        self.bls
+            .as_ref()
+            .and_then(|b| b.aggregate_leader_signature.as_ref())
+    }
+
+    pub fn acknowledgment_bls_signatures(&self) -> &[BlsSignatureBytes] {
+        self.bls
+            .as_ref()
+            .map(|b| b.acknowledgment_signatures.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn preserialize(&mut self) {
@@ -463,7 +517,7 @@ impl VerifiedBlock {
         transactions: Vec<BaseTransaction>,
         merkle_root: TransactionsCommitment,
         strong_vote: Option<bool>,
-        bls_round_signature: Option<BlsSignatureBytes>,
+        bls: Option<BlsFields>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
@@ -489,17 +543,16 @@ impl VerifiedBlock {
                 ),
             },
             block_references,
-            acknowledgment_intersection,
-            acknowledgment_references,
             meta_creation_time_ns,
             epoch_marker,
             signature,
             transactions_commitment: merkle_root,
+            ack: AckFields {
+                intersection: acknowledgment_intersection,
+                extra_references: acknowledgment_references,
+            },
             strong_vote,
-            bls_round_signature,
-            bls_leader_signature: None,
-            bls_aggregate_round_signature: None,
-            bls_aggregate_leader_signature: None,
+            bls: bls.map(Box::new),
             serialized: None,
         };
 
@@ -529,17 +582,16 @@ impl VerifiedBlock {
                 ),
             },
             block_references: block_refs,
-            acknowledgment_intersection: Some(0),
-            acknowledgment_references: ack_refs,
             meta_creation_time_ns: 0,
             epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
+            ack: AckFields {
+                intersection: Some(0),
+                extra_references: ack_refs,
+            },
             strong_vote: None,
-            bls_round_signature: None,
-            bls_leader_signature: None,
-            bls_aggregate_round_signature: None,
-            bls_aggregate_leader_signature: None,
+            bls: None,
             serialized: None,
         };
         let mut block = Self {
@@ -559,6 +611,8 @@ impl VerifiedBlock {
         epoch_marker: EpochStatus,
         signer: &Signer,
         bls_signer: Option<&BlsSigner>,
+        committee: Option<&Committee>,
+        ack_commitments: &[(BlockReference, TransactionsCommitment)],
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
@@ -567,7 +621,8 @@ impl VerifiedBlock {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 TransactionsCommitment::new_from_encoded_transactions(
                     encoded_transactions.as_ref().unwrap(),
                     authority as usize,
@@ -596,8 +651,9 @@ impl VerifiedBlock {
             strong_vote,
         );
 
-        // Optionally compute BLS round signature over the digest.
-        let bls_round_sig = bls_signer.map(|bs| {
+        // Build BLS fields if a BLS signer is provided (StarfishL).
+        let bls = bls_signer.map(|bs| {
+            // Round signature over the digest.
             let mut bls_hasher = crypto::Blake3Hasher::new();
             crypto::BlockDigest::digest_without_signature(
                 &mut bls_hasher,
@@ -611,7 +667,44 @@ impl VerifiedBlock {
                 strong_vote,
             );
             let bls_digest: [u8; 32] = bls_hasher.finalize().into();
-            bs.sign_digest(&bls_digest)
+            let round_signature = bs.sign_digest(&bls_digest);
+
+            // Leader signature if we include the previous-round leader.
+            let leader_signature = (|| {
+                let committee = committee?;
+                let leader_round = round.checked_sub(1)?;
+                if leader_round == 0 {
+                    return None;
+                }
+                let leader = committee.elect_leader(leader_round);
+                let leader_ref = block_references
+                    .iter()
+                    .find(|r| r.round == leader_round && r.authority == leader)?;
+                let msg = crypto::bls_leader_message(leader_ref);
+                Some(bs.sign_digest(&msg))
+            })();
+
+            // DAC signatures over each acknowledged block's commitment.
+            let acknowledgment_signatures = acknowledgments
+                .iter()
+                .map(|ack_ref| {
+                    let commitment = ack_commitments
+                        .iter()
+                        .find(|(r, _)| r == ack_ref)
+                        .map(|(_, c)| *c)
+                        .unwrap_or_default();
+                    let msg = crypto::bls_dac_message(ack_ref, commitment);
+                    bs.sign_digest(&msg)
+                })
+                .collect();
+
+            BlsFields {
+                round_signature,
+                leader_signature,
+                aggregate_round_signature: None,
+                aggregate_leader_signature: None,
+                acknowledgment_signatures,
+            }
         });
 
         Self::new(
@@ -625,7 +718,7 @@ impl VerifiedBlock {
             transactions,
             transactions_commitment,
             strong_vote,
-            bls_round_sig,
+            bls,
         )
     }
 
@@ -803,7 +896,8 @@ impl VerifiedBlock {
         match consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => {
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => {
                 let info_length = committee.info_length();
                 let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
@@ -1097,17 +1191,16 @@ mod tests {
         let header = BlockHeader {
             reference: BlockReference::new_test(0, 2),
             block_references: vec![a],
-            acknowledgment_intersection: None,
-            acknowledgment_references: vec![b],
             meta_creation_time_ns: 0,
             epoch_marker: false,
             signature: SignatureBytes::default(),
             transactions_commitment: TransactionsCommitment::default(),
+            ack: AckFields {
+                intersection: None,
+                extra_references: vec![b],
+            },
             strong_vote: None,
-            bls_round_signature: None,
-            bls_leader_signature: None,
-            bls_aggregate_round_signature: None,
-            bls_aggregate_leader_signature: None,
+            bls: None,
             serialized: None,
         };
 

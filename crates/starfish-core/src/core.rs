@@ -11,6 +11,7 @@ use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
 
 use crate::{
+    bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     block_handler::BlockHandler,
     block_manager::BlockManager,
     committee::Committee,
@@ -56,8 +57,8 @@ pub struct Core<H: BlockHandler> {
     dag_state: DagState,
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
-    #[allow(dead_code)] // Will be used by future BLS-based protocols
     bls_signer: BlsSigner,
+    bls_cert_aggregator: Option<BlsCertificateAggregator>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
@@ -161,6 +162,41 @@ impl<H: BlockHandler> Core<H> {
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
+        let bls_cert_aggregator =
+            if dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                let mut aggregator = BlsCertificateAggregator::new(committee.clone());
+                // Build a local commitment map for recovery replay (blocks
+                // are not yet in DagState at this point).
+                let recovery_commitments: AHashMap<BlockReference, _> = unprocessed_blocks
+                    .iter()
+                    .map(|b| (*b.reference(), b.merkle_root()))
+                    .collect();
+                // Replay recovered blocks through the aggregator to rebuild
+                // certificate state (in-memory only — not persisted).
+                for block in &unprocessed_blocks {
+                    let events = aggregator.add_block(block, |ack_ref| {
+                        recovery_commitments
+                            .get(ack_ref)
+                            .copied()
+                            .unwrap_or_default()
+                    });
+                    for event in events {
+                        match event {
+                            CertificateEvent::Leader(leader_ref, _) => {
+                                dag_state.mark_leader_certified(leader_ref);
+                            }
+                            CertificateEvent::Dac(block_ref, _) => {
+                                dag_state.mark_dac_certified(block_ref);
+                            }
+                            CertificateEvent::Round(..) => {}
+                        }
+                    }
+                }
+                Some(aggregator)
+            } else {
+                None
+            };
+
         let this = Self {
             block_manager,
             store,
@@ -175,6 +211,7 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
+            bls_cert_aggregator,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
             epoch_manager,
@@ -267,6 +304,7 @@ impl<H: BlockHandler> Core<H> {
             self.pending
                 .push(MetaTransaction::Include(*processed.reference()));
             self.attach_pending_transaction_data(processed);
+            self.feed_aggregator(processed);
         }
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
@@ -301,6 +339,7 @@ impl<H: BlockHandler> Core<H> {
             self.pending
                 .push(MetaTransaction::Include(*block.reference()));
             self.attach_pending_transaction_data(block);
+            self.feed_aggregator(block);
             processed_refs.push(*block.reference());
         }
         self.run_block_handler();
@@ -360,6 +399,29 @@ impl<H: BlockHandler> Core<H> {
             &item.shard_data,
         ) {
             self.pending_reconstructed_data.insert(block_ref, item);
+        }
+    }
+
+    /// Feed a block to the BLS certificate aggregator (StarfishL only).
+    /// Propagates certificate events to DagState.
+    fn feed_aggregator(&mut self, block: &Data<VerifiedBlock>) {
+        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
+            let dag = &self.dag_state;
+            let events = aggregator.add_block(block, |ack_ref| {
+                dag.get_transactions_commitment(ack_ref)
+                    .unwrap_or_default()
+            });
+            for event in events {
+                match event {
+                    CertificateEvent::Leader(leader_ref, _) => {
+                        self.dag_state.mark_leader_certified(leader_ref);
+                    }
+                    CertificateEvent::Dac(block_ref, _) => {
+                        self.dag_state.mark_dac_certified(block_ref);
+                    }
+                    CertificateEvent::Round(..) => {}
+                }
+            }
         }
     }
 
@@ -524,7 +586,8 @@ impl<H: BlockHandler> Core<H> {
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS => Some(self.encoder.encode_transactions(
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => Some(self.encoder.encode_transactions(
                 transactions,
                 info_length,
                 parity_length,
@@ -607,6 +670,34 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
+        let is_starfish_l =
+            self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
+        let bls_signer_opt = if is_starfish_l {
+            Some(&self.bls_signer)
+        } else {
+            None
+        };
+        let committee_opt = if is_starfish_l {
+            Some(self.committee.as_ref())
+        } else {
+            None
+        };
+
+        // Build ack_commitments: for each acknowledgment ref, look up its
+        // transactions_commitment from DagState.
+        let ack_commitments: Vec<_> = if is_starfish_l {
+            acknowledgment_references
+                .iter()
+                .filter_map(|ack_ref| {
+                    self.dag_state
+                        .get_transactions_commitment(ack_ref)
+                        .map(|c| (*ack_ref, c))
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -615,7 +706,9 @@ impl<H: BlockHandler> Core<H> {
             time_ns,
             self.epoch_changing(),
             &self.signer,
-            None, // BLS signing not used by current protocols
+            bls_signer_opt,
+            committee_opt,
+            &ack_commitments,
             transactions.to_vec(),
             encoded_transactions.clone(),
             self.dag_state.consensus_protocol,
@@ -755,6 +848,9 @@ impl<H: BlockHandler> Core<H> {
         self.pending_reconstructed_data
             .retain(|block_ref, _| block_ref.round >= threshold);
         self.committer.cleanup(threshold);
+        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
+            aggregator.cleanup_below_round(threshold);
+        }
         self.update_pending_metrics();
         threshold
     }

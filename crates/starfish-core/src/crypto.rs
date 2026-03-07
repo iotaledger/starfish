@@ -20,6 +20,26 @@ use crate::{
     },
 };
 
+/// Build the 32-byte message that validators sign (BLS) to certify a leader.
+/// Domain separation: `b"leader" || leader_ref` fields.
+pub fn bls_leader_message(leader_ref: &BlockReference) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"leader");
+    leader_ref.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
+/// Build the 32-byte message that validators sign (BLS) to certify data
+/// availability for an acknowledged block.
+/// Domain separation: `b"dac" || ack_ref || commitment`.
+pub fn bls_dac_message(ack_ref: &BlockReference, commitment: TransactionsCommitment) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"dac");
+    ack_ref.crypto_hash(&mut hasher);
+    commitment.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 
@@ -731,6 +751,36 @@ impl Drop for BlsSigner {
         let zero_sk = bls::SecretKey::key_gen(&[0u8; 32], &[]).expect("BLS keygen");
         *self.0 = zero_sk;
     }
+}
+
+/// Aggregate N partial BLS signatures into one 96-byte signature.
+#[allow(dead_code)]
+pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
+    assert!(!sigs.is_empty(), "Cannot aggregate zero signatures");
+    let parsed: Vec<bls::Signature> = sigs
+        .iter()
+        .map(|s| bls::Signature::from_bytes(&s.0).expect("valid BLS signature bytes"))
+        .collect();
+    let refs: Vec<&bls::Signature> = parsed.iter().collect();
+    let agg = bls::AggregateSignature::aggregate(&refs, true).expect("BLS aggregation");
+    BlsSignatureBytes(agg.to_signature().to_bytes())
+}
+
+/// Verify an aggregate signature against multiple public keys (all signed same
+/// message).
+#[allow(dead_code)]
+pub fn bls_fast_aggregate_verify(
+    message: &[u8],
+    agg_sig: &BlsSignatureBytes,
+    pubkeys: &[&BlsPublicKey],
+) -> bool {
+    let sig = match bls::Signature::from_bytes(&agg_sig.0) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let pks: Vec<&bls::PublicKey> = pubkeys.iter().map(|pk| &pk.0).collect();
+    let result = sig.fast_aggregate_verify(true, message, BLS_DST, &pks);
+    result == blst::BLST_ERROR::BLST_SUCCESS
 }
 
 pub fn dummy_bls_signer() -> BlsSigner {
