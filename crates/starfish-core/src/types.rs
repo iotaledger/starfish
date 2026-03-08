@@ -591,11 +591,13 @@ impl VerifiedBlock {
         signer: &Signer,
         bls_signer: Option<&BlsSigner>,
         committee: Option<&Committee>,
-        ack_commitments: &[(BlockReference, TransactionsCommitment)],
+        aggregate_dac_sigs: Vec<BlsSignatureBytes>,
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
         strong_vote: Option<bool>,
+        aggregate_round_sig: Option<BlsSignatureBytes>,
+        aggregate_leader_sig: Option<BlsSignatureBytes>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -661,25 +663,14 @@ impl VerifiedBlock {
                 Some(bs.sign_digest(&msg))
             })();
 
-            // DAC signatures over each acknowledged block's commitment.
-            let acknowledgment_signatures = acknowledgments
-                .iter()
-                .map(|ack_ref| {
-                    let commitment = ack_commitments
-                        .iter()
-                        .find(|(r, _)| r == ack_ref)
-                        .map(|(_, c)| *c)
-                        .unwrap_or_default();
-                    let msg = crypto::bls_dac_message(ack_ref, commitment);
-                    bs.sign_digest(&msg)
-                })
-                .collect();
+            // Aggregated DAC certificates from the aggregator.
+            let acknowledgment_signatures = aggregate_dac_sigs;
 
             BlsFields {
                 round_signature,
                 leader_signature,
-                aggregate_round_signature: None,
-                aggregate_leader_signature: None,
+                aggregate_round_signature: aggregate_round_sig,
+                aggregate_leader_signature: aggregate_leader_sig,
                 acknowledgment_signatures,
             }
         });

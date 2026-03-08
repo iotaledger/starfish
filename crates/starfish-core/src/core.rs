@@ -159,21 +159,10 @@ impl<H: BlockHandler> Core<H> {
 
         let bls_cert_aggregator = if dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
-            // Build a local commitment map for recovery replay (blocks
-            // are not yet in DagState at this point).
-            let recovery_commitments: AHashMap<BlockReference, _> = unprocessed_blocks
-                .iter()
-                .map(|b| (*b.reference(), b.merkle_root()))
-                .collect();
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
             for block in &unprocessed_blocks {
-                let events = aggregator.add_block(block, |ack_ref| {
-                    recovery_commitments
-                        .get(ack_ref)
-                        .copied()
-                        .unwrap_or_default()
-                });
+                let events = aggregator.add_block(block);
                 for event in events {
                     match event {
                         CertificateEvent::Leader(leader_ref, _) => {
@@ -406,10 +395,7 @@ impl<H: BlockHandler> Core<H> {
     /// Propagates certificate events to DagState.
     fn feed_aggregator(&mut self, block: &Data<VerifiedBlock>) {
         if let Some(ref mut aggregator) = self.bls_cert_aggregator {
-            let dag = &self.dag_state;
-            let events = aggregator.add_block(block, |ack_ref| {
-                dag.get_transactions_commitment(ack_ref).unwrap_or_default()
-            });
+            let events = aggregator.add_block(block);
             for event in events {
                 match event {
                     CertificateEvent::Leader(leader_ref, _) => {
@@ -540,6 +526,38 @@ impl<H: BlockHandler> Core<H> {
             self.calculate_authority_bounds(number_of_blocks_to_create)
         );
 
+        // For StarfishL: require aggregate round/leader certs before creating block.
+        let (aggregate_round_sig, aggregate_leader_sig) =
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                let aggregator = self.bls_cert_aggregator.as_ref().unwrap();
+
+                // Round cert for clock_round - 1 (the round we just completed).
+                let round_cert = if clock_round <= 1 {
+                    None
+                } else {
+                    let cert = aggregator.round_certificate(clock_round - 1)?;
+                    Some(*cert)
+                };
+
+                // Leader cert for leader of clock_round - 1 (if we include that leader).
+                let leader_cert = if clock_round <= 2 {
+                    None
+                } else {
+                    let leader_round = clock_round - 1;
+                    let leader_authority = self.committee.elect_leader(leader_round);
+                    block_references
+                        .iter()
+                        .find(|r| r.round == leader_round && r.authority == leader_authority)
+                        .and_then(|leader_ref| {
+                            aggregator.leader_certificate(leader_ref).copied()
+                        })
+                };
+
+                (round_cert, leader_cert)
+            } else {
+                (None, None)
+            };
+
         // Create and store blocks
         let mut first_block = None;
         for block_id in 0..number_of_blocks_to_create {
@@ -559,6 +577,8 @@ impl<H: BlockHandler> Core<H> {
                     &acknowledgment_references,
                     clock_round,
                     block_id,
+                    aggregate_round_sig,
+                    aggregate_leader_sig,
                 )
             );
             tracing::debug!("Created block {:?}", block_data);
@@ -688,6 +708,8 @@ impl<H: BlockHandler> Core<H> {
         acknowledgment_references: &[BlockReference],
         clock_round: RoundNumber,
         block_id_in_round: usize,
+        aggregate_round_sig: Option<BlsSignatureBytes>,
+        aggregate_leader_sig: Option<BlsSignatureBytes>,
     ) -> Data<VerifiedBlock> {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
         let mut block_references = vec![*self.last_own_block[block_id_in_round].block.reference()];
@@ -716,15 +738,16 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        // Build ack_commitments: for each acknowledgment ref, look up its
-        // transactions_commitment from DagState.
-        let ack_commitments: Vec<_> = if is_starfish_l {
+        // Fetch aggregated DAC certificates from the BLS aggregator.
+        let aggregate_dac_sigs: Vec<BlsSignatureBytes> = if is_starfish_l {
+            let aggregator = self.bls_cert_aggregator.as_ref().unwrap();
             acknowledgment_references
                 .iter()
-                .filter_map(|ack_ref| {
-                    self.dag_state
-                        .get_transactions_commitment(ack_ref)
-                        .map(|c| (*ack_ref, c))
+                .map(|ack_ref| {
+                    aggregator
+                        .dac_certificate(ack_ref)
+                        .copied()
+                        .unwrap_or_default()
                 })
                 .collect()
         } else {
@@ -740,11 +763,13 @@ impl<H: BlockHandler> Core<H> {
             &self.signer,
             bls_signer_opt,
             committee_opt,
-            &ack_commitments,
+            aggregate_dac_sigs,
             transactions.to_vec(),
             encoded_transactions.clone(),
             self.dag_state.consensus_protocol,
             strong_vote,
+            aggregate_round_sig,
+            aggregate_leader_sig,
         );
 
         self.metrics
@@ -827,7 +852,22 @@ impl<H: BlockHandler> Core<H> {
             authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
         };
         self.last_own_block[block_id] = own_block.clone();
-        self.dag_state.insert_own_block(own_block);
+        self.dag_state.insert_own_block(own_block.clone());
+
+        // Feed our own DAC partial sig for the block we just created.
+        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
+            let own_ref = *own_block.block.reference();
+            let commitment = own_block.block.merkle_root();
+            let digest = crypto::bls_dac_message(&own_ref, commitment);
+            let sig = self.bls_signer.sign_digest(&digest);
+            let events =
+                aggregator.add_standalone_dac_sig(own_ref, self.authority, sig, commitment);
+            for event in events {
+                if let CertificateEvent::Dac(ref r, _) = event {
+                    self.dag_state.mark_dac_certified(*r);
+                }
+            }
+        }
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedBlock>) {
@@ -929,6 +969,16 @@ impl<H: BlockHandler> Core<H> {
                     .has_strong_votes_quorum_at_round(leader_round, &self.committee)
             {
                 return false;
+            }
+        }
+
+        // StarfishL: require round certificate for the previous round.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+            if let Some(ref aggregator) = self.bls_cert_aggregator {
+                let prev_round = quorum_round.saturating_sub(1);
+                if prev_round > 0 && aggregator.round_certificate(prev_round).is_none() {
+                    return false;
+                }
             }
         }
 

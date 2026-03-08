@@ -172,9 +172,12 @@ struct DagStateInner {
     /// Threshold clock tracking quorum round advancement.
     threshold_clock: ThresholdClockAggregator,
     /// Leader references with confirmed BLS leader certificates (StarfishL).
-    leader_certificates: AHashSet<BlockReference>,
+    /// Stored per-authority in round order so cleanup can `split_off()` at the
+    /// eviction frontier instead of scanning the full certificate set.
+    leader_certificates: Vec<BTreeSet<BlockReference>>,
     /// Block references with confirmed BLS DAC certificates (StarfishL).
-    dac_certificates: AHashSet<BlockReference>,
+    /// Stored per-authority in round order for the same reason as leaders.
+    dac_certificates: Vec<BTreeSet<BlockReference>>,
 }
 
 impl DagState {
@@ -233,8 +236,8 @@ impl DagState {
             round_version: AHashMap::new(),
             last_committed_rounds: vec![0; n],
             threshold_clock: ThresholdClockAggregator::new(0),
-            leader_certificates: AHashSet::new(),
-            dac_certificates: AHashSet::new(),
+            leader_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -602,33 +605,25 @@ impl DagState {
 
     /// Mark a leader block as having a confirmed BLS leader certificate.
     pub fn mark_leader_certified(&self, leader_ref: BlockReference) {
-        self.dag_state_inner
-            .write()
-            .leader_certificates
+        self.dag_state_inner.write().leader_certificates[leader_ref.authority as usize]
             .insert(leader_ref);
     }
 
     /// Mark a block as having a confirmed BLS DAC certificate.
     pub fn mark_dac_certified(&self, block_ref: BlockReference) {
-        self.dag_state_inner
-            .write()
-            .dac_certificates
+        self.dag_state_inner.write().dac_certificates[block_ref.authority as usize]
             .insert(block_ref);
     }
 
     /// Check whether the given leader has a confirmed BLS leader certificate.
     pub fn has_leader_certificate(&self, leader_ref: &BlockReference) -> bool {
-        self.dag_state_inner
-            .read()
-            .leader_certificates
+        self.dag_state_inner.read().leader_certificates[leader_ref.authority as usize]
             .contains(leader_ref)
     }
 
     /// Check whether the given block has a confirmed BLS DAC certificate.
     pub fn has_dac_certificate(&self, block_ref: &BlockReference) -> bool {
-        self.dag_state_inner
-            .read()
-            .dac_certificates
+        self.dag_state_inner.read().dac_certificates[block_ref.authority as usize]
             .contains(block_ref)
     }
 
@@ -1072,6 +1067,7 @@ impl DagState {
         let (highest_round, lowest_round, block_count, max_evicted) = {
             let mut inner = self.dag_state_inner.write();
             inner.evict_per_authority();
+            inner.prune_certificate_state();
             (
                 inner.highest_round,
                 inner.global_lowest_round(),
@@ -1406,6 +1402,18 @@ impl DagStateInner {
         }
         let min_evicted = self.min_evicted_round();
         self.round_version.retain(|&r, _| r >= min_evicted);
+    }
+
+    fn prune_certificate_state(&mut self) {
+        for auth in 0..self.committee_size {
+            let split_ref = BlockReference {
+                authority: auth as AuthorityIndex,
+                round: self.evicted_rounds[auth],
+                digest: BlockDigest::default(),
+            };
+            self.leader_certificates[auth] = self.leader_certificates[auth].split_off(&split_ref);
+            self.dac_certificates[auth] = self.dac_certificates[auth].split_off(&split_ref);
+        }
     }
 
     pub fn add_block(
@@ -1929,7 +1937,33 @@ impl CommitData {
 
 #[cfg(test)]
 mod tests {
-    use super::ConsensusProtocol;
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    use super::{CACHED_ROUNDS, ConsensusProtocol, DagState};
+    use crate::{
+        committee::Committee, config::StorageBackend, metrics::Metrics, types::BlockReference,
+    };
+
+    fn open_test_dag_state() -> DagState {
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some("starfish-l"));
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        DagState::open(
+            0,
+            path,
+            metrics,
+            committee,
+            "honest".to_string(),
+            "starfish-l".to_string(),
+            &StorageBackend::Rocksdb,
+        )
+        .dag_state
+    }
 
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
@@ -1939,5 +1973,57 @@ mod tests {
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
+    }
+
+    #[test]
+    fn cleanup_prunes_certificates_for_evicted_rounds() {
+        let dag_state = open_test_dag_state();
+        let leader_pruned = BlockReference {
+            round: 9,
+            authority: 0,
+            digest: Default::default(),
+        };
+        let leader_kept = BlockReference {
+            round: 10,
+            authority: 0,
+            digest: Default::default(),
+        };
+        let dac_pruned = BlockReference {
+            round: 4,
+            authority: 1,
+            digest: Default::default(),
+        };
+        let dac_kept = BlockReference {
+            round: 5,
+            authority: 1,
+            digest: Default::default(),
+        };
+        let authority_without_eviction = BlockReference {
+            round: 1,
+            authority: 2,
+            digest: Default::default(),
+        };
+
+        {
+            let mut inner = dag_state.dag_state_inner.write();
+            inner.last_seen_by_authority[0] = CACHED_ROUNDS + 10;
+            inner.last_seen_by_authority[1] = CACHED_ROUNDS + 5;
+            inner.last_seen_by_authority[2] = CACHED_ROUNDS;
+            inner.leader_certificates[0].insert(leader_pruned);
+            inner.leader_certificates[0].insert(leader_kept);
+            inner.leader_certificates[2].insert(authority_without_eviction);
+            inner.dac_certificates[1].insert(dac_pruned);
+            inner.dac_certificates[1].insert(dac_kept);
+            inner.dac_certificates[2].insert(authority_without_eviction);
+        }
+
+        dag_state.cleanup();
+
+        assert!(!dag_state.has_leader_certificate(&leader_pruned));
+        assert!(dag_state.has_leader_certificate(&leader_kept));
+        assert!(dag_state.has_leader_certificate(&authority_without_eviction));
+        assert!(!dag_state.has_dac_certificate(&dac_pruned));
+        assert!(dag_state.has_dac_certificate(&dac_kept));
+        assert!(dag_state.has_dac_certificate(&authority_without_eviction));
     }
 }
