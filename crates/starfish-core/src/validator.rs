@@ -121,7 +121,7 @@ impl Validator {
             (None, None)
         };
 
-        let core = Core::open(
+        let (core, bls_cert_aggregator) = Core::open(
             block_handler,
             authority,
             committee.clone(),
@@ -147,6 +147,7 @@ impl Validator {
             commit_handler,
             metrics.clone(),
             dac_outbox_rx,
+            bls_cert_aggregator,
         );
 
         tracing::info!("Validator {authority} listening on {network_address}");

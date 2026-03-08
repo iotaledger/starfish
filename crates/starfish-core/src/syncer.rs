@@ -8,6 +8,7 @@ use ahash::AHashSet;
 
 use crate::{
     block_handler::BlockHandler,
+    bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
     crypto::BlsSignatureBytes,
@@ -22,6 +23,7 @@ use crate::{
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
+    bls_cert_aggregator: Option<BlsCertificateAggregator>,
     force_new_block: bool,
     signals: S,
     commit_observer: C,
@@ -51,10 +53,17 @@ pub trait CommitObserver: Send + Sync {
 }
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
-    pub fn new(core: Core<H>, signals: S, commit_observer: C, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        core: Core<H>,
+        bls_cert_aggregator: Option<BlsCertificateAggregator>,
+        signals: S,
+        commit_observer: C,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let committee_size = core.committee().len();
         Self {
             core,
+            bls_cert_aggregator,
             force_new_block: false,
             signals,
             commit_observer,
@@ -79,14 +88,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             pending_blocks_with_transactions,
             missing_parents,
             used_additional_blocks,
-            bls_state_changed,
+            processed_blocks,
         ) = self.core.add_blocks(blocks);
+        if let Some(ref mut agg) = self.bls_cert_aggregator {
+            let events = agg.add_blocks(self.core.dag_state(), &processed_blocks);
+            if apply_certificate_events(self.core.dag_state(), events) {
+                self.try_new_commit();
+            }
+        }
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
-        }
-        if bls_state_changed {
-            self.try_new_commit();
         }
         (
             pending_blocks_with_transactions,
@@ -100,14 +112,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let (success, missing_parents, processed_refs, bls_state_changed) =
+        let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers);
+        if let Some(ref mut agg) = self.bls_cert_aggregator {
+            let events = agg.add_blocks(self.core.dag_state(), &processed_blocks);
+            if apply_certificate_events(self.core.dag_state(), events) {
+                self.try_new_commit();
+            }
+        }
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block();
-        }
-        if bls_state_changed {
-            self.try_new_commit();
         }
         (missing_parents, processed_refs)
     }
@@ -125,8 +140,16 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
     ) {
-        if self.core.add_dac_partial_sig(block_ref, signer, sig) {
-            self.try_new_commit();
+        if let Some(ref mut agg) = self.bls_cert_aggregator {
+            let commitment = self
+                .core
+                .dag_state()
+                .get_transactions_commitment(&block_ref)
+                .unwrap_or_default();
+            let events = agg.add_standalone_dac_sig(block_ref, signer, sig, commitment);
+            if apply_certificate_events(self.core.dag_state(), events) {
+                self.try_new_commit();
+            }
         }
     }
 
@@ -156,7 +179,19 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
         if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
             tracing::debug!("Attempt to create new block in syncer after one trigger");
-            if self.core.try_new_block().is_some() {
+            if let Some(ref block) = self.core.try_new_block() {
+                // Feed the new block to the BLS aggregator and generate own DAC sig.
+                if let Some(ref mut agg) = self.bls_cert_aggregator {
+                    let events = agg.add_blocks(self.core.dag_state(), std::slice::from_ref(block));
+                    apply_certificate_events(self.core.dag_state(), events);
+                    if let Some((block_ref, auth, sig, commitment)) =
+                        self.core.generate_own_dac_partial_sig(block)
+                    {
+                        let events =
+                            agg.add_standalone_dac_sig(block_ref, auth, sig, commitment);
+                        apply_certificate_events(self.core.dag_state(), events);
+                    }
+                }
                 self.signals.new_block_ready();
                 self.force_new_block = false;
                 return true;
@@ -198,6 +233,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn cleanup(&mut self) {
         let threshold = self.core.cleanup();
+        if let Some(ref mut agg) = self.bls_cert_aggregator {
+            agg.cleanup_below_round(threshold);
+        }
         self.commit_observer.cleanup(threshold);
     }
 

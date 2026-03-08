@@ -35,7 +35,7 @@ use crate::{
     runtime::{Handle, JoinError, JoinHandle, sleep},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, VerifiedBlock,
+        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock,
         format_authority_index,
     },
 };
@@ -486,16 +486,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn process_blocks_without_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
-        use crate::shard_reconstructor::ShardMessage;
-
         let connection_knowledge = self
             .inner
             .cordial_knowledge
             .connection_knowledge(self.peer_id);
         let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
         let needed_before_verify = self.filter_for_blocks.needed_headers(&incoming_digests);
-        // (block, shard sidecar from verify)
-        let mut verified_blocks: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
+        let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
 
         for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
             if !is_needed {
@@ -504,14 +501,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            let shard = match block.verify(
+            // All blocks here have transaction_data == None, so verify()
+            // always returns Ok(None) for the shard.
+            match block.verify(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
             ) {
-                Ok(shard) => shard,
+                Ok(shard) => debug_assert!(shard.is_none(), "shard must be None for header-only blocks"),
                 Err(e) => {
                     tracing::warn!(
                         "Rejected incorrect block {} from {}: {:?}",
@@ -523,44 +522,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
             };
 
-            // Send shard to reconstructor for off-critical-path decoding
-            if let Some(provable_shard) = shard.as_ref() {
-                let maybe_tx = self.inner.shard_tx.lock().clone();
-                if let Some(shard_tx) = maybe_tx {
-                    let _ = shard_tx
-                        .send(ShardMessage::Shard {
-                            block_reference: *block.reference(),
-                            shard: provable_shard.shard().clone(),
-                            shard_index: provable_shard.shard_index(),
-                            block_header: Box::new(block.header().clone()),
-                        })
-                        .await;
-                }
-            }
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
-                if shard.is_some() {
-                    ck.mark_shard_useful_from_peer(*block.reference());
-                }
             }
-            verified_blocks.push((block, shard));
+            verified_blocks.push(block);
         }
 
         let mut new_data_blocks = Vec::new();
-        let mut new_block_shards: Vec<Option<ProvableShard>> = Vec::new();
         let mut digests_to_insert = Vec::new();
-        for (storage_block, shard) in verified_blocks {
+        for storage_block in verified_blocks {
             let digest = storage_block.digest();
             let send_to_core = !self.filter_for_blocks.contains(&digest);
             digests_to_insert.push(digest);
             if send_to_core {
-                // Insert shard into sidecar index before block enters core
-                if let Some(s) = shard.as_ref() {
-                    self.inner
-                        .dag_state
-                        .insert_shard(*storage_block.reference(), s.clone());
-                }
                 let mut storage_block = storage_block;
                 storage_block.preserialize();
                 debug_assert!(
@@ -568,20 +543,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     "header must be preserialized before entering core"
                 );
                 new_data_blocks.push(Data::new(storage_block));
-                new_block_shards.push(shard);
-            } else if let Some(s) = shard {
-                // Shard-bearing duplicate: attach shard to existing DAG block.
-                if self
-                    .inner
-                    .dag_state
-                    .attach_shard_data(*storage_block.reference(), &s)
-                {
-                    self.inner
-                        .cordial_knowledge
-                        .send(CordialKnowledgeMessage::NewShard(
-                            *storage_block.reference(),
-                        ));
-                }
             }
         }
 
@@ -595,19 +556,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             new_data_blocks.len(),
             new_data_blocks
         );
-        // Only send first-appearance blocks to core (subsequent shards
-        // already went to the shard reconstructor above).
         if !new_data_blocks.is_empty() {
-            // Notify CordialKnowledge about new headers (and shards) entering the DAG
-            for (block, shard) in new_data_blocks.iter().zip(new_block_shards.iter()) {
+            // Notify CordialKnowledge about new headers entering the DAG
+            for block in new_data_blocks.iter() {
                 self.inner
                     .cordial_knowledge
                     .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-                if shard.is_some() {
-                    self.inner
-                        .cordial_knowledge
-                        .send(CordialKnowledgeMessage::NewShard(*block.reference()));
-                }
             }
             let (missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
@@ -859,6 +813,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut commit_observer: C,
         metrics: Arc<Metrics>,
         dac_outbox_rx: Option<mpsc::UnboundedReceiver<(BlockReference, BlsSignatureBytes)>>,
+        bls_cert_aggregator: Option<crate::bls_certificate_aggregator::BlsCertificateAggregator>,
     ) -> Self {
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
@@ -868,7 +823,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let dag_state = core.dag_state().clone();
         let _store = core.store();
         let universal_committer = core.get_universal_committer();
-        let mut syncer = Syncer::new(core, notify.clone(), commit_observer, metrics.clone());
+        let mut syncer = Syncer::new(
+            core,
+            bls_cert_aggregator,
+            notify.clone(),
+            commit_observer,
+            metrics.clone(),
+        );
         syncer.force_new_block(0);
         let syncer = CoreThreadDispatcher::start(syncer);
         let (stop_sender, stop_receiver) = mpsc::channel(1);

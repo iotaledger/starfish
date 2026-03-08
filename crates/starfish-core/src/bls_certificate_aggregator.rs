@@ -21,12 +21,36 @@ use crate::{
     types::{AuthorityIndex, BlockReference, BlsAggregateCertificate, RoundNumber, VerifiedBlock},
 };
 
+/// Apply certificate events to a `DagState`, returning `true` if any new
+/// certificate was learned.
+pub fn apply_certificate_events(dag_state: &DagState, events: Vec<CertificateEvent>) -> bool {
+    let mut changed = false;
+    for event in events {
+        match event {
+            CertificateEvent::Round(round, cert) => {
+                changed |= dag_state.mark_round_certified(round, cert);
+            }
+            CertificateEvent::Leader(leader_ref, cert) => {
+                changed |= dag_state.mark_leader_certified(leader_ref, cert);
+            }
+            CertificateEvent::Dac(block_ref, cert) => {
+                changed |= dag_state.mark_dac_certified(block_ref, cert);
+            }
+            CertificateEvent::DacRejected(block_ref) => {
+                changed |= dag_state.mark_dac_rejected(block_ref);
+            }
+        }
+    }
+    changed
+}
+
 /// Events emitted when a new verified certificate is completed.
 #[derive(Debug)]
 pub enum CertificateEvent {
     Round(RoundNumber, BlsAggregateCertificate),
     Leader(BlockReference, BlsAggregateCertificate),
     Dac(BlockReference, BlsAggregateCertificate),
+    DacRejected(BlockReference),
 }
 
 enum PartialTaskKind {
@@ -62,6 +86,8 @@ pub struct BlsCertificateAggregator {
     dac_stake: AHashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     /// Completed DAC certificates.
     dac_certs: AHashMap<BlockReference, BlsAggregateCertificate>,
+    /// DAC certificates that failed verification and must not be sequenced.
+    dac_rejections: AHashSet<BlockReference>,
 }
 
 impl BlsCertificateAggregator {
@@ -77,6 +103,7 @@ impl BlsCertificateAggregator {
             dac_partial_sigs: AHashMap::new(),
             dac_stake: AHashMap::new(),
             dac_certs: AHashMap::new(),
+            dac_rejections: AHashSet::new(),
         }
     }
 
@@ -145,6 +172,7 @@ impl BlsCertificateAggregator {
         self.dac_partial_sigs.retain(|r, _| r.round >= round);
         self.dac_stake.retain(|r, _| r.round >= round);
         self.dac_certs.retain(|r, _| r.round >= round);
+        self.dac_rejections.retain(|r| r.round >= round);
     }
 
     /// Process a standalone DAC partial signature received directly from a
@@ -158,7 +186,7 @@ impl BlsCertificateAggregator {
         commitment: crate::crypto::TransactionsCommitment,
     ) -> Vec<CertificateEvent> {
         let mut events = Vec::new();
-        if self.dac_certs.contains_key(&block_ref) {
+        if self.dac_certs.contains_key(&block_ref) || self.dac_rejections.contains(&block_ref) {
             return events;
         }
 
@@ -248,7 +276,6 @@ impl BlsCertificateAggregator {
         let mut tasks = Vec::new();
         let mut entries = Vec::new();
         let mut seen_leaders = AHashSet::new();
-        let mut seen_dacs = AHashSet::new();
 
         enum AggregateTaskKind {
             Round(RoundNumber, BlsAggregateCertificate),
@@ -306,7 +333,7 @@ impl BlsCertificateAggregator {
             {
                 if cert.is_empty()
                     || self.dac_certs.contains_key(&ack_ref)
-                    || !seen_dacs.insert(ack_ref)
+                    || self.dac_rejections.contains(&ack_ref)
                 {
                     continue;
                 }
@@ -332,26 +359,47 @@ impl BlsCertificateAggregator {
             Err(bad) => bad.into_iter().collect(),
         };
 
+        let mut valid_dacs = AHashMap::new();
+        let mut rejected_dacs = AHashSet::new();
         for (index, entry) in entries.into_iter().enumerate() {
-            if invalid.contains(&index) {
-                continue;
-            }
             match entry {
                 AggregateTaskKind::Round(round, cert) => {
+                    if invalid.contains(&index) {
+                        continue;
+                    }
                     if self.round_certs.insert(round, cert).is_none() {
                         events.push(CertificateEvent::Round(round, cert));
                     }
                 }
                 AggregateTaskKind::Leader(leader_ref, cert) => {
+                    if invalid.contains(&index) {
+                        continue;
+                    }
                     if self.leader_certs.insert(leader_ref, cert).is_none() {
                         events.push(CertificateEvent::Leader(leader_ref, cert));
                     }
                 }
                 AggregateTaskKind::Dac(block_ref, cert) => {
-                    if self.dac_certs.insert(block_ref, cert).is_none() {
-                        events.push(CertificateEvent::Dac(block_ref, cert));
+                    if invalid.contains(&index) {
+                        if !valid_dacs.contains_key(&block_ref) {
+                            rejected_dacs.insert(block_ref);
+                        }
+                    } else {
+                        rejected_dacs.remove(&block_ref);
+                        valid_dacs.entry(block_ref).or_insert(cert);
                     }
                 }
+            }
+        }
+
+        for (block_ref, cert) in valid_dacs {
+            if self.dac_certs.insert(block_ref, cert).is_none() {
+                events.push(CertificateEvent::Dac(block_ref, cert));
+            }
+        }
+        for block_ref in rejected_dacs {
+            if self.dac_rejections.insert(block_ref) {
+                events.push(CertificateEvent::DacRejected(block_ref));
             }
         }
 
@@ -440,7 +488,7 @@ impl BlsCertificateAggregator {
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
     ) -> Option<CertificateEvent> {
-        if self.dac_certs.contains_key(&block_ref) {
+        if self.dac_certs.contains_key(&block_ref) || self.dac_rejections.contains(&block_ref) {
             return None;
         }
         let sigs = self.dac_partial_sigs.entry(block_ref).or_default();
