@@ -160,10 +160,12 @@ mod tests {
             signer,
             None,
             None,
-            &[],
+            vec![],
             transactions,
             Some(encoded.clone()),
             ConsensusProtocol::Starfish,
+            None,
+            None,
             None,
         );
         (block, encoded)
