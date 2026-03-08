@@ -15,8 +15,8 @@ use crate::{
     crypto,
     serde::{ByteRepr, BytesVisitor},
     types::{
-        AuthorityIndex, BaseTransaction, BlockHeader, BlockReference, RoundNumber, Shard,
-        TimestampNs,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
+        Shard, TimestampNs,
     },
 };
 
@@ -26,6 +26,15 @@ pub fn bls_leader_message(leader_ref: &BlockReference) -> [u8; 32] {
     let mut hasher = Blake3Hasher::new();
     hasher.update(b"leader");
     leader_ref.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
+/// Build the 32-byte message that validators sign to certify round
+/// advancement.
+pub fn bls_round_message(round: RoundNumber) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"round");
+    round.crypto_hash(&mut hasher);
     hasher.finalize().into()
 }
 
@@ -281,7 +290,7 @@ impl PublicKey {
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
             &mut hasher,
-            header.author(),
+            header.authority(),
             header.round(),
             header.block_references(),
             &acknowledgments,
@@ -603,6 +612,10 @@ impl BlsPublicKey {
         bls::PublicKey::from_bytes(bytes).map(Self)
     }
 
+    pub fn from_aggregate(agg_pk: &bls::AggregatePublicKey) -> Self {
+        Self(bls::PublicKey::from_aggregate(agg_pk))
+    }
+
     /// Access the inner `blst::min_pk::PublicKey`.
     pub fn inner(&self) -> &bls::PublicKey {
         &self.0
@@ -772,6 +785,27 @@ pub fn bls_fast_aggregate_verify(
     let pks: Vec<&bls::PublicKey> = pubkeys.iter().map(|pk| &pk.0).collect();
     let result = sig.fast_aggregate_verify(true, message, BLS_DST, &pks);
     result == blst::BLST_ERROR::BLST_SUCCESS
+}
+
+pub fn bls_aggregate_public_keys(pubkeys: &[&BlsPublicKey]) -> Option<BlsPublicKey> {
+    if pubkeys.is_empty() {
+        return None;
+    }
+
+    let pks: Vec<&bls::PublicKey> = pubkeys.iter().map(|pk| pk.inner()).collect();
+    let agg = bls::AggregatePublicKey::aggregate(&pks, false).ok()?;
+    Some(BlsPublicKey::from_aggregate(&agg))
+}
+
+pub fn bls_public_keys_for_signers(
+    committee: &crate::committee::Committee,
+    signers: AuthoritySet,
+) -> Option<Vec<&BlsPublicKey>> {
+    let mut pubkeys = Vec::new();
+    for signer in signers.present() {
+        pubkeys.push(committee.get_bls_public_key(signer)?);
+    }
+    Some(pubkeys)
 }
 
 pub fn dummy_bls_signer() -> BlsSigner {

@@ -10,12 +10,12 @@ use crate::{
 };
 
 pub fn threshold_clock_valid_block_header(header: &BlockHeader, committee: &Committee) -> bool {
-    let round_number = header.reference().round;
+    let round_number = header.round();
     assert!(round_number > 0);
 
     // Ensure all includes have a round number smaller than the block round number
     for include in header.block_references() {
-        if include.round >= header.reference().round {
+        if include.round >= header.round() {
             return false;
         }
     }

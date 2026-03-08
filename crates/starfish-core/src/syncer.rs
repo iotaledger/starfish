@@ -74,11 +74,19 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     ) {
         // todo: when block is updated we might return false here and it can make
         // committing longer
-        let (success, pending_blocks_with_transactions, missing_parents, used_additional_blocks) =
-            self.core.add_blocks(blocks);
+        let (
+            success,
+            pending_blocks_with_transactions,
+            missing_parents,
+            used_additional_blocks,
+            bls_state_changed,
+        ) = self.core.add_blocks(blocks);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
+        }
+        if bls_state_changed {
+            self.try_new_commit();
         }
         (
             pending_blocks_with_transactions,
@@ -92,10 +100,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let (success, missing_parents, processed_refs) = self.core.add_headers(headers);
+        let (success, missing_parents, processed_refs, bls_state_changed) =
+            self.core.add_headers(headers);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block();
+        }
+        if bls_state_changed {
+            self.try_new_commit();
         }
         (missing_parents, processed_refs)
     }
@@ -113,7 +125,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
     ) {
-        self.core.add_dac_partial_sig(block_ref, signer, sig);
+        if self.core.add_dac_partial_sig(block_ref, signer, sig) {
+            self.try_new_commit();
+        }
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {

@@ -206,7 +206,7 @@ impl BaseCommitter {
         let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
         for voting_block in voting_blocks.iter() {
-            let voter = voting_block.reference().authority;
+            let voter = voting_block.authority();
             blame_stake_aggregator.add(voter, &self.committee);
         }
         let all_stake_above_quorum =
@@ -224,7 +224,7 @@ impl BaseCommitter {
             let mut vote_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
             let leader_block_reference = leader_block.reference();
             for voting_block in voting_blocks.iter() {
-                let voter = voting_block.author();
+                let voter = voting_block.authority();
                 if voter_info
                     .voters
                     .contains(&(*leader_block_reference, *voting_block.reference()))
@@ -257,7 +257,7 @@ impl BaseCommitter {
                         .iter()
                         .all(|inc| inc.authority != leader)
                 })
-                .map(|b| b.author()),
+                .map(|b| b.authority()),
         )
     }
 
@@ -276,7 +276,7 @@ impl BaseCommitter {
         // the potential certificates.
         let mut early_stop = true;
         for certifying_block in certifying_blocks.iter() {
-            if total_stake_aggregator.add(certifying_block.author(), &self.committee) {
+            if total_stake_aggregator.add(certifying_block.authority(), &self.committee) {
                 early_stop = false;
                 break;
             }
@@ -294,7 +294,7 @@ impl BaseCommitter {
             certifying_blocks
                 .iter()
                 .filter(|b| self.is_certificate(b, leader_block, voter_info))
-                .map(|b| b.author()),
+                .map(|b| b.authority()),
         )
     }
 
@@ -347,7 +347,7 @@ impl BaseCommitter {
                     voter_info.voters.contains(&(leader_ref, *b.reference()))
                         && b.strong_vote() == Some(false)
                 })
-                .map(|b| b.author()),
+                .map(|b| b.authority()),
         );
         if has_strong_blame_quorum {
             return Some(CommitMetastate::Std);
@@ -364,7 +364,7 @@ impl BaseCommitter {
             certifying_blocks
                 .iter()
                 .filter(|b| self.carries_strong_qc(b, leader_block, voter_info))
-                .map(|b| b.author()),
+                .map(|b| b.authority()),
         ) {
             return Some(CommitMetastate::Opt);
         }

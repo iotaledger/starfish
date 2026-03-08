@@ -131,7 +131,7 @@ impl Linearizer {
         let mut blocks_transaction_data_quorum = vec![];
         while let Some(x) = buffer.pop() {
             tracing::debug!("Buffer popped {}", x.reference());
-            let who_votes = x.reference().authority;
+            let who_votes = x.authority();
             for ack_ref in x.acknowledgments() {
                 if ack_ref.round < min_round {
                     continue;
@@ -181,7 +181,7 @@ impl Linearizer {
             .into_iter()
             .map(|block| {
                 let round = block.round();
-                let author = block.author();
+                let author = block.authority();
                 let digest = block.digest();
                 (round, author, digest, block)
             })
@@ -213,7 +213,7 @@ impl Linearizer {
         let mut holders = StakeAggregator::<QuorumThreshold>::new();
         for block in dag_state.get_blocks_by_round(round) {
             if block.strong_vote() == Some(true) {
-                holders.add(block.author(), &self.committee);
+                holders.add(block.authority(), &self.committee);
             }
         }
         holders
@@ -256,7 +256,7 @@ impl Linearizer {
 
                     if self.committed.insert(*ack_ref) {
                         if let Some(block) = dag_state.get_storage_block(*ack_ref) {
-                            if self.committed_slots.insert((block.round(), block.author())) {
+                            if self.committed_slots.insert((block.round(), block.authority())) {
                                 sub_dag.blocks.push(block);
                             }
                         }
