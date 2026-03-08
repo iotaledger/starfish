@@ -13,7 +13,7 @@ use crate::{
         CommitMetastate,
         linearizer::{CommittedSubDag, Linearizer},
     },
-    dag_state::DagState,
+    dag_state::{DacCertificateVerificationState, DagState, PendingSubDag},
     data::Data,
     metrics::Metrics,
     runtime::{self, TimeInstant},
@@ -146,6 +146,96 @@ impl RealCommitHandler {
     pub fn committed_leaders(&self) -> &Vec<BlockReference> {
         &self.committed_leaders
     }
+
+    fn filter_certified_commit(
+        &self,
+        dag_state: &DagState,
+        commit: &PendingSubDag,
+    ) -> Option<PendingSubDag> {
+        debug_assert_eq!(commit.0.blocks.len(), commit.1.len());
+
+        let mut certified_blocks = Vec::with_capacity(commit.0.blocks.len());
+        let mut acknowledgement_authorities = Vec::with_capacity(commit.1.len());
+        for (block, holders) in commit.0.blocks.iter().zip(commit.1.iter()) {
+            if block.round() == 0 {
+                certified_blocks.push(block.clone());
+                acknowledgement_authorities.push(holders.clone());
+                continue;
+            }
+
+            match dag_state.dac_certificate_state(block.reference()) {
+                DacCertificateVerificationState::Verified => {
+                    certified_blocks.push(block.clone());
+                    acknowledgement_authorities.push(holders.clone());
+                }
+                DacCertificateVerificationState::Rejected => {}
+                DacCertificateVerificationState::Unchecked => return None,
+            }
+        }
+
+        Some((
+            CommittedSubDag::new(commit.0.anchor, certified_blocks),
+            acknowledgement_authorities,
+        ))
+    }
+
+    fn drain_certified_commits(
+        &self,
+        dag_state: &DagState,
+        committed: Vec<PendingSubDag>,
+    ) -> (Vec<PendingSubDag>, Vec<PendingSubDag>) {
+        let mut certified = Vec::new();
+        let mut resolved_count = 0;
+        for commit in &committed {
+            let Some(filtered) = self.filter_certified_commit(dag_state, commit) else {
+                break;
+            };
+            certified.push(filtered);
+            resolved_count += 1;
+        }
+        let pending = committed.into_iter().skip(resolved_count).collect();
+        (certified, pending)
+    }
+
+    fn drain_available_commits(
+        &self,
+        dag_state: &DagState,
+        committed: Vec<PendingSubDag>,
+    ) -> (Vec<CommittedSubDag>, Vec<PendingSubDag>) {
+        let mut ready_count = 0;
+        let mut resulted_committed = Vec::new();
+        for commit in &committed {
+            let mut check_availability = true;
+            for block in &commit.0.blocks {
+                if block.round() > 0 && !dag_state.is_data_available(block.reference()) {
+                    tracing::debug!("Block {} is not available", block.reference());
+                    check_availability = false;
+                    break;
+                }
+            }
+            if check_availability {
+                for block in &commit.0.blocks {
+                    let updated_block = dag_state
+                        .get_storage_block(*block.reference())
+                        .expect("We should have the whole sub-dag by now");
+                    if updated_block.round() > 0 {
+                        self.transaction_observer(updated_block);
+
+                        tracing::debug!(
+                            "Latency of transactions from block {} is computed",
+                            block.reference()
+                        );
+                    }
+                }
+            } else {
+                break;
+            }
+            resulted_committed.push(commit.0.clone());
+            ready_count += 1;
+        }
+        let pending = committed.into_iter().skip(ready_count).collect();
+        (resulted_committed, pending)
+    }
 }
 
 impl CommitObserver for RealCommitHandler {
@@ -216,48 +306,21 @@ impl CommitObserver for RealCommitHandler {
                 self.metrics.benchmark_duration.inc_by(delta);
             }
         }
-        // Compute transaction end-to-end latency
-        // First read for which subdags there is not enough transaction data
+        if dag_state.consensus_protocol == crate::dag_state::ConsensusProtocol::StarfishL {
+            let mut pending = dag_state.read_pending_not_certified();
+            pending.append(&mut committed);
+            let (certified, unresolved) = self.drain_certified_commits(dag_state, pending);
+            dag_state.update_pending_not_certified(unresolved);
+            committed = certified;
+        }
+
+        // Compute transaction end-to-end latency after certification is
+        // resolved and the data itself is locally available.
         let mut pending = dag_state.read_pending_unavailable();
         pending.append(&mut committed);
-        let committed = pending;
-        let mut slice_index = 0;
-        let mut resulted_committed = Vec::new();
-        for commit in committed.iter() {
-            let mut check_availability = true;
-            for block in &commit.0.blocks {
-                if block.round() > 0 && !dag_state.is_data_available(block.reference()) {
-                    tracing::debug!("Block {} is not available", block.reference());
-                    check_availability = false;
-                    break;
-                }
-            }
-            if check_availability {
-                for block in &commit.0.blocks {
-                    let updated_block = dag_state
-                        .get_storage_block(*block.reference())
-                        .expect("We should have the whole sub-dag by now");
-                    if updated_block.round() > 0 {
-                        // Block is supposed to have uncoded transactions
-                        self.transaction_observer(updated_block);
-
-                        tracing::debug!(
-                            "Latency of transactions from block {} is computed",
-                            block.reference()
-                        );
-                    }
-                }
-            } else {
-                break;
-            }
-            // todo: need to change the committed subdag again, but it is ok for now as the
-            // storage is not used.
-            resulted_committed.push(commit.0.clone());
-            // self.committed_dags.push(commit);
-            slice_index += 1;
-        }
-        dag_state.update_pending_unavailable(committed[slice_index..].to_vec());
-        self.sequenced_commit_count += slice_index;
+        let (resulted_committed, unavailable) = self.drain_available_commits(dag_state, pending);
+        dag_state.update_pending_unavailable(unavailable);
+        self.sequenced_commit_count += resulted_committed.len();
         self.metrics
             .commit_availability_gap
             .set((self.committed_count - self.sequenced_commit_count) as i64);

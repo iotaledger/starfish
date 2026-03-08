@@ -36,6 +36,16 @@ use crate::{
 /// authorities.
 type AuthorityBitmask = u128;
 
+pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DacCertificateVerificationState {
+    #[default]
+    Unchecked,
+    Verified,
+    Rejected,
+}
+
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ConsensusProtocol {
     Mysticeti,
@@ -164,8 +174,10 @@ struct DagStateInner {
     last_available_commit: RoundNumber,
     // per-round version counter, incremented on each add_block to that round
     round_version: AHashMap<RoundNumber, u64>,
+    // committed subdag which contains blocks with unresolved DAC certificates
+    pending_not_certified: Vec<PendingSubDag>,
     // committed subdag which contains blocks with at least one unavailable transaction data
-    pending_not_available: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
+    pending_not_available: Vec<PendingSubDag>,
     /// Per-authority highest committed round. Used for populating CommitData
     /// and for windowed recovery on restart.
     last_committed_rounds: Vec<RoundNumber>,
@@ -180,6 +192,8 @@ struct DagStateInner {
     /// Block references with confirmed BLS DAC certificates (StarfishL).
     /// Stored per-authority in round order for the same reason as leaders.
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
+    /// Block references with DAC certificates that failed BLS verification.
+    rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
 }
 
 impl DagState {
@@ -234,6 +248,7 @@ impl DagState {
             last_own_block: None,
             dag: (0..n).map(|_| BTreeMap::new()).collect(),
             evicted_rounds: vec![0; n],
+            pending_not_certified: Vec::new(),
             pending_not_available: Vec::new(),
             round_version: AHashMap::new(),
             last_committed_rounds: vec![0; n],
@@ -241,6 +256,7 @@ impl DagState {
             round_certificates: BTreeMap::new(),
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
+            rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -459,16 +475,21 @@ impl DagState {
         self.dag_state_inner.read().authority
     }
 
-    pub fn read_pending_unavailable(
-        &self,
-    ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
+    pub fn read_pending_not_certified(&self) -> Vec<PendingSubDag> {
+        self.dag_state_inner.read().read_pending_not_certified()
+    }
+
+    pub fn update_pending_not_certified(&self, pending: Vec<PendingSubDag>) {
+        self.dag_state_inner
+            .write()
+            .update_pending_not_certified(pending);
+    }
+
+    pub fn read_pending_unavailable(&self) -> Vec<PendingSubDag> {
         self.dag_state_inner.read().read_pending_unavailable()
     }
 
-    pub fn update_pending_unavailable(
-        &self,
-        pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
-    ) {
+    pub fn update_pending_unavailable(&self, pending: Vec<PendingSubDag>) {
         self.dag_state_inner
             .write()
             .update_pending_unavailable(pending);
@@ -636,9 +657,22 @@ impl DagState {
         block_ref: BlockReference,
         certificate: BlsAggregateCertificate,
     ) -> bool {
-        self.dag_state_inner.write().dac_certificates[block_ref.authority as usize]
+        let mut inner = self.dag_state_inner.write();
+        if inner.rejected_dac_certificates[block_ref.authority as usize].contains(&block_ref) {
+            return false;
+        }
+        inner.dac_certificates[block_ref.authority as usize]
             .insert(block_ref, certificate)
             .is_none()
+    }
+
+    /// Mark a block as carrying a DAC certificate that failed BLS verification.
+    pub fn mark_dac_rejected(&self, block_ref: BlockReference) -> bool {
+        let mut inner = self.dag_state_inner.write();
+        if inner.dac_certificates[block_ref.authority as usize].contains_key(&block_ref) {
+            return false;
+        }
+        inner.rejected_dac_certificates[block_ref.authority as usize].insert(block_ref)
     }
 
     /// Check whether the given round has a confirmed BLS certificate.
@@ -678,6 +712,25 @@ impl DagState {
     pub fn has_dac_certificate(&self, block_ref: &BlockReference) -> bool {
         self.dag_state_inner.read().dac_certificates[block_ref.authority as usize]
             .contains_key(block_ref)
+    }
+
+    pub fn has_rejected_dac_certificate(&self, block_ref: &BlockReference) -> bool {
+        self.dag_state_inner.read().rejected_dac_certificates[block_ref.authority as usize]
+            .contains(block_ref)
+    }
+
+    pub fn dac_certificate_state(
+        &self,
+        block_ref: &BlockReference,
+    ) -> DacCertificateVerificationState {
+        let inner = self.dag_state_inner.read();
+        if inner.rejected_dac_certificates[block_ref.authority as usize].contains(block_ref) {
+            DacCertificateVerificationState::Rejected
+        } else if inner.dac_certificates[block_ref.authority as usize].contains_key(block_ref) {
+            DacCertificateVerificationState::Verified
+        } else {
+            DacCertificateVerificationState::Unchecked
+        }
     }
 
     /// Retrieve the confirmed BLS DAC certificate, if any.
@@ -1329,16 +1382,19 @@ impl DagStateInner {
         0
     }
 
-    pub fn read_pending_unavailable(
-        &self,
-    ) -> Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)> {
+    pub fn read_pending_not_certified(&self) -> Vec<PendingSubDag> {
+        self.pending_not_certified.clone()
+    }
+
+    pub fn update_pending_not_certified(&mut self, pending: Vec<PendingSubDag>) {
+        self.pending_not_certified = pending;
+    }
+
+    pub fn read_pending_unavailable(&self) -> Vec<PendingSubDag> {
         self.pending_not_available.clone()
     }
 
-    pub fn update_pending_unavailable(
-        &mut self,
-        pending: Vec<(CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>)>,
-    ) {
+    pub fn update_pending_unavailable(&mut self, pending: Vec<PendingSubDag>) {
         self.pending_not_available = pending;
     }
 
@@ -1475,6 +1531,8 @@ impl DagStateInner {
             };
             self.leader_certificates[auth] = self.leader_certificates[auth].split_off(&split_ref);
             self.dac_certificates[auth] = self.dac_certificates[auth].split_off(&split_ref);
+            self.rejected_dac_certificates[auth] =
+                self.rejected_dac_certificates[auth].split_off(&split_ref);
         }
     }
 
@@ -2006,8 +2064,9 @@ mod tests {
     use crate::{
         committee::Committee,
         config::StorageBackend,
+        crypto::BlsSignatureBytes,
         metrics::Metrics,
-        types::{BlockReference, BlsAggregateCertificate},
+        types::{AuthoritySet, BlockReference, BlsAggregateCertificate},
     };
 
     fn open_test_dag_state() -> DagState {
@@ -2068,12 +2127,23 @@ mod tests {
             authority: 2,
             digest: Default::default(),
         };
+        let rejected_pruned = BlockReference {
+            round: 4,
+            authority: 3,
+            digest: Default::default(),
+        };
+        let rejected_kept = BlockReference {
+            round: 5,
+            authority: 3,
+            digest: Default::default(),
+        };
 
         {
             let mut inner = dag_state.dag_state_inner.write();
             inner.last_seen_by_authority[0] = CACHED_ROUNDS + 10;
             inner.last_seen_by_authority[1] = CACHED_ROUNDS + 5;
             inner.last_seen_by_authority[2] = CACHED_ROUNDS;
+            inner.last_seen_by_authority[3] = CACHED_ROUNDS + 5;
             inner.leader_certificates[0].insert(leader_pruned, BlsAggregateCertificate::default());
             inner.leader_certificates[0].insert(leader_kept, BlsAggregateCertificate::default());
             inner.leader_certificates[2].insert(
@@ -2086,6 +2156,8 @@ mod tests {
                 authority_without_eviction,
                 BlsAggregateCertificate::default(),
             );
+            inner.rejected_dac_certificates[3].insert(rejected_pruned);
+            inner.rejected_dac_certificates[3].insert(rejected_kept);
         }
 
         dag_state.cleanup();
@@ -2096,5 +2168,46 @@ mod tests {
         assert!(!dag_state.has_dac_certificate(&dac_pruned));
         assert!(dag_state.has_dac_certificate(&dac_kept));
         assert!(dag_state.has_dac_certificate(&authority_without_eviction));
+        assert!(!dag_state.has_rejected_dac_certificate(&rejected_pruned));
+        assert!(dag_state.has_rejected_dac_certificate(&rejected_kept));
+    }
+
+    #[test]
+    fn dac_certificate_state_tracks_unchecked_verified_and_rejected() {
+        let dag_state = open_test_dag_state();
+        let unchecked = BlockReference {
+            round: 7,
+            authority: 1,
+            digest: Default::default(),
+        };
+        let rejected = BlockReference {
+            round: 8,
+            authority: 1,
+            digest: Default::default(),
+        };
+        let verified = BlockReference {
+            round: 9,
+            authority: 1,
+            digest: Default::default(),
+        };
+        let mut signers = AuthoritySet::default();
+        signers.insert(0);
+        let cert = BlsAggregateCertificate::new(BlsSignatureBytes([1u8; 96]), signers);
+
+        assert_eq!(
+            dag_state.dac_certificate_state(&unchecked),
+            super::DacCertificateVerificationState::Unchecked
+        );
+        assert!(dag_state.mark_dac_rejected(rejected));
+        assert_eq!(
+            dag_state.dac_certificate_state(&rejected),
+            super::DacCertificateVerificationState::Rejected
+        );
+        assert!(dag_state.mark_dac_certified(verified, cert));
+        assert_eq!(
+            dag_state.dac_certificate_state(&verified),
+            super::DacCertificateVerificationState::Verified
+        );
+        assert!(!dag_state.mark_dac_certified(rejected, cert));
     }
 }

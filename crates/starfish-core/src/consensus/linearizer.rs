@@ -126,7 +126,6 @@ impl Linearizer {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *(leader_block.reference());
         let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
-        let use_dac_gating = dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
         let mut buffer = vec![leader_block];
         let mut blocks_transaction_data_quorum = vec![];
         while let Some(x) = buffer.pop() {
@@ -136,20 +135,9 @@ impl Linearizer {
                 if ack_ref.round < min_round {
                     continue;
                 }
-                if use_dac_gating {
-                    // StarfishL: only include blocks with DAC certificates.
-                    if dag_state.has_dac_certificate(&ack_ref) {
-                        let s = self.votes.entry(ack_ref).or_default();
-                        if !s.is_quorum(&self.committee) {
-                            s.add(who_votes, &self.committee);
-                            blocks_transaction_data_quorum.push(ack_ref);
-                        }
-                    }
-                } else {
-                    let s = self.votes.entry(ack_ref).or_default();
-                    if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
-                        blocks_transaction_data_quorum.push(ack_ref);
-                    }
+                let s = self.votes.entry(ack_ref).or_default();
+                if !s.is_quorum(&self.committee) && s.add(who_votes, &self.committee) {
+                    blocks_transaction_data_quorum.push(ack_ref);
                 }
             }
             self.traversed_blocks.insert(*x.reference());

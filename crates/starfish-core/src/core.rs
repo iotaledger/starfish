@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
-    bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
+    bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
     committee::Committee,
     config::NodePrivateConfig,
     consensus::{
@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
+    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer, TransactionsCommitment},
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
@@ -56,7 +56,6 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
-    bls_cert_aggregator: Option<BlsCertificateAggregator>,
     dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
@@ -81,7 +80,7 @@ impl<H: BlockHandler> Core<H> {
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
         dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
-    ) -> Self {
+    ) -> (Self, Option<BlsCertificateAggregator>) {
         let RecoveredState {
             dag_state,
             store,
@@ -162,19 +161,7 @@ impl<H: BlockHandler> Core<H> {
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
             let events = aggregator.add_blocks(&dag_state, &unprocessed_blocks);
-            for event in events {
-                match event {
-                    CertificateEvent::Round(round, cert) => {
-                        dag_state.mark_round_certified(round, cert);
-                    }
-                    CertificateEvent::Leader(leader_ref, cert) => {
-                        dag_state.mark_leader_certified(leader_ref, cert);
-                    }
-                    CertificateEvent::Dac(block_ref, cert) => {
-                        dag_state.mark_dac_certified(block_ref, cert);
-                    }
-                }
-            }
+            apply_certificate_events(&dag_state, events);
             Some(aggregator)
         } else {
             None
@@ -194,7 +181,6 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
-            bls_cert_aggregator,
             dac_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
@@ -209,7 +195,7 @@ impl<H: BlockHandler> Core<H> {
             );
         }
 
-        this
+        (this, bls_cert_aggregator)
     }
 
     pub fn get_signer(&self) -> &Signer {
@@ -229,6 +215,7 @@ impl<H: BlockHandler> Core<H> {
     // and need to be requested.
     // Fourth, it returns a vector of references for blocks without
     // transactions that are added to the local DAG.
+    #[allow(clippy::type_complexity)]
     pub fn add_blocks(
         &mut self,
         blocks: Vec<Data<VerifiedBlock>>,
@@ -237,7 +224,7 @@ impl<H: BlockHandler> Core<H> {
         Vec<BlockReference>,
         AHashSet<BlockReference>,
         Vec<BlockReference>,
-        bool,
+        Vec<Data<VerifiedBlock>>,
     ) {
         let _timer = self
             .metrics
@@ -283,15 +270,14 @@ impl<H: BlockHandler> Core<H> {
             updated_existing_with_transactions
         );
 
-        for processed in &processed {
+        for block in &processed {
             self.pending
-                .push(MetaTransaction::Include(*processed.reference()));
-            self.attach_pending_transaction_data(processed);
-            if processed.transactions().is_some() {
-                self.sign_and_enqueue_dac(processed.reference());
+                .push(MetaTransaction::Include(*block.reference()));
+            self.attach_pending_transaction_data(block);
+            if block.transactions().is_some() {
+                self.sign_and_enqueue_dac(block.reference());
             }
         }
-        let bls_state_changed = self.feed_aggregator_batch(&processed);
         tracing::debug!("Pending after adding blocks: {:?}", self.pending);
         self.run_block_handler();
         self.update_pending_metrics();
@@ -300,7 +286,7 @@ impl<H: BlockHandler> Core<H> {
             not_processed_block_references_with_transactions,
             missing_references,
             processed_references_without_transactions,
-            bls_state_changed,
+            processed,
         )
     }
 
@@ -310,7 +296,12 @@ impl<H: BlockHandler> Core<H> {
     pub fn add_headers(
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
-    ) -> (bool, AHashSet<BlockReference>, Vec<BlockReference>, bool) {
+    ) -> (
+        bool,
+        AHashSet<BlockReference>,
+        Vec<BlockReference>,
+        Vec<Data<VerifiedBlock>>,
+    ) {
         let _timer = self
             .metrics
             .utilization_timer
@@ -328,15 +319,9 @@ impl<H: BlockHandler> Core<H> {
             self.attach_pending_transaction_data(block);
             processed_refs.push(*block.reference());
         }
-        let bls_state_changed = self.feed_aggregator_batch(&processed);
         self.run_block_handler();
         self.update_pending_metrics();
-        (
-            success,
-            missing_references,
-            processed_refs,
-            bls_state_changed,
-        )
+        (success, missing_references, processed_refs, processed)
     }
 
     /// Attach recovered transaction data directly to existing blocks in the
@@ -398,34 +383,6 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// Feed blocks to the BLS certificate aggregator (StarfishL only).
-    /// Propagates verified certificate events to DagState and reports whether
-    /// any new verified certificate was learned.
-    fn feed_aggregator_batch(&mut self, blocks: &[Data<VerifiedBlock>]) -> bool {
-        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
-            let events = aggregator.add_blocks(&self.dag_state, blocks);
-            return self.apply_certificate_events(events);
-        }
-        false
-    }
-
-    fn apply_certificate_events(&self, events: Vec<CertificateEvent>) -> bool {
-        let mut changed = false;
-        for event in events {
-            match event {
-                CertificateEvent::Round(round, cert) => {
-                    changed |= self.dag_state.mark_round_certified(round, cert);
-                }
-                CertificateEvent::Leader(leader_ref, cert) => {
-                    changed |= self.dag_state.mark_leader_certified(leader_ref, cert);
-                }
-                CertificateEvent::Dac(block_ref, cert) => {
-                    changed |= self.dag_state.mark_dac_certified(block_ref, cert);
-                }
-            }
-        }
-        changed
-    }
 
     /// Sign and enqueue a standalone DAC partial signature for a remote block.
     /// No-op for non-StarfishL or own blocks.
@@ -444,23 +401,6 @@ impl<H: BlockHandler> Core<H> {
         let _ = outbox.send((*block_ref, sig));
     }
 
-    /// Handle a standalone DAC partial signature received from a peer.
-    pub fn add_dac_partial_sig(
-        &mut self,
-        block_ref: BlockReference,
-        signer: AuthorityIndex,
-        sig: BlsSignatureBytes,
-    ) -> bool {
-        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
-            let commitment = self
-                .dag_state
-                .get_transactions_commitment(&block_ref)
-                .unwrap_or_default();
-            let events = aggregator.add_standalone_dac_sig(block_ref, signer, sig, commitment);
-            return self.apply_certificate_events(events);
-        }
-        false
-    }
 
     fn run_block_handler(&mut self) {
         let _timer = self
@@ -861,18 +801,22 @@ impl<H: BlockHandler> Core<H> {
         };
         self.last_own_block[block_id] = own_block.clone();
         self.dag_state.insert_own_block(own_block.clone());
-        let _ = self.feed_aggregator_batch(std::slice::from_ref(&own_block.block));
+    }
 
-        // Feed our own DAC partial sig for the block we just created.
-        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
-            let own_ref = *own_block.block.reference();
-            let commitment = own_block.block.merkle_root();
-            let digest = crypto::bls_dac_message(&own_ref, commitment);
-            let sig = self.bls_signer.sign_digest(&digest);
-            let events =
-                aggregator.add_standalone_dac_sig(own_ref, self.authority, sig, commitment);
-            self.apply_certificate_events(events);
+    /// Generate an own DAC partial signature for a block we just created.
+    /// Returns the data needed by the aggregator without touching it.
+    pub fn generate_own_dac_partial_sig(
+        &self,
+        block: &Data<VerifiedBlock>,
+    ) -> Option<(BlockReference, AuthorityIndex, BlsSignatureBytes, TransactionsCommitment)> {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishL {
+            return None;
         }
+        let own_ref = *block.reference();
+        let commitment = block.merkle_root();
+        let digest = crypto::bls_dac_message(&own_ref, commitment);
+        let sig = self.bls_signer.sign_digest(&digest);
+        Some((own_ref, self.authority, sig, commitment))
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedBlock>) {
@@ -920,9 +864,6 @@ impl<H: BlockHandler> Core<H> {
         self.pending_reconstructed_data
             .retain(|block_ref, _| block_ref.round >= threshold);
         self.committer.cleanup(threshold);
-        if let Some(ref mut aggregator) = self.bls_cert_aggregator {
-            aggregator.cleanup_below_round(threshold);
-        }
         self.update_pending_metrics();
         threshold
     }
