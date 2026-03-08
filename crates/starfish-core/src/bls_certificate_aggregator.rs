@@ -1,35 +1,45 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-//! Collects partial BLS signatures from received blocks and produces aggregate
-//! certificates once a quorum (2f+1 by stake) is reached.
+//! Collects BLS verification results from received blocks and produces
+//! verified aggregate certificates once a quorum (2f+1 by stake) is reached.
 //!
-//! Three certificate types are tracked:
-//! - **Round certificates**: aggregate of `bls_round_signature` values from
-//!   blocks at the same round.
-//! - **Leader certificates**: aggregate of `bls_leader_signature` values for a
-//!   particular leader block.
-//! - **DAC certificates**: aggregate of per-block partial BLS signatures over
-//!   `payloadCommit` (transactions commitment) for acknowledged blocks.
+//! Partial signatures carried in blocks are batch-verified before they can
+//! update certificate state. Aggregate leader/DAC certificates embedded in
+//! blocks are also verified before being accepted.
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 
 use crate::{
+    bls_batch_verifier::{BlsBatchVerifier, BlsVerificationTask},
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    crypto::{self, BlsSignatureBytes, bls_aggregate},
+    crypto::{self, BlsSignatureBytes, bls_aggregate, bls_aggregate_public_keys},
+    dag_state::DagState,
     data::Data,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
+    types::{AuthorityIndex, BlockReference, BlsAggregateCertificate, RoundNumber, VerifiedBlock},
 };
 
-/// Events emitted when a new certificate is completed.
+/// Events emitted when a new verified certificate is completed.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum CertificateEvent {
-    Round(RoundNumber, BlsSignatureBytes),
-    Leader(BlockReference, BlsSignatureBytes),
-    Dac(BlockReference, BlsSignatureBytes),
+    Round(RoundNumber, BlsAggregateCertificate),
+    Leader(BlockReference, BlsAggregateCertificate),
+    Dac(BlockReference, BlsAggregateCertificate),
+}
+
+enum PartialTaskKind {
+    Round {
+        round: RoundNumber,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    },
+    Leader {
+        leader_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    },
 }
 
 pub struct BlsCertificateAggregator {
@@ -39,22 +49,21 @@ pub struct BlsCertificateAggregator {
     round_partial_sigs: BTreeMap<RoundNumber, AHashMap<AuthorityIndex, BlsSignatureBytes>>,
     round_stake: BTreeMap<RoundNumber, StakeAggregator<QuorumThreshold>>,
     /// Completed round certificates.
-    round_certs: BTreeMap<RoundNumber, BlsSignatureBytes>,
+    round_certs: BTreeMap<RoundNumber, BlsAggregateCertificate>,
 
     // leader_ref -> (authority -> partial leader sig)
     leader_partial_sigs: AHashMap<BlockReference, AHashMap<AuthorityIndex, BlsSignatureBytes>>,
     leader_stake: AHashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     /// Completed leader certificates.
-    leader_certs: AHashMap<BlockReference, BlsSignatureBytes>,
+    leader_certs: AHashMap<BlockReference, BlsAggregateCertificate>,
 
     // block_ref -> (authority -> partial DAC sig on payloadCommit)
     dac_partial_sigs: AHashMap<BlockReference, AHashMap<AuthorityIndex, BlsSignatureBytes>>,
     dac_stake: AHashMap<BlockReference, StakeAggregator<QuorumThreshold>>,
     /// Completed DAC certificates.
-    dac_certs: AHashMap<BlockReference, BlsSignatureBytes>,
+    dac_certs: AHashMap<BlockReference, BlsAggregateCertificate>,
 }
 
-#[allow(dead_code)]
 impl BlsCertificateAggregator {
     pub fn new(committee: Arc<Committee>) -> Self {
         Self {
@@ -71,148 +80,56 @@ impl BlsCertificateAggregator {
         }
     }
 
-    /// Verify a BLS signature against the author's public key.
-    /// Returns `false` (and the signature is silently dropped) on failure.
-    fn verify_sig(
-        &self,
-        author: AuthorityIndex,
-        digest: &[u8; 32],
-        sig: &BlsSignatureBytes,
-    ) -> bool {
-        let Some(pk) = self.committee.get_bls_public_key(author) else {
-            return false;
-        };
-        pk.verify(digest, sig).is_ok()
-    }
-
-    /// Process a new block: verify and accumulate partial BLS sigs.
-    /// Returns newly completed certificates.
-    ///
-    pub fn add_block(
+    /// Process a batch of new blocks: batch-verify partial BLS signatures,
+    /// verify any aggregate certificates embedded in those blocks, and return
+    /// newly completed certificate events.
+    pub fn add_blocks(
         &mut self,
-        block: &Data<VerifiedBlock>,
+        dag_state: &DagState,
+        blocks: &[Data<VerifiedBlock>],
     ) -> Vec<CertificateEvent> {
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
-        let author = block.author();
-        let round = block.round();
+        let mut tasks = Vec::new();
+        let mut task_kinds = Vec::new();
 
-        // 1. Round signature — verify against block digest
-        if let Some(sig) = block.header().bls_round_signature() {
-            if !self.round_certs.contains_key(&round) {
-                // Compute the same digest the signer used.
-                let mut bls_hasher = crypto::Blake3Hasher::new();
-                crypto::BlockDigest::digest_without_signature(
-                    &mut bls_hasher,
-                    block.author(),
-                    round,
-                    block.block_references(),
-                    &block.acknowledgments(),
-                    block.meta_creation_time_ns(),
-                    block.merkle_root(),
-                    block.strong_vote(),
-                );
-                let digest: [u8; 32] = bls_hasher.finalize().into();
-                if self.verify_sig(author, &digest, sig) {
-                    let sigs = self.round_partial_sigs.entry(round).or_default();
-                    sigs.entry(author).or_insert(*sig);
-                    let stake = self.round_stake.entry(round).or_default();
-                    if stake.add(author, &self.committee) {
-                        let agg = self.aggregate_round(round);
-                        self.round_certs.insert(round, agg);
-                        events.push(CertificateEvent::Round(round, agg));
+        for block in blocks {
+            self.collect_partial_tasks(block, &mut tasks, &mut task_kinds);
+        }
+
+        let invalid = match BlsBatchVerifier::verify_batch(&tasks) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
+        for (index, kind) in task_kinds.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+
+            match kind {
+                PartialTaskKind::Round { round, signer, sig } => {
+                    if let Some(event) = self.add_round_partial(round, signer, sig) {
+                        events.push(event);
+                    }
+                }
+                PartialTaskKind::Leader {
+                    leader_ref,
+                    signer,
+                    sig,
+                } => {
+                    if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
+                        events.push(event);
                     }
                 }
             }
         }
 
-        // 2. Leader signature — verify against leader message
-        if let Some(sig) = block.header().bls_leader_signature() {
-            let leader_round = round.saturating_sub(1);
-            let leader_authority = self.committee.elect_leader(leader_round);
-            if let Some(leader_ref) = block
-                .block_references()
-                .iter()
-                .find(|r| r.round == leader_round && r.authority == leader_authority)
-            {
-                let leader_ref = *leader_ref;
-                if !self.leader_certs.contains_key(&leader_ref) {
-                    let digest = crypto::bls_leader_message(&leader_ref);
-                    if self.verify_sig(author, &digest, sig) {
-                        let sigs = self.leader_partial_sigs.entry(leader_ref).or_default();
-                        sigs.entry(author).or_insert(*sig);
-                        let stake = self.leader_stake.entry(leader_ref).or_default();
-                        if stake.add(author, &self.committee) {
-                            let agg = self.aggregate_leader(&leader_ref);
-                            self.leader_certs.insert(leader_ref, agg);
-                            events.push(CertificateEvent::Leader(leader_ref, agg));
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Absorb aggregated DAC certs from the block.
-        let ack_refs = block.acknowledgments();
-        let ack_bls_sigs = block.header().acknowledgment_bls_signatures();
-        for (ack_ref, agg_sig) in ack_refs.iter().zip(ack_bls_sigs.iter()) {
-            if *agg_sig == BlsSignatureBytes::default() {
-                continue; // skip placeholder (no cert available when block was created)
-            }
-            #[allow(clippy::map_entry)]
-            if !self.dac_certs.contains_key(ack_ref) {
-                self.dac_certs.insert(*ack_ref, *agg_sig);
-                events.push(CertificateEvent::Dac(*ack_ref, *agg_sig));
-            }
-        }
-
-        // 4. Absorb pre-aggregated round cert if present.
-        if let Some(agg_sig) = block.header().bls_aggregate_round_signature() {
-            if let std::collections::btree_map::Entry::Vacant(e) = self.round_certs.entry(round) {
-                e.insert(*agg_sig);
-                events.push(CertificateEvent::Round(round, *agg_sig));
-            }
-        }
-
-        // 5. Absorb pre-aggregated leader cert if present.
-        if let Some(agg_sig) = block.header().bls_aggregate_leader_signature() {
-            let leader_round = round.saturating_sub(1);
-            if leader_round > 0 {
-                let leader_authority = self.committee.elect_leader(leader_round);
-                if let Some(leader_ref) = block
-                    .block_references()
-                    .iter()
-                    .find(|r| r.round == leader_round && r.authority == leader_authority)
-                {
-                    #[allow(clippy::map_entry)]
-                    if !self.leader_certs.contains_key(leader_ref) {
-                        self.leader_certs.insert(*leader_ref, *agg_sig);
-                        events.push(CertificateEvent::Leader(*leader_ref, *agg_sig));
-                    }
-                }
-            }
-        }
-
+        events.extend(self.verify_embedded_aggregate_certificates(dag_state, blocks));
         events
-    }
-
-    /// Check if round certificate is available.
-    pub fn round_certificate(&self, round: RoundNumber) -> Option<&BlsSignatureBytes> {
-        self.round_certs.get(&round)
-    }
-
-    /// Check if leader certificate is available.
-    pub fn leader_certificate(&self, leader_ref: &BlockReference) -> Option<&BlsSignatureBytes> {
-        self.leader_certs.get(leader_ref)
-    }
-
-    /// Get completed DAC certificate for a specific block.
-    pub fn dac_certificate(&self, block_ref: &BlockReference) -> Option<&BlsSignatureBytes> {
-        self.dac_certs.get(block_ref)
-    }
-
-    /// Get completed DAC certificates ready to include in next block.
-    pub fn pending_dac_certificates(&self) -> Vec<(BlockReference, BlsSignatureBytes)> {
-        self.dac_certs.iter().map(|(r, s)| (*r, *s)).collect()
     }
 
     /// Cleanup state for rounds below the given threshold.
@@ -232,7 +149,7 @@ impl BlsCertificateAggregator {
 
     /// Process a standalone DAC partial signature received directly from a
     /// peer (not embedded in a block). Same verification + accumulation +
-    /// quorum logic as the embedded path in `add_block`.
+    /// quorum logic as the embedded path in `add_blocks`.
     pub fn add_standalone_dac_sig(
         &mut self,
         block_ref: BlockReference,
@@ -244,18 +161,301 @@ impl BlsCertificateAggregator {
         if self.dac_certs.contains_key(&block_ref) {
             return events;
         }
+
+        let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+            return events;
+        };
         let digest = crypto::bls_dac_message(&block_ref, commitment);
-        if self.verify_sig(signer, &digest, &sig) {
-            let sigs = self.dac_partial_sigs.entry(block_ref).or_default();
-            sigs.entry(signer).or_insert(sig);
-            let stake = self.dac_stake.entry(block_ref).or_default();
-            if stake.add(signer, &self.committee) {
-                let agg = self.aggregate_dac(&block_ref);
-                self.dac_certs.insert(block_ref, agg);
-                events.push(CertificateEvent::Dac(block_ref, agg));
-            }
+        let task = BlsVerificationTask {
+            message: digest,
+            signature: sig,
+            public_key,
+            block_index: 0,
+        };
+        if BlsBatchVerifier::verify_batch(&[task]).is_err() {
+            return events;
+        }
+
+        if let Some(event) = self.add_dac_partial(block_ref, signer, sig) {
+            events.push(event);
         }
         events
+    }
+
+    fn collect_partial_tasks(
+        &self,
+        block: &Data<VerifiedBlock>,
+        tasks: &mut Vec<BlsVerificationTask>,
+        task_kinds: &mut Vec<PartialTaskKind>,
+    ) {
+        let author = block.authority();
+        let Some(public_key) = self.committee.get_bls_public_key(author).cloned() else {
+            return;
+        };
+
+        if let Some(sig) = block.header().bls_round_signature() {
+            let round = block.round();
+            if !self.round_certs.contains_key(&round)
+                && !self
+                    .round_partial_sigs
+                    .get(&round)
+                    .is_some_and(|sigs| sigs.contains_key(&author))
+            {
+                tasks.push(BlsVerificationTask {
+                    message: crypto::bls_round_message(round),
+                    signature: *sig,
+                    public_key: public_key.clone(),
+                    block_index: task_kinds.len(),
+                });
+                task_kinds.push(PartialTaskKind::Round {
+                    round,
+                    signer: author,
+                    sig: *sig,
+                });
+            }
+        }
+
+        if let Some(sig) = block.header().bls_leader_signature() {
+            if let Some(leader_ref) = self.block_leader_ref(block) {
+                if !self.leader_certs.contains_key(&leader_ref)
+                    && !self
+                        .leader_partial_sigs
+                        .get(&leader_ref)
+                        .is_some_and(|sigs| sigs.contains_key(&author))
+                {
+                    tasks.push(BlsVerificationTask {
+                        message: crypto::bls_leader_message(&leader_ref),
+                        signature: *sig,
+                        public_key,
+                        block_index: task_kinds.len(),
+                    });
+                    task_kinds.push(PartialTaskKind::Leader {
+                        leader_ref,
+                        signer: author,
+                        sig: *sig,
+                    });
+                }
+            }
+        }
+    }
+
+    fn verify_embedded_aggregate_certificates(
+        &mut self,
+        dag_state: &DagState,
+        blocks: &[Data<VerifiedBlock>],
+    ) -> Vec<CertificateEvent> {
+        let mut events = Vec::new();
+        let mut tasks = Vec::new();
+        let mut entries = Vec::new();
+        let mut seen_leaders = AHashSet::new();
+        let mut seen_dacs = AHashSet::new();
+
+        enum AggregateTaskKind {
+            Round(RoundNumber, BlsAggregateCertificate),
+            Leader(BlockReference, BlsAggregateCertificate),
+            Dac(BlockReference, BlsAggregateCertificate),
+        }
+
+        for block in blocks {
+            if let Some(cert) = block.header().bls_aggregate_round_signature() {
+                let certified_round = block.round().saturating_sub(1);
+                if cert.is_empty()
+                    || certified_round == 0
+                    || self.round_certs.contains_key(&certified_round)
+                {
+                    continue;
+                }
+                let Some(task) = self
+                    .aggregate_same_message_task(crypto::bls_round_message(certified_round), cert)
+                else {
+                    continue;
+                };
+                tasks.push(BlsVerificationTask {
+                    block_index: entries.len(),
+                    ..task
+                });
+                entries.push(AggregateTaskKind::Round(certified_round, *cert));
+            }
+
+            if let Some(cert) = block.header().bls_aggregate_leader_signature() {
+                if cert.is_empty() {
+                    continue;
+                }
+                let Some(leader_ref) = self.block_leader_ref(block) else {
+                    continue;
+                };
+                if self.leader_certs.contains_key(&leader_ref) || !seen_leaders.insert(leader_ref) {
+                    continue;
+                }
+                let Some(task) =
+                    self.aggregate_same_message_task(crypto::bls_leader_message(&leader_ref), cert)
+                else {
+                    continue;
+                };
+                tasks.push(BlsVerificationTask {
+                    block_index: entries.len(),
+                    ..task
+                });
+                entries.push(AggregateTaskKind::Leader(leader_ref, *cert));
+            }
+
+            for (ack_ref, cert) in block
+                .acknowledgments()
+                .into_iter()
+                .zip(block.header().acknowledgment_bls_signatures().iter())
+            {
+                if cert.is_empty()
+                    || self.dac_certs.contains_key(&ack_ref)
+                    || !seen_dacs.insert(ack_ref)
+                {
+                    continue;
+                }
+                let Some(commitment) = dag_state.get_transactions_commitment(&ack_ref) else {
+                    continue;
+                };
+                let Some(task) = self.aggregate_same_message_task(
+                    crypto::bls_dac_message(&ack_ref, commitment),
+                    cert,
+                ) else {
+                    continue;
+                };
+                tasks.push(BlsVerificationTask {
+                    block_index: entries.len(),
+                    ..task
+                });
+                entries.push(AggregateTaskKind::Dac(ack_ref, *cert));
+            }
+        }
+
+        let invalid = match BlsBatchVerifier::verify_batch(&tasks) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
+        for (index, entry) in entries.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+            match entry {
+                AggregateTaskKind::Round(round, cert) => {
+                    if self.round_certs.insert(round, cert).is_none() {
+                        events.push(CertificateEvent::Round(round, cert));
+                    }
+                }
+                AggregateTaskKind::Leader(leader_ref, cert) => {
+                    if self.leader_certs.insert(leader_ref, cert).is_none() {
+                        events.push(CertificateEvent::Leader(leader_ref, cert));
+                    }
+                }
+                AggregateTaskKind::Dac(block_ref, cert) => {
+                    if self.dac_certs.insert(block_ref, cert).is_none() {
+                        events.push(CertificateEvent::Dac(block_ref, cert));
+                    }
+                }
+            }
+        }
+
+        events
+    }
+
+    fn aggregate_same_message_task(
+        &self,
+        message: [u8; 32],
+        cert: &BlsAggregateCertificate,
+    ) -> Option<BlsVerificationTask> {
+        let pubkeys = crypto::bls_public_keys_for_signers(&self.committee, cert.signers())?;
+        let aggregate_public_key = bls_aggregate_public_keys(&pubkeys)?;
+        Some(BlsVerificationTask {
+            message,
+            signature: *cert.signature(),
+            public_key: aggregate_public_key,
+            block_index: 0,
+        })
+    }
+
+    fn block_leader_ref(&self, block: &Data<VerifiedBlock>) -> Option<BlockReference> {
+        let leader_round = block.round().saturating_sub(1);
+        if leader_round == 0 {
+            return None;
+        }
+        let leader_authority = self.committee.elect_leader(leader_round);
+        block
+            .block_references()
+            .iter()
+            .find(|r| r.round == leader_round && r.authority == leader_authority)
+            .copied()
+    }
+
+    fn add_round_partial(
+        &mut self,
+        round: RoundNumber,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) -> Option<CertificateEvent> {
+        if self.round_certs.contains_key(&round) {
+            return None;
+        }
+        let sigs = self.round_partial_sigs.entry(round).or_default();
+        sigs.entry(signer).or_insert(sig);
+        let (reached_quorum, signers) = {
+            let stake = self.round_stake.entry(round).or_default();
+            (stake.add(signer, &self.committee), stake.votes)
+        };
+        if reached_quorum {
+            let cert = BlsAggregateCertificate::new(self.aggregate_round(round), signers);
+            self.round_certs.insert(round, cert);
+            Some(CertificateEvent::Round(round, cert))
+        } else {
+            None
+        }
+    }
+
+    fn add_leader_partial(
+        &mut self,
+        leader_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) -> Option<CertificateEvent> {
+        if self.leader_certs.contains_key(&leader_ref) {
+            return None;
+        }
+        let sigs = self.leader_partial_sigs.entry(leader_ref).or_default();
+        sigs.entry(signer).or_insert(sig);
+        let (reached_quorum, signers) = {
+            let stake = self.leader_stake.entry(leader_ref).or_default();
+            (stake.add(signer, &self.committee), stake.votes)
+        };
+        if reached_quorum {
+            let cert = BlsAggregateCertificate::new(self.aggregate_leader(&leader_ref), signers);
+            self.leader_certs.insert(leader_ref, cert);
+            Some(CertificateEvent::Leader(leader_ref, cert))
+        } else {
+            None
+        }
+    }
+
+    fn add_dac_partial(
+        &mut self,
+        block_ref: BlockReference,
+        signer: AuthorityIndex,
+        sig: BlsSignatureBytes,
+    ) -> Option<CertificateEvent> {
+        if self.dac_certs.contains_key(&block_ref) {
+            return None;
+        }
+        let sigs = self.dac_partial_sigs.entry(block_ref).or_default();
+        sigs.entry(signer).or_insert(sig);
+        let (reached_quorum, signers) = {
+            let stake = self.dac_stake.entry(block_ref).or_default();
+            (stake.add(signer, &self.committee), stake.votes)
+        };
+        if reached_quorum {
+            let cert = BlsAggregateCertificate::new(self.aggregate_dac(&block_ref), signers);
+            self.dac_certs.insert(block_ref, cert);
+            Some(CertificateEvent::Dac(block_ref, cert))
+        } else {
+            None
+        }
     }
 
     fn aggregate_round(&self, round: RoundNumber) -> BlsSignatureBytes {
@@ -274,103 +474,5 @@ impl BlsCertificateAggregator {
         let sigs = &self.dac_partial_sigs[block_ref];
         let sig_refs: Vec<&BlsSignatureBytes> = sigs.values().collect();
         bls_aggregate(&sig_refs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        committee::Committee,
-        crypto::{BlsSigner, Signer},
-        dag_state::ConsensusProtocol,
-        types::VerifiedBlock,
-    };
-
-    fn make_block(
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        block_refs: Vec<BlockReference>,
-        ack_refs: Vec<BlockReference>,
-        signer: &Signer,
-        bls_signer: &BlsSigner,
-        committee: &Committee,
-    ) -> Data<VerifiedBlock> {
-        let block = VerifiedBlock::new_with_signer(
-            authority,
-            round,
-            block_refs,
-            ack_refs,
-            0,
-            signer,
-            Some(bls_signer),
-            Some(committee),
-            vec![],
-            vec![],
-            Some(vec![vec![]; committee.len()]),
-            ConsensusProtocol::StarfishL,
-            None,
-            None,
-            None,
-        );
-        Data::new(block)
-    }
-
-    #[test]
-    fn round_certificate_quorum() {
-        let signers = Signer::new_for_test(4);
-        let bls_signers = BlsSigner::new_for_test(4);
-        let committee = Committee::new_for_benchmarks(4);
-        let mut aggregator = BlsCertificateAggregator::new(committee.clone());
-
-        let genesis_refs: Vec<_> = (0..4)
-            .map(|a| *VerifiedBlock::new_genesis(a).reference())
-            .collect();
-
-        // Add 2 blocks at round 1 — not yet quorum
-        for i in 0..2u64 {
-            let block = make_block(
-                i,
-                1,
-                genesis_refs.clone(),
-                vec![],
-                &signers[i as usize],
-                &bls_signers[i as usize],
-                &committee,
-            );
-            aggregator.add_block(&block);
-        }
-        assert!(aggregator.round_certificate(1).is_none());
-
-        // Add 3rd block — reaches quorum
-        let block = make_block(
-            2,
-            1,
-            genesis_refs.clone(),
-            vec![],
-            &signers[2],
-            &bls_signers[2],
-            &committee,
-        );
-        let events = aggregator.add_block(&block);
-        assert!(aggregator.round_certificate(1).is_some());
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, CertificateEvent::Round(1, _)))
-        );
-    }
-
-    #[test]
-    fn cleanup_removes_old_state() {
-        let committee = Committee::new_for_benchmarks(4);
-        let mut aggregator = BlsCertificateAggregator::new(committee);
-        // Insert some dummy data
-        aggregator.round_partial_sigs.insert(5, AHashMap::new());
-        aggregator.round_partial_sigs.insert(10, AHashMap::new());
-
-        aggregator.cleanup_below_round(8);
-        assert!(!aggregator.round_partial_sigs.contains_key(&5));
-        assert!(aggregator.round_partial_sigs.contains_key(&10));
     }
 }

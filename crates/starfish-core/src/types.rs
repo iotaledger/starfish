@@ -112,22 +112,46 @@ pub struct AckFields {
 /// BLS certificate data (StarfishL only).
 ///
 /// `round_signature` is always present — every StarfishL block signs the
-/// digest. `leader_signature` is present when the block includes the
-/// previous-round leader. Aggregate fields are populated by the protocol layer
-/// once quorum is reached. `acknowledgment_signatures` is parallel to the
-/// block's acknowledgment list.
+/// canonical round message. `leader_signature` is present when the block includes the
+/// previous-round leader. Aggregate fields carry the signature plus the
+/// contributing signer set once quorum is reached. `acknowledgment_signatures`
+/// is parallel to the block's acknowledgment list.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct BlsAggregateCertificate {
+    pub(crate) signature: BlsSignatureBytes,
+    pub(crate) signers: AuthoritySet,
+}
+
+impl BlsAggregateCertificate {
+    pub fn new(signature: BlsSignatureBytes, signers: AuthoritySet) -> Self {
+        Self { signature, signers }
+    }
+
+    pub fn signature(&self) -> &BlsSignatureBytes {
+        &self.signature
+    }
+
+    pub fn signers(&self) -> AuthoritySet {
+        self.signers
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.signature == BlsSignatureBytes::default() || self.signers.is_empty()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlsFields {
-    /// BLS round signature (block author signs the digest).
+    /// BLS round signature over the canonical round message.
     pub(crate) round_signature: BlsSignatureBytes,
     /// BLS leader signature (present when the block includes the leader ref).
     pub(crate) leader_signature: Option<BlsSignatureBytes>,
     /// Aggregate BLS round signature (populated by protocol layer).
-    pub(crate) aggregate_round_signature: Option<BlsSignatureBytes>,
+    pub(crate) aggregate_round_signature: Option<BlsAggregateCertificate>,
     /// Aggregate BLS leader signature (populated by protocol layer).
-    pub(crate) aggregate_leader_signature: Option<BlsSignatureBytes>,
+    pub(crate) aggregate_leader_signature: Option<BlsAggregateCertificate>,
     /// BLS DAC signatures, parallel to the acknowledgment list.
-    pub(crate) acknowledgment_signatures: Vec<BlsSignatureBytes>,
+    pub(crate) acknowledgment_signatures: Vec<BlsAggregateCertificate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +226,7 @@ impl BlockHeader {
         )
     }
 
-    pub fn author(&self) -> AuthorityIndex {
+    pub fn authority(&self) -> AuthorityIndex {
         self.reference.authority
     }
 
@@ -252,19 +276,19 @@ impl BlockHeader {
         self.bls.as_ref().and_then(|b| b.leader_signature.as_ref())
     }
 
-    pub fn bls_aggregate_round_signature(&self) -> Option<&BlsSignatureBytes> {
+    pub fn bls_aggregate_round_signature(&self) -> Option<&BlsAggregateCertificate> {
         self.bls
             .as_ref()
             .and_then(|b| b.aggregate_round_signature.as_ref())
     }
 
-    pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsSignatureBytes> {
+    pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsAggregateCertificate> {
         self.bls
             .as_ref()
             .and_then(|b| b.aggregate_leader_signature.as_ref())
     }
 
-    pub fn acknowledgment_bls_signatures(&self) -> &[BlsSignatureBytes] {
+    pub fn acknowledgment_bls_signatures(&self) -> &[BlsAggregateCertificate] {
         self.bls
             .as_ref()
             .map(|b| b.acknowledgment_signatures.as_slice())
@@ -591,13 +615,13 @@ impl VerifiedBlock {
         signer: &Signer,
         bls_signer: Option<&BlsSigner>,
         committee: Option<&Committee>,
-        aggregate_dac_sigs: Vec<BlsSignatureBytes>,
+        aggregate_dac_sigs: Vec<BlsAggregateCertificate>,
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
         strong_vote: Option<bool>,
-        aggregate_round_sig: Option<BlsSignatureBytes>,
-        aggregate_leader_sig: Option<BlsSignatureBytes>,
+        aggregate_round_sig: Option<BlsAggregateCertificate>,
+        aggregate_leader_sig: Option<BlsAggregateCertificate>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -633,20 +657,8 @@ impl VerifiedBlock {
 
         // Build BLS fields if a BLS signer is provided (StarfishL).
         let bls = bls_signer.map(|bs| {
-            // Round signature over the digest.
-            let mut bls_hasher = crypto::Blake3Hasher::new();
-            crypto::BlockDigest::digest_without_signature(
-                &mut bls_hasher,
-                authority,
-                round,
-                &block_references,
-                &acknowledgments,
-                meta_creation_time_ns,
-                transactions_commitment,
-                strong_vote,
-            );
-            let bls_digest: [u8; 32] = bls_hasher.finalize().into();
-            let round_signature = bs.sign_digest(&bls_digest);
+            // Round signature over the canonical round message.
+            let round_signature = bs.sign_digest(&crypto::bls_round_message(round));
 
             // Leader signature if we include the previous-round leader.
             let leader_signature = (|| {
@@ -719,8 +731,8 @@ impl VerifiedBlock {
         self.header.acknowledgment_count()
     }
 
-    pub fn author(&self) -> AuthorityIndex {
-        self.header.author()
+    pub fn authority(&self) -> AuthorityIndex {
+        self.header.authority()
     }
 
     pub fn round(&self) -> RoundNumber {
@@ -914,7 +926,7 @@ impl VerifiedBlock {
         }
         let acknowledgments = self.header.acknowledgments();
         let digest = BlockDigest::new(
-            self.author(),
+            self.authority(),
             round,
             &self.header.block_references,
             &acknowledgments,
@@ -929,9 +941,9 @@ impl VerifiedBlock {
             digest,
             self.digest()
         );
-        let pub_key = committee.get_public_key(self.author());
+        let pub_key = committee.get_public_key(self.authority());
         let Some(pub_key) = pub_key else {
-            bail!("Unknown block author {}", self.author())
+            bail!("Unknown block author {}", self.authority())
         };
         if round == GENESIS_ROUND {
             bail!("Genesis block should not go through verification");
@@ -1037,6 +1049,17 @@ impl AuthoritySet {
 
     pub fn present(&self) -> impl Iterator<Item = AuthorityIndex> + '_ {
         (0..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
+    }
+
+    #[inline]
+    pub fn contains(&self, v: AuthorityIndex) -> bool {
+        let bit = 1u128 << v;
+        self.0 & bit == bit
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
     }
 
     #[inline]

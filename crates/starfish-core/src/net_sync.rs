@@ -982,8 +982,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         if let Some(bridge_task) = self.bridge_task {
             bridge_task.await.ok();
         }
-        // The DAC routing task exits when Core's outbox sender is dropped.
+        // The DAC routing task holds an `Arc` to `inner` and waits on a
+        // receiver whose sender lives inside the core thread. Abort it here to
+        // break that shutdown cycle before unwrapping `inner`.
         if let Some(dac_task) = self.dac_routing_task {
+            dac_task.abort();
             dac_task.await.ok();
         }
         // Stop the cordial knowledge actor.

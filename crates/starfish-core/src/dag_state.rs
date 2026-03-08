@@ -27,8 +27,8 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, ProvableShard, RoundNumber, TransactionData,
-        VerifiedBlock,
+        AuthorityIndex, BlockDigest, BlockReference, BlsAggregateCertificate, ProvableShard,
+        RoundNumber, TransactionData, VerifiedBlock,
     },
 };
 
@@ -171,13 +171,15 @@ struct DagStateInner {
     last_committed_rounds: Vec<RoundNumber>,
     /// Threshold clock tracking quorum round advancement.
     threshold_clock: ThresholdClockAggregator,
+    /// Verified BLS round certificates keyed by round (StarfishL).
+    round_certificates: BTreeMap<RoundNumber, BlsAggregateCertificate>,
     /// Leader references with confirmed BLS leader certificates (StarfishL).
     /// Stored per-authority in round order so cleanup can `split_off()` at the
     /// eviction frontier instead of scanning the full certificate set.
-    leader_certificates: Vec<BTreeSet<BlockReference>>,
+    leader_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with confirmed BLS DAC certificates (StarfishL).
     /// Stored per-authority in round order for the same reason as leaders.
-    dac_certificates: Vec<BTreeSet<BlockReference>>,
+    dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
 }
 
 impl DagState {
@@ -236,8 +238,9 @@ impl DagState {
             round_version: AHashMap::new(),
             last_committed_rounds: vec![0; n],
             threshold_clock: ThresholdClockAggregator::new(0),
-            leader_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            round_certificates: BTreeMap::new(),
+            leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
+            dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -603,28 +606,85 @@ impl DagState {
             .map(|b| b.merkle_root())
     }
 
+    /// Mark a round as having a confirmed BLS certificate.
+    pub fn mark_round_certified(
+        &self,
+        round: RoundNumber,
+        certificate: BlsAggregateCertificate,
+    ) -> bool {
+        self.dag_state_inner
+            .write()
+            .round_certificates
+            .insert(round, certificate)
+            .is_none()
+    }
+
     /// Mark a leader block as having a confirmed BLS leader certificate.
-    pub fn mark_leader_certified(&self, leader_ref: BlockReference) {
+    pub fn mark_leader_certified(
+        &self,
+        leader_ref: BlockReference,
+        certificate: BlsAggregateCertificate,
+    ) -> bool {
         self.dag_state_inner.write().leader_certificates[leader_ref.authority as usize]
-            .insert(leader_ref);
+            .insert(leader_ref, certificate)
+            .is_none()
     }
 
     /// Mark a block as having a confirmed BLS DAC certificate.
-    pub fn mark_dac_certified(&self, block_ref: BlockReference) {
+    pub fn mark_dac_certified(
+        &self,
+        block_ref: BlockReference,
+        certificate: BlsAggregateCertificate,
+    ) -> bool {
         self.dag_state_inner.write().dac_certificates[block_ref.authority as usize]
-            .insert(block_ref);
+            .insert(block_ref, certificate)
+            .is_none()
+    }
+
+    /// Check whether the given round has a confirmed BLS certificate.
+    pub fn has_round_certificate(&self, round: RoundNumber) -> bool {
+        self.dag_state_inner
+            .read()
+            .round_certificates
+            .contains_key(&round)
+    }
+
+    /// Retrieve the confirmed BLS round certificate, if any.
+    pub fn round_certificate(&self, round: RoundNumber) -> Option<BlsAggregateCertificate> {
+        self.dag_state_inner
+            .read()
+            .round_certificates
+            .get(&round)
+            .copied()
     }
 
     /// Check whether the given leader has a confirmed BLS leader certificate.
     pub fn has_leader_certificate(&self, leader_ref: &BlockReference) -> bool {
         self.dag_state_inner.read().leader_certificates[leader_ref.authority as usize]
-            .contains(leader_ref)
+            .contains_key(leader_ref)
+    }
+
+    /// Retrieve the confirmed BLS leader certificate, if any.
+    pub fn leader_certificate(
+        &self,
+        leader_ref: &BlockReference,
+    ) -> Option<BlsAggregateCertificate> {
+        self.dag_state_inner.read().leader_certificates[leader_ref.authority as usize]
+            .get(leader_ref)
+            .copied()
     }
 
     /// Check whether the given block has a confirmed BLS DAC certificate.
     pub fn has_dac_certificate(&self, block_ref: &BlockReference) -> bool {
         self.dag_state_inner.read().dac_certificates[block_ref.authority as usize]
-            .contains(block_ref)
+            .contains_key(block_ref)
+    }
+
+    /// Retrieve the confirmed BLS DAC certificate, if any.
+    pub fn dac_certificate(&self, block_ref: &BlockReference) -> Option<BlsAggregateCertificate> {
+        self.dag_state_inner.read().dac_certificates[block_ref.authority as usize]
+            .get(block_ref)
+            .copied()
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
@@ -697,7 +757,7 @@ impl DagState {
         }
         authorities
             .iter()
-            .all(|auth| blocks.iter().any(|b| b.author() == *auth))
+            .all(|auth| blocks.iter().any(|b| b.authority() == *auth))
     }
 
     /// Check if a quorum of blocks at `round` include the leader
@@ -717,7 +777,7 @@ impl DagState {
                 .block_references()
                 .iter()
                 .any(|r| r.authority == leader && r.round == leader_round);
-            if votes_for_leader && aggregator.add(block.author(), committee) {
+            if votes_for_leader && aggregator.add(block.authority(), committee) {
                 return true;
             }
         }
@@ -734,7 +794,7 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            if block.strong_vote() == Some(true) && aggregator.add(block.author(), committee) {
+            if block.strong_vote() == Some(true) && aggregator.add(block.authority(), committee) {
                 return true;
             }
         }
@@ -1050,7 +1110,7 @@ impl DagState {
     pub fn update_last_committed_rounds(&self, commit: &CommittedSubDag) {
         let mut inner = self.dag_state_inner.write();
         for block in &commit.blocks {
-            let auth = block.author() as usize;
+            let auth = block.authority() as usize;
             inner.last_committed_rounds[auth] =
                 inner.last_committed_rounds[auth].max(block.round());
         }
@@ -1405,6 +1465,8 @@ impl DagStateInner {
     }
 
     fn prune_certificate_state(&mut self) {
+        let min_evicted = self.min_evicted_round();
+        self.round_certificates = self.round_certificates.split_off(&min_evicted);
         for auth in 0..self.committee_size {
             let split_ref = BlockReference {
                 authority: auth as AuthorityIndex,
@@ -1942,7 +2004,10 @@ mod tests {
 
     use super::{CACHED_ROUNDS, ConsensusProtocol, DagState};
     use crate::{
-        committee::Committee, config::StorageBackend, metrics::Metrics, types::BlockReference,
+        committee::Committee,
+        config::StorageBackend,
+        metrics::Metrics,
+        types::{BlockReference, BlsAggregateCertificate},
     };
 
     fn open_test_dag_state() -> DagState {
@@ -2009,12 +2074,18 @@ mod tests {
             inner.last_seen_by_authority[0] = CACHED_ROUNDS + 10;
             inner.last_seen_by_authority[1] = CACHED_ROUNDS + 5;
             inner.last_seen_by_authority[2] = CACHED_ROUNDS;
-            inner.leader_certificates[0].insert(leader_pruned);
-            inner.leader_certificates[0].insert(leader_kept);
-            inner.leader_certificates[2].insert(authority_without_eviction);
-            inner.dac_certificates[1].insert(dac_pruned);
-            inner.dac_certificates[1].insert(dac_kept);
-            inner.dac_certificates[2].insert(authority_without_eviction);
+            inner.leader_certificates[0].insert(leader_pruned, BlsAggregateCertificate::default());
+            inner.leader_certificates[0].insert(leader_kept, BlsAggregateCertificate::default());
+            inner.leader_certificates[2].insert(
+                authority_without_eviction,
+                BlsAggregateCertificate::default(),
+            );
+            inner.dac_certificates[1].insert(dac_pruned, BlsAggregateCertificate::default());
+            inner.dac_certificates[1].insert(dac_kept, BlsAggregateCertificate::default());
+            inner.dac_certificates[2].insert(
+                authority_without_eviction,
+                BlsAggregateCertificate::default(),
+            );
         }
 
         dag_state.cleanup();

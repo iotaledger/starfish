@@ -69,7 +69,7 @@ impl LeaderStatus {
 
     pub fn authority(&self) -> AuthorityIndex {
         match self {
-            Self::Commit(block, _) => block.author(),
+            Self::Commit(block, _) => block.authority(),
             Self::Skip(authority, _) => *authority,
             Self::Undecided(authority, _) => *authority,
         }
