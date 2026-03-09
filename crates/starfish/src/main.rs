@@ -21,8 +21,8 @@ use starfish_core::{
     ByzantineStrategy,
     committee::Committee,
     config::{
-        ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig, Parameters,
-        StorageBackend, TransactionMode,
+        DisseminationMode, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig,
+        Parameters, StorageBackend, TransactionMode,
     },
     metrics::Metrics,
     types::AuthorityIndex,
@@ -98,6 +98,10 @@ enum Operation {
         /// Transaction payload mode: all_zero | random
         #[clap(long, value_name = "STRING")]
         transaction_mode: Option<String>,
+        /// Dissemination mode override:
+        /// protocol-default | pull | push-causal | push-useful
+        #[clap(long, value_name = "STRING")]
+        dissemination_mode: Option<String>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -117,6 +121,10 @@ enum Operation {
         consensus: String,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
+        /// Dissemination mode override:
+        /// protocol-default | pull | push-causal | push-useful
+        #[clap(long, value_name = "STRING")]
+        dissemination_mode: Option<String>,
     },
 }
 
@@ -168,6 +176,7 @@ async fn main() -> Result<()> {
             base_ip,
             storage_backend,
             transaction_mode,
+            dissemination_mode,
         } => {
             dryrun(
                 authority,
@@ -181,6 +190,7 @@ async fn main() -> Result<()> {
                 base_ip,
                 storage_backend,
                 transaction_mode,
+                dissemination_mode,
             )
             .await?
         }
@@ -193,10 +203,14 @@ async fn main() -> Result<()> {
             uniform_latency_ms,
             consensus: consensus_protocol,
             duration_secs,
+            dissemination_mode,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
             if let Some(latency) = uniform_latency_ms {
                 node_parameters.uniform_latency_ms = Some(latency);
+            }
+            if let Some(ref mode) = dissemination_mode {
+                node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
             local_benchmark(
                 committee_size,
@@ -496,6 +510,7 @@ async fn dryrun(
     base_ip: Option<IpAddr>,
     storage_backend: Option<String>,
     transaction_mode: Option<String>,
+    dissemination_mode: Option<String>,
 ) -> Result<()> {
     tracing::warn!(
         "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
@@ -534,6 +549,9 @@ async fn dryrun(
     let mut node_parameters = NodeParameters::default_with_latency(mimic_latency);
     if let Some(latency) = uniform_latency_ms {
         node_parameters.uniform_latency_ms = Some(latency);
+    }
+    if let Some(ref mode) = dissemination_mode {
+        node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
@@ -576,6 +594,19 @@ async fn dryrun(
     network_result.expect("Validator crashed");
 
     Ok(())
+}
+
+fn parse_dissemination_mode(mode: &str) -> Result<DisseminationMode> {
+    match mode {
+        "protocol-default" => Ok(DisseminationMode::ProtocolDefault),
+        "pull" => Ok(DisseminationMode::Pull),
+        "push-causal" => Ok(DisseminationMode::PushCausal),
+        "push-useful" => Ok(DisseminationMode::PushUseful),
+        other => eyre::bail!(
+            "Unknown dissemination mode '{other}'. \
+             Use 'protocol-default', 'pull', 'push-causal', or 'push-useful'."
+        ),
+    }
 }
 
 fn run_with_progress(

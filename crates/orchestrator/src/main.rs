@@ -152,6 +152,12 @@ pub enum Operation {
         /// parameters file. Available options: all_zero | random
         #[clap(long, value_name = "STRING", global = true)]
         transaction_mode: Option<String>,
+
+        /// Dissemination mode override. Overrides the value from the
+        /// node parameters file. Available options:
+        /// protocol-default | pull | push-causal | push-useful
+        #[clap(long, value_name = "STRING", global = true)]
+        dissemination_mode: Option<String>,
     },
     /// One-click adaptive latency-throughput sweep. This command ensures the
     /// required testbed capacity, then benchmarks each protocol until the
@@ -239,6 +245,12 @@ pub enum Operation {
         /// parameters file. Available options: all_zero | random
         #[clap(long, value_name = "STRING", global = true)]
         transaction_mode: Option<String>,
+
+        /// Dissemination mode override. Overrides the value from the
+        /// node parameters file. Available options:
+        /// protocol-default | pull | push-causal | push-useful
+        #[clap(long, value_name = "STRING", global = true)]
+        dissemination_mode: Option<String>,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -388,11 +400,15 @@ fn load_benchmark_configs(
     mimic_extra_latency: bool,
     storage_backend: &Option<String>,
     transaction_mode: &Option<String>,
+    dissemination_mode: &Option<String>,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
-    let node_parameters = match &settings.node_parameters_path {
+    let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
         None => NodeParameters::default_with_latency(mimic_extra_latency),
     };
+    if let Some(ref mode) = dissemination_mode {
+        node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
+    }
     let mut client_parameters = match &settings.parameters_path {
         Some(path) => ClientParameters::load(path).wrap_err("Failed to load parameters")?,
         None => ClientParameters::default(),
@@ -415,6 +431,20 @@ fn load_benchmark_configs(
     }
 
     Ok((node_parameters, client_parameters))
+}
+
+fn parse_dissemination_mode(mode: &str) -> eyre::Result<starfish_core::config::DisseminationMode> {
+    use starfish_core::config::DisseminationMode;
+    match mode {
+        "protocol-default" => Ok(DisseminationMode::ProtocolDefault),
+        "pull" => Ok(DisseminationMode::Pull),
+        "push-causal" => Ok(DisseminationMode::PushCausal),
+        "push-useful" => Ok(DisseminationMode::PushUseful),
+        other => eyre::bail!(
+            "Unknown dissemination mode '{other}'. \
+             Use 'protocol-default', 'pull', 'push-causal', or 'push-useful'."
+        ),
+    }
 }
 
 async fn maybe_destroy_after_result<C: ServerProviderClient>(
@@ -639,6 +669,7 @@ async fn run<C: ServerProviderClient>(
             enable_tracing,
             storage_backend,
             transaction_mode,
+            dissemination_mode,
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
@@ -650,6 +681,7 @@ async fn run<C: ServerProviderClient>(
                 mimic_extra_latency,
                 &storage_backend,
                 &transaction_mode,
+                &dissemination_mode,
             )?;
 
             let protocols = if protocols.is_empty() {
@@ -763,6 +795,7 @@ async fn run<C: ServerProviderClient>(
             enable_tracing,
             storage_backend,
             transaction_mode,
+            dissemination_mode,
         } => {
             let mut settings = settings;
             maybe_auto_detect_prebuilt_binary(&mut settings);
@@ -772,6 +805,7 @@ async fn run<C: ServerProviderClient>(
                 mimic_extra_latency,
                 &storage_backend,
                 &transaction_mode,
+                &dissemination_mode,
             )?;
 
             let protocols = if protocols.is_empty() {
