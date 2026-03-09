@@ -66,14 +66,49 @@ async fn run_bls_service(
 ) {
     while let Some(msg) = receiver.recv().await {
         let _timer = metrics.bls_service_util.utilization_timer();
-        let mut events = Vec::new();
 
-        // Process the first message.
-        process_message(&mut aggregator, msg, &mut events, &metrics);
-
-        // Drain any additional queued messages for batching.
+        // Collect all queued messages before processing, so blocks from
+        // multiple ProcessBlocks messages are verified in a single batch.
+        let mut all_blocks = Vec::new();
+        let mut dac_sigs = Vec::new();
+        collect_message(msg, &mut all_blocks, &mut dac_sigs, &mut aggregator);
         while let Ok(msg) = receiver.try_recv() {
-            process_message(&mut aggregator, msg, &mut events, &metrics);
+            collect_message(msg, &mut all_blocks, &mut dac_sigs, &mut aggregator);
+        }
+
+        let num_blocks = all_blocks.len();
+        let num_dac_sigs = dac_sigs.len();
+
+        // Offload CPU-heavy verification to avoid blocking tokio workers.
+        // Inside, verify_batch_parallel fans out across BLS_VERIFICATION_WORKERS
+        // threads via std::thread::scope.
+        let events = tokio::task::block_in_place(|| {
+            let mut events = Vec::new();
+
+            if !all_blocks.is_empty() {
+                let (new_events, batch_failures) = aggregator.add_blocks(&all_blocks);
+                if batch_failures > 0 {
+                    metrics
+                        .bls_batch_verification_failures_total
+                        .inc_by(batch_failures);
+                }
+                events.extend(new_events);
+            }
+
+            if !dac_sigs.is_empty() {
+                events.extend(aggregator.add_standalone_dac_sigs_batch(dac_sigs));
+            }
+
+            events
+        });
+
+        if num_blocks > 0 {
+            metrics.bls_blocks_processed_total.inc_by(num_blocks as u64);
+        }
+        if num_dac_sigs > 0 {
+            metrics
+                .bls_standalone_dac_sigs_total
+                .inc_by(num_dac_sigs as u64);
         }
 
         // Count completed certificates by type.
@@ -110,28 +145,18 @@ async fn run_bls_service(
     }
 }
 
-fn process_message(
-    aggregator: &mut BlsCertificateAggregator,
+/// Classify a message into accumulated block or DAC-sig vectors.
+/// Cleanup messages are applied immediately since they are cheap.
+fn collect_message(
     msg: BlsServiceMessage,
-    events: &mut Vec<CertificateEvent>,
-    metrics: &Metrics,
+    blocks: &mut Vec<Data<VerifiedBlock>>,
+    dac_sigs: &mut Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    aggregator: &mut BlsCertificateAggregator,
 ) {
     match msg {
-        BlsServiceMessage::ProcessBlocks(blocks) => {
-            metrics
-                .bls_blocks_processed_total
-                .inc_by(blocks.len() as u64);
-            let (new_events, batch_failures) = aggregator.add_blocks(&blocks);
-            if batch_failures > 0 {
-                metrics
-                    .bls_batch_verification_failures_total
-                    .inc_by(batch_failures);
-            }
-            events.extend(new_events);
-        }
+        BlsServiceMessage::ProcessBlocks(b) => blocks.extend(b),
         BlsServiceMessage::DacPartialSig(block_ref, signer, sig) => {
-            metrics.bls_standalone_dac_sigs_total.inc();
-            events.extend(aggregator.add_standalone_dac_sig(block_ref, signer, sig));
+            dac_sigs.push((block_ref, signer, sig));
         }
         BlsServiceMessage::Cleanup(round) => {
             aggregator.cleanup_below_round(round);

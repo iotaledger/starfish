@@ -956,6 +956,9 @@ where
         useful_headers_authors: useful_headers,
         useful_shards_authors: useful_shards,
     };
+    if let Ok(size) = bincode::serialized_size(&batch) {
+        metrics.block_bundle_size_bytes.observe(size as usize);
+    }
     let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
     send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }

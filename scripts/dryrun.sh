@@ -24,7 +24,7 @@ STORAGE_BACKEND=rocksdb
 TRANSACTION_MODE=all_zero
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-DISSEMINATION_MODE=${DISSEMINATION_MODE:-}
+DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}

@@ -2086,6 +2086,7 @@
               }
             ]
           },
+          "decimals": 2,
           "unit": "bytes"
         },
         "overrides": []
@@ -2598,7 +2599,7 @@
         "y": 77
       },
       "id": 230,
-      "title": "Leader timeouts",
+      "title": "Proposal wait time",
       "targets": [
         {
           "datasource": {
@@ -2606,7 +2607,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(leader_timeout_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(proposal_wait_time_total_us{validator=~\"$validator\"}[1m]) / 1e6",
           "instant": false,
           "legendFormat": "{{validator}}",
           "range": true,

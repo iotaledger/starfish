@@ -66,8 +66,12 @@ enum PartialTaskKind {
     },
 }
 
+/// Number of parallel threads used for BLS batch verification.
+pub const BLS_VERIFICATION_WORKERS: usize = 5;
+
 pub struct BlsCertificateAggregator {
     committee: Arc<Committee>,
+    num_workers: usize,
 
     // Round r -> (authority -> partial round sig)
     round_partial_sigs: BTreeMap<RoundNumber, AHashMap<AuthorityIndex, BlsSignatureBytes>>,
@@ -92,8 +96,13 @@ pub struct BlsCertificateAggregator {
 
 impl BlsCertificateAggregator {
     pub fn new(committee: Arc<Committee>) -> Self {
+        Self::with_workers(committee, BLS_VERIFICATION_WORKERS)
+    }
+
+    pub fn with_workers(committee: Arc<Committee>, num_workers: usize) -> Self {
         Self {
             committee,
+            num_workers: num_workers.max(1),
             round_partial_sigs: BTreeMap::new(),
             round_stake: BTreeMap::new(),
             round_certs: BTreeMap::new(),
@@ -124,13 +133,14 @@ impl BlsCertificateAggregator {
             self.collect_partial_tasks(block, &mut tasks, &mut task_kinds);
         }
 
-        let (invalid, batch_failures) = match BlsBatchVerifier::verify_batch(&tasks) {
-            Ok(()) => (AHashSet::new(), 0),
-            Err(bad) => {
-                let count = bad.len() as u64;
-                (bad.into_iter().collect(), count)
-            }
-        };
+        let (invalid, batch_failures) =
+            match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
+                Ok(()) => (AHashSet::new(), 0),
+                Err(bad) => {
+                    let count = bad.len() as u64;
+                    (bad.into_iter().collect(), count)
+                }
+            };
 
         for (index, kind) in task_kinds.into_iter().enumerate() {
             if invalid.contains(&index) {
@@ -178,33 +188,67 @@ impl BlsCertificateAggregator {
     /// Process a standalone DAC partial signature received directly from a
     /// peer (not embedded in a block). Same verification + accumulation +
     /// quorum logic as the embedded path in `add_blocks`.
+    /// Process a single standalone DAC partial signature.
     pub fn add_standalone_dac_sig(
         &mut self,
         block_ref: BlockReference,
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
     ) -> Vec<CertificateEvent> {
+        self.add_standalone_dac_sigs_batch(vec![(block_ref, signer, sig)])
+    }
+
+    /// Process a batch of standalone DAC partial signatures using a single
+    /// multi-pairing check instead of verifying each individually.
+    pub fn add_standalone_dac_sigs_batch(
+        &mut self,
+        sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> Vec<CertificateEvent> {
+        let mut tasks = Vec::new();
+        // Track which input indices survive filtering.
+        let mut filtered: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
+
+        for (block_ref, signer, sig) in sigs {
+            // Skip if cert already complete, rejected, duplicate, or quorum
+            // already reached.
+            if self.dac_certs.contains_key(&block_ref)
+                || self.dac_rejections.contains(&block_ref)
+                || self
+                    .dac_stake
+                    .get(&block_ref)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
+                || self
+                    .dac_partial_sigs
+                    .get(&block_ref)
+                    .is_some_and(|sigs| sigs.contains_key(&signer))
+            {
+                continue;
+            }
+            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+                continue;
+            };
+            tasks.push(BlsVerificationTask {
+                message: crypto::bls_dac_message(&block_ref),
+                signature: sig,
+                public_key,
+                block_index: filtered.len(),
+            });
+            filtered.push((block_ref, signer, sig));
+        }
+
+        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
         let mut events = Vec::new();
-        if self.dac_certs.contains_key(&block_ref) || self.dac_rejections.contains(&block_ref) {
-            return events;
-        }
-
-        let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
-            return events;
-        };
-        let digest = crypto::bls_dac_message(&block_ref);
-        let task = BlsVerificationTask {
-            message: digest,
-            signature: sig,
-            public_key,
-            block_index: 0,
-        };
-        if BlsBatchVerifier::verify_batch(&[task]).is_err() {
-            return events;
-        }
-
-        if let Some(event) = self.add_dac_partial(block_ref, signer, sig) {
-            events.push(event);
+        for (index, (block_ref, signer, sig)) in filtered.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+            if let Some(event) = self.add_dac_partial(block_ref, signer, sig) {
+                events.push(event);
+            }
         }
         events
     }
@@ -223,6 +267,10 @@ impl BlsCertificateAggregator {
         if let Some(sig) = block.header().bls_round_signature() {
             let round = block.round();
             if !self.round_certs.contains_key(&round)
+                && !self
+                    .round_stake
+                    .get(&round)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
                 && !self
                     .round_partial_sigs
                     .get(&round)
@@ -244,6 +292,10 @@ impl BlsCertificateAggregator {
 
         if let Some((leader_ref, sig)) = block.header().voted_leader() {
             if !self.leader_certs.contains_key(leader_ref)
+                && !self
+                    .leader_stake
+                    .get(leader_ref)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
                 && !self
                     .leader_partial_sigs
                     .get(leader_ref)
@@ -343,7 +395,7 @@ impl BlsCertificateAggregator {
             }
         }
 
-        let invalid = match BlsBatchVerifier::verify_batch(&tasks) {
+        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
             Ok(()) => AHashSet::new(),
             Err(bad) => bad.into_iter().collect(),
         };
