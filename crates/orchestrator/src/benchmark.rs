@@ -74,7 +74,17 @@ pub struct BenchmarkRunSummary {
 
 impl BenchmarkRunSummary {
     pub fn csv_header() -> &'static str {
-        "protocol,committee,load,transaction_size_bytes,duration_secs,tps,bps,transaction_latency_p25_ms,transaction_latency_p50_ms,transaction_latency_p75_ms,block_latency_p25_ms,block_latency_p50_ms,block_latency_p75_ms,bandwidth_efficiency_p25,bandwidth_efficiency_p50,bandwidth_efficiency_p75,bandwidth_per_round_p25_bytes,bandwidth_per_round_p50_bytes,bandwidth_per_round_p75_bytes,cpu_p25_cores,cpu_p50_cores,cpu_p75_cores"
+        "protocol,committee,load,transaction_size_bytes,duration_secs,\
+         tps,bps,\
+         transaction_latency_p25_ms,transaction_latency_p50_ms,\
+         transaction_latency_p75_ms,\
+         block_latency_p25_ms,block_latency_p50_ms,\
+         block_latency_p75_ms,\
+         bandwidth_efficiency_p25,bandwidth_efficiency_p50,\
+         bandwidth_efficiency_p75,\
+         bandwidth_per_round_p25_bytes,bandwidth_per_round_p50_bytes,\
+         bandwidth_per_round_p75_bytes,\
+         cpu_p25_cores,cpu_p50_cores,cpu_p75_cores"
     }
 
     pub fn csv_record(&self) -> String {

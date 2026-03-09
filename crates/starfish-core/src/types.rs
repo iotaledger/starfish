@@ -1027,7 +1027,9 @@ impl VerifiedBlock {
                 } else {
                     ensure!(
                         self.header.block_references.len() <= 2,
-                        "StarfishL non-leader block may reference only the author's previous block and the previous-round leader"
+                        "StarfishL non-leader block may reference only \
+                         the author's previous block and the \
+                         previous-round leader"
                     );
                     let _self_ref = *self
                         .header
@@ -1062,7 +1064,8 @@ impl VerifiedBlock {
                             .block_references
                             .iter()
                             .all(|r| r.authority == self.authority()),
-                        "StarfishL non-leader block without a leader vote must not reference other parties"
+                        "StarfishL non-leader block without a leader \
+                         vote must not reference other parties"
                     );
                 }
                 for (ack_ref, cert) in acknowledgments
@@ -1568,9 +1571,10 @@ mod tests {
                 ConsensusProtocol::StarfishL,
             )
             .unwrap_err();
-        assert!(err.to_string().contains(
-            "StarfishL non-leader block may reference only the author's previous block and the previous-round leader"
-        ));
+        assert!(
+            err.to_string()
+                .contains("StarfishL non-leader block may reference only",)
+        );
     }
 
     #[test]

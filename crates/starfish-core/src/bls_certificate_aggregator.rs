@@ -614,9 +614,11 @@ mod tests {
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
         let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, CertificateEvent::Dac(block_ref, cert) if *block_ref == ack_ref && *cert == dac_cert)),
+            events.iter().any(|event| matches!(
+                event,
+                CertificateEvent::Dac(block_ref, cert)
+                    if *block_ref == ack_ref && *cert == dac_cert
+            )),
             "remote aggregator should learn the embedded DAC cert for the acknowledged block"
         );
     }
@@ -677,9 +679,11 @@ mod tests {
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
         let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, CertificateEvent::Dac(block_ref, cert) if *block_ref == ack_ref && *cert == dac_cert)),
+            events.iter().any(|event| matches!(
+                event,
+                CertificateEvent::Dac(block_ref, cert)
+                    if *block_ref == ack_ref && *cert == dac_cert
+            )),
             "remote aggregator should learn the embedded DAC cert for the acknowledged block"
         );
     }
@@ -727,9 +731,11 @@ mod tests {
         remote_aggregator.round_certs.insert(2, dac_cert);
         let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, CertificateEvent::Dac(block_ref, cert) if *block_ref == ack_ref && *cert == dac_cert)),
+            events.iter().any(|event| matches!(
+                event,
+                CertificateEvent::Dac(block_ref, cert)
+                    if *block_ref == ack_ref && *cert == dac_cert
+            )),
             "duplicate round cert must not prevent learning embedded DAC certs"
         );
     }
@@ -778,9 +784,11 @@ mod tests {
         remote_aggregator.leader_certs.insert(leader_ref, dac_cert);
         let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, CertificateEvent::Dac(block_ref, cert) if *block_ref == ack_ref && *cert == dac_cert)),
+            events.iter().any(|event| matches!(
+                event,
+                CertificateEvent::Dac(block_ref, cert)
+                    if *block_ref == ack_ref && *cert == dac_cert
+            )),
             "duplicate leader cert must not prevent learning embedded DAC certs"
         );
     }
