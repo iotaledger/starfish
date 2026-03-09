@@ -553,12 +553,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()))
                     .await;
             }
-            // Notify CordialKnowledge about new headers entering the DAG
-            for block in new_data_blocks.iter() {
-                self.inner
-                    .cordial_knowledge
-                    .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-            }
+            // Notify CordialKnowledge about all new headers in one batch.
+            let header_refs = new_data_blocks
+                .iter()
+                .map(|block| *block.reference())
+                .collect();
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::DagParts {
+                    headers: header_refs,
+                    shards: Vec::new(),
+                });
             let (missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
             if !missing_parents.is_empty() {
@@ -661,17 +666,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 ))
                 .await;
             }
-            // Notify CordialKnowledge about new headers (and shards) entering the DAG
-            for (block, &has_shard) in verified_data_blocks.iter().zip(verified_has_shard.iter()) {
-                self.inner
-                    .cordial_knowledge
-                    .send(CordialKnowledgeMessage::NewHeader(*block.reference()));
-                if has_shard {
-                    self.inner
-                        .cordial_knowledge
-                        .send(CordialKnowledgeMessage::NewShard(*block.reference()));
-                }
-            }
+            // Notify CordialKnowledge about all new headers and shards in one batch.
+            let header_refs: Vec<_> = verified_data_blocks
+                .iter()
+                .map(|block| *block.reference())
+                .collect();
+            let shard_refs: Vec<_> = verified_data_blocks
+                .iter()
+                .zip(verified_has_shard.iter())
+                .filter_map(|(block, &has_shard)| has_shard.then_some(*block.reference()))
+                .collect();
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::DagParts {
+                    headers: header_refs,
+                    shards: shard_refs,
+                });
             let (_pending_block_references, missing_parents, _processed_additional_blocks) =
                 self.inner.syncer.add_blocks(verified_data_blocks).await;
             if !missing_parents.is_empty() {
@@ -912,13 +922,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let bridge_inner = inner.clone();
             handle.spawn(async move {
                 while let Some(items) = decoded_rx.recv().await {
-                    // Notify CordialKnowledge: reconstruction proves we have both
-                    // the header (already known) and the shard data.
-                    for item in &items {
-                        bridge_inner
-                            .cordial_knowledge
-                            .send(CordialKnowledgeMessage::NewShard(item.block_reference));
-                    }
+                    // Reconstruction proves we now have the shard data for the
+                    // entire batch.
+                    let shard_refs = items.iter().map(|item| item.block_reference).collect();
+                    bridge_inner
+                        .cordial_knowledge
+                        .send(CordialKnowledgeMessage::DagParts {
+                            headers: Vec::new(),
+                            shards: shard_refs,
+                        });
                     bridge_inner.syncer.add_transaction_data(items).await;
                 }
             })
