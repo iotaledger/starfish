@@ -37,6 +37,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 
 pub trait SyncerSignals: Send + Sync {
     fn new_block_ready(&mut self);
+    fn threshold_clock_round_advanced(&mut self, round: RoundNumber);
 }
 
 pub trait CommitObserver: Send + Sync {
@@ -85,6 +86,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
+        let previous_threshold_round = self.core.dag_state().threshold_clock_round();
         // todo: when block is updated we might return false here and it can make
         // committing longer
         let (
@@ -95,6 +97,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             _processed_blocks,
         ) = self.core.add_blocks(blocks);
         self.maybe_start_proposal_wait();
+        self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
@@ -111,9 +114,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
+        let previous_threshold_round = self.core.dag_state().threshold_clock_round();
         let (success, missing_parents, processed_refs, _processed_blocks) =
             self.core.add_headers(headers);
         self.maybe_start_proposal_wait();
+        self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block();
@@ -201,6 +206,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
+    fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
+        let current_threshold_round = self.core.dag_state().threshold_clock_round();
+        if current_threshold_round > previous_threshold_round {
+            self.signals
+                .threshold_clock_round_advanced(current_threshold_round);
+        }
+    }
+
     pub fn try_new_commit(&mut self) {
         let _timer = self
             .metrics
@@ -255,6 +268,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
 impl SyncerSignals for bool {
     fn new_block_ready(&mut self) {
+        *self = true;
+    }
+
+    fn threshold_clock_round_advanced(&mut self, _round: RoundNumber) {
         *self = true;
     }
 }

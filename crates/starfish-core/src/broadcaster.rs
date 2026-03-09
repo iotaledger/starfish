@@ -645,10 +645,12 @@ where
     ) -> Option<()> {
         let sample_timeout = broadcaster_parameters.sample_timeout;
         loop {
-            let notified = inner.notify.notified();
+            let block_notified = inner.notify.notified();
+            let threshold_clock_notified = inner.threshold_clock_notify.notified();
             let trigger = select! {
                 _ = sleep(sample_timeout) => "timeout",
-                _ = notified => "new block",
+                _ = block_notified => "new block",
+                _ = threshold_clock_notified => "threshold clock",
             };
             let timer = metrics
                 .utilization_timer
