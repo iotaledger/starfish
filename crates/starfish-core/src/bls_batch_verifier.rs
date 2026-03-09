@@ -105,6 +105,48 @@ impl BlsBatchVerifier {
         public_key.verify(message, signature).is_ok()
     }
 
+    /// Verify a batch of BLS signatures across multiple threads.
+    ///
+    /// Splits the tasks into `num_workers` chunks, each verified in its own
+    /// `blst::Pairing`. The calling thread processes one chunk while
+    /// `num_workers - 1` OS threads handle the rest via `std::thread::scope`.
+    pub fn verify_batch_parallel(
+        tasks: &[BlsVerificationTask],
+        num_workers: usize,
+    ) -> Result<(), Vec<usize>> {
+        if tasks.len() <= num_workers || num_workers <= 1 {
+            return Self::verify_batch(tasks);
+        }
+
+        let chunk_size = tasks.len().div_ceil(num_workers);
+        let mut all_bad = Vec::new();
+
+        std::thread::scope(|s| {
+            // Spawn workers for all chunks except the first.
+            let handles: Vec<_> = tasks[chunk_size..]
+                .chunks(chunk_size)
+                .map(|chunk| s.spawn(|| Self::verify_batch(chunk)))
+                .collect();
+
+            // Process the first chunk on the calling thread.
+            if let Err(bad) = Self::verify_batch(&tasks[..chunk_size]) {
+                all_bad.extend(bad);
+            }
+
+            for handle in handles {
+                if let Err(bad) = handle.join().expect("BLS worker panicked") {
+                    all_bad.extend(bad);
+                }
+            }
+        });
+
+        if all_bad.is_empty() {
+            Ok(())
+        } else {
+            Err(all_bad)
+        }
+    }
+
     /// Individual fallback: verify each task independently and collect bad
     /// indices.
     fn fallback_individual(tasks: &[BlsVerificationTask]) -> Result<(), Vec<usize>> {

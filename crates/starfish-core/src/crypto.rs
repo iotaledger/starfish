@@ -762,6 +762,11 @@ impl Drop for BlsSigner {
 
 /// Aggregate N partial BLS signatures into one 96-byte signature.
 #[allow(dead_code)]
+/// Aggregate pre-verified BLS partial signatures into a single signature.
+///
+/// Callers MUST ensure all input signatures have already been verified
+/// (e.g. via [`BlsBatchVerifier::verify_batch`]). Subgroup checking is
+/// skipped because verification implies subgroup membership.
 pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
     assert!(!sigs.is_empty(), "Cannot aggregate zero signatures");
     let parsed: Vec<bls::Signature> = sigs
@@ -769,7 +774,9 @@ pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
         .map(|s| bls::Signature::from_bytes(&s.0).expect("valid BLS signature bytes"))
         .collect();
     let refs: Vec<&bls::Signature> = parsed.iter().collect();
-    let agg = bls::AggregateSignature::aggregate(&refs, true).expect("BLS aggregation");
+    // Safety: false = skip subgroup check. All signatures were batch-verified
+    // before reaching aggregation, so they are guaranteed to be in G2.
+    let agg = bls::AggregateSignature::aggregate(&refs, false).expect("BLS aggregation");
     BlsSignatureBytes(agg.to_signature().to_bytes())
 }
 

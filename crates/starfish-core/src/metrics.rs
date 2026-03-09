@@ -38,6 +38,7 @@ pub struct Metrics {
     pub benchmark_duration: IntCounter,
     pub committed_leaders_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
+    pub proposal_wait_time_total_us: IntCounter,
     pub sequenced_transactions_total: IntCounter,
     pub sequenced_transactions_bytes: IntCounter,
 
@@ -494,6 +495,12 @@ impl Metrics {
             leader_timeout_total: register_int_counter_with_registry!(
                 "leader_timeout_total",
                 "Total number of leader timeouts",
+                registry,
+            )
+            .unwrap(),
+            proposal_wait_time_total_us: register_int_counter_with_registry!(
+                "proposal_wait_time_total_us",
+                "Cumulative proposal wait time (microseconds)",
                 registry,
             )
             .unwrap(),

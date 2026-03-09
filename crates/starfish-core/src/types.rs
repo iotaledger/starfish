@@ -1102,7 +1102,23 @@ impl VerifiedBlock {
                     );
                 }
             }
-            _ => {
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::StarfishS => {
+                ensure!(
+                    threshold_clock_valid_block_header(&self.header, committee),
+                    "Threshold clock is not valid"
+                );
+                ensure!(
+                    self.header.bls().is_none(),
+                    "Only StarfishL blocks may carry BLS fields"
+                );
+            }
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                ensure!(
+                    acknowledgments.is_empty(),
+                    "{consensus_protocol:?} blocks must not carry acknowledgments"
+                );
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),
                     "Threshold clock is not valid"
@@ -1353,6 +1369,34 @@ mod tests {
         (block, committee)
     }
 
+    fn make_cordial_miners_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        acknowledgments: Vec<BlockReference>,
+    ) -> (VerifiedBlock, std::sync::Arc<Committee>) {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let block = VerifiedBlock::new_with_signer(
+            authority,
+            round,
+            vec![BlockReference::new_test(authority, round - 1)],
+            None,
+            acknowledgments,
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::CordialMiners,
+            None,
+            None,
+            None,
+        );
+        (block, committee)
+    }
+
     #[test]
     fn compresses_acknowledgments_against_shared_suffix() {
         let a = BlockReference::new_test(0, 1);
@@ -1574,6 +1618,28 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("StarfishL non-leader block may reference only",)
+        );
+    }
+
+    #[test]
+    fn rejects_cordial_miners_acknowledgments() {
+        let ack_ref = BlockReference::new_test(1, 1);
+        let (mut block, committee) = make_cordial_miners_block(0, 2, vec![ack_ref]);
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let err = block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::CordialMiners,
+            )
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("CordialMiners blocks must not carry acknowledgments")
         );
     }
 

@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use ahash::AHashSet;
 
@@ -26,6 +26,7 @@ use crate::{
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
     force_new_block: bool,
+    proposal_wait_started_at: Option<Instant>,
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
@@ -66,6 +67,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         Self {
             core,
             force_new_block: false,
+            proposal_wait_started_at: None,
             signals,
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
@@ -92,6 +94,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             used_additional_blocks,
             _processed_blocks,
         ) = self.core.add_blocks(blocks);
+        self.maybe_start_proposal_wait();
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
@@ -110,6 +113,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
         let (success, missing_parents, processed_refs, _processed_blocks) =
             self.core.add_headers(headers);
+        self.maybe_start_proposal_wait();
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block();
@@ -121,6 +125,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// creation.
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         self.core.add_transaction_data(items);
+        self.maybe_start_proposal_wait();
         self.try_new_block();
     }
 
@@ -129,6 +134,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// retry both paths immediately when DAG state changed.
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
         if apply_certificate_events(self.core.dag_state(), events) {
+            self.maybe_start_proposal_wait();
             self.try_new_block();
             self.try_new_commit();
         }
@@ -139,6 +145,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
             tracing::debug!("Attempt to force new block after timeout");
+            self.maybe_start_proposal_wait();
             self.try_new_block();
             true
         } else {
@@ -147,6 +154,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self) -> bool {
+        self.maybe_start_proposal_wait();
         let committee = self.core.committee();
         let own_authority = self.core.authority();
         let mut subscriber_stake = committee.get_total_stake(&self.subscribed_by_authorities);
@@ -161,6 +169,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
             tracing::debug!("Attempt to create new block in syncer after one trigger");
             if let Some(ref block) = self.core.try_new_block() {
+                if let Some(started_at) = self.proposal_wait_started_at.take() {
+                    self.metrics
+                        .proposal_wait_time_total_us
+                        .inc_by(started_at.elapsed().as_micros() as u64);
+                }
                 // Send own block and DAC partial sig to BLS service.
                 if let Some(ref bls_tx) = self.bls_tx {
                     let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
@@ -177,6 +190,15 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             }
         }
         false
+    }
+
+    fn maybe_start_proposal_wait(&mut self) {
+        if self.proposal_wait_started_at.is_some() {
+            return;
+        }
+        if self.core.dag_state().threshold_clock_round() > self.core.last_proposed() {
+            self.proposal_wait_started_at = Some(Instant::now());
+        }
     }
 
     pub fn try_new_commit(&mut self) {

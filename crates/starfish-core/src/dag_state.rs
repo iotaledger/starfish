@@ -73,7 +73,6 @@ impl ConsensusProtocol {
         matches!(
             self,
             ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::StarfishS
@@ -2172,7 +2171,7 @@ mod tests {
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
-        assert!(ConsensusProtocol::CordialMiners.supports_acknowledgments());
+        assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishPull.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
