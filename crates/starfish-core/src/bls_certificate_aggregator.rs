@@ -110,10 +110,7 @@ impl BlsCertificateAggregator {
     /// Process a batch of new blocks: batch-verify partial BLS signatures,
     /// verify any aggregate certificates embedded in those blocks, and return
     /// newly completed certificate events.
-    pub fn add_blocks(
-        &mut self,
-        blocks: &[Data<VerifiedBlock>],
-    ) -> Vec<CertificateEvent> {
+    pub fn add_blocks(&mut self, blocks: &[Data<VerifiedBlock>]) -> Vec<CertificateEvent> {
         if blocks.is_empty() {
             return Vec::new();
         }
@@ -303,9 +300,7 @@ impl BlsCertificateAggregator {
                 if cert.is_empty() {
                     continue;
                 }
-                if self.leader_certs.contains_key(leader_ref)
-                    || !seen_leaders.insert(*leader_ref)
-                {
+                if self.leader_certs.contains_key(leader_ref) || !seen_leaders.insert(*leader_ref) {
                     continue;
                 }
                 let Some(task) =
@@ -331,10 +326,9 @@ impl BlsCertificateAggregator {
                 {
                     continue;
                 }
-                let Some(task) = self.aggregate_same_message_task(
-                    crypto::bls_dac_message(&ack_ref),
-                    cert,
-                ) else {
+                let Some(task) =
+                    self.aggregate_same_message_task(crypto::bls_dac_message(&ack_ref), cert)
+                else {
                     continue;
                 };
                 tasks.push(BlsVerificationTask {

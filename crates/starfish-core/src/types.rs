@@ -286,9 +286,7 @@ impl BlockHeader {
     }
 
     pub fn certified_leader(&self) -> Option<&(BlockReference, BlsAggregateCertificate)> {
-        self.bls
-            .as_ref()
-            .and_then(|b| b.certified_leader.as_ref())
+        self.bls.as_ref().and_then(|b| b.certified_leader.as_ref())
     }
 
     pub fn acknowledgment_bls_signatures(&self) -> &[BlsAggregateCertificate] {

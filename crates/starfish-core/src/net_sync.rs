@@ -21,6 +21,7 @@ use tokio::{
 
 use crate::{
     block_handler::BlockHandler,
+    bls_service::{BlsServiceHandle, BlsServiceMessage},
     broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     committee::Committee,
     consensus::universal_committer::UniversalCommitter,
@@ -177,6 +178,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     peer: char,
     own_id: AuthorityIndex,
     sender: mpsc::Sender<NetworkMessage>,
+    bls_service: Option<BlsServiceHandle>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H, C> {
@@ -187,6 +189,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
         filter_for_shards: Arc<FilterForShards>,
+        bls_service: Option<BlsServiceHandle>,
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
@@ -225,6 +228,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             peer,
             own_id,
             sender: connection.sender.clone(),
+            bls_service,
         }
     }
 
@@ -261,10 +265,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::DacPartialSig(block_ref, signer, sig) => {
                 if signer == self.peer_id {
-                    self.inner
-                        .syncer
-                        .add_dac_partial_sig(block_ref, signer, sig)
-                        .await;
+                    if let Some(ref bls) = self.bls_service {
+                        bls.send(BlsServiceMessage::DacPartialSig(block_ref, signer, sig))
+                            .await;
+                    }
                 }
             }
         }
@@ -528,6 +532,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             new_data_blocks
         );
         if !new_data_blocks.is_empty() {
+            // Send block copies to BLS service for signature verification.
+            if let Some(ref bls) = self.bls_service {
+                bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()))
+                    .await;
+            }
             // Notify CordialKnowledge about new headers entering the DAG
             for block in new_data_blocks.iter() {
                 self.inner
@@ -629,6 +638,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_data_blocks
         );
         if !verified_data_blocks.is_empty() {
+            // Send block copies to BLS service for signature verification.
+            if let Some(ref bls) = self.bls_service {
+                bls.send(BlsServiceMessage::ProcessBlocks(
+                    verified_data_blocks.clone(),
+                ))
+                .await;
+            }
             // Notify CordialKnowledge about new headers (and shards) entering the DAG
             for (block, &has_shard) in verified_data_blocks.iter().zip(verified_has_shard.iter()) {
                 self.inner
@@ -763,6 +779,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     stop: mpsc::Receiver<()>,
     bridge_task: Option<JoinHandle<()>>,
     dac_routing_task: Option<JoinHandle<()>>,
+    bls_event_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -797,12 +814,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let dag_state = core.dag_state().clone();
         let _store = core.store();
         let universal_committer = core.get_universal_committer();
+        // Create BLS service channel — sender clones go to Syncer (Core thread)
+        // and network connection handlers, receiver goes to the BLS service task.
+        let (bls_msg_tx, bls_msg_rx) = if bls_cert_aggregator.is_some() {
+            let (tx, rx) = mpsc::channel::<BlsServiceMessage>(10_000);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let mut syncer = Syncer::new(
             core,
-            bls_cert_aggregator,
             notify.clone(),
             commit_observer,
             metrics.clone(),
+            bls_msg_tx.clone(),
         );
         syncer.force_new_block(0);
         let syncer = CoreThreadDispatcher::start(syncer);
@@ -888,6 +913,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             })
         });
+        // Start BLS verification service and event bridge task.
+        let (bls_service, bls_event_task) = if let (Some(aggregator), Some(bls_rx), Some(bls_tx)) =
+            (bls_cert_aggregator, bls_msg_rx, bls_msg_tx)
+        {
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<
+                Vec<crate::bls_certificate_aggregator::CertificateEvent>,
+            >();
+            crate::bls_service::start_bls_service(aggregator, bls_rx, event_tx);
+            let bls_handle = BlsServiceHandle::new(bls_tx);
+            let event_inner = inner.clone();
+            let task = handle.spawn(async move {
+                while let Some(events) = event_rx.recv().await {
+                    event_inner.syncer.apply_certificate_events(events).await;
+                }
+            });
+            (Some(bls_handle), Some(task))
+        } else {
+            (None, None)
+        };
+
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(
             network,
@@ -895,6 +940,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             block_fetcher,
             metrics.clone(),
+            bls_service.clone(),
         ));
         Self {
             inner,
@@ -902,6 +948,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             stop: stop_receiver,
             bridge_task,
             dac_routing_task,
+            bls_event_task,
             cordial_knowledge_task,
         }
     }
@@ -924,6 +971,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             dac_task.abort();
             dac_task.await.ok();
         }
+        // The BLS event bridge task holds an `Arc` to `inner`. Abort it to
+        // allow `Arc::try_unwrap` below.
+        if let Some(bls_task) = self.bls_event_task {
+            bls_task.abort();
+            bls_task.await.ok();
+        }
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
@@ -939,13 +992,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
+        bls_service: Option<BlsServiceHandle>,
     ) {
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
         let leader_timeout_task = handle.spawn(Self::leader_timeout_task(inner.clone()));
 
         let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
-        let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone()));
+        let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone(), bls_service.clone()));
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
@@ -967,6 +1021,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 metrics.clone(),
                 filter_for_blocks.clone(),
                 filter_for_shards.clone(),
+                bls_service.clone(),
             ));
             connections.insert(peer_id, task);
         }
@@ -992,6 +1047,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         metrics: Arc<Metrics>,
         filter_for_blocks: Arc<FilterForBlocks>,
         filter_for_shards: Arc<FilterForShards>,
+        bls_service: Option<BlsServiceHandle>,
     ) -> Option<()> {
         let gc_round = inner.dag_state.gc_round();
         connection
@@ -1007,6 +1063,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics,
             filter_for_blocks,
             filter_for_shards,
+            bls_service,
         );
         handler.start().await;
 
@@ -1093,7 +1150,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
-    async fn cleanup_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
+    async fn cleanup_task(
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        bls_service: Option<BlsServiceHandle>,
+    ) -> Option<()> {
         let cleanup_interval = Duration::from_secs(10);
         loop {
             select! {
@@ -1101,6 +1161,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     inner.syncer.cleanup().await;
                     let gc_round = inner.dag_state.gc_round();
                     inner.gc_round.store(gc_round, Ordering::Relaxed);
+
+                    // Notify BLS service to clean up old aggregator state.
+                    if let Some(ref bls) = bls_service {
+                        bls.send(BlsServiceMessage::Cleanup(gc_round)).await;
+                    }
 
                     // Evict stale entries from CordialKnowledge
                     // using per-authority eviction rounds.

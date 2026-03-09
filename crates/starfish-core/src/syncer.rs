@@ -6,12 +6,14 @@ use std::sync::Arc;
 
 use ahash::AHashSet;
 
+use tokio::sync::mpsc;
+
 use crate::{
     block_handler::BlockHandler,
-    bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
+    bls_certificate_aggregator::{CertificateEvent, apply_certificate_events},
+    bls_service::BlsServiceMessage,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
-    crypto::BlsSignatureBytes,
     dag_state::DagState,
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -23,13 +25,13 @@ use crate::{
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
-    bls_cert_aggregator: Option<BlsCertificateAggregator>,
     force_new_block: bool,
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
     pub(crate) subscribed_by_authorities: AHashSet<AuthorityIndex>,
     pub(crate) metrics: Arc<Metrics>,
+    bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -55,21 +57,21 @@ pub trait CommitObserver: Send + Sync {
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn new(
         core: Core<H>,
-        bls_cert_aggregator: Option<BlsCertificateAggregator>,
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
+        bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
     ) -> Self {
         let committee_size = core.committee().len();
         Self {
             core,
-            bls_cert_aggregator,
             force_new_block: false,
             signals,
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
             subscribed_by_authorities: AHashSet::with_capacity(committee_size),
             metrics,
+            bls_tx,
         }
     }
 
@@ -88,14 +90,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             pending_blocks_with_transactions,
             missing_parents,
             used_additional_blocks,
-            processed_blocks,
+            _processed_blocks,
         ) = self.core.add_blocks(blocks);
-        if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let events = agg.add_blocks(&processed_blocks);
-            if apply_certificate_events(self.core.dag_state(), events) {
-                self.try_new_commit();
-            }
-        }
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block();
@@ -112,14 +108,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let (success, missing_parents, processed_refs, processed_blocks) =
+        let (success, missing_parents, processed_refs, _processed_blocks) =
             self.core.add_headers(headers);
-        if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let events = agg.add_blocks(&processed_blocks);
-            if apply_certificate_events(self.core.dag_state(), events) {
-                self.try_new_commit();
-            }
-        }
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block();
@@ -134,17 +124,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.try_new_block();
     }
 
-    pub fn add_dac_partial_sig(
-        &mut self,
-        block_ref: BlockReference,
-        signer: AuthorityIndex,
-        sig: BlsSignatureBytes,
-    ) {
-        if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let events = agg.add_standalone_dac_sig(block_ref, signer, sig);
-            if apply_certificate_events(self.core.dag_state(), events) {
-                self.try_new_commit();
-            }
+    /// Apply BLS certificate events from the BLS verification service.
+    pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
+        if apply_certificate_events(self.core.dag_state(), events) {
+            self.try_new_commit();
         }
     }
 
@@ -175,15 +158,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
             tracing::debug!("Attempt to create new block in syncer after one trigger");
             if let Some(ref block) = self.core.try_new_block() {
-                // Feed the new block to the BLS aggregator and generate own DAC sig.
-                if let Some(ref mut agg) = self.bls_cert_aggregator {
-                    let events = agg.add_blocks(std::slice::from_ref(block));
-                    apply_certificate_events(self.core.dag_state(), events);
+                // Send own block and DAC partial sig to BLS service.
+                if let Some(ref bls_tx) = self.bls_tx {
+                    let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
                     if let Some((block_ref, auth, sig)) =
                         self.core.generate_own_dac_partial_sig(block)
                     {
-                        let events = agg.add_standalone_dac_sig(block_ref, auth, sig);
-                        apply_certificate_events(self.core.dag_state(), events);
+                        let _ =
+                            bls_tx.try_send(BlsServiceMessage::DacPartialSig(block_ref, auth, sig));
                     }
                 }
                 self.signals.new_block_ready();
@@ -193,6 +175,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
         false
     }
+
     pub fn try_new_commit(&mut self) {
         let _timer = self
             .metrics
@@ -227,9 +210,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn cleanup(&mut self) {
         let threshold = self.core.cleanup();
-        if let Some(ref mut agg) = self.bls_cert_aggregator {
-            agg.cleanup_below_round(threshold);
-        }
         self.commit_observer.cleanup(threshold);
     }
 

@@ -1670,7 +1670,8 @@ impl DagStateInner {
             return;
         }
         if self.consensus_protocol == ConsensusProtocol::StarfishL
-            && !self.dac_certificates[auth].contains_key(&block_ref)
+            && (block_ref.authority != self.authority
+                || !self.dac_certificates[auth].contains_key(&block_ref))
         {
             return;
         }
@@ -1681,9 +1682,15 @@ impl DagStateInner {
         let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
             return Vec::new();
         };
-        let (to_return, to_keep): (Vec<_>, Vec<_>) = pending_acknowledgment
-            .drain(..)
-            .partition(|x| x.round <= round_number);
+        let current_round = round_number;
+        let (to_return, to_keep): (Vec<_>, Vec<_>) =
+            pending_acknowledgment.drain(..).partition(|x| {
+                if self.consensus_protocol == ConsensusProtocol::StarfishL {
+                    x.round < current_round
+                } else {
+                    x.round <= current_round
+                }
+            });
         *pending_acknowledgment = to_keep;
         to_return
     }
