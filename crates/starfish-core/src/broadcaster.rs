@@ -377,7 +377,9 @@ where
                     }
                 }
                 tracing::debug!(
-                    "Requested missing parent headers (and extra potentially-missing headers) {:?} are sent from {own_index:?} to {peer:?}",
+                    "Requested missing parent headers (and extra \
+                     potentially-missing headers) {:?} are sent \
+                     from {own_index:?} to {peer:?}",
                     headers
                 );
                 self.sender
