@@ -439,17 +439,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .mark_shard_useful_from_peer(payload.block_reference);
             }
 
-            // Attach shard to DAG block for immediate relay.
-            if self
-                .inner
-                .dag_state
-                .attach_shard_data(payload.block_reference, &payload.shard)
-            {
-                self.inner
-                    .cordial_knowledge
-                    .send(CordialKnowledgeMessage::NewShard(payload.block_reference));
-            }
-
             batch.push(ShardMessage::Shard {
                 block_reference: payload.block_reference,
                 merkle_root: payload.shard.transactions_commitment(),
