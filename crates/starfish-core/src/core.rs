@@ -383,7 +383,6 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-
     /// Sign and enqueue a standalone DAC partial signature for a remote block.
     /// No-op for non-StarfishL or own blocks.
     fn sign_and_enqueue_dac(&self, block_ref: &BlockReference) {
@@ -397,7 +396,6 @@ impl<H: BlockHandler> Core<H> {
         let sig = self.bls_signer.sign_digest(&digest);
         let _ = outbox.send((*block_ref, sig));
     }
-
 
     fn run_block_handler(&mut self) {
         let _timer = self
