@@ -228,13 +228,11 @@ impl Metrics {
                 ),
             ),
 
-            block_bundle_size_bytes: parking_lot::Mutex::new(
-                HistogramReporter::new_in_registry(
-                    block_bundle_size_bytes_hist,
-                    registry,
-                    "block_bundle_size_bytes",
-                ),
-            ),
+            block_bundle_size_bytes: parking_lot::Mutex::new(HistogramReporter::new_in_registry(
+                block_bundle_size_bytes_hist,
+                registry,
+                "block_bundle_size_bytes",
+            )),
 
             connection_latency: parking_lot::Mutex::new(VecHistogramReporter::new_in_registry(
                 connection_latency_hist,

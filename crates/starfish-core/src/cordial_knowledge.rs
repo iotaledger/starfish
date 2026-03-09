@@ -154,6 +154,19 @@ impl ConnectionKnowledge {
         mask
     }
 
+    fn drain_ref(
+        authority_map: &mut BTreeMap<RoundNumber, AHashSet<BlockReference>>,
+        round: RoundNumber,
+        block_ref: BlockReference,
+    ) {
+        if let Some(round_set) = authority_map.get_mut(&round) {
+            round_set.remove(&block_ref);
+            if round_set.is_empty() {
+                authority_map.remove(&round);
+            }
+        }
+    }
+
     pub fn new(peer: AuthorityIndex, committee_size: usize) -> Self {
         Self {
             peer,
@@ -226,6 +239,14 @@ impl ConnectionKnowledge {
         }
     }
 
+    pub fn knows_header(&self, block_ref: &BlockReference) -> bool {
+        self.known_headers.contains(block_ref)
+    }
+
+    pub fn knows_shard(&self, block_ref: &BlockReference) -> bool {
+        self.known_shards.contains(block_ref)
+    }
+
     /// Drain the oldest unknown headers, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_headers(&mut self, limit: usize) -> Vec<BlockReference> {
@@ -261,6 +282,42 @@ impl ConnectionKnowledge {
         )
     }
 
+    pub fn take_unsent_headers_at_round_excluding_authority(
+        &mut self,
+        limit: usize,
+        round: RoundNumber,
+        excluded_authority: AuthorityIndex,
+    ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(limit);
+        while result.len() < limit {
+            let mut made_progress = false;
+            for (authority, authority_map) in self.headers_not_known.iter_mut().enumerate() {
+                if excluded_authority == authority as AuthorityIndex {
+                    continue;
+                }
+                let picked = authority_map
+                    .get(&round)
+                    .and_then(|refs| refs.iter().next().copied());
+                let Some(block_ref) = picked else {
+                    continue;
+                };
+                Self::drain_ref(authority_map, round, block_ref);
+                result.push(block_ref);
+                made_progress = true;
+                if result.len() >= limit {
+                    break;
+                }
+            }
+            if !made_progress {
+                break;
+            }
+        }
+        result
+    }
+
     /// Drain the oldest unknown shards, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_shards(&mut self, limit: usize) -> Vec<BlockReference> {
@@ -275,6 +332,88 @@ impl ConnectionKnowledge {
         allowed_authorities: u128,
     ) -> Vec<BlockReference> {
         Self::take_unsent_refs(&mut self.shards_not_known, limit, None, allowed_authorities)
+    }
+
+    pub fn take_unsent_shards_up_to_round(
+        &mut self,
+        limit: usize,
+        round: RoundNumber,
+    ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(limit);
+        while result.len() < limit {
+            let mut made_progress = false;
+            for authority_map in &mut self.shards_not_known {
+                let picked =
+                    authority_map
+                        .range(..=round)
+                        .next()
+                        .and_then(|(&picked_round, refs)| {
+                            refs.iter()
+                                .next()
+                                .copied()
+                                .map(|block_ref| (picked_round, block_ref))
+                        });
+                let Some((picked_round, block_ref)) = picked else {
+                    continue;
+                };
+                Self::drain_ref(authority_map, picked_round, block_ref);
+                result.push(block_ref);
+                made_progress = true;
+                if result.len() >= limit {
+                    break;
+                }
+            }
+            if !made_progress {
+                break;
+            }
+        }
+        result
+    }
+
+    pub fn take_unsent_shards_up_to_round_excluding_authority(
+        &mut self,
+        limit: usize,
+        round: RoundNumber,
+        excluded_authority: AuthorityIndex,
+    ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(limit);
+        while result.len() < limit {
+            let mut made_progress = false;
+            for (authority, authority_map) in self.shards_not_known.iter_mut().enumerate() {
+                if excluded_authority == authority as AuthorityIndex {
+                    continue;
+                }
+                let picked =
+                    authority_map
+                        .range(..=round)
+                        .next()
+                        .and_then(|(&picked_round, refs)| {
+                            refs.iter()
+                                .next()
+                                .copied()
+                                .map(|block_ref| (picked_round, block_ref))
+                        });
+                let Some((picked_round, block_ref)) = picked else {
+                    continue;
+                };
+                Self::drain_ref(authority_map, picked_round, block_ref);
+                result.push(block_ref);
+                made_progress = true;
+                if result.len() >= limit {
+                    break;
+                }
+            }
+            if !made_progress {
+                break;
+            }
+        }
+        result
     }
 
     /// Evict all entries below the given per-authority rounds.
@@ -647,6 +786,24 @@ mod tests {
     }
 
     #[test]
+    fn test_take_unsent_headers_at_round_excluding_authority() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let round_four = block_ref(0, 4);
+        let round_five_a = block_ref(0, 5);
+        let round_five_b = block_ref(2, 5);
+
+        ck.new_header(round_four);
+        ck.new_header(round_five_a);
+        ck.new_header(round_five_b);
+
+        let drained = ck.take_unsent_headers_at_round_excluding_authority(10, 5, 0);
+        assert_eq!(drained, vec![round_five_b]);
+
+        let remaining = ck.take_unsent_headers(10);
+        assert_eq!(remaining, vec![round_four, round_five_a]);
+    }
+
+    #[test]
     fn test_evict_below() {
         let mut ck = ConnectionKnowledge::new(1, 4);
         for round in 1..=10 {
@@ -734,6 +891,42 @@ mod tests {
 
         ck.mark_shard_useful_to_peer(block_ref(2, 12));
         assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(12));
+    }
+
+    #[test]
+    fn test_take_unsent_shards_up_to_round() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let early = block_ref(0, 3);
+        let middle = block_ref(2, 5);
+        let late = block_ref(3, 7);
+
+        ck.new_shard(early);
+        ck.new_shard(middle);
+        ck.new_shard(late);
+
+        let drained = ck.take_unsent_shards_up_to_round(10, 5);
+        assert_eq!(drained, vec![early, middle]);
+
+        let remaining = ck.take_unsent_shards(10);
+        assert_eq!(remaining, vec![late]);
+    }
+
+    #[test]
+    fn test_take_unsent_shards_up_to_round_excluding_authority() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let excluded = block_ref(0, 3);
+        let kept = block_ref(2, 5);
+        let late = block_ref(3, 7);
+
+        ck.new_shard(excluded);
+        ck.new_shard(kept);
+        ck.new_shard(late);
+
+        let drained = ck.take_unsent_shards_up_to_round_excluding_authority(10, 5, 0);
+        assert_eq!(drained, vec![kept]);
+
+        let remaining = ck.take_unsent_shards(10);
+        assert_eq!(remaining, vec![excluded, late]);
     }
 
     #[tokio::test]

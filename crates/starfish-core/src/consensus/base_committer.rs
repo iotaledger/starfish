@@ -197,7 +197,7 @@ impl BaseCommitter {
         }
     }
 
-    fn decide_skip_starfish(
+    fn decide_skip(
         &self,
         voting_round: RoundNumber,
         leader: AuthorityIndex,
@@ -243,22 +243,6 @@ impl BaseCommitter {
             }
         }
         to_skip
-    }
-
-    /// Check whether the specified leader has enough blames (that is, 2f+1
-    /// non-votes) to be directly skipped.
-    fn decide_skip_mysticeti(&self, voting_round: RoundNumber, leader: AuthorityIndex) -> bool {
-        let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
-        self.has_quorum_support(
-            voting_blocks
-                .iter()
-                .filter(|b| {
-                    b.block_references()
-                        .iter()
-                        .all(|inc| inc.authority != leader)
-                })
-                .map(|b| b.authority()),
-        )
     }
 
     /// Check whether the specified leader has enough support (that is, 2f+1
@@ -422,20 +406,8 @@ impl BaseCommitter {
         // non-votes for that leader (which ensure there will never be a
         // certificate for that leader).
         let voting_round = leader_round + 1;
-        match self.dag_state.consensus_protocol {
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => {
-                if self.decide_skip_starfish(voting_round, leader, voter_info) {
-                    return LeaderStatus::Skip(leader, leader_round);
-                }
-            }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
-                if self.decide_skip_mysticeti(voting_round, leader) {
-                    return LeaderStatus::Skip(leader, leader_round);
-                }
-            }
+        if self.decide_skip(voting_round, leader, voter_info) {
+            return LeaderStatus::Skip(leader, leader_round);
         }
 
         // Check whether the leader(s) has enough support. That is, whether there are

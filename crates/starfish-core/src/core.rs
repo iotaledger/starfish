@@ -496,26 +496,26 @@ impl<H: BlockHandler> Core<H> {
             self.calculate_authority_bounds(number_of_blocks_to_create)
         );
 
-        let certified_leader =
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-                // Leader cert for leader of clock_round - 1 (if we include that leader).
-                if clock_round <= 2 {
-                    None
-                } else {
-                    let leader_round = clock_round - 1;
-                    let leader_authority = self.committee.elect_leader(leader_round);
-                    block_references
-                        .iter()
-                        .find(|r| r.round == leader_round && r.authority == leader_authority)
-                        .and_then(|leader_ref| {
-                            self.dag_state
-                                .leader_certificate(leader_ref)
-                                .map(|cert| (*leader_ref, cert))
-                        })
-                }
-            } else {
+        let certified_leader = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
+        {
+            // Leader cert for leader of clock_round - 1 (if we include that leader).
+            if clock_round <= 2 {
                 None
-            };
+            } else {
+                let leader_round = clock_round - 1;
+                let leader_authority = self.committee.elect_leader(leader_round);
+                block_references
+                    .iter()
+                    .find(|r| r.round == leader_round && r.authority == leader_authority)
+                    .and_then(|leader_ref| {
+                        self.dag_state
+                            .leader_certificate(leader_ref)
+                            .map(|cert| (*leader_ref, cert))
+                    })
+            }
+        } else {
+            None
+        };
 
         // Create and store blocks
         let mut first_block = None;
@@ -790,11 +790,7 @@ impl<H: BlockHandler> Core<H> {
         block_round: RoundNumber,
     ) -> Vec<BlockReference> {
         if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-            if self
-                .committee
-                .elect_leader(block_round)
-                != self.authority
-            {
+            if self.committee.elect_leader(block_round) != self.authority {
                 return Vec::new();
             }
 

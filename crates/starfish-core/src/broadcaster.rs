@@ -2,7 +2,12 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cmp::max, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    cmp::max,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use ahash::AHashSet;
 use futures::future::join_all;
@@ -679,7 +684,18 @@ where
                             )
                             .await?;
                         }
-                        ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
+                        ConsensusProtocol::CordialMiners => {
+                            sending_batch_causal_cordial_miners_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                        ConsensusProtocol::Mysticeti => {
                             sending_batch_all_blocks(
                                 inner.clone(),
                                 to.clone(),
@@ -815,6 +831,112 @@ where
     Some(())
 }
 
+fn collect_causal_header_seeds<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    peer: AuthorityIndex,
+    round: RoundNumber,
+    limit: usize,
+) -> Vec<BlockReference>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let own_authority = inner.dag_state.get_own_authority_index();
+    let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
+        return Vec::new();
+    };
+    let header_refs =
+        ck.write()
+            .take_unsent_headers_at_round_excluding_authority(limit, round, own_authority);
+    header_refs
+}
+
+fn collect_causal_ancestor_headers<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    peer: AuthorityIndex,
+    own_authority: AuthorityIndex,
+    sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
+    roots: &[BlockReference],
+    limit: usize,
+) -> Vec<BlockReference>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    if limit == 0 || roots.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
+        return Vec::new();
+    };
+    let sent = sent_to_peer.read();
+    let mut queued = AHashSet::with_capacity(roots.len());
+    let mut frontier: VecDeque<_> = roots.iter().copied().collect();
+    let mut collected = Vec::with_capacity(limit);
+
+    while !frontier.is_empty() && collected.len() < limit {
+        let frontier_refs: Vec<_> = frontier.drain(..).collect();
+        let blocks = inner.dag_state.get_storage_blocks(&frontier_refs);
+        for block in blocks.into_iter().flatten() {
+            for parent in block.block_references() {
+                if parent.round == 0
+                    || parent.authority == peer
+                    || parent.authority == own_authority
+                    || sent.contains(parent)
+                    || !queued.insert(*parent)
+                {
+                    continue;
+                }
+                if ck.read().knows_header(parent) {
+                    continue;
+                }
+                collected.push(*parent);
+                frontier.push_back(*parent);
+                if collected.len() >= limit {
+                    break;
+                }
+            }
+            if collected.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    if !collected.is_empty() {
+        let mut known = ck.write();
+        for block_ref in &collected {
+            known.mark_header_known(*block_ref);
+        }
+    }
+
+    collected
+}
+
+fn collect_causal_shard_refs<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    peer: AuthorityIndex,
+    own_authority: AuthorityIndex,
+    max_round: RoundNumber,
+    limit: usize,
+) -> Vec<BlockReference>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    if limit == 0 || max_round == 0 {
+        return Vec::new();
+    }
+
+    let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
+        return Vec::new();
+    };
+    let shard_refs = ck
+        .write()
+        .take_unsent_shards_up_to_round_excluding_authority(limit, max_round, own_authority);
+    shard_refs
+}
+
 async fn sending_batch_all_blocks<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
@@ -927,6 +1049,85 @@ where
     send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }
 
+async fn sending_batch_causal_cordial_miners_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    broadcaster_parameters: BroadcasterParameters,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
+    let own_authority = inner.dag_state.get_own_authority_index();
+    let peer = format_authority_index(to_whom_authority_index);
+
+    let own_blocks = {
+        let sent = sent_to_peer.read();
+        inner
+            .dag_state
+            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
+    };
+
+    let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
+    let mut causal_refs = Vec::new();
+    if let Some(newest_round) = newest_own_round {
+        let previous_round = newest_round.saturating_sub(1);
+        if previous_round > 0 {
+            let seed_refs = collect_causal_header_seeds(
+                &inner,
+                to_whom_authority_index,
+                previous_round,
+                batch_other_block_size,
+            );
+            let ancestor_refs = collect_causal_ancestor_headers(
+                &inner,
+                to_whom_authority_index,
+                own_authority,
+                &sent_to_peer,
+                &seed_refs,
+                batch_other_block_size.saturating_sub(seed_refs.len()),
+            );
+            causal_refs.extend(seed_refs);
+            causal_refs.extend(ancestor_refs);
+        }
+    }
+
+    let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
+    causal_refs.retain(|block_ref| !own_refs.contains(block_ref));
+
+    let mut full_blocks = own_blocks;
+    full_blocks.extend(
+        inner
+            .dag_state
+            .get_transmission_blocks(&causal_refs)
+            .into_iter()
+            .flatten(),
+    );
+
+    let useful_headers = 0;
+    let useful_shards = 0;
+    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
+
+    tracing::debug!(
+        "Cordial Miners causal batch to {peer}: {} full",
+        full_blocks.len()
+    );
+    let batch = BlockBatch {
+        full_blocks,
+        headers: Vec::new(),
+        shards: Vec::new(),
+        useful_headers_authors: useful_headers,
+        useful_shards_authors: useful_shards,
+    };
+    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
+}
+
 /// Starfish-specific batch: own blocks as full, others' headers from
 /// CordialKnowledge, shards from CordialKnowledge, plus useful-authors
 /// feedback bitmasks.
@@ -1025,48 +1226,57 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let committee_size = inner.committee.len();
     let own_index = inner.dag_state.get_own_authority_index();
     let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
     let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
     let batch_shard_size = broadcaster_parameters.batch_shard_size;
     let peer = format_authority_index(to_whom_authority_index);
-    let mut authorities_with_missing_blocks: AHashSet<AuthorityIndex> =
-        (0..committee_size as AuthorityIndex).collect();
-    authorities_with_missing_blocks.remove(&own_index);
 
-    let causal_blocks = {
+    let own_blocks = {
         let sent = sent_to_peer.read();
-        inner.dag_state.get_unsent_causal_history(
-            &sent,
-            to_whom_authority_index,
-            batch_own_block_size,
-            batch_other_block_size,
-            authorities_with_missing_blocks,
-        )
+        inner
+            .dag_state
+            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
     };
 
-    let own_blocks: Vec<_> = causal_blocks
-        .iter()
-        .filter(|block| block.authority() == own_index)
-        .cloned()
-        .collect();
-    let header_refs: Vec<_> = causal_blocks
-        .iter()
-        .filter(|block| block.authority() != own_index)
-        .map(|block| *block.reference())
-        .collect();
+    let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
+    let mut header_refs = Vec::new();
+    let mut shard_round_cutoff = 0;
+    if let Some(newest_round) = newest_own_round {
+        let previous_round = newest_round.saturating_sub(1);
+        shard_round_cutoff =
+            newest_round.saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
+        if previous_round > 0 {
+            let seed_refs = collect_causal_header_seeds(
+                &inner,
+                to_whom_authority_index,
+                previous_round,
+                batch_other_block_size,
+            );
+            let ancestor_refs = collect_causal_ancestor_headers(
+                &inner,
+                to_whom_authority_index,
+                own_index,
+                &sent_to_peer,
+                &seed_refs,
+                batch_other_block_size.saturating_sub(seed_refs.len()),
+            );
+            header_refs.extend(seed_refs);
+            header_refs.extend(ancestor_refs);
+        }
+    }
+
+    let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
+    header_refs.retain(|block_ref| !own_refs.contains(block_ref));
     let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
 
-    let current_round = inner.dag_state.highest_round();
-    let shard_round_cutoff =
-        current_round.saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
-    let shard_refs: Vec<_> = header_refs
-        .iter()
-        .copied()
-        .filter(|block_ref| block_ref.round <= shard_round_cutoff)
-        .take(batch_shard_size)
-        .collect();
+    let shard_refs = collect_causal_shard_refs(
+        &inner,
+        to_whom_authority_index,
+        own_index,
+        shard_round_cutoff,
+        batch_shard_size,
+    );
     let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
 
     let useful_headers = 0;
