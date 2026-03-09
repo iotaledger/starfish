@@ -573,6 +573,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     missing_parents,
                     self.peer
                 );
+                self.metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&self.peer_id.to_string()])
+                    .inc();
                 self.sender
                     .send(NetworkMessage::MissingParentsRequest(missing_parents))
                     .await
@@ -698,6 +702,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     missing_parents,
                     self.peer
                 );
+                self.metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&self.peer_id.to_string()])
+                    .inc();
                 self.sender
                     .send(NetworkMessage::MissingParentsRequest(missing_parents))
                     .await
