@@ -886,6 +886,11 @@ impl<H: BlockHandler> Core<H> {
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
+        if let Some(header_bytes) = block.serialized_header_bytes() {
+            self.metrics
+                .proposed_header_size_bytes
+                .observe(header_bytes.len());
+        }
         if let Some(transactions) = block.transactions() {
             if transactions.is_empty() {
                 self.metrics.proposed_transaction_size_bytes.observe(0);
