@@ -821,10 +821,16 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     cordial_knowledge_task: JoinHandle<()>,
 }
 
+pub(crate) struct NetworkSyncSignals {
+    block_ready_notify: Arc<Notify>,
+    threshold_clock_notify: Arc<Notify>,
+}
+
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
-    pub syncer: CoreThreadDispatcher<H, Arc<Notify>, C>,
+    syncer: CoreThreadDispatcher<H, NetworkSyncSignals, C>,
     pub dag_state: DagState,
     pub notify: Arc<Notify>,
+    pub threshold_clock_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
     pub dissemination_mode: crate::config::DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
@@ -849,6 +855,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     ) -> Self {
         let handle = Handle::current();
         let notify = Arc::new(Notify::new());
+        let threshold_clock_notify = Arc::new(Notify::new());
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
@@ -868,7 +875,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
         let mut syncer = Syncer::new(
             core,
-            notify.clone(),
+            NetworkSyncSignals {
+                block_ready_notify: notify.clone(),
+                threshold_clock_notify: threshold_clock_notify.clone(),
+            },
             commit_observer,
             metrics.clone(),
             bls_msg_tx.clone(),
@@ -913,8 +923,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let inner = Arc::new(NetworkSyncerInner {
             notify,
-            syncer,
             dag_state: dag_state.clone(),
+            syncer,
+            threshold_clock_notify,
             committee,
             dissemination_mode,
             causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
@@ -1001,7 +1012,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
-    pub async fn shutdown(self) -> Syncer<H, Arc<Notify>, C> {
+    pub(crate) async fn shutdown(self) -> Syncer<H, NetworkSyncSignals, C> {
         drop(self.stop);
         // todo - wait for network shutdown as well
         self.main_task.await.ok();
@@ -1256,9 +1267,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<
     }
 }
 
-impl SyncerSignals for Arc<Notify> {
+impl SyncerSignals for NetworkSyncSignals {
     fn new_block_ready(&mut self) {
-        self.notify_waiters();
+        self.block_ready_notify.notify_waiters();
+    }
+
+    fn threshold_clock_round_advanced(&mut self, _round: RoundNumber) {
+        self.threshold_clock_notify.notify_waiters();
     }
 }
 
@@ -1269,6 +1284,20 @@ mod tests {
         crypto::{SignatureBytes, TransactionsCommitment},
         types::{BaseTransaction, BlockReference},
     };
+
+    #[tokio::test]
+    async fn threshold_clock_signal_notifies_waiters() {
+        let block_ready_notify = Arc::new(Notify::new());
+        let threshold_clock_notify = Arc::new(Notify::new());
+        let mut signals = NetworkSyncSignals {
+            block_ready_notify,
+            threshold_clock_notify: threshold_clock_notify.clone(),
+        };
+
+        let wait = threshold_clock_notify.notified();
+        signals.threshold_clock_round_advanced(5);
+        wait.await;
+    }
 
     #[test]
     fn acknowledgments_imply_peer_knows_shard_data() {
