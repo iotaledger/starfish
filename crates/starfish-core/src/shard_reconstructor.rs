@@ -550,7 +550,7 @@ mod tests {
         let own_id: AuthorityIndex = 0;
 
         let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None);
+        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None, None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));
@@ -618,7 +618,7 @@ mod tests {
         let own_id: AuthorityIndex = 0;
 
         let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None);
+        let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None, None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
         let gc_round = Arc::new(AtomicU64::new(0));

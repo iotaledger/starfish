@@ -2148,8 +2148,12 @@ mod tests {
     fn open_test_dag_state() -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
-        let (metrics, _reporter) =
-            Metrics::new(&registry, Some(committee.as_ref()), Some("starfish-l"));
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-l"),
+            None,
+        );
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         std::mem::forget(dir);
