@@ -20,7 +20,7 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer, TransactionsCommitment},
+    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
     dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
     data::Data,
     encoder::ShardEncoder,
@@ -160,7 +160,7 @@ impl<H: BlockHandler> Core<H> {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
-            let events = aggregator.add_blocks(&dag_state, &unprocessed_blocks);
+            let events = aggregator.add_blocks(&unprocessed_blocks);
             apply_certificate_events(&dag_state, events);
             Some(aggregator)
         } else {
@@ -393,10 +393,7 @@ impl<H: BlockHandler> Core<H> {
         let Some(ref outbox) = self.dac_sig_outbox else {
             return;
         };
-        let Some(commitment) = self.dag_state.get_transactions_commitment(block_ref) else {
-            return;
-        };
-        let digest = crypto::bls_dac_message(block_ref, commitment);
+        let digest = crypto::bls_dac_message(block_ref);
         let sig = self.bls_signer.sign_digest(&digest);
         let _ = outbox.send((*block_ref, sig));
     }
@@ -808,15 +805,14 @@ impl<H: BlockHandler> Core<H> {
     pub fn generate_own_dac_partial_sig(
         &self,
         block: &Data<VerifiedBlock>,
-    ) -> Option<(BlockReference, AuthorityIndex, BlsSignatureBytes, TransactionsCommitment)> {
+    ) -> Option<(BlockReference, AuthorityIndex, BlsSignatureBytes)> {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishL {
             return None;
         }
         let own_ref = *block.reference();
-        let commitment = block.merkle_root();
-        let digest = crypto::bls_dac_message(&own_ref, commitment);
+        let digest = crypto::bls_dac_message(&own_ref);
         let sig = self.bls_signer.sign_digest(&digest);
-        Some((own_ref, self.authority, sig, commitment))
+        Some((own_ref, self.authority, sig))
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedBlock>) {

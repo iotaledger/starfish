@@ -112,7 +112,6 @@ impl BlsCertificateAggregator {
     /// newly completed certificate events.
     pub fn add_blocks(
         &mut self,
-        dag_state: &DagState,
         blocks: &[Data<VerifiedBlock>],
     ) -> Vec<CertificateEvent> {
         if blocks.is_empty() {
@@ -155,7 +154,7 @@ impl BlsCertificateAggregator {
             }
         }
 
-        events.extend(self.verify_embedded_aggregate_certificates(dag_state, blocks));
+        events.extend(self.verify_embedded_aggregate_certificates(blocks));
         events
     }
 
@@ -183,7 +182,6 @@ impl BlsCertificateAggregator {
         block_ref: BlockReference,
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
-        commitment: crate::crypto::TransactionsCommitment,
     ) -> Vec<CertificateEvent> {
         let mut events = Vec::new();
         if self.dac_certs.contains_key(&block_ref) || self.dac_rejections.contains(&block_ref) {
@@ -193,7 +191,7 @@ impl BlsCertificateAggregator {
         let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
             return events;
         };
-        let digest = crypto::bls_dac_message(&block_ref, commitment);
+        let digest = crypto::bls_dac_message(&block_ref);
         let task = BlsVerificationTask {
             message: digest,
             signature: sig,
@@ -269,7 +267,6 @@ impl BlsCertificateAggregator {
 
     fn verify_embedded_aggregate_certificates(
         &mut self,
-        dag_state: &DagState,
         blocks: &[Data<VerifiedBlock>],
     ) -> Vec<CertificateEvent> {
         let mut events = Vec::new();
@@ -337,11 +334,8 @@ impl BlsCertificateAggregator {
                 {
                     continue;
                 }
-                let Some(commitment) = dag_state.get_transactions_commitment(&ack_ref) else {
-                    continue;
-                };
                 let Some(task) = self.aggregate_same_message_task(
-                    crypto::bls_dac_message(&ack_ref, commitment),
+                    crypto::bls_dac_message(&ack_ref),
                     cert,
                 ) else {
                     continue;
