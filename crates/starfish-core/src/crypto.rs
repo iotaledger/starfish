@@ -40,12 +40,15 @@ pub fn bls_round_message(round: RoundNumber) -> [u8; 32] {
 
 /// Build the 32-byte message that validators sign (BLS) to certify data
 /// availability for an acknowledged block.
-/// Domain separation: `b"dac" || ack_ref || commitment`.
-pub fn bls_dac_message(ack_ref: &BlockReference, commitment: TransactionsCommitment) -> [u8; 32] {
+/// Domain separation: `b"dac" || ack_ref`.
+///
+/// The `BlockReference` already contains the block digest which commits to the
+/// full block content (header + transactions), so a separate commitment
+/// parameter is unnecessary.
+pub fn bls_dac_message(ack_ref: &BlockReference) -> [u8; 32] {
     let mut hasher = Blake3Hasher::new();
     hasher.update(b"dac");
     ack_ref.crypto_hash(&mut hasher);
-    commitment.crypto_hash(&mut hasher);
     hasher.finalize().into()
 }
 

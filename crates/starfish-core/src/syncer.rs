@@ -91,7 +91,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             processed_blocks,
         ) = self.core.add_blocks(blocks);
         if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let events = agg.add_blocks(self.core.dag_state(), &processed_blocks);
+            let events = agg.add_blocks(&processed_blocks);
             if apply_certificate_events(self.core.dag_state(), events) {
                 self.try_new_commit();
             }
@@ -115,7 +115,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers);
         if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let events = agg.add_blocks(self.core.dag_state(), &processed_blocks);
+            let events = agg.add_blocks(&processed_blocks);
             if apply_certificate_events(self.core.dag_state(), events) {
                 self.try_new_commit();
             }
@@ -141,12 +141,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         sig: BlsSignatureBytes,
     ) {
         if let Some(ref mut agg) = self.bls_cert_aggregator {
-            let commitment = self
-                .core
-                .dag_state()
-                .get_transactions_commitment(&block_ref)
-                .unwrap_or_default();
-            let events = agg.add_standalone_dac_sig(block_ref, signer, sig, commitment);
+            let events = agg.add_standalone_dac_sig(block_ref, signer, sig);
             if apply_certificate_events(self.core.dag_state(), events) {
                 self.try_new_commit();
             }
@@ -182,13 +177,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             if let Some(ref block) = self.core.try_new_block() {
                 // Feed the new block to the BLS aggregator and generate own DAC sig.
                 if let Some(ref mut agg) = self.bls_cert_aggregator {
-                    let events = agg.add_blocks(self.core.dag_state(), std::slice::from_ref(block));
+                    let events = agg.add_blocks(std::slice::from_ref(block));
                     apply_certificate_events(self.core.dag_state(), events);
-                    if let Some((block_ref, auth, sig, commitment)) =
+                    if let Some((block_ref, auth, sig)) =
                         self.core.generate_own_dac_partial_sig(block)
                     {
-                        let events =
-                            agg.add_standalone_dac_sig(block_ref, auth, sig, commitment);
+                        let events = agg.add_standalone_dac_sig(block_ref, auth, sig);
                         apply_certificate_events(self.core.dag_state(), events);
                     }
                 }
