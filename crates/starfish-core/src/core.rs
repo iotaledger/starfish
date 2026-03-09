@@ -478,7 +478,7 @@ impl<H: BlockHandler> Core<H> {
         );
 
         // For StarfishL: require aggregate round/leader certs before creating block.
-        let (aggregate_round_sig, aggregate_leader_sig) =
+        let (aggregate_round_sig, certified_leader) =
             if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
                 // Round cert for clock_round - 1 (the round we just completed).
                 let round_cert = if clock_round <= 1 {
@@ -488,7 +488,7 @@ impl<H: BlockHandler> Core<H> {
                 };
 
                 // Leader cert for leader of clock_round - 1 (if we include that leader).
-                let leader_cert = if clock_round <= 2 {
+                let certified_leader = if clock_round <= 2 {
                     None
                 } else {
                     let leader_round = clock_round - 1;
@@ -496,10 +496,14 @@ impl<H: BlockHandler> Core<H> {
                     block_references
                         .iter()
                         .find(|r| r.round == leader_round && r.authority == leader_authority)
-                        .and_then(|leader_ref| self.dag_state.leader_certificate(leader_ref))
+                        .and_then(|leader_ref| {
+                            self.dag_state
+                                .leader_certificate(leader_ref)
+                                .map(|cert| (*leader_ref, cert))
+                        })
                 };
 
-                (round_cert, leader_cert)
+                (round_cert, certified_leader)
             } else {
                 (None, None)
             };
@@ -524,7 +528,7 @@ impl<H: BlockHandler> Core<H> {
                     clock_round,
                     block_id,
                     aggregate_round_sig,
-                    aggregate_leader_sig,
+                    certified_leader,
                 )
             );
             tracing::debug!("Created block {:?}", block_data);
@@ -655,7 +659,7 @@ impl<H: BlockHandler> Core<H> {
         clock_round: RoundNumber,
         block_id_in_round: usize,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
-        aggregate_leader_sig: Option<BlsAggregateCertificate>,
+        certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     ) -> Data<VerifiedBlock> {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
         let mut block_references = vec![*self.last_own_block[block_id_in_round].block.reference()];
@@ -709,7 +713,7 @@ impl<H: BlockHandler> Core<H> {
             self.dag_state.consensus_protocol,
             strong_vote,
             aggregate_round_sig,
-            aggregate_leader_sig,
+            certified_leader,
         );
 
         self.metrics
