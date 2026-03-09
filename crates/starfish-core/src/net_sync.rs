@@ -479,7 +479,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 &mut self.encoder,
                 self.consensus_protocol,
             ) {
-                Ok(shard) => debug_assert!(shard.is_none(), "shard must be None for header-only blocks"),
+                Ok(shard) => {
+                    debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Rejected incorrect block {} from {}: {:?}",
