@@ -669,6 +669,7 @@ impl DagState {
             .insert(block_ref, certificate)
             .is_none();
         if is_new {
+            tracing::debug!("Certified DAC for {}", block_ref);
             inner.maybe_queue_ack(block_ref);
         }
         is_new
@@ -680,7 +681,11 @@ impl DagState {
         if inner.dac_certificates[block_ref.authority as usize].contains_key(&block_ref) {
             return false;
         }
-        inner.rejected_dac_certificates[block_ref.authority as usize].insert(block_ref)
+        let is_new = inner.rejected_dac_certificates[block_ref.authority as usize].insert(block_ref);
+        if is_new {
+            tracing::debug!("Rejected DAC for {}", block_ref);
+        }
+        is_new
     }
 
     /// Check whether the given round has a confirmed BLS certificate.
@@ -819,6 +824,22 @@ impl DagState {
         authorities
             .iter()
             .all(|auth| blocks.iter().any(|b| b.authority() == *auth))
+    }
+
+    pub fn has_block_quorum_at_round(
+        &self,
+        round: RoundNumber,
+        committee: &Committee,
+    ) -> bool {
+        let inner = self.dag_state_inner.read();
+        let blocks = inner.get_blocks_by_round(round);
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for block in &blocks {
+            if aggregator.add(block.authority(), committee) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Check if a quorum of blocks at `round` include the leader
