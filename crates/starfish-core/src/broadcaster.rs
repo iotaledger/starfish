@@ -24,12 +24,13 @@ use crate::{
     config::DisseminationMode,
     consensus::universal_committer::UniversalCommitter,
     dag_state::{ByzantineStrategy, ConsensusProtocol},
+    data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     net_sync::NetworkSyncerInner,
     network::{BlockBatch, NetworkMessage},
     runtime::{Handle, sleep},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_index},
+    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock, format_authority_index},
 };
 
 fn peer_can_serve_missing_data(
@@ -669,82 +670,30 @@ where
                         )
                         .await?;
                     }
-                    DisseminationMode::PushCausal => match inner.dag_state.consensus_protocol {
-                        ConsensusProtocol::Starfish
-                        | ConsensusProtocol::StarfishS
-                        | ConsensusProtocol::StarfishL
-                        | ConsensusProtocol::StarfishPull => {
-                            sending_batch_causal_starfish_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                        ConsensusProtocol::CordialMiners => {
-                            sending_batch_causal_cordial_miners_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                        ConsensusProtocol::Mysticeti => {
-                            sending_batch_all_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                    },
-                    DisseminationMode::PushUseful => match inner.dag_state.consensus_protocol {
-                        ConsensusProtocol::Starfish
-                        | ConsensusProtocol::StarfishS
-                        | ConsensusProtocol::StarfishL
-                        | ConsensusProtocol::StarfishPull => {
-                            sending_batch_starfish_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                        ConsensusProtocol::CordialMiners => {
-                            sending_batch_cordial_miners_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                        ConsensusProtocol::Mysticeti => {
-                            sending_batch_all_blocks(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                broadcaster_parameters.clone(),
-                                sent_to_peer.clone(),
-                                &metrics,
-                            )
-                            .await?;
-                        }
-                    },
+                    DisseminationMode::PushCausal => {
+                        sending_batch_push_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            broadcaster_parameters.clone(),
+                            sent_to_peer.clone(),
+                            &metrics,
+                            PushSelectionMode::Causal,
+                        )
+                        .await?;
+                    }
+                    DisseminationMode::PushUseful => {
+                        sending_batch_push_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            broadcaster_parameters.clone(),
+                            sent_to_peer.clone(),
+                            &metrics,
+                            PushSelectionMode::Useful,
+                        )
+                        .await?;
+                    }
                     DisseminationMode::ProtocolDefault => {
                         unreachable!("protocol-default dissemination mode must be resolved")
                     }
@@ -803,6 +752,38 @@ fn report_useful_authorities(
 }
 
 const HEADER_PRUNE_OVERFETCH_FACTOR: usize = 4;
+
+#[derive(Clone, Copy)]
+enum PushSelectionMode {
+    Causal,
+    Useful,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PushOtherBlocksFormat {
+    FullBlocks,
+    HeadersAndShards,
+}
+
+struct PushBatchPlan {
+    own_blocks: Vec<Data<VerifiedBlock>>,
+    other_refs: Vec<BlockReference>,
+    shard_refs: Vec<BlockReference>,
+    useful_headers: u128,
+    useful_shards: u128,
+}
+
+fn push_other_blocks_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
+    match consensus_protocol {
+        ConsensusProtocol::Starfish
+        | ConsensusProtocol::StarfishS
+        | ConsensusProtocol::StarfishL
+        | ConsensusProtocol::StarfishPull => PushOtherBlocksFormat::HeadersAndShards,
+        ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
+            PushOtherBlocksFormat::FullBlocks
+        }
+    }
+}
 
 /// Track sent references in `sent_to_peer`, evict stale entries, and send the
 /// batch.
@@ -984,319 +965,198 @@ where
     send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }
 
-/// Cordial Miners-specific batch: own blocks as full blocks from the indexed
-/// own-block path, plus other full blocks selected from CordialKnowledge's
-/// per-peer queue and pruned against the DAG's `known_by` view.
-async fn sending_batch_cordial_miners_blocks<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
+fn plan_push_batch<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
     to_whom_authority_index: AuthorityIndex,
-    broadcaster_parameters: BroadcasterParameters,
-    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-    metrics: &Metrics,
-) -> Option<()>
+    broadcaster_parameters: &BroadcasterParameters,
+    sent_to_peer: &Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    selection_mode: PushSelectionMode,
+) -> Option<PushBatchPlan>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
-    let peer = format_authority_index(to_whom_authority_index);
-
-    let own_blocks = {
-        let sent = sent_to_peer.read();
-        inner
-            .dag_state
-            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
-    };
-
     let own_authority = inner.dag_state.get_own_authority_index();
-    let ck = inner
-        .cordial_knowledge
-        .connection_knowledge(to_whom_authority_index)?;
-    let candidate_limit = batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
-    let other_candidates = {
-        let mut ck = ck.write();
-        ck.take_unsent_headers_excluding_authority(candidate_limit, own_authority)
-    };
-    let other_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
-        &other_candidates,
-        to_whom_authority_index,
-        batch_other_block_size,
-    );
-    let mut full_blocks = own_blocks;
-    full_blocks.extend(
-        inner
-            .dag_state
-            .get_transmission_blocks(&other_refs)
-            .into_iter()
-            .flatten(),
-    );
-
-    let useful_headers = 0;
-    let useful_shards = 0;
-    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
-
-    tracing::debug!("Cordial Miners batch to {peer}: {} full", full_blocks.len());
-    let batch = BlockBatch {
-        full_blocks,
-        headers: Vec::new(),
-        shards: Vec::new(),
-        useful_headers_authors: useful_headers,
-        useful_shards_authors: useful_shards,
-    };
-    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
-    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
-}
-
-async fn sending_batch_causal_cordial_miners_blocks<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
-    to_whom_authority_index: AuthorityIndex,
-    broadcaster_parameters: BroadcasterParameters,
-    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-    metrics: &Metrics,
-) -> Option<()>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
-    let own_authority = inner.dag_state.get_own_authority_index();
-    let peer = format_authority_index(to_whom_authority_index);
-
+    let other_blocks_format = push_other_blocks_format(inner.dag_state.consensus_protocol);
     let own_blocks = {
         let sent = sent_to_peer.read();
-        inner
-            .dag_state
-            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
+        inner.dag_state.get_unsent_own_blocks(
+            &sent,
+            to_whom_authority_index,
+            broadcaster_parameters.batch_own_block_size,
+        )
     };
-
-    let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
-    let mut causal_refs = Vec::new();
-    if let Some(newest_round) = newest_own_round {
-        let previous_round = newest_round.saturating_sub(1);
-        if previous_round > 0 {
-            let seed_refs = collect_causal_header_seeds(
-                &inner,
-                to_whom_authority_index,
-                previous_round,
-                batch_other_block_size,
-            );
-            let ancestor_refs = collect_causal_ancestor_headers(
-                &inner,
-                to_whom_authority_index,
-                own_authority,
-                &sent_to_peer,
-                &seed_refs,
-                batch_other_block_size.saturating_sub(seed_refs.len()),
-            );
-            causal_refs.extend(seed_refs);
-            causal_refs.extend(ancestor_refs);
-        }
-    }
-
     let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
-    causal_refs.retain(|block_ref| !own_refs.contains(block_ref));
 
-    let mut full_blocks = own_blocks;
-    full_blocks.extend(
-        inner
-            .dag_state
-            .get_transmission_blocks(&causal_refs)
-            .into_iter()
-            .flatten(),
-    );
+    let (mut other_refs, mut shard_refs, useful_headers, useful_shards) = match selection_mode {
+        PushSelectionMode::Causal => {
+            let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
+            let mut other_refs = Vec::new();
+            let mut shard_refs = Vec::new();
 
-    let useful_headers = 0;
-    let useful_shards = 0;
-    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
+            if let Some(newest_round) = newest_own_round {
+                let previous_round = newest_round.saturating_sub(1);
+                if previous_round > 0 {
+                    let seed_refs = collect_causal_header_seeds(
+                        inner,
+                        to_whom_authority_index,
+                        previous_round,
+                        broadcaster_parameters.batch_other_block_size,
+                    );
+                    let ancestor_refs = collect_causal_ancestor_headers(
+                        inner,
+                        to_whom_authority_index,
+                        own_authority,
+                        sent_to_peer,
+                        &seed_refs,
+                        broadcaster_parameters
+                            .batch_other_block_size
+                            .saturating_sub(seed_refs.len()),
+                    );
+                    other_refs.extend(seed_refs);
+                    other_refs.extend(ancestor_refs);
+                }
 
-    tracing::debug!(
-        "Cordial Miners causal batch to {peer}: {} full",
-        full_blocks.len()
-    );
-    let batch = BlockBatch {
-        full_blocks,
-        headers: Vec::new(),
-        shards: Vec::new(),
-        useful_headers_authors: useful_headers,
-        useful_shards_authors: useful_shards,
-    };
-    let sent_refs: Vec<_> = batch.full_blocks.iter().map(|b| *b.reference()).collect();
-    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
-}
+                if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
+                    let shard_round_cutoff = newest_round
+                        .saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
+                    shard_refs = collect_causal_shard_refs(
+                        inner,
+                        to_whom_authority_index,
+                        own_authority,
+                        shard_round_cutoff,
+                        broadcaster_parameters.batch_shard_size,
+                    );
+                }
+            }
 
-/// Starfish-specific batch: own blocks as full, others' headers from
-/// CordialKnowledge, shards from CordialKnowledge, plus useful-authors
-/// feedback bitmasks.
-async fn sending_batch_starfish_blocks<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
-    to_whom_authority_index: AuthorityIndex,
-    broadcaster_parameters: BroadcasterParameters,
-    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-    metrics: &Metrics,
-) -> Option<()>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
-    let batch_shard_size = broadcaster_parameters.batch_shard_size;
-    let peer = format_authority_index(to_whom_authority_index);
-
-    // 1. Own blocks: send as full blocks
-    let own_blocks = {
-        let sent = sent_to_peer.read();
-        inner
-            .dag_state
-            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
-    };
-
-    // 2. Others' headers + shards: consult CordialKnowledge
-    let ck = inner
-        .cordial_knowledge
-        .connection_knowledge(to_whom_authority_index)?;
-    let header_candidate_limit =
-        batch_other_block_size.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
-    let (header_candidates, shard_refs, useful_headers, useful_shards) = {
-        let mut ck = ck.write();
-        let current_round = inner.dag_state.highest_round();
-        let (useful_headers_to_peer, useful_shards_to_peer) =
-            ck.useful_authors_to_peer_bitmasks(current_round);
-        let header_refs =
-            ck.take_unsent_headers_for_authorities(header_candidate_limit, useful_headers_to_peer);
-        let shard_refs =
-            ck.take_unsent_shards_for_authorities(batch_shard_size, useful_shards_to_peer);
-        let (uh, us) = ck.useful_authors_bitmasks(current_round);
-        (header_refs, shard_refs, uh, us)
-    };
-    let peer_label = peer.to_string();
-    report_useful_authorities(metrics, &peer_label, useful_headers, useful_shards);
-
-    let header_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
-        &header_candidates,
-        to_whom_authority_index,
-        batch_other_block_size,
-    );
-    let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
-    let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
-
-    // 3. Build structured batch
-    let batch = BlockBatch {
-        full_blocks: own_blocks,
-        headers: header_blocks,
-        shards: shard_payloads,
-        useful_headers_authors: useful_headers,
-        useful_shards_authors: useful_shards,
-    };
-
-    if let Ok(size) = bincode::serialized_size(&batch) {
-        metrics.block_bundle_size_bytes.observe(size as usize);
-    }
-
-    tracing::debug!(
-        "Starfish batch to {peer}: {} full, {} headers, {} shards",
-        batch.full_blocks.len(),
-        batch.headers.len(),
-        batch.shards.len()
-    );
-    let sent_refs: Vec<_> = batch
-        .full_blocks
-        .iter()
-        .map(|b| *b.reference())
-        .chain(batch.headers.iter().map(|b| *b.reference()))
-        .chain(batch.shards.iter().map(|s| s.block_reference))
-        .collect();
-    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
-}
-
-async fn sending_batch_causal_starfish_blocks<H, C>(
-    inner: Arc<NetworkSyncerInner<H, C>>,
-    to: Sender<NetworkMessage>,
-    to_whom_authority_index: AuthorityIndex,
-    broadcaster_parameters: BroadcasterParameters,
-    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
-    metrics: &Metrics,
-) -> Option<()>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let own_index = inner.dag_state.get_own_authority_index();
-    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
-    let batch_shard_size = broadcaster_parameters.batch_shard_size;
-    let peer = format_authority_index(to_whom_authority_index);
-
-    let own_blocks = {
-        let sent = sent_to_peer.read();
-        inner
-            .dag_state
-            .get_unsent_own_blocks(&sent, to_whom_authority_index, batch_own_block_size)
-    };
-
-    let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
-    let mut header_refs = Vec::new();
-    let mut shard_round_cutoff = 0;
-    if let Some(newest_round) = newest_own_round {
-        let previous_round = newest_round.saturating_sub(1);
-        shard_round_cutoff =
-            newest_round.saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
-        if previous_round > 0 {
-            let seed_refs = collect_causal_header_seeds(
-                &inner,
-                to_whom_authority_index,
-                previous_round,
-                batch_other_block_size,
-            );
-            let ancestor_refs = collect_causal_ancestor_headers(
-                &inner,
-                to_whom_authority_index,
-                own_index,
-                &sent_to_peer,
-                &seed_refs,
-                batch_other_block_size.saturating_sub(seed_refs.len()),
-            );
-            header_refs.extend(seed_refs);
-            header_refs.extend(ancestor_refs);
+            (other_refs, shard_refs, 0, 0)
         }
+        PushSelectionMode::Useful => {
+            let ck = inner
+                .cordial_knowledge
+                .connection_knowledge(to_whom_authority_index)?;
+            let header_candidate_limit = broadcaster_parameters
+                .batch_other_block_size
+                .saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+            let (other_candidates, shard_refs, useful_headers, useful_shards) = {
+                let mut ck = ck.write();
+                let current_round = inner.dag_state.highest_round();
+                let (useful_headers_to_peer, useful_shards_to_peer) =
+                    ck.useful_authors_to_peer_bitmasks(current_round);
+                let other_candidates = ck.take_unsent_headers_for_authorities(
+                    header_candidate_limit,
+                    useful_headers_to_peer,
+                );
+                let shard_refs = if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
+                    ck.take_unsent_shards_for_authorities(
+                        broadcaster_parameters.batch_shard_size,
+                        useful_shards_to_peer,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let (useful_headers, useful_shards) = ck.useful_authors_bitmasks(current_round);
+                (
+                    other_candidates,
+                    shard_refs,
+                    useful_headers,
+                    if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
+                        useful_shards
+                    } else {
+                        0
+                    },
+                )
+            };
+            let other_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
+                &other_candidates,
+                to_whom_authority_index,
+                broadcaster_parameters.batch_other_block_size,
+            );
+            (other_refs, shard_refs, useful_headers, useful_shards)
+        }
+    };
+
+    other_refs.retain(|block_ref| !own_refs.contains(block_ref));
+    shard_refs.retain(|block_ref| !own_refs.contains(block_ref));
+
+    Some(PushBatchPlan {
+        own_blocks,
+        other_refs,
+        shard_refs,
+        useful_headers,
+        useful_shards,
+    })
+}
+
+fn build_push_batch<H, C>(inner: &Arc<NetworkSyncerInner<H, C>>, plan: PushBatchPlan) -> BlockBatch
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    match push_other_blocks_format(inner.dag_state.consensus_protocol) {
+        PushOtherBlocksFormat::FullBlocks => {
+            let mut full_blocks = plan.own_blocks;
+            full_blocks.extend(
+                inner
+                    .dag_state
+                    .get_transmission_blocks(&plan.other_refs)
+                    .into_iter()
+                    .flatten(),
+            );
+            BlockBatch {
+                full_blocks,
+                headers: Vec::new(),
+                shards: Vec::new(),
+                useful_headers_authors: plan.useful_headers,
+                useful_shards_authors: 0,
+            }
+        }
+        PushOtherBlocksFormat::HeadersAndShards => BlockBatch {
+            full_blocks: plan.own_blocks,
+            headers: inner.dag_state.get_header_only_blocks(&plan.other_refs),
+            shards: inner.dag_state.get_shard_payloads(&plan.shard_refs),
+            useful_headers_authors: plan.useful_headers,
+            useful_shards_authors: plan.useful_shards,
+        },
     }
+}
 
-    let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
-    header_refs.retain(|block_ref| !own_refs.contains(block_ref));
-    let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
-
-    let shard_refs = collect_causal_shard_refs(
+async fn sending_batch_push_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    broadcaster_parameters: BroadcasterParameters,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
+    selection_mode: PushSelectionMode,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let peer = format_authority_index(to_whom_authority_index);
+    let plan = plan_push_batch(
         &inner,
         to_whom_authority_index,
-        own_index,
-        shard_round_cutoff,
-        batch_shard_size,
+        &broadcaster_parameters,
+        &sent_to_peer,
+        selection_mode,
+    )?;
+    report_useful_authorities(
+        metrics,
+        &peer.to_string(),
+        plan.useful_headers,
+        plan.useful_shards,
     );
-    let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
 
-    let useful_headers = 0;
-    let useful_shards = 0;
-    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
-
-    let batch = BlockBatch {
-        full_blocks: own_blocks,
-        headers: header_blocks,
-        shards: shard_payloads,
-        useful_headers_authors: useful_headers,
-        useful_shards_authors: useful_shards,
-    };
-
+    let batch = build_push_batch(&inner, plan);
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
 
     tracing::debug!(
-        "Starfish causal batch to {peer}: {} full, {} headers, {} shards",
+        "Push batch to {peer}: {} full, {} headers, {} shards",
         batch.full_blocks.len(),
         batch.headers.len(),
         batch.shards.len()
