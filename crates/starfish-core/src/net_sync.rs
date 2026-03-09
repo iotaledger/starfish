@@ -321,7 +321,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
                 crate::config::DisseminationMode::PushCausal
                 | crate::config::DisseminationMode::PushUseful => {
-                    self.disseminator.disseminate_all_blocks_push().await;
+                    self.disseminator.start_push_batch_stream().await;
                 }
                 crate::config::DisseminationMode::ProtocolDefault => {
                     unreachable!("protocol-default dissemination mode must be resolved")

@@ -425,7 +425,7 @@ where
             existing.await.ok();
         }
 
-        let handle = Handle::current().spawn(Self::stream_only_own_blocks(
+        let handle = Handle::current().spawn(Self::stream_own_block_batches(
             self.universal_committer.clone(),
             self.to_whom_authority_index,
             self.sender.clone(),
@@ -437,13 +437,13 @@ where
         self.own_blocks = Some(handle);
     }
 
-    pub async fn disseminate_all_blocks_push(&mut self) {
+    pub async fn start_push_batch_stream(&mut self) {
         if let Some(existing) = self.push_blocks.take() {
             existing.abort();
             existing.await.ok();
         }
 
-        let handle = Handle::current().spawn(Self::disseminate_own_blocks_and_encoded_past_blocks(
+        let handle = Handle::current().spawn(Self::stream_dissemination_batches(
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
@@ -454,7 +454,7 @@ where
         self.push_blocks = Some(handle);
     }
 
-    async fn stream_only_own_blocks(
+    async fn stream_own_block_batches(
         universal_committer: UniversalCommitter,
         to_whom_authority_index: AuthorityIndex,
         to: Sender<NetworkMessage>,
@@ -485,7 +485,7 @@ where
                     if leaders_current_round.contains(&own_authority_index) {
                         let _sleep = sleep(sample_timeout).await;
                     }
-                    sending_batch_own_blocks(
+                    send_own_block_batch(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
@@ -509,7 +509,7 @@ where
                         let send: bool = rng.gen_bool(0.5);
                         if send {
                             // Send blocks to the authority
-                            sending_batch_own_blocks(
+                            send_own_block_batch(
                                 inner.clone(),
                                 to.clone(),
                                 to_whom_authority_index,
@@ -531,7 +531,7 @@ where
                         let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                         // Only send blocks if the next leader is the intended recipient
                         if leaders_next_round.contains(&to_whom_authority_index) {
-                            sending_batch_own_blocks(
+                            send_own_block_batch(
                                 inner.clone(),
                                 to.clone(),
                                 to_whom_authority_index,
@@ -549,7 +549,7 @@ where
                     let probability = 1.0 / committee_size as f64;
                     let send: bool = rng.gen_bool(probability);
                     if send {
-                        sending_batch_own_blocks(
+                        send_own_block_batch(
                             inner.clone(),
                             to.clone(),
                             to_whom_authority_index,
@@ -564,7 +564,7 @@ where
                 // Create two equivocating blocks and, send the first one to the first 50% and the
                 // second to the other 50% of the validators
                 Some(ByzantineStrategy::EquivocatingTwoChains) => {
-                    sending_batch_own_blocks(
+                    send_own_block_batch(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
@@ -578,7 +578,7 @@ where
                 }
                 // Send an equivocating block to the authority whenever it is created
                 Some(ByzantineStrategy::EquivocatingChains) => {
-                    sending_batch_own_blocks(
+                    send_own_block_batch(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
@@ -595,7 +595,7 @@ where
                 Some(ByzantineStrategy::EquivocatingChainsBomb) => {
                     let leaders_next_round = universal_committer.get_leaders(current_round + 1);
                     if leaders_next_round.contains(&to_whom_authority_index) {
-                        sending_batch_own_blocks(
+                        send_own_block_batch(
                             inner.clone(),
                             to.clone(),
                             to_whom_authority_index,
@@ -610,7 +610,7 @@ where
                 // Send block to the authority whenever a new block is created
                 // Additionally try to send blocks after a timeout
                 _ => {
-                    sending_batch_own_blocks(
+                    send_own_block_batch(
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
@@ -633,7 +633,7 @@ where
         }
     }
 
-    async fn disseminate_own_blocks_and_encoded_past_blocks(
+    async fn stream_dissemination_batches(
         to_whom_authority_index: AuthorityIndex,
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
@@ -652,59 +652,52 @@ where
                 .utilization_timer
                 .utilization_timer("Broadcaster: send blocks");
             tracing::debug!("Disseminate to {to_whom_authority_index} after {trigger}");
-            match inner.dag_state.consensus_protocol {
-                ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
-                | ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::CordialMiners
-                | ConsensusProtocol::Mysticeti => match broadcaster_parameters.dissemination_mode {
-                    DisseminationMode::Pull => {
-                        sending_batch_all_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            broadcaster_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                        )
-                        .await?;
-                    }
-                    DisseminationMode::PushCausal => {
-                        sending_batch_push_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            broadcaster_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                            PushSelectionMode::Causal,
-                        )
-                        .await?;
-                    }
-                    DisseminationMode::PushUseful => {
-                        sending_batch_push_blocks(
-                            inner.clone(),
-                            to.clone(),
-                            to_whom_authority_index,
-                            broadcaster_parameters.clone(),
-                            sent_to_peer.clone(),
-                            &metrics,
-                            PushSelectionMode::Useful,
-                        )
-                        .await?;
-                    }
-                    DisseminationMode::ProtocolDefault => {
-                        unreachable!("protocol-default dissemination mode must be resolved")
-                    }
-                },
+            match broadcaster_parameters.dissemination_mode {
+                DisseminationMode::Pull => {
+                    send_full_block_batch(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        broadcaster_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                    )
+                    .await?;
+                }
+                DisseminationMode::PushCausal => {
+                    send_push_batch(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        broadcaster_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                        PushSelectionMode::Causal,
+                    )
+                    .await?;
+                }
+                DisseminationMode::PushUseful => {
+                    send_push_batch(
+                        inner.clone(),
+                        to.clone(),
+                        to_whom_authority_index,
+                        broadcaster_parameters.clone(),
+                        sent_to_peer.clone(),
+                        &metrics,
+                        PushSelectionMode::Useful,
+                    )
+                    .await?;
+                }
+                DisseminationMode::ProtocolDefault => {
+                    unreachable!("protocol-default dissemination mode must be resolved")
+                }
             }
             drop(timer);
         }
     }
 }
 
-async fn sending_batch_own_blocks<H, C>(
+async fn send_own_block_batch<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
@@ -765,7 +758,7 @@ enum PushOtherBlocksFormat {
     HeadersAndShards,
 }
 
-struct PushBatchPlan {
+struct PushBatchParts {
     own_blocks: Vec<Data<VerifiedBlock>>,
     other_refs: Vec<BlockReference>,
     shard_refs: Vec<BlockReference>,
@@ -773,7 +766,7 @@ struct PushBatchPlan {
     useful_shards: u128,
 }
 
-fn push_other_blocks_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
+fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
     match consensus_protocol {
         ConsensusProtocol::Starfish
         | ConsensusProtocol::StarfishS
@@ -812,7 +805,7 @@ where
     Some(())
 }
 
-fn collect_causal_header_seeds<H, C>(
+fn take_previous_round_header_refs<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     peer: AuthorityIndex,
     round: RoundNumber,
@@ -832,7 +825,7 @@ where
     header_refs
 }
 
-fn collect_causal_ancestor_headers<H, C>(
+fn collect_unsent_ancestor_header_refs<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     peer: AuthorityIndex,
     own_authority: AuthorityIndex,
@@ -894,7 +887,7 @@ where
     collected
 }
 
-fn collect_causal_shard_refs<H, C>(
+fn take_causal_shard_refs<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     peer: AuthorityIndex,
     own_authority: AuthorityIndex,
@@ -918,7 +911,7 @@ where
     shard_refs
 }
 
-async fn sending_batch_all_blocks<H, C>(
+async fn send_full_block_batch<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
@@ -965,19 +958,19 @@ where
     send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
 }
 
-fn plan_push_batch<H, C>(
+fn select_push_batch_parts<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     to_whom_authority_index: AuthorityIndex,
     broadcaster_parameters: &BroadcasterParameters,
     sent_to_peer: &Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     selection_mode: PushSelectionMode,
-) -> Option<PushBatchPlan>
+) -> Option<PushBatchParts>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
     let own_authority = inner.dag_state.get_own_authority_index();
-    let other_blocks_format = push_other_blocks_format(inner.dag_state.consensus_protocol);
+    let other_blocks_format = push_transport_format(inner.dag_state.consensus_protocol);
     let own_blocks = {
         let sent = sent_to_peer.read();
         inner.dag_state.get_unsent_own_blocks(
@@ -997,13 +990,13 @@ where
             if let Some(newest_round) = newest_own_round {
                 let previous_round = newest_round.saturating_sub(1);
                 if previous_round > 0 {
-                    let seed_refs = collect_causal_header_seeds(
+                    let seed_refs = take_previous_round_header_refs(
                         inner,
                         to_whom_authority_index,
                         previous_round,
                         broadcaster_parameters.batch_other_block_size,
                     );
-                    let ancestor_refs = collect_causal_ancestor_headers(
+                    let ancestor_refs = collect_unsent_ancestor_header_refs(
                         inner,
                         to_whom_authority_index,
                         own_authority,
@@ -1020,7 +1013,7 @@ where
                 if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
                     let shard_round_cutoff = newest_round
                         .saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
-                    shard_refs = collect_causal_shard_refs(
+                    shard_refs = take_causal_shard_refs(
                         inner,
                         to_whom_authority_index,
                         own_authority,
@@ -1080,7 +1073,7 @@ where
     other_refs.retain(|block_ref| !own_refs.contains(block_ref));
     shard_refs.retain(|block_ref| !own_refs.contains(block_ref));
 
-    Some(PushBatchPlan {
+    Some(PushBatchParts {
         own_blocks,
         other_refs,
         shard_refs,
@@ -1089,12 +1082,15 @@ where
     })
 }
 
-fn build_push_batch<H, C>(inner: &Arc<NetworkSyncerInner<H, C>>, plan: PushBatchPlan) -> BlockBatch
+fn materialize_push_batch<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    plan: PushBatchParts,
+) -> BlockBatch
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    match push_other_blocks_format(inner.dag_state.consensus_protocol) {
+    match push_transport_format(inner.dag_state.consensus_protocol) {
         PushOtherBlocksFormat::FullBlocks => {
             let mut full_blocks = plan.own_blocks;
             full_blocks.extend(
@@ -1122,7 +1118,7 @@ where
     }
 }
 
-async fn sending_batch_push_blocks<H, C>(
+async fn send_push_batch<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
@@ -1136,7 +1132,7 @@ where
     H: 'static + BlockHandler,
 {
     let peer = format_authority_index(to_whom_authority_index);
-    let plan = plan_push_batch(
+    let plan = select_push_batch_parts(
         &inner,
         to_whom_authority_index,
         &broadcaster_parameters,
@@ -1150,7 +1146,7 @@ where
         plan.useful_shards,
     );
 
-    let batch = build_push_batch(&inner, plan);
+    let batch = materialize_push_batch(&inner, plan);
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
