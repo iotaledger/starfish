@@ -26,7 +26,7 @@ use crate::{
     committee::Committee,
     config::NodeParameters,
     consensus::universal_committer::UniversalCommitter,
-    cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage},
+    cordial_knowledge::{ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
     core_thread::CoreThreadDispatcher,
     crypto::BlsSignatureBytes,
@@ -161,6 +161,31 @@ impl FilterForShards {
             }
         });
         entry.count = self.info_length;
+    }
+}
+
+fn infer_peer_knowledge_from_received_batch(
+    ck: &mut ConnectionKnowledge,
+    full_blocks: &[Data<VerifiedBlock>],
+    headers: &[Data<VerifiedBlock>],
+    shards: &[crate::network::ShardPayload],
+) {
+    for block in full_blocks.iter().chain(headers.iter()) {
+        // Peer knows this block's header because they sent it.
+        ck.mark_header_known(*block.reference());
+        // Peer knows the header of every parent in the causal history.
+        for parent_ref in block.block_references() {
+            ck.mark_header_known(*parent_ref);
+        }
+        // Acknowledging a block implies the peer already has that block's data.
+        for ack_ref in block.acknowledgments() {
+            ck.mark_header_known(ack_ref);
+            ck.mark_shard_known(ack_ref);
+        }
+    }
+    for shard in shards {
+        ck.mark_header_known(shard.block_reference);
+        ck.mark_shard_known(shard.block_reference);
     }
 }
 
@@ -357,23 +382,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .connection_knowledge(self.peer_id)
         {
             let mut ck = ck.write();
-            for block in full_blocks.iter().chain(headers.iter()) {
-                // Peer knows this block's header (they sent it to us)
-                ck.mark_header_known(*block.reference());
-                // Peer knows the header of every parent (causal history)
-                for parent_ref in block.block_references() {
-                    ck.mark_header_known(*parent_ref);
-                }
-                // Acknowledgments only prove the peer knows the acknowledged
-                // block headers.
-                for ack_ref in block.acknowledgments() {
-                    ck.mark_header_known(ack_ref);
-                }
-            }
-            for shard in &shards {
-                ck.mark_header_known(shard.block_reference);
-                ck.mark_shard_known(shard.block_reference);
-            }
+            infer_peer_knowledge_from_received_batch(&mut ck, &full_blocks, &headers, &shards);
         }
 
         // Separate full blocks by whether they carry transactions
@@ -1230,5 +1239,37 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncerInner<
 impl SyncerSignals for Arc<Notify> {
     fn new_block_ready(&mut self) {
         self.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::{SignatureBytes, TransactionsCommitment},
+        types::{BaseTransaction, BlockReference},
+    };
+
+    #[test]
+    fn acknowledgments_imply_peer_knows_shard_data() {
+        let ack_ref = BlockReference::new_test(2, 3);
+        let block = Data::new(VerifiedBlock::new(
+            0,
+            4,
+            vec![BlockReference::new_test(0, 3)],
+            vec![ack_ref],
+            0,
+            SignatureBytes::default(),
+            Vec::<BaseTransaction>::new(),
+            TransactionsCommitment::default(),
+            None,
+            None,
+        ));
+
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        infer_peer_knowledge_from_received_batch(&mut ck, &[block], &[], &[]);
+
+        assert!(ck.knows_header(&ack_ref));
+        assert!(ck.knows_shard(&ack_ref));
     }
 }
