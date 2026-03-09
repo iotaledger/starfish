@@ -44,6 +44,8 @@ pub struct NodeParameters {
     pub mimic_latency: bool,
     #[serde(default = "node_defaults::default_uniform_latency_ms")]
     pub uniform_latency_ms: Option<f64>,
+    #[serde(default = "node_defaults::default_adversarial_latency")]
+    pub adversarial_latency: bool,
     #[serde(default)]
     pub dissemination_mode: DisseminationMode,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
@@ -73,6 +75,10 @@ pub mod node_defaults {
         None
     }
 
+    pub fn default_adversarial_latency() -> bool {
+        false
+    }
+
     pub fn default_causal_push_shard_round_lag() -> super::RoundNumber {
         2
     }
@@ -87,6 +93,7 @@ impl Default for NodeParameters {
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency: node_defaults::default_mimic_latency(),
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
+            adversarial_latency: node_defaults::default_adversarial_latency(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
         }
@@ -102,6 +109,7 @@ impl NodeParameters {
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency,
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
+            adversarial_latency: node_defaults::default_adversarial_latency(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
         }
