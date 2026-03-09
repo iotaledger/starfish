@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-l, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish}
+CONSENSUS=${CONSENSUS:-mysticeti}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -22,6 +22,9 @@ TEST_TIME=${TEST_TIME:-3000}
 STORAGE_BACKEND=rocksdb
 # Transaction payload mode: all_zero (default) | random
 TRANSACTION_MODE=all_zero
+# Dissemination mode: protocol-default (default) | pull |
+#   push-causal | push-useful
+DISSEMINATION_MODE=${DISSEMINATION_MODE:-}
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
@@ -315,6 +318,10 @@ EOH
         fi
         if [ -n "${TRANSACTION_MODE:-}" ]; then
             PARAM_FLAGS+=" --transaction-mode $TRANSACTION_MODE"
+        fi
+        if [ -n "${DISSEMINATION_MODE:-}" ]; then
+            PARAM_FLAGS+=" --dissemination-mode"
+            PARAM_FLAGS+=" $DISSEMINATION_MODE"
         fi
 
         cat <<EOV

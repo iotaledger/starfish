@@ -5,7 +5,7 @@
 use std::{
     fmt::{Debug, Display},
     net::IpAddr,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     path::PathBuf,
 };
 
@@ -33,6 +33,12 @@ impl Deref for StarfishNodeParameters {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for StarfishNodeParameters {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
