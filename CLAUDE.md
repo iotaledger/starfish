@@ -5,6 +5,9 @@
 Before committing (and especially before pushing), run the following checks that mirror CI:
 
 ```bash
+# Editorconfig (max line length, trailing whitespace, etc.)
+editorconfig-checker
+
 # Formatting (must use nightly)
 cargo +nightly fmt --check
 
