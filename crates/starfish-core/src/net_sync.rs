@@ -414,6 +414,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .connection_knowledge(self.peer_id);
         let committee_size = self.inner.committee.len();
 
+        let mut batch = Vec::new();
+
         for payload in shards {
             if !self
                 .filter_for_shards
@@ -432,56 +434,34 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 continue;
             }
 
-            // Look up the block header from the DAG to supply to the reconstructor.
-            if let Some(block) = self
+            if let Some(ck) = connection_knowledge.as_ref() {
+                ck.write()
+                    .mark_shard_useful_from_peer(payload.block_reference);
+            }
+
+            // Attach shard to DAG block for immediate relay.
+            if self
                 .inner
                 .dag_state
-                .get_storage_block(payload.block_reference)
+                .attach_shard_data(payload.block_reference, &payload.shard)
             {
-                // Cross-check: the shard's commitment must match the block header's.
-                if payload.shard.transactions_commitment() != block.header().transactions_commitment
-                {
-                    tracing::warn!(
-                        "Standalone shard commitment mismatch for {:?} from {} — dropped",
-                        payload.block_reference,
-                        self.peer
-                    );
-                    continue;
-                }
-
-                if let Some(ck) = connection_knowledge.as_ref() {
-                    ck.write()
-                        .mark_shard_useful_from_peer(payload.block_reference);
-                }
-
-                // Attach shard to DAG block for immediate relay.
-                if self
-                    .inner
-                    .dag_state
-                    .attach_shard_data(payload.block_reference, &payload.shard)
-                {
-                    self.inner
-                        .cordial_knowledge
-                        .send(CordialKnowledgeMessage::NewShard(payload.block_reference));
-                }
-
-                let _ = shard_tx
-                    .send(ShardMessage::Shard {
-                        block_reference: payload.block_reference,
-                        shard: payload.shard.shard().clone(),
-                        shard_index: payload.shard.shard_index(),
-                        block_header: Box::new(block.header().clone()),
-                    })
-                    .await;
-                self.filter_for_shards
-                    .add(payload.block_reference.digest, payload.shard.shard_index());
-            } else {
-                tracing::debug!(
-                    "Standalone shard for unknown block {:?} from {} — dropped",
-                    payload.block_reference,
-                    self.peer
-                );
+                self.inner
+                    .cordial_knowledge
+                    .send(CordialKnowledgeMessage::NewShard(payload.block_reference));
             }
+
+            batch.push(ShardMessage::Shard {
+                block_reference: payload.block_reference,
+                merkle_root: payload.shard.transactions_commitment(),
+                shard: payload.shard.shard().clone(),
+                shard_index: payload.shard.shard_index(),
+            });
+            self.filter_for_shards
+                .add(payload.block_reference.digest, payload.shard.shard_index());
+        }
+
+        if !batch.is_empty() {
+            let _ = shard_tx.send(batch).await;
         }
     }
 
@@ -620,14 +600,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .dag_state
                     .insert_shard(*block.reference(), s.clone());
             }
-            // Notify reconstructor to stop collecting shards for this block
-            if let Some(shard_tx) = shard_tx.as_ref() {
-                let _ = shard_tx
-                    .send(crate::shard_reconstructor::ShardMessage::FullBlock(
-                        *block.reference(),
-                    ))
-                    .await;
-            }
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
@@ -646,6 +618,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             );
             verified_data_blocks.push(Data::new(block));
             verified_has_shard.push(has_shard);
+        }
+
+        // Notify reconstructor to stop collecting shards for these blocks (batched).
+        if let Some(shard_tx) = shard_tx.as_ref() {
+            let full_block_msgs: Vec<_> = verified_data_blocks
+                .iter()
+                .map(|b| crate::shard_reconstructor::ShardMessage::FullBlock(*b.reference()))
+                .collect();
+            if !full_block_msgs.is_empty() {
+                let _ = shard_tx.send(full_block_msgs).await;
+            }
         }
 
         tracing::debug!(
@@ -800,7 +783,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     stop: mpsc::Sender<()>,
     pub gc_round: Arc<AtomicU64>,
     pub shard_tx:
-        parking_lot::Mutex<Option<mpsc::Sender<crate::shard_reconstructor::ShardMessage>>>,
+        parking_lot::Mutex<Option<mpsc::Sender<Vec<crate::shard_reconstructor::ShardMessage>>>>,
     pub cordial_knowledge: CordialKnowledgeHandle,
     /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
