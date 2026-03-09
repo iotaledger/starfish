@@ -156,6 +156,7 @@ impl Metrics {
         registry: &Registry,
         committee: Option<&Committee>,
         consensus_protocol: Option<&str>,
+        dissemination_mode: Option<&str>,
     ) -> (Arc<Self>, Arc<MetricReporter>) {
         // Write-once info gauges (kept alive by the registry).
         let committee_size_gauge = register_int_gauge_with_registry!(
@@ -175,6 +176,17 @@ impl Metrics {
         .unwrap();
         if let Some(name) = consensus_protocol {
             protocol_info.with_label_values(&[name]).set(1);
+        }
+
+        let dissemination_info = register_int_gauge_vec_with_registry!(
+            "dissemination_mode_info",
+            "Active dissemination mode (label carries the name)",
+            &["mode"],
+            registry,
+        )
+        .unwrap();
+        if let Some(name) = dissemination_mode {
+            dissemination_info.with_label_values(&[name]).set(1);
         }
         let (transaction_committed_latency_hist, transaction_committed_latency) = histogram();
         let (block_committed_latency_hist, block_committed_latency) = histogram();

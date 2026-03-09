@@ -120,6 +120,17 @@ pub enum DisseminationMode {
     PushUseful,
 }
 
+impl std::fmt::Display for DisseminationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProtocolDefault => write!(f, "protocol-default"),
+            Self::Pull => write!(f, "pull"),
+            Self::PushCausal => write!(f, "push-causal"),
+            Self::PushUseful => write!(f, "push-useful"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NodeIdentifier {
     pub public_key: PublicKey,

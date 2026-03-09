@@ -77,7 +77,15 @@ impl Validator {
                 .register(Box::new(pc))
                 .wrap_err("Failed to register ProcessCollector")?;
         }
-        let (metrics, reporter) = Metrics::new(&registry, Some(&committee), Some(&consensus));
+        let resolved_dissemination = ConsensusProtocol::from_str(&consensus)
+            .resolve_dissemination_mode(public_config.parameters.dissemination_mode);
+        let dissemination_str = resolved_dissemination.to_string();
+        let (metrics, reporter) = Metrics::new(
+            &registry,
+            Some(&committee),
+            Some(&consensus),
+            Some(&dissemination_str),
+        );
         reporter.clone().start();
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);

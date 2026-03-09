@@ -165,6 +165,21 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "F"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
           }
         ]
       },
@@ -189,7 +204,7 @@
         },
         "textMode": "name"
       },
-      "title": "Configuration (protocol, transaction type, storage)",
+      "title": "Configuration (protocol, dissemination, tx type, storage)",
       "type": "stat",
       "targets": [
         {
@@ -240,6 +255,16 @@
           "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"}) == 1",
           "legendFormat": "TideHunter",
           "refId": "E",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "expr": "max by (mode) (dissemination_mode_info{validator=~\"$validator\"})",
+          "legendFormat": "{{mode}}",
+          "refId": "F",
           "instant": true
         }
       ]
