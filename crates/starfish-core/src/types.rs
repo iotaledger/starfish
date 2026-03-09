@@ -370,6 +370,38 @@ fn compress_acknowledgments(
     )
 }
 
+fn align_acknowledgment_certificates(
+    acknowledgments: &[BlockReference],
+    acknowledgment_references: &[BlockReference],
+    certificates: Vec<BlsAggregateCertificate>,
+) -> Vec<BlsAggregateCertificate> {
+    if certificates.is_empty() {
+        return certificates;
+    }
+
+    assert_eq!(
+        acknowledgment_references.len(),
+        certificates.len(),
+        "acknowledgment references and DAC certificates must stay parallel",
+    );
+
+    let mut pairs: Vec<_> = acknowledgment_references
+        .iter()
+        .copied()
+        .zip(certificates)
+        .collect();
+    acknowledgments
+        .iter()
+        .map(|ack_ref| {
+            let position = pairs
+                .iter()
+                .position(|(reference, _)| reference == ack_ref)
+                .expect("every acknowledgment should have a matching DAC certificate");
+            pairs.remove(position).1
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // TransactionData — the actual committed payload.
 // ---------------------------------------------------------------------------
@@ -647,6 +679,11 @@ impl VerifiedBlock {
             acknowledgment_intersection,
             &extra_acknowledgment_references,
         );
+        let acknowledgment_signatures = align_acknowledgment_certificates(
+            &acknowledgments,
+            &acknowledgment_references,
+            aggregate_dac_sigs,
+        );
         let signature = signer.sign_block(
             authority,
             round,
@@ -675,8 +712,6 @@ impl VerifiedBlock {
             })();
 
             // Aggregated DAC certificates from the aggregator.
-            let acknowledgment_signatures = aggregate_dac_sigs;
-
             BlsFields {
                 round_signature,
                 voted_leader,
@@ -1361,6 +1396,48 @@ mod tests {
 
         assert_eq!(header.acknowledgment_count(), 1);
         assert_eq!(header.acknowledgments(), vec![b]);
+    }
+
+    #[test]
+    fn aligns_starfish_l_ack_certificates_with_compressed_ack_order() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let bls_signers = BlsSigner::new_for_test(committee.len());
+        let info_length = committee.info_length();
+        let parity_length = committee.len() - info_length;
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let transactions = vec![];
+        let encoded_transactions =
+            encoder.encode_transactions(&transactions, info_length, parity_length);
+
+        let a = BlockReference::new_test(0, 1);
+        let b = BlockReference::new_test(1, 1);
+        let c = BlockReference::new_test(2, 1);
+        let d = BlockReference::new_test(3, 1);
+        let cert_d = single_signer_cert(crypto::bls_dac_message(&d), 3, &bls_signers);
+        let cert_c = single_signer_cert(crypto::bls_dac_message(&c), 2, &bls_signers);
+
+        let block = VerifiedBlock::new_with_signer(
+            0,
+            2,
+            vec![a, b, c],
+            None,
+            vec![d, c],
+            0,
+            &signers[0],
+            Some(&bls_signers[0]),
+            Some(committee.as_ref()),
+            vec![cert_d, cert_c],
+            transactions,
+            Some(encoded_transactions),
+            ConsensusProtocol::StarfishL,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(block.acknowledgments(), vec![c, d]);
+        assert_eq!(block.header().acknowledgment_bls_signatures(), &[cert_c, cert_d]);
     }
 
     #[test]

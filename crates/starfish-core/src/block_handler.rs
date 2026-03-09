@@ -168,8 +168,21 @@ impl RealCommitHandler {
                     certified_blocks.push(block.clone());
                     acknowledgement_authorities.push(holders.clone());
                 }
-                DacCertificateVerificationState::Rejected => {}
-                DacCertificateVerificationState::Unchecked => return None,
+                DacCertificateVerificationState::Rejected => {
+                    tracing::debug!(
+                        "Skipping {} from pending certified commit {} after DAC rejection",
+                        block.reference(),
+                        commit.0.anchor
+                    );
+                }
+                DacCertificateVerificationState::Unchecked => {
+                    tracing::debug!(
+                        "Waiting for DAC certification of {} before sequencing anchor {}",
+                        block.reference(),
+                        commit.0.anchor
+                    );
+                    return None;
+                }
             }
         }
 

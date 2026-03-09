@@ -986,6 +986,14 @@ impl<H: BlockHandler> Core<H> {
             if prev_round > 0 && !self.dag_state.has_round_certificate(prev_round) {
                 return false;
             }
+            if prev_round > 0
+                && self.committee.elect_leader(quorum_round) == self.authority
+                && !self
+                    .dag_state
+                    .has_block_quorum_at_round(prev_round, &self.committee)
+            {
+                return false;
+            }
         }
 
         true
