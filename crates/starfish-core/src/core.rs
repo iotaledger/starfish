@@ -692,7 +692,11 @@ impl<H: BlockHandler> Core<H> {
         let aggregate_dac_sigs = if is_starfish_l {
             acknowledgment_references
                 .iter()
-                .map(|ack_ref| self.dag_state.dac_certificate(ack_ref).unwrap_or_default())
+                .map(|ack_ref| {
+                    self.dag_state
+                        .dac_certificate(ack_ref)
+                        .expect("ack queued without DAC certificate")
+                })
                 .collect()
         } else {
             vec![]
