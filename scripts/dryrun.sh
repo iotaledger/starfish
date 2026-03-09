@@ -6,7 +6,7 @@
 # Recommend < physical cores. Hard limit is 128
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
-# Options: starfish, starfish-s, starfish-pull,
+# Options: starfish, starfish-s, starfish-l, starfish-pull,
 #          cordial-miners, mysticeti
 CONSENSUS=${CONSENSUS:-starfish}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}

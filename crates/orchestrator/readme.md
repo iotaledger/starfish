@@ -129,7 +129,7 @@ each load generator submits a fixed load of 100 tx/s
 or more precisely 10 tx every 100ms.
 Performance measurements are collected by regularly scraping
 the Prometheus metrics exposed by the load generators.
-There are 5 options for consensus protocols: `starfish`, `starfish-s`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
+There are 6 options for consensus protocols: `starfish`, `starfish-s`, `starfish-l`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
 
 To run with Byzantine validators:
 
