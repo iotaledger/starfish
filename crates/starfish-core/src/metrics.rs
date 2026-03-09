@@ -128,6 +128,14 @@ pub struct Metrics {
 
     // per-peer useful-authorities counts by kind
     pub useful_authorities: IntGaugeVec,
+
+    // BLS certificate aggregation metrics
+    pub bls_certificates_total: IntCounterVec,
+    pub bls_dac_rejections_total: IntCounter,
+    pub bls_blocks_processed_total: IntCounter,
+    pub bls_standalone_dac_sigs_total: IntCounter,
+    pub bls_service_util: IntCounter,
+    pub bls_batch_verification_failures_total: IntCounter,
 }
 
 pub struct MetricReporter {
@@ -443,6 +451,43 @@ impl Metrics {
                 "useful_authorities",
                 "Number of useful authorities per peer by kind",
                 &["peer", "kind"],
+                registry,
+            )
+            .unwrap(),
+            bls_certificates_total: register_int_counter_vec_with_registry!(
+                "bls_certificates_total",
+                "Total completed BLS certificates by type",
+                &["type"],
+                registry,
+            )
+            .unwrap(),
+            bls_dac_rejections_total: register_int_counter_with_registry!(
+                "bls_dac_rejections_total",
+                "Total DAC certificates that failed verification",
+                registry,
+            )
+            .unwrap(),
+            bls_blocks_processed_total: register_int_counter_with_registry!(
+                "bls_blocks_processed_total",
+                "Total blocks processed by BLS service",
+                registry,
+            )
+            .unwrap(),
+            bls_standalone_dac_sigs_total: register_int_counter_with_registry!(
+                "bls_standalone_dac_sigs_total",
+                "Total standalone DAC partial signatures processed",
+                registry,
+            )
+            .unwrap(),
+            bls_service_util: register_int_counter_with_registry!(
+                "bls_service_util",
+                "BLS service utilization timer (microseconds)",
+                registry,
+            )
+            .unwrap(),
+            bls_batch_verification_failures_total: register_int_counter_with_registry!(
+                "bls_batch_verification_failures_total",
+                "Total partial signatures that failed batch verification",
                 registry,
             )
             .unwrap(),

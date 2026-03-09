@@ -960,7 +960,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let (event_tx, mut event_rx) = mpsc::unbounded_channel::<
                 Vec<crate::bls_certificate_aggregator::CertificateEvent>,
             >();
-            crate::bls_service::start_bls_service(aggregator, bls_rx, event_tx);
+            crate::bls_service::start_bls_service(aggregator, bls_rx, event_tx, metrics.clone());
             let bls_handle = BlsServiceHandle::new(bls_tx);
             let event_inner = inner.clone();
             let task = handle.spawn(async move {

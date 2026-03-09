@@ -109,10 +109,11 @@ impl BlsCertificateAggregator {
 
     /// Process a batch of new blocks: batch-verify partial BLS signatures,
     /// verify any aggregate certificates embedded in those blocks, and return
-    /// newly completed certificate events.
-    pub fn add_blocks(&mut self, blocks: &[Data<VerifiedBlock>]) -> Vec<CertificateEvent> {
+    /// newly completed certificate events together with the number of partial
+    /// signatures that failed batch verification.
+    pub fn add_blocks(&mut self, blocks: &[Data<VerifiedBlock>]) -> (Vec<CertificateEvent>, u64) {
         if blocks.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
 
         let mut events = Vec::new();
@@ -123,9 +124,12 @@ impl BlsCertificateAggregator {
             self.collect_partial_tasks(block, &mut tasks, &mut task_kinds);
         }
 
-        let invalid = match BlsBatchVerifier::verify_batch(&tasks) {
-            Ok(()) => AHashSet::new(),
-            Err(bad) => bad.into_iter().collect(),
+        let (invalid, batch_failures) = match BlsBatchVerifier::verify_batch(&tasks) {
+            Ok(()) => (AHashSet::new(), 0),
+            Err(bad) => {
+                let count = bad.len() as u64;
+                (bad.into_iter().collect(), count)
+            }
         };
 
         for (index, kind) in task_kinds.into_iter().enumerate() {
@@ -152,7 +156,7 @@ impl BlsCertificateAggregator {
         }
 
         events.extend(self.verify_embedded_aggregate_certificates(blocks));
-        events
+        (events, batch_failures)
     }
 
     /// Cleanup state for rounds below the given threshold.
@@ -612,7 +616,7 @@ mod tests {
         );
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
-        let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
+        let (events, _) = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -677,7 +681,7 @@ mod tests {
         );
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
-        let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
+        let (events, _) = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -729,7 +733,7 @@ mod tests {
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
         remote_aggregator.round_certs.insert(2, dac_cert);
-        let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
+        let (events, _) = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -782,7 +786,7 @@ mod tests {
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
         remote_aggregator.leader_certs.insert(leader_ref, dac_cert);
-        let events = remote_aggregator.add_blocks(&[Data::new(carrier)]);
+        let (events, _) = remote_aggregator.add_blocks(&[Data::new(carrier)]);
         assert!(
             events.iter().any(|event| matches!(
                 event,

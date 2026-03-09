@@ -160,7 +160,7 @@ impl<H: BlockHandler> Core<H> {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
-            let events = aggregator.add_blocks(&unprocessed_blocks);
+            let (events, _) = aggregator.add_blocks(&unprocessed_blocks);
             apply_certificate_events(&dag_state, events);
             Some(aggregator)
         } else {
