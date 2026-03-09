@@ -39,6 +39,7 @@ pub struct Metrics {
     pub committed_leaders_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
     pub sequenced_transactions_total: IntCounter,
+    pub sequenced_transactions_bytes: IntCounter,
 
     pub filtered_blocks_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
@@ -454,6 +455,12 @@ impl Metrics {
             sequenced_transactions_total: register_int_counter_with_registry!(
                 "sequenced_transactions_total",
                 "Total number of sequenced transactions",
+                registry,
+            )
+            .unwrap(),
+            sequenced_transactions_bytes: register_int_counter_with_registry!(
+                "sequenced_transactions_bytes",
+                "Total bytes of sequenced transactions",
                 registry,
             )
             .unwrap(),

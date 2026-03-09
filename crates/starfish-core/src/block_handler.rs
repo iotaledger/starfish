@@ -13,6 +13,7 @@ use crate::{
         CommitMetastate,
         linearizer::{CommittedSubDag, Linearizer},
     },
+    crypto::AsBytes,
     dag_state::{DacCertificateVerificationState, DagState, PendingSubDag},
     data::Data,
     metrics::Metrics,
@@ -135,6 +136,9 @@ impl RealCommitHandler {
                     .inc_by(latency.as_micros().pow(2) as u64);
 
                 self.metrics.sequenced_transactions_total.inc();
+                self.metrics
+                    .sequenced_transactions_bytes
+                    .inc_by(transaction.as_bytes().len() as u64);
             }
         } else {
             tracing::debug!(

@@ -34,6 +34,11 @@ pub enum CordialKnowledgeMessage {
     NewHeader(BlockReference),
     /// A new shard became available for a block.
     NewShard(BlockReference),
+    /// A batch of new DAG parts entered local storage.
+    DagParts {
+        headers: Vec<BlockReference>,
+        shards: Vec<BlockReference>,
+    },
     /// A header was received FROM a specific peer — mark it as known for that
     /// peer.
     HeaderReceivedFrom {
@@ -588,6 +593,17 @@ impl CordialKnowledge {
                         ck.write().new_shard(block_ref);
                     }
                 }
+                CordialKnowledgeMessage::DagParts { headers, shards } => {
+                    for ck in &self.connection_knowledges {
+                        let mut ck = ck.write();
+                        for block_ref in &headers {
+                            ck.new_header(*block_ref);
+                        }
+                        for block_ref in &shards {
+                            ck.new_shard(*block_ref);
+                        }
+                    }
+                }
                 CordialKnowledgeMessage::HeaderReceivedFrom { peer, block_ref } => {
                     let idx = peer as usize;
                     if idx < self.committee_size {
@@ -974,6 +990,33 @@ mod tests {
         // Peer 2 should NOT see it (it's their own block)
         let ck2 = handle.connection_knowledge(2).unwrap();
         assert_eq!(ck2.read().unknown_headers_count(), 0);
+
+        drop(handle);
+        actor_task.await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_actor_propagates_dag_parts_batch() {
+        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let actor_task = tokio::spawn(actor.run());
+
+        let header = block_ref(2, 5);
+        let shard = block_ref(3, 6);
+        handle.send(CordialKnowledgeMessage::DagParts {
+            headers: vec![header],
+            shards: vec![shard],
+        });
+
+        tokio::task::yield_now().await;
+
+        let ck = handle.connection_knowledge(0).unwrap();
+        let ck = ck.read();
+        assert!(!ck.knows_header(&header));
+        assert_eq!(ck.unknown_headers_count(), 1);
+        assert_eq!(ck.unknown_shards_count(), 1);
+
+        let ck3 = handle.connection_knowledge(3).unwrap();
+        assert_eq!(ck3.read().unknown_shards_count(), 0);
 
         drop(handle);
         actor_task.await.ok();

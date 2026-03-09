@@ -1171,7 +1171,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_sent_total{validator=~\"$validator\"}[1m]) + rate(bytes_received_total{validator=~\"$validator\"}[1m])) / avg(rate(submitted_transactions_bytes{validator=~\"$validator\"}[1m]))",
+          "expr": "avg(increase(bytes_sent_total{validator=~\"$validator\"}[5m]) + increase(bytes_received_total{validator=~\"$validator\"}[5m])) / avg(increase(sequenced_transactions_bytes{validator=~\"$validator\"}[5m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
