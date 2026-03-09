@@ -24,6 +24,7 @@ use crate::{
     bls_service::{BlsServiceHandle, BlsServiceMessage},
     broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     committee::Committee,
+    config::NodeParameters,
     consensus::universal_committer::UniversalCommitter,
     cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
@@ -193,7 +194,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
-        let broadcaster_parameters = BroadcasterParameters::new(committee_size, consensus_protocol);
+        let broadcaster_parameters = BroadcasterParameters::new(
+            committee_size,
+            consensus_protocol,
+            inner.dissemination_mode,
+            inner.causal_push_shard_round_lag,
+        );
         let peer_id = connection.peer_id as AuthorityIndex;
 
         let disseminator = BlockDisseminator::new(
@@ -284,15 +290,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             let round = 0;
             self.disseminator.disseminate_own_blocks(round).await;
         } else {
-            match self.consensus_protocol {
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
+            match self.inner.dissemination_mode {
+                crate::config::DisseminationMode::Pull => {
                     self.disseminator.disseminate_own_blocks(round).await;
                 }
-                ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
-                | ConsensusProtocol::CordialMiners => {
+                crate::config::DisseminationMode::PushCausal
+                | crate::config::DisseminationMode::PushUseful => {
                     self.disseminator.disseminate_all_blocks_push().await;
+                }
+                crate::config::DisseminationMode::ProtocolDefault => {
+                    unreachable!("protocol-default dissemination mode must be resolved")
                 }
             }
         }
@@ -699,19 +706,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if let Some(ck) = self
-                .inner
-                .cordial_knowledge
-                .connection_knowledge(self.peer_id)
-            {
-                let mut ck = ck.write();
-                let mut useful_headers_mask = 0u128;
-                for block_ref in &block_references {
-                    useful_headers_mask |= 1u128 << block_ref.authority;
-                }
-                if useful_headers_mask != 0 {
-                    let current_round = self.inner.dag_state.highest_round();
-                    ck.update_useful_authors_to_peer(useful_headers_mask, 0, current_round);
+            if self.inner.dissemination_mode == crate::config::DisseminationMode::PushUseful {
+                if let Some(ck) = self
+                    .inner
+                    .cordial_knowledge
+                    .connection_knowledge(self.peer_id)
+                {
+                    let mut ck = ck.write();
+                    let mut useful_headers_mask = 0u128;
+                    for block_ref in &block_references {
+                        useful_headers_mask |= 1u128 << block_ref.authority;
+                    }
+                    if useful_headers_mask != 0 {
+                        let current_round = self.inner.dag_state.highest_round();
+                        ck.update_useful_authors_to_peer(useful_headers_mask, 0, current_round);
+                    }
                 }
             }
             if self.inner.dag_state.byzantine_strategy.is_none()
@@ -744,14 +753,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if let Some(ck) = self
-                .inner
-                .cordial_knowledge
-                .connection_knowledge(self.peer_id)
-            {
-                let mut ck = ck.write();
-                for block_ref in &block_references {
-                    ck.mark_shard_useful_to_peer(*block_ref);
+            if self.inner.dissemination_mode == crate::config::DisseminationMode::PushUseful {
+                if let Some(ck) = self
+                    .inner
+                    .cordial_knowledge
+                    .connection_knowledge(self.peer_id)
+                {
+                    let mut ck = ck.write();
+                    for block_ref in &block_references {
+                        ck.mark_shard_useful_to_peer(*block_ref);
+                    }
                 }
             }
             if self.inner.dag_state.byzantine_strategy.is_none()
@@ -788,6 +799,8 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub dag_state: DagState,
     pub notify: Arc<Notify>,
     pub committee: Arc<Committee>,
+    pub dissemination_mode: crate::config::DisseminationMode,
+    pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
     pub gc_round: Arc<AtomicU64>,
     pub shard_tx:
@@ -803,6 +816,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut core: Core<H>,
         mut commit_observer: C,
         metrics: Arc<Metrics>,
+        node_parameters: NodeParameters,
         dac_outbox_rx: Option<mpsc::UnboundedReceiver<(BlockReference, BlsSignatureBytes)>>,
         bls_cert_aggregator: Option<crate::bls_certificate_aggregator::BlsCertificateAggregator>,
     ) -> Self {
@@ -812,6 +826,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
         let dag_state = core.dag_state().clone();
+        let dissemination_mode = dag_state
+            .consensus_protocol
+            .resolve_dissemination_mode(node_parameters.dissemination_mode);
         let _store = core.store();
         let universal_committer = core.get_universal_committer();
         // Create BLS service channel — sender clones go to Syncer (Core thread)
@@ -872,6 +889,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             syncer,
             dag_state: dag_state.clone(),
             committee,
+            dissemination_mode,
+            causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
             stop: stop_sender.clone(),
             gc_round,
             shard_tx: parking_lot::Mutex::new(shard_tx),

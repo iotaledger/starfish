@@ -146,6 +146,7 @@ impl Validator {
             core,
             commit_handler,
             metrics.clone(),
+            public_config.parameters.clone(),
             dac_outbox_rx,
             bls_cert_aggregator,
         );

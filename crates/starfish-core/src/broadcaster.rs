@@ -16,6 +16,7 @@ use tokio::{
 use crate::{
     block_handler::BlockHandler,
     committee::{QuorumThreshold, StakeAggregator},
+    config::DisseminationMode,
     consensus::universal_committer::UniversalCommitter,
     dag_state::{ByzantineStrategy, ConsensusProtocol},
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -48,16 +49,28 @@ pub struct BroadcasterParameters {
     pub batch_shard_size: usize,
     /// The sampling precision with which to re-evaluate the sync strategy.
     pub sample_timeout: Duration,
+    /// Whether peers exchange data via pull, push-causal, or push-useful.
+    pub dissemination_mode: DisseminationMode,
+    /// In push-causal mode, only shard payloads up to this many rounds behind
+    /// the current frontier are piggybacked.
+    pub causal_push_shard_round_lag: RoundNumber,
 }
 
 impl BroadcasterParameters {
-    pub fn new(committee_size: usize, consensus_protocol: ConsensusProtocol) -> Self {
+    pub fn new(
+        committee_size: usize,
+        consensus_protocol: ConsensusProtocol,
+        dissemination_mode: DisseminationMode,
+        causal_push_shard_round_lag: RoundNumber,
+    ) -> Self {
         match consensus_protocol {
             ConsensusProtocol::Mysticeti => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: 3 * committee_size,
                 batch_shard_size: 3 * committee_size,
                 sample_timeout: Duration::from_millis(600),
+                dissemination_mode,
+                causal_push_shard_round_lag,
             },
             ConsensusProtocol::StarfishPull
             | ConsensusProtocol::Starfish
@@ -68,6 +81,8 @@ impl BroadcasterParameters {
                 batch_other_block_size: committee_size * committee_size,
                 batch_shard_size: committee_size * committee_size,
                 sample_timeout: Duration::from_millis(600),
+                dissemination_mode,
+                causal_push_shard_round_lag,
             },
         }
     }
@@ -80,6 +95,8 @@ impl Default for BroadcasterParameters {
             batch_other_block_size: 128,
             batch_shard_size: 128,
             sample_timeout: Duration::from_millis(600),
+            dissemination_mode: DisseminationMode::Pull,
+            causal_push_shard_round_lag: 2,
         }
     }
 }
@@ -310,7 +327,9 @@ where
                 let remaining_extra_budget =
                     batch_other_block_size.saturating_sub(refs_to_send.len());
 
-                if remaining_extra_budget > 0 {
+                if self.parameters.dissemination_mode == DisseminationMode::PushUseful
+                    && remaining_extra_budget > 0
+                {
                     if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
                         let current_round = self.inner.dag_state.highest_round();
                         let header_candidate_limit =
@@ -630,39 +649,90 @@ where
             match inner.dag_state.consensus_protocol {
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL => {
-                    sending_batch_starfish_blocks(
-                        inner.clone(),
-                        to.clone(),
-                        to_whom_authority_index,
-                        broadcaster_parameters.clone(),
-                        sent_to_peer.clone(),
-                        &metrics,
-                    )
-                    .await?;
-                }
-                ConsensusProtocol::CordialMiners => {
-                    sending_batch_cordial_miners_blocks(
-                        inner.clone(),
-                        to.clone(),
-                        to_whom_authority_index,
-                        broadcaster_parameters.clone(),
-                        sent_to_peer.clone(),
-                        &metrics,
-                    )
-                    .await?;
-                }
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
-                    sending_batch_all_blocks(
-                        inner.clone(),
-                        to.clone(),
-                        to_whom_authority_index,
-                        broadcaster_parameters.clone(),
-                        sent_to_peer.clone(),
-                        &metrics,
-                    )
-                    .await?;
-                }
+                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::Mysticeti => match broadcaster_parameters.dissemination_mode {
+                    DisseminationMode::Pull => {
+                        sending_batch_all_blocks(
+                            inner.clone(),
+                            to.clone(),
+                            to_whom_authority_index,
+                            broadcaster_parameters.clone(),
+                            sent_to_peer.clone(),
+                            &metrics,
+                        )
+                        .await?;
+                    }
+                    DisseminationMode::PushCausal => match inner.dag_state.consensus_protocol {
+                        ConsensusProtocol::Starfish
+                        | ConsensusProtocol::StarfishS
+                        | ConsensusProtocol::StarfishL
+                        | ConsensusProtocol::StarfishPull => {
+                            sending_batch_causal_starfish_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                        ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
+                            sending_batch_all_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                    },
+                    DisseminationMode::PushUseful => match inner.dag_state.consensus_protocol {
+                        ConsensusProtocol::Starfish
+                        | ConsensusProtocol::StarfishS
+                        | ConsensusProtocol::StarfishL
+                        | ConsensusProtocol::StarfishPull => {
+                            sending_batch_starfish_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                        ConsensusProtocol::CordialMiners => {
+                            sending_batch_cordial_miners_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                        ConsensusProtocol::Mysticeti => {
+                            sending_batch_all_blocks(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                broadcaster_parameters.clone(),
+                                sent_to_peer.clone(),
+                                &metrics,
+                            )
+                            .await?;
+                        }
+                    },
+                    DisseminationMode::ProtocolDefault => {
+                        unreachable!("protocol-default dissemination mode must be resolved")
+                    }
+                },
             }
             drop(timer);
         }
@@ -925,6 +995,90 @@ where
 
     tracing::debug!(
         "Starfish batch to {peer}: {} full, {} headers, {} shards",
+        batch.full_blocks.len(),
+        batch.headers.len(),
+        batch.shards.len()
+    );
+    let sent_refs: Vec<_> = batch
+        .full_blocks
+        .iter()
+        .map(|b| *b.reference())
+        .chain(batch.headers.iter().map(|b| *b.reference()))
+        .chain(batch.shards.iter().map(|s| s.block_reference))
+        .collect();
+    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
+}
+
+async fn sending_batch_causal_starfish_blocks<H, C>(
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    to: Sender<NetworkMessage>,
+    to_whom_authority_index: AuthorityIndex,
+    broadcaster_parameters: BroadcasterParameters,
+    sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
+    metrics: &Metrics,
+) -> Option<()>
+where
+    C: 'static + CommitObserver,
+    H: 'static + BlockHandler,
+{
+    let committee_size = inner.committee.len();
+    let own_index = inner.dag_state.get_own_authority_index();
+    let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
+    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
+    let batch_shard_size = broadcaster_parameters.batch_shard_size;
+    let peer = format_authority_index(to_whom_authority_index);
+    let mut authorities_with_missing_blocks: AHashSet<AuthorityIndex> =
+        (0..committee_size as AuthorityIndex).collect();
+    authorities_with_missing_blocks.remove(&own_index);
+
+    let causal_blocks = {
+        let sent = sent_to_peer.read();
+        inner.dag_state.get_unsent_causal_history(
+            &sent,
+            to_whom_authority_index,
+            batch_own_block_size,
+            batch_other_block_size,
+            authorities_with_missing_blocks,
+        )
+    };
+
+    let own_blocks: Vec<_> = causal_blocks
+        .iter()
+        .filter(|block| block.authority() == own_index)
+        .cloned()
+        .collect();
+    let header_refs: Vec<_> = causal_blocks
+        .iter()
+        .filter(|block| block.authority() != own_index)
+        .map(|block| *block.reference())
+        .collect();
+    let header_blocks = inner.dag_state.get_header_only_blocks(&header_refs);
+
+    let current_round = inner.dag_state.highest_round();
+    let shard_round_cutoff =
+        current_round.saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
+    let shard_refs: Vec<_> = header_refs
+        .iter()
+        .copied()
+        .filter(|block_ref| block_ref.round <= shard_round_cutoff)
+        .take(batch_shard_size)
+        .collect();
+    let shard_payloads = inner.dag_state.get_shard_payloads(&shard_refs);
+
+    let useful_headers = 0;
+    let useful_shards = 0;
+    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
+
+    let batch = BlockBatch {
+        full_blocks: own_blocks,
+        headers: header_blocks,
+        shards: shard_payloads,
+        useful_headers_authors: useful_headers,
+        useful_shards_authors: useful_shards,
+    };
+
+    tracing::debug!(
+        "Starfish causal batch to {peer}: {} full, {} headers, {} shards",
         batch.full_blocks.len(),
         batch.headers.len(),
         batch.shards.len()

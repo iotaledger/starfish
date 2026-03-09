@@ -44,6 +44,10 @@ pub struct NodeParameters {
     pub mimic_latency: bool,
     #[serde(default = "node_defaults::default_uniform_latency_ms")]
     pub uniform_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub dissemination_mode: DisseminationMode,
+    #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
+    pub causal_push_shard_round_lag: RoundNumber,
 }
 
 pub mod node_defaults {
@@ -68,6 +72,10 @@ pub mod node_defaults {
     pub fn default_uniform_latency_ms() -> Option<f64> {
         None
     }
+
+    pub fn default_causal_push_shard_round_lag() -> super::RoundNumber {
+        2
+    }
 }
 
 impl Default for NodeParameters {
@@ -79,6 +87,8 @@ impl Default for NodeParameters {
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency: node_defaults::default_mimic_latency(),
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
+            dissemination_mode: DisseminationMode::default(),
+            causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
         }
     }
 }
@@ -92,11 +102,23 @@ impl NodeParameters {
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency,
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
+            dissemination_mode: DisseminationMode::default(),
+            causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
         }
     }
 }
 
 impl ImportExport for NodeParameters {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisseminationMode {
+    #[default]
+    ProtocolDefault,
+    Pull,
+    PushCausal,
+    PushUseful,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NodeIdentifier {
