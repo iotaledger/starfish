@@ -57,8 +57,9 @@ pub struct BroadcasterParameters {
     pub sample_timeout: Duration,
     /// Whether peers exchange data via pull, push-causal, or push-useful.
     pub dissemination_mode: DisseminationMode,
-    /// In push-causal mode, only shard payloads up to this many rounds behind
-    /// the current frontier are piggybacked.
+    /// In push-causal mode, shard payloads are piggybacked up to this many
+    /// rounds behind the current frontier. A value of `0` means "push as soon
+    /// as the shard is ready".
     pub causal_push_shard_round_lag: RoundNumber,
 }
 
@@ -102,7 +103,7 @@ impl Default for BroadcasterParameters {
             batch_shard_size: 128,
             sample_timeout: Duration::from_millis(600),
             dissemination_mode: DisseminationMode::Pull,
-            causal_push_shard_round_lag: 2,
+            causal_push_shard_round_lag: 0,
         }
     }
 }

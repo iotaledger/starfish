@@ -80,7 +80,7 @@ pub mod node_defaults {
     }
 
     pub fn default_causal_push_shard_round_lag() -> super::RoundNumber {
-        2
+        0
     }
 }
 
