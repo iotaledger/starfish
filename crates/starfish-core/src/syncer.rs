@@ -125,10 +125,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     /// Apply BLS certificate events from the BLS verification service.
+    /// Does not trigger commit — the periodic `ForceCommit` timer handles that.
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
-        if apply_certificate_events(self.core.dag_state(), events) {
-            self.try_new_commit();
-        }
+        apply_certificate_events(self.core.dag_state(), events);
     }
 
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {
@@ -206,6 +205,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
         self.core
             .handle_committed_subdag(committed_subdag, any_decided);
+        self.try_new_block();
     }
 
     pub fn cleanup(&mut self) {
