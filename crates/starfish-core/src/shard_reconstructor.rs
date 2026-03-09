@@ -27,9 +27,7 @@ use crate::{
     crypto::TransactionsCommitment,
     decoder,
     metrics::Metrics,
-    types::{
-        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, Shard,
-    },
+    types::{AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, Shard},
 };
 
 const EVICTION_TIMEOUT: Duration = Duration::from_secs(1);
@@ -46,7 +44,8 @@ pub enum ShardMessage {
         block_reference: BlockReference,
         shard: Shard,
         shard_index: usize,
-        /// Merkle root (transactions commitment) for verification after reconstruction.
+        /// Merkle root (transactions commitment) for verification after
+        /// reconstruction.
         merkle_root: TransactionsCommitment,
     },
     /// Full block with transactions arrived — stop collecting shards.
@@ -150,6 +149,8 @@ struct ShardReconstructor {
     decoded_tx: Sender<DecodedBlocks>,
     // Eviction
     gc_round: Arc<AtomicU64>,
+    // Highest round seen from incoming shard messages (for lag metric)
+    highest_seen_round: RoundNumber,
 }
 
 /// Start a shard reconstructor and return the public handle.
@@ -198,6 +199,7 @@ impl ShardReconstructor {
             pending_decoded: Vec::new(),
             decoded_tx,
             gc_round,
+            highest_seen_round: 0,
         };
 
         let join_handle = tokio::spawn(async move {
@@ -334,6 +336,9 @@ impl ShardReconstructor {
                 shard_index,
                 merkle_root,
             } => {
+                if block_reference.round > self.highest_seen_round {
+                    self.highest_seen_round = block_reference.round;
+                }
                 if self.processed_blocks.contains(&block_reference)
                     || self.reconstruction_queue.contains(&block_reference)
                 {
@@ -405,6 +410,12 @@ impl ShardReconstructor {
         self.metrics
             .reconstructed_blocks_total
             .inc_by(blocks.len() as u64);
+        for block in &blocks {
+            let lag = self
+                .highest_seen_round
+                .saturating_sub(block.block_reference.round);
+            self.metrics.shard_reconstruction_lag.observe(lag as f64);
+        }
         if self.decoded_tx.send(blocks).await.is_err() {
             tracing::warn!("Decoded blocks channel closed");
         }

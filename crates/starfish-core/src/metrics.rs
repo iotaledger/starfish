@@ -50,6 +50,7 @@ pub struct Metrics {
     pub shard_reconstruction_pending_accumulators: IntGauge,
     pub shard_reconstruction_queued_jobs: IntGauge,
     pub shard_reconstruction_pending_decoded_blocks: IntGauge,
+    pub shard_reconstruction_lag: Histogram,
     pub used_additional_blocks_total: IntCounter,
 
     pub dag_state_unloaded_blocks: IntCounter,
@@ -304,6 +305,12 @@ impl Metrics {
             shard_reconstruction_pending_decoded_blocks: register_int_gauge_with_registry!(
                 "shard_reconstruction_pending_decoded_blocks",
                 "Current number of decoded blocks pending flush to core",
+                registry,
+            )
+            .unwrap(),
+            shard_reconstruction_lag: register_histogram_with_registry!(
+                "shard_reconstruction_lag",
+                "Round lag between DAG head and reconstructed block",
                 registry,
             )
             .unwrap(),
