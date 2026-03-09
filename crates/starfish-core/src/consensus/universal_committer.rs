@@ -84,11 +84,20 @@ impl UniversalCommitter {
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
-                        for reference in vb.block_references() {
-                            if reference.round == round && reference.authority == leader {
-                                voters.insert((*reference, vb_ref));
-                                voter_strong_votes.insert(vb_ref, vb.strong_vote());
-                                break;
+                        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                            if let Some((leader_ref, _)) = vb.header().voted_leader() {
+                                if leader_ref.round == round && leader_ref.authority == leader {
+                                    voters.insert((*leader_ref, vb_ref));
+                                    voter_strong_votes.insert(vb_ref, vb.strong_vote());
+                                }
+                            }
+                        } else {
+                            for reference in vb.block_references() {
+                                if reference.round == round && reference.authority == leader {
+                                    voters.insert((*reference, vb_ref));
+                                    voter_strong_votes.insert(vb_ref, vb.strong_vote());
+                                    break;
+                                }
                             }
                         }
                     }

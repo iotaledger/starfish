@@ -81,9 +81,11 @@ impl Linearizer {
         self.committed_slots = self.committed_slots.split_off(&(threshold_round, 0));
     }
 
-    fn single_data_holder(&self, authority: AuthorityIndex) -> StakeAggregator<QuorumThreshold> {
+    fn potential_data_holders(&self) -> StakeAggregator<QuorumThreshold> {
         let mut holders = StakeAggregator::<QuorumThreshold>::new();
-        holders.add(authority, &self.committee);
+        for authority in self.committee.authorities() {
+            holders.add(authority, &self.committee);
+        }
         holders
     }
 
@@ -342,7 +344,7 @@ impl Linearizer {
                 .blocks
                 .iter()
                 .map(|x| match consensus_protocol {
-                    ConsensusProtocol::StarfishL => self.single_data_holder(x.authority()),
+                    ConsensusProtocol::StarfishL => self.potential_data_holders(),
                     _ => self
                         .votes
                         .get(x.reference())

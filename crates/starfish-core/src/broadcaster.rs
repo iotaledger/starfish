@@ -15,6 +15,7 @@ use tokio::{
 
 use crate::{
     block_handler::BlockHandler,
+    committee::{QuorumThreshold, StakeAggregator},
     consensus::universal_committer::UniversalCommitter,
     dag_state::{ByzantineStrategy, ConsensusProtocol},
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -24,6 +25,18 @@ use crate::{
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_index},
 };
+
+fn peer_can_serve_missing_data(
+    consensus_protocol: ConsensusProtocol,
+    holders: &StakeAggregator<QuorumThreshold>,
+    own_id: AuthorityIndex,
+    peer_id: AuthorityIndex,
+) -> bool {
+    match consensus_protocol {
+        ConsensusProtocol::StarfishL => holders.votes.contains(peer_id),
+        _ => !holders.votes.contains(own_id) && holders.votes.contains(peer_id),
+    }
+}
 
 #[derive(Clone)]
 pub struct BroadcasterParameters {
@@ -158,6 +171,7 @@ where
         let own_id = inner.dag_state.get_own_authority_index();
         let sample_timeout = parameters.sample_timeout;
         let upper_limit_request_size = parameters.batch_other_block_size;
+        let consensus_protocol = inner.dag_state.consensus_protocol;
         loop {
             let committed_dags = inner.dag_state.read_pending_unavailable();
             // Collect candidates that pass the aggregator filter.
@@ -165,8 +179,12 @@ where
             'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
                     if block.round() > 0 {
-                        let mut aggregator = commit.1[i].clone();
-                        if aggregator.votes.insert(own_id) && !aggregator.votes.insert(peer_id) {
+                        if peer_can_serve_missing_data(
+                            consensus_protocol,
+                            &commit.1[i],
+                            own_id,
+                            peer_id,
+                        ) {
                             candidates.push(*block.reference());
                         }
                     }
@@ -995,5 +1013,50 @@ impl BlockFetcherWorker {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::committee::Committee;
+
+    fn holder_set(authorities: &[AuthorityIndex]) -> StakeAggregator<QuorumThreshold> {
+        let committee = Committee::new_test(vec![1, 1, 1, 1]);
+        let mut holders = StakeAggregator::<QuorumThreshold>::new();
+        for authority in authorities {
+            holders.add(*authority, committee.as_ref());
+        }
+        holders
+    }
+
+    #[test]
+    fn starfish_l_can_request_from_any_peer_even_if_own_is_in_holder_set() {
+        let holders = holder_set(&[0, 1, 2, 3]);
+        assert!(peer_can_serve_missing_data(
+            ConsensusProtocol::StarfishL,
+            &holders,
+            0,
+            1,
+        ));
+    }
+
+    #[test]
+    fn non_starfish_l_only_requests_from_known_remote_holders() {
+        let remote_holders = holder_set(&[1, 2, 3]);
+        assert!(peer_can_serve_missing_data(
+            ConsensusProtocol::Starfish,
+            &remote_holders,
+            0,
+            1,
+        ));
+
+        let own_and_remote_holders = holder_set(&[0, 1, 2]);
+        assert!(!peer_can_serve_missing_data(
+            ConsensusProtocol::Starfish,
+            &own_and_remote_holders,
+            0,
+            1,
+        ));
     }
 }

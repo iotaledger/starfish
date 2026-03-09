@@ -448,6 +448,12 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions)
         );
+        let voted_leader_ref = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
+        {
+            self.select_starfish_l_voted_leader(clock_round)
+        } else {
+            None
+        };
         timed!(
             self.metrics,
             "Core::new_block::prepare_last_blocks",
@@ -520,6 +526,7 @@ impl<H: BlockHandler> Core<H> {
                 "Core::new_block::build_block",
                 self.build_block(
                     &block_references,
+                    voted_leader_ref,
                     &transactions,
                     &encoded_transactions,
                     &acknowledgment_references,
@@ -651,6 +658,7 @@ impl<H: BlockHandler> Core<H> {
     fn build_block(
         &self,
         block_references_without_own: &[BlockReference],
+        voted_leader_ref: Option<BlockReference>,
         transactions: &[BaseTransaction],
         encoded_transactions: &Option<Vec<Shard>>,
         acknowledgment_references: &[BlockReference],
@@ -660,7 +668,15 @@ impl<H: BlockHandler> Core<H> {
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     ) -> Data<VerifiedBlock> {
         let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
-        let mut block_references = vec![*self.last_own_block[block_id_in_round].block.reference()];
+        let own_previous = *self.last_own_block[block_id_in_round].block.reference();
+        let mut block_references = vec![own_previous];
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+            if let Some(leader_ref) = voted_leader_ref {
+                if leader_ref != own_previous {
+                    block_references.push(leader_ref);
+                }
+            }
+        }
         block_references.extend(block_references_without_own.iter().cloned());
 
         let prev_round_ref_count = block_references
@@ -704,6 +720,7 @@ impl<H: BlockHandler> Core<H> {
             self.authority,
             clock_round,
             block_references,
+            voted_leader_ref,
             acknowledgment_references.to_vec(),
             time_ns,
             &self.signer,
@@ -763,6 +780,15 @@ impl<H: BlockHandler> Core<H> {
         &self,
         pending_refs: &[BlockReference],
     ) -> Vec<BlockReference> {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
+            && self
+                .committee
+                .elect_leader(self.dag_state.threshold_clock_round())
+                != self.authority
+        {
+            return Vec::new();
+        }
+
         let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();
 
         let blocks = self.dag_state.get_storage_blocks(pending_refs);
@@ -785,6 +811,19 @@ impl<H: BlockHandler> Core<H> {
                 .collect();
         }
         compressed
+    }
+
+    fn select_starfish_l_voted_leader(&self, clock_round: RoundNumber) -> Option<BlockReference> {
+        let leader_round = clock_round.checked_sub(1)?;
+        if leader_round == 0 {
+            return None;
+        }
+        let leader_authority = self.committee.elect_leader(leader_round);
+        self.dag_state
+            .get_blocks_at_authority_round(leader_authority, leader_round)
+            .into_iter()
+            .min_by_key(|block| *block.reference())
+            .map(|block| *block.reference())
     }
 
     fn store_block(
