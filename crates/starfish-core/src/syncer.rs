@@ -252,17 +252,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.commit_observer.cleanup(threshold);
     }
 
-    pub fn commit_observer(&self) -> &C {
-        &self.commit_observer
-    }
-
     pub fn core(&self) -> &Core<H> {
         &self.core
-    }
-
-    #[cfg(test)]
-    pub fn scheduler_state_id(&self) -> usize {
-        self.core.authority() as usize
     }
 }
 

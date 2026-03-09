@@ -1010,10 +1010,12 @@ mod tests {
         tokio::task::yield_now().await;
 
         let ck = handle.connection_knowledge(0).unwrap();
-        let ck = ck.read();
-        assert!(!ck.knows_header(&header));
-        assert_eq!(ck.unknown_headers_count(), 1);
-        assert_eq!(ck.unknown_shards_count(), 1);
+        {
+            let ck = ck.read();
+            assert!(!ck.knows_header(&header));
+            assert_eq!(ck.unknown_headers_count(), 1);
+            assert_eq!(ck.unknown_shards_count(), 1);
+        }
 
         let ck3 = handle.connection_knowledge(3).unwrap();
         assert_eq!(ck3.read().unknown_shards_count(), 0);
