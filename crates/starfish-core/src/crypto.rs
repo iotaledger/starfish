@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use blst::min_pk as bls;
+use blst::min_sig as bls;
 use ed25519_consensus::Signature;
 use rand::{SeedableRng, rngs::StdRng};
 use rs_merkle::{Hasher, MerkleProof, MerkleTree};
@@ -516,12 +516,12 @@ pub fn dummy_public_key() -> PublicKey {
 }
 
 // ---------------------------------------------------------------------------
-// BLS12-381 types (min_pk variant: 48-byte G1 public keys, 96-byte G2
+// BLS12-381 types (min_sig variant: 96-byte G2 public keys, 48-byte G1
 // signatures).
 // ---------------------------------------------------------------------------
 
-pub const BLS_SIGNATURE_SIZE: usize = 96;
-pub const BLS_PUBLIC_KEY_SIZE: usize = 48;
+pub const BLS_SIGNATURE_SIZE: usize = 48;
+pub const BLS_PUBLIC_KEY_SIZE: usize = 96;
 
 /// Domain separation tag for BLS signatures in Starfish.
 pub(crate) const BLS_DST: &[u8] = b"STARFISH_BLS_SIG";
@@ -619,7 +619,7 @@ impl BlsPublicKey {
         Self(bls::PublicKey::from_aggregate(agg_pk))
     }
 
-    /// Access the inner `blst::min_pk::PublicKey`.
+    /// Access the inner `blst::min_sig::PublicKey`.
     pub fn inner(&self) -> &bls::PublicKey {
         &self.0
     }
@@ -644,7 +644,7 @@ impl<'de> Deserialize<'de> for BlsPublicKey {
         impl<'de> de::Visitor<'de> for BlsPkVisitor {
             type Value = BlsPublicKey;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("48-byte BLS public key")
+                f.write_str("96-byte BLS public key")
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
                 if v.len() != BLS_PUBLIC_KEY_SIZE {
@@ -698,7 +698,7 @@ impl BlsSigner {
         BlsPublicKey(self.0.sk_to_pk())
     }
 
-    /// Access the inner `blst::min_pk::SecretKey`.
+    /// Access the inner `blst::min_sig::SecretKey`.
     pub fn inner(&self) -> &bls::SecretKey {
         &self.0
     }
@@ -760,7 +760,7 @@ impl Drop for BlsSigner {
     }
 }
 
-/// Aggregate N partial BLS signatures into one 96-byte signature.
+/// Aggregate N partial BLS signatures into one 48-byte signature.
 #[allow(dead_code)]
 /// Aggregate pre-verified BLS partial signatures into a single signature.
 ///
@@ -775,7 +775,7 @@ pub fn bls_aggregate(sigs: &[&BlsSignatureBytes]) -> BlsSignatureBytes {
         .collect();
     let refs: Vec<&bls::Signature> = parsed.iter().collect();
     // Safety: false = skip subgroup check. All signatures were batch-verified
-    // before reaching aggregation, so they are guaranteed to be in G2.
+    // before reaching aggregation, so they are guaranteed to be in G1.
     let agg = bls::AggregateSignature::aggregate(&refs, false).expect("BLS aggregation");
     BlsSignatureBytes(agg.to_signature().to_bytes())
 }
