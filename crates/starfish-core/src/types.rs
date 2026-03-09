@@ -1437,7 +1437,10 @@ mod tests {
         );
 
         assert_eq!(block.acknowledgments(), vec![c, d]);
-        assert_eq!(block.header().acknowledgment_bls_signatures(), &[cert_c, cert_d]);
+        assert_eq!(
+            block.header().acknowledgment_bls_signatures(),
+            &[cert_c, cert_d]
+        );
     }
 
     #[test]
@@ -1584,7 +1587,10 @@ mod tests {
         let mut block = VerifiedBlock::new_with_signer(
             0,
             5,
-            vec![BlockReference::new_test(0, 3), BlockReference::new_test(0, 4)],
+            vec![
+                BlockReference::new_test(0, 3),
+                BlockReference::new_test(0, 4),
+            ],
             Some(BlockReference::new_test(0, 4)),
             vec![],
             0,
