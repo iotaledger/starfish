@@ -2704,9 +2704,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(block_sync_requests_sent{validator=~\"$validator\"}[1m])",
+          "expr": "sum by (validator) (rate(block_sync_requests_sent{validator=~\"$validator\"}[1m]))",
           "instant": false,
-          "legendFormat": "{{authority}}",
+          "legendFormat": "{{validator}}",
           "range": true,
           "refId": "A"
         }
@@ -5161,7 +5161,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 177
       },
@@ -5259,9 +5259,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 185
+        "w": 12,
+        "x": 12,
+        "y": 177
       },
       "id": 214,
       "options": {
