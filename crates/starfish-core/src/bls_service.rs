@@ -59,11 +59,12 @@ pub fn start_bls_service(
 }
 
 async fn run_bls_service(
-    mut aggregator: BlsCertificateAggregator,
+    aggregator: BlsCertificateAggregator,
     mut receiver: mpsc::Receiver<BlsServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<CertificateEvent>>,
     metrics: Arc<Metrics>,
 ) {
+    let mut aggregator = Some(aggregator);
     while let Some(msg) = receiver.recv().await {
         let _timer = metrics.bls_service_util.utilization_timer();
 
@@ -71,36 +72,62 @@ async fn run_bls_service(
         // multiple ProcessBlocks messages are verified in a single batch.
         let mut all_blocks = Vec::new();
         let mut dac_sigs = Vec::new();
-        collect_message(msg, &mut all_blocks, &mut dac_sigs, &mut aggregator);
+        collect_message(
+            msg,
+            &mut all_blocks,
+            &mut dac_sigs,
+            aggregator
+                .as_mut()
+                .expect("BLS aggregator should always be available"),
+        );
         while let Ok(msg) = receiver.try_recv() {
-            collect_message(msg, &mut all_blocks, &mut dac_sigs, &mut aggregator);
+            collect_message(
+                msg,
+                &mut all_blocks,
+                &mut dac_sigs,
+                aggregator
+                    .as_mut()
+                    .expect("BLS aggregator should always be available"),
+            );
         }
 
         let num_blocks = all_blocks.len();
         let num_dac_sigs = dac_sigs.len();
 
-        // Offload CPU-heavy verification to avoid blocking tokio workers.
-        // Inside, verify_batch_parallel fans out across BLS_VERIFICATION_WORKERS
-        // threads via std::thread::scope.
-        let events = tokio::task::block_in_place(|| {
-            let mut events = Vec::new();
+        let events = if num_blocks == 0 && num_dac_sigs == 0 {
+            Vec::new()
+        } else {
+            // Offload CPU-heavy verification to the blocking pool. Inside,
+            // verify_batch_parallel fans out across BLS_VERIFICATION_WORKERS
+            // threads via std::thread::scope.
+            let mut worker_aggregator = aggregator
+                .take()
+                .expect("BLS aggregator should always be available");
+            let metrics = metrics.clone();
+            let (worker_aggregator, events) = tokio::task::spawn_blocking(move || {
+                let mut events = Vec::new();
 
-            if !all_blocks.is_empty() {
-                let (new_events, batch_failures) = aggregator.add_blocks(&all_blocks);
-                if batch_failures > 0 {
-                    metrics
-                        .bls_batch_verification_failures_total
-                        .inc_by(batch_failures);
+                if !all_blocks.is_empty() {
+                    let (new_events, batch_failures) = worker_aggregator.add_blocks(&all_blocks);
+                    if batch_failures > 0 {
+                        metrics
+                            .bls_batch_verification_failures_total
+                            .inc_by(batch_failures);
+                    }
+                    events.extend(new_events);
                 }
-                events.extend(new_events);
-            }
 
-            if !dac_sigs.is_empty() {
-                events.extend(aggregator.add_standalone_dac_sigs_batch(dac_sigs));
-            }
+                if !dac_sigs.is_empty() {
+                    events.extend(worker_aggregator.add_standalone_dac_sigs_batch(dac_sigs));
+                }
 
+                (worker_aggregator, events)
+            })
+            .await
+            .expect("BLS blocking task should not panic");
+            aggregator = Some(worker_aggregator);
             events
-        });
+        };
 
         if num_blocks > 0 {
             metrics.bls_blocks_processed_total.inc_by(num_blocks as u64);
