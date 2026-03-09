@@ -90,6 +90,10 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         mimic_extra_latency: bool,
 
+        /// Overlay 10s latency on the f farthest peers (circular distance).
+        #[clap(long, action, default_value_t = false, global = true)]
+        adversarial_latency: bool,
+
         /// The set of loads to submit to the system (tx/s). Each load triggers
         /// a separate benchmark run. Setting a load to zero will not
         /// deploy any benchmark clients (useful to boot testbeds
@@ -178,6 +182,10 @@ pub enum Operation {
         /// Whether to add synthetic network latency to node defaults.
         #[clap(long, action, default_value_t = false, global = true)]
         mimic_extra_latency: bool,
+
+        /// Overlay 10s latency on the f farthest peers (circular distance).
+        #[clap(long, action, default_value_t = false, global = true)]
+        adversarial_latency: bool,
 
         /// Whether to skip testbed updates before running benchmarks.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -398,6 +406,7 @@ fn required_benchmark_instances(settings: &Settings, committee: usize) -> usize 
 fn load_benchmark_configs(
     settings: &Settings,
     mimic_extra_latency: bool,
+    adversarial_latency: bool,
     storage_backend: &Option<String>,
     transaction_mode: &Option<String>,
     dissemination_mode: &Option<String>,
@@ -406,6 +415,7 @@ fn load_benchmark_configs(
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
         None => NodeParameters::default_with_latency(mimic_extra_latency),
     };
+    node_parameters.adversarial_latency = adversarial_latency;
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }
@@ -662,6 +672,7 @@ async fn run<C: ServerProviderClient>(
             protocols,
             destroy_testbed_after,
             mimic_extra_latency,
+            adversarial_latency,
             use_internal_ip_addresses,
             loads,
             skip_testbed_update,
@@ -679,6 +690,7 @@ async fn run<C: ServerProviderClient>(
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
                 mimic_extra_latency,
+                adversarial_latency,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -789,6 +801,7 @@ async fn run<C: ServerProviderClient>(
             sweep_max_points,
             destroy_testbed_after,
             mimic_extra_latency,
+            adversarial_latency,
             use_internal_ip_addresses,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -803,6 +816,7 @@ async fn run<C: ServerProviderClient>(
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
                 mimic_extra_latency,
+                adversarial_latency,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,

@@ -83,6 +83,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
+        /// Overlay 10s latency on the f farthest peers (circular distance).
+        #[clap(long, default_value_t = false)]
+        adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         /// Directory to store validator data (default: current directory)
@@ -117,6 +120,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
+        /// Overlay 10s latency on the f farthest peers (circular distance).
+        #[clap(long, default_value_t = false)]
+        adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         #[clap(long, value_name = "INT", default_value_t = 600)]
@@ -171,6 +177,7 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             mimic_extra_latency: mimic_latency,
             uniform_latency_ms,
+            adversarial_latency,
             consensus: consensus_protocol,
             data_dir,
             base_ip,
@@ -185,6 +192,7 @@ async fn main() -> Result<()> {
                 byzantine_strategy,
                 mimic_latency,
                 uniform_latency_ms,
+                adversarial_latency,
                 consensus_protocol,
                 data_dir,
                 base_ip,
@@ -201,6 +209,7 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             mimic_extra_latency,
             uniform_latency_ms,
+            adversarial_latency,
             consensus: consensus_protocol,
             duration_secs,
             dissemination_mode,
@@ -209,6 +218,7 @@ async fn main() -> Result<()> {
             if let Some(latency) = uniform_latency_ms {
                 node_parameters.uniform_latency_ms = Some(latency);
             }
+            node_parameters.adversarial_latency = adversarial_latency;
             if let Some(ref mode) = dissemination_mode {
                 node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
@@ -312,6 +322,9 @@ async fn local_benchmark(
                 "Disabled"
             }
         );
+    }
+    if node_parameters.adversarial_latency {
+        println!("Adversarial Latency: 10s on f farthest peers");
     }
     println!("Duration: {duration_secs} seconds");
     println!("===========================\n");
@@ -498,6 +511,7 @@ async fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dryrun(
     authority: AuthorityIndex,
     committee_size: usize,
@@ -505,6 +519,7 @@ async fn dryrun(
     byzantine_strategy: String,
     mimic_latency: bool,
     uniform_latency_ms: Option<f64>,
+    adversarial_latency: bool,
     consensus_protocol: String,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
@@ -550,6 +565,7 @@ async fn dryrun(
     if let Some(latency) = uniform_latency_ms {
         node_parameters.uniform_latency_ms = Some(latency);
     }
+    node_parameters.adversarial_latency = adversarial_latency;
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }

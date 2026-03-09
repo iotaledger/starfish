@@ -691,6 +691,27 @@ fn generate_latency_table(n: usize, node_params: &crate::config::NodeParameters)
             }
         }
     }
+
+    // Adversarial latency overlay: for n = 3f+1, each node has f "far"
+    // peers at circular distance > f. Far connections get a flat 10s
+    // latency. The circular distance is symmetric by definition.
+    if node_params.adversarial_latency && n > 1 {
+        const ADVERSARIAL_LATENCY_MS: f64 = 10_000.0;
+        let f = (n - 1) / 3;
+        for (i, row) in resulting_table.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let diff = j.abs_diff(i);
+                let circ_dist = diff.min(n - diff);
+                if circ_dist > f {
+                    *cell = ADVERSARIAL_LATENCY_MS;
+                }
+            }
+        }
+    }
+
     resulting_table
 }
 
