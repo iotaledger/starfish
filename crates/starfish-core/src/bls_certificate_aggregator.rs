@@ -241,26 +241,24 @@ impl BlsCertificateAggregator {
             }
         }
 
-        if let Some(sig) = block.header().bls_leader_signature() {
-            if let Some(leader_ref) = self.block_leader_ref(block) {
-                if !self.leader_certs.contains_key(&leader_ref)
-                    && !self
-                        .leader_partial_sigs
-                        .get(&leader_ref)
-                        .is_some_and(|sigs| sigs.contains_key(&author))
-                {
-                    tasks.push(BlsVerificationTask {
-                        message: crypto::bls_leader_message(&leader_ref),
-                        signature: *sig,
-                        public_key,
-                        block_index: task_kinds.len(),
-                    });
-                    task_kinds.push(PartialTaskKind::Leader {
-                        leader_ref,
-                        signer: author,
-                        sig: *sig,
-                    });
-                }
+        if let Some((leader_ref, sig)) = block.header().voted_leader() {
+            if !self.leader_certs.contains_key(leader_ref)
+                && !self
+                    .leader_partial_sigs
+                    .get(leader_ref)
+                    .is_some_and(|sigs| sigs.contains_key(&author))
+            {
+                tasks.push(BlsVerificationTask {
+                    message: crypto::bls_leader_message(leader_ref),
+                    signature: *sig,
+                    public_key,
+                    block_index: task_kinds.len(),
+                });
+                task_kinds.push(PartialTaskKind::Leader {
+                    leader_ref: *leader_ref,
+                    signer: author,
+                    sig: *sig,
+                });
             }
         }
     }
@@ -301,18 +299,17 @@ impl BlsCertificateAggregator {
                 entries.push(AggregateTaskKind::Round(certified_round, *cert));
             }
 
-            if let Some(cert) = block.header().bls_aggregate_leader_signature() {
+            if let Some((leader_ref, cert)) = block.header().certified_leader() {
                 if cert.is_empty() {
                     continue;
                 }
-                let Some(leader_ref) = self.block_leader_ref(block) else {
-                    continue;
-                };
-                if self.leader_certs.contains_key(&leader_ref) || !seen_leaders.insert(leader_ref) {
+                if self.leader_certs.contains_key(leader_ref)
+                    || !seen_leaders.insert(*leader_ref)
+                {
                     continue;
                 }
                 let Some(task) =
-                    self.aggregate_same_message_task(crypto::bls_leader_message(&leader_ref), cert)
+                    self.aggregate_same_message_task(crypto::bls_leader_message(leader_ref), cert)
                 else {
                     continue;
                 };
@@ -320,7 +317,7 @@ impl BlsCertificateAggregator {
                     block_index: entries.len(),
                     ..task
                 });
-                entries.push(AggregateTaskKind::Leader(leader_ref, *cert));
+                entries.push(AggregateTaskKind::Leader(*leader_ref, *cert));
             }
 
             for (ack_ref, cert) in block
@@ -413,19 +410,6 @@ impl BlsCertificateAggregator {
             public_key: aggregate_public_key,
             block_index: 0,
         })
-    }
-
-    fn block_leader_ref(&self, block: &Data<VerifiedBlock>) -> Option<BlockReference> {
-        let leader_round = block.round().saturating_sub(1);
-        if leader_round == 0 {
-            return None;
-        }
-        let leader_authority = self.committee.elect_leader(leader_round);
-        block
-            .block_references()
-            .iter()
-            .find(|r| r.round == leader_round && r.authority == leader_authority)
-            .copied()
     }
 
     fn add_round_partial(

@@ -112,9 +112,10 @@ pub struct AckFields {
 /// BLS certificate data (StarfishL only).
 ///
 /// `round_signature` is always present — every StarfishL block signs the
-/// canonical round message. `leader_signature` is present when the block includes the
-/// previous-round leader. Aggregate fields carry the signature plus the
-/// contributing signer set once quorum is reached. `acknowledgment_signatures`
+/// canonical round message. `voted_leader` pairs the leader reference with the
+/// partial BLS sig when the block includes the previous-round leader.
+/// `certified_leader` pairs the leader ref with an aggregate certificate once
+/// quorum is reached. `acknowledgment_signatures`
 /// is parallel to the block's acknowledgment list.
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct BlsAggregateCertificate {
@@ -144,12 +145,14 @@ impl BlsAggregateCertificate {
 pub struct BlsFields {
     /// BLS round signature over the canonical round message.
     pub(crate) round_signature: BlsSignatureBytes,
-    /// BLS leader signature (present when the block includes the leader ref).
-    pub(crate) leader_signature: Option<BlsSignatureBytes>,
+    /// Leader this block votes for, paired with the partial BLS leader sig.
+    /// `None` when the block does not include the previous-round leader.
+    pub(crate) voted_leader: Option<(BlockReference, BlsSignatureBytes)>,
     /// Aggregate BLS round signature (populated by protocol layer).
     pub(crate) aggregate_round_signature: Option<BlsAggregateCertificate>,
-    /// Aggregate BLS leader signature (populated by protocol layer).
-    pub(crate) aggregate_leader_signature: Option<BlsAggregateCertificate>,
+    /// Certified leader: the leader block reference paired with its aggregate
+    /// BLS certificate. `None` when no leader is certified by this block.
+    pub(crate) certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     /// BLS DAC signatures, parallel to the acknowledgment list.
     pub(crate) acknowledgment_signatures: Vec<BlsAggregateCertificate>,
 }
@@ -272,8 +275,8 @@ impl BlockHeader {
         self.bls.as_ref().map(|b| &b.round_signature)
     }
 
-    pub fn bls_leader_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls.as_ref().and_then(|b| b.leader_signature.as_ref())
+    pub fn voted_leader(&self) -> Option<&(BlockReference, BlsSignatureBytes)> {
+        self.bls.as_ref().and_then(|b| b.voted_leader.as_ref())
     }
 
     pub fn bls_aggregate_round_signature(&self) -> Option<&BlsAggregateCertificate> {
@@ -282,10 +285,10 @@ impl BlockHeader {
             .and_then(|b| b.aggregate_round_signature.as_ref())
     }
 
-    pub fn bls_aggregate_leader_signature(&self) -> Option<&BlsAggregateCertificate> {
+    pub fn certified_leader(&self) -> Option<&(BlockReference, BlsAggregateCertificate)> {
         self.bls
             .as_ref()
-            .and_then(|b| b.aggregate_leader_signature.as_ref())
+            .and_then(|b| b.certified_leader.as_ref())
     }
 
     pub fn acknowledgment_bls_signatures(&self) -> &[BlsAggregateCertificate] {
@@ -621,7 +624,7 @@ impl VerifiedBlock {
         consensus_protocol: ConsensusProtocol,
         strong_vote: Option<bool>,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
-        aggregate_leader_sig: Option<BlsAggregateCertificate>,
+        certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -660,8 +663,8 @@ impl VerifiedBlock {
             // Round signature over the canonical round message.
             let round_signature = bs.sign_digest(&crypto::bls_round_message(round));
 
-            // Leader signature if we include the previous-round leader.
-            let leader_signature = (|| {
+            // Leader vote: sign the previous-round leader if we include it.
+            let voted_leader = (|| {
                 let committee = committee?;
                 let leader_round = round.checked_sub(1)?;
                 if leader_round == 0 {
@@ -672,7 +675,7 @@ impl VerifiedBlock {
                     .iter()
                     .find(|r| r.round == leader_round && r.authority == leader)?;
                 let msg = crypto::bls_leader_message(leader_ref);
-                Some(bs.sign_digest(&msg))
+                Some((*leader_ref, bs.sign_digest(&msg)))
             })();
 
             // Aggregated DAC certificates from the aggregator.
@@ -680,9 +683,9 @@ impl VerifiedBlock {
 
             BlsFields {
                 round_signature,
-                leader_signature,
+                voted_leader,
                 aggregate_round_signature: aggregate_round_sig,
-                aggregate_leader_signature: aggregate_leader_sig,
+                certified_leader,
                 acknowledgment_signatures,
             }
         });
