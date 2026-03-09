@@ -7,7 +7,7 @@
 //! in a single multi-pairing check. On failure, falls back to individual
 //! verification to identify bad signatures.
 
-use blst::min_pk as bls;
+use blst::min_sig as bls;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::crypto::{BLS_DST, BlsPublicKey, BlsSignatureBytes};
@@ -68,9 +68,9 @@ impl BlsBatchVerifier {
             let rand_bytes = rng.gen::<[u8; 8]>();
 
             // Convert to affine types for blst::Pairing which uses `dyn Any`
-            // downcasting (min_pk: pk=blst_p1_affine, sig=blst_p2_affine).
-            let pk_aff: &blst::blst_p1_affine = task.public_key.inner().into();
-            let sig_aff: &blst::blst_p2_affine = (&sig).into();
+            // downcasting (min_sig: pk=blst_p2_affine, sig=blst_p1_affine).
+            let pk_aff: &blst::blst_p2_affine = task.public_key.inner().into();
+            let sig_aff: &blst::blst_p1_affine = (&sig).into();
 
             let result = pairing.mul_n_aggregate(
                 pk_aff,

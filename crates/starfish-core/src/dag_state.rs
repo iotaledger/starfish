@@ -2139,7 +2139,7 @@ mod tests {
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
-        crypto::BlsSignatureBytes,
+        crypto::{BLS_SIGNATURE_SIZE, BlsSignatureBytes},
         metrics::Metrics,
         types::{AuthoritySet, BlockReference, BlsAggregateCertificate},
     };
@@ -2271,7 +2271,8 @@ mod tests {
         };
         let mut signers = AuthoritySet::default();
         signers.insert(0);
-        let cert = BlsAggregateCertificate::new(BlsSignatureBytes([1u8; 96]), signers);
+        let cert =
+            BlsAggregateCertificate::new(BlsSignatureBytes([1u8; BLS_SIGNATURE_SIZE]), signers);
 
         assert_eq!(
             dag_state.dac_certificate_state(&unchecked),
