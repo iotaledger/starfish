@@ -155,6 +155,7 @@ mod tests {
             authority,
             1,
             vec![],
+            None,
             vec![],
             0,
             signer,
