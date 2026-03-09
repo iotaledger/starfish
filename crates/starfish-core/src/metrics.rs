@@ -85,7 +85,9 @@ pub struct Metrics {
     pub transaction_committed_latency_squared_micros: IntCounter,
 
     pub proposed_block_size_bytes: HistogramSender<usize>,
+    pub proposed_header_size_bytes: HistogramSender<usize>,
     pub proposed_transaction_size_bytes: HistogramSender<usize>,
+    pub block_bundle_size_bytes: HistogramSender<usize>,
     pub proposed_block_refs: Histogram,
     pub proposed_block_acks: Histogram,
     pub created_own_blocks: IntCounter,
@@ -131,7 +133,9 @@ pub struct MetricReporter {
     pub transaction_committed_latency: parking_lot::Mutex<HistogramReporter<Duration>>,
     pub block_committed_latency: parking_lot::Mutex<HistogramReporter<Duration>>,
     pub proposed_block_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
+    pub proposed_header_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
     pub proposed_transaction_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
+    pub block_bundle_size_bytes: parking_lot::Mutex<HistogramReporter<usize>>,
     pub connection_latency: parking_lot::Mutex<VecHistogramReporter<Duration>>,
     pub global_in_memory_blocks: IntGauge,
     pub global_in_memory_blocks_bytes: IntGauge,
@@ -176,7 +180,9 @@ impl Metrics {
         let (block_committed_latency_hist, block_committed_latency) = histogram();
 
         let (proposed_block_size_bytes_hist, proposed_block_size_bytes) = histogram();
+        let (proposed_header_size_bytes_hist, proposed_header_size_bytes) = histogram();
         let (proposed_transaction_size_bytes_hist, proposed_transaction_size_bytes) = histogram();
+        let (block_bundle_size_bytes_hist, block_bundle_size_bytes) = histogram();
 
         let committee_size = committee.map(Committee::len).unwrap_or_default();
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
@@ -206,11 +212,27 @@ impl Metrics {
                 "proposed_block_size_bytes",
             )),
 
+            proposed_header_size_bytes: parking_lot::Mutex::new(
+                HistogramReporter::new_in_registry(
+                    proposed_header_size_bytes_hist,
+                    registry,
+                    "proposed_header_size_bytes",
+                ),
+            ),
+
             proposed_transaction_size_bytes: parking_lot::Mutex::new(
                 HistogramReporter::new_in_registry(
                     proposed_transaction_size_bytes_hist,
                     registry,
                     "proposed_transaction_size_bytes",
+                ),
+            ),
+
+            block_bundle_size_bytes: parking_lot::Mutex::new(
+                HistogramReporter::new_in_registry(
+                    block_bundle_size_bytes_hist,
+                    registry,
+                    "block_bundle_size_bytes",
                 ),
             ),
 
@@ -570,7 +592,9 @@ impl Metrics {
             .unwrap(),
 
             proposed_block_size_bytes,
+            proposed_header_size_bytes,
             proposed_transaction_size_bytes,
+            block_bundle_size_bytes,
             proposed_block_refs: {
                 let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
                 register_histogram_with_registry!(
@@ -974,9 +998,21 @@ impl MetricReporter {
         }
 
         {
+            let mut header_size = self.proposed_header_size_bytes.lock();
+            header_size.clear_receive_all();
+            header_size.report();
+        }
+
+        {
             let mut tx_size = self.proposed_transaction_size_bytes.lock();
             tx_size.clear_receive_all();
             tx_size.report();
+        }
+
+        {
+            let mut bundle_size = self.block_bundle_size_bytes.lock();
+            bundle_size.clear_receive_all();
+            bundle_size.report();
         }
 
         {
@@ -992,9 +1028,11 @@ impl MetricReporter {
             .clear_receive_all();
         self.block_committed_latency.lock().clear_receive_all();
         self.proposed_block_size_bytes.lock().clear_receive_all();
+        self.proposed_header_size_bytes.lock().clear_receive_all();
         self.proposed_transaction_size_bytes
             .lock()
             .clear_receive_all();
+        self.block_bundle_size_bytes.lock().clear_receive_all();
         self.connection_latency.lock().clear_receive_all();
     }
 }

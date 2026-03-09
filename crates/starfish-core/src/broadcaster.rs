@@ -195,15 +195,15 @@ where
             let mut candidates = Vec::new();
             'commit_loop: for commit in &committed_dags {
                 for (i, block) in commit.0.blocks.iter().enumerate() {
-                    if block.round() > 0 {
-                        if peer_can_serve_missing_data(
+                    if block.round() > 0
+                        && peer_can_serve_missing_data(
                             consensus_protocol,
                             &commit.1[i],
                             own_id,
                             peer_id,
-                        ) {
-                            candidates.push(*block.reference());
-                        }
+                        )
+                    {
+                        candidates.push(*block.reference());
                     }
                 }
                 if candidates.len() >= upper_limit_request_size {
@@ -993,6 +993,10 @@ where
         useful_shards_authors: useful_shards,
     };
 
+    if let Ok(size) = bincode::serialized_size(&batch) {
+        metrics.block_bundle_size_bytes.observe(size as usize);
+    }
+
     tracing::debug!(
         "Starfish batch to {peer}: {} full, {} headers, {} shards",
         batch.full_blocks.len(),
@@ -1076,6 +1080,10 @@ where
         useful_headers_authors: useful_headers,
         useful_shards_authors: useful_shards,
     };
+
+    if let Ok(size) = bincode::serialized_size(&batch) {
+        metrics.block_bundle_size_bytes.observe(size as usize);
+    }
 
     tracing::debug!(
         "Starfish causal batch to {peer}: {} full, {} headers, {} shards",
