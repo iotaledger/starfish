@@ -7,12 +7,15 @@
 //! batch verification and aggregation via [`BlsCertificateAggregator`], and
 //! sends accumulated [`CertificateEvent`]s to the Core thread.
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use crate::{
     bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     crypto::BlsSignatureBytes,
     data::Data,
+    metrics::{Metrics, UtilizationTimerExt},
     types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock},
 };
 
@@ -50,24 +53,54 @@ pub fn start_bls_service(
     aggregator: BlsCertificateAggregator,
     receiver: mpsc::Receiver<BlsServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<CertificateEvent>>,
+    metrics: Arc<Metrics>,
 ) {
-    tokio::spawn(run_bls_service(aggregator, receiver, event_tx));
+    tokio::spawn(run_bls_service(aggregator, receiver, event_tx, metrics));
 }
 
 async fn run_bls_service(
     mut aggregator: BlsCertificateAggregator,
     mut receiver: mpsc::Receiver<BlsServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<CertificateEvent>>,
+    metrics: Arc<Metrics>,
 ) {
     while let Some(msg) = receiver.recv().await {
+        let _timer = metrics.bls_service_util.utilization_timer();
         let mut events = Vec::new();
 
         // Process the first message.
-        process_message(&mut aggregator, msg, &mut events);
+        process_message(&mut aggregator, msg, &mut events, &metrics);
 
         // Drain any additional queued messages for batching.
         while let Ok(msg) = receiver.try_recv() {
-            process_message(&mut aggregator, msg, &mut events);
+            process_message(&mut aggregator, msg, &mut events, &metrics);
+        }
+
+        // Count completed certificates by type.
+        for event in &events {
+            match event {
+                CertificateEvent::Round(..) => {
+                    metrics
+                        .bls_certificates_total
+                        .with_label_values(&["round"])
+                        .inc();
+                }
+                CertificateEvent::Leader(..) => {
+                    metrics
+                        .bls_certificates_total
+                        .with_label_values(&["leader"])
+                        .inc();
+                }
+                CertificateEvent::Dac(..) => {
+                    metrics
+                        .bls_certificates_total
+                        .with_label_values(&["dac"])
+                        .inc();
+                }
+                CertificateEvent::DacRejected(..) => {
+                    metrics.bls_dac_rejections_total.inc();
+                }
+            }
         }
 
         // Send accumulated events to the Core thread.
@@ -81,12 +114,23 @@ fn process_message(
     aggregator: &mut BlsCertificateAggregator,
     msg: BlsServiceMessage,
     events: &mut Vec<CertificateEvent>,
+    metrics: &Metrics,
 ) {
     match msg {
         BlsServiceMessage::ProcessBlocks(blocks) => {
-            events.extend(aggregator.add_blocks(&blocks));
+            metrics
+                .bls_blocks_processed_total
+                .inc_by(blocks.len() as u64);
+            let (new_events, batch_failures) = aggregator.add_blocks(&blocks);
+            if batch_failures > 0 {
+                metrics
+                    .bls_batch_verification_failures_total
+                    .inc_by(batch_failures);
+            }
+            events.extend(new_events);
         }
         BlsServiceMessage::DacPartialSig(block_ref, signer, sig) => {
+            metrics.bls_standalone_dac_sigs_total.inc();
             events.extend(aggregator.add_standalone_dac_sig(block_ref, signer, sig));
         }
         BlsServiceMessage::Cleanup(round) => {
