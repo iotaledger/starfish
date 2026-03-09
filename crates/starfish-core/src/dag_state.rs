@@ -194,6 +194,8 @@ struct DagStateInner {
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with DAC certificates that failed BLS verification.
     rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
+    /// Protocol variant, needed to gate ack queueing on DAC certificates.
+    consensus_protocol: ConsensusProtocol,
 }
 
 impl DagState {
@@ -257,6 +259,7 @@ impl DagState {
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            consensus_protocol,
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -652,6 +655,7 @@ impl DagState {
     }
 
     /// Mark a block as having a confirmed BLS DAC certificate.
+    /// If data is already available, the acknowledgment is queued immediately.
     pub fn mark_dac_certified(
         &self,
         block_ref: BlockReference,
@@ -661,9 +665,13 @@ impl DagState {
         if inner.rejected_dac_certificates[block_ref.authority as usize].contains(&block_ref) {
             return false;
         }
-        inner.dac_certificates[block_ref.authority as usize]
+        let is_new = inner.dac_certificates[block_ref.authority as usize]
             .insert(block_ref, certificate)
-            .is_none()
+            .is_none();
+        if is_new {
+            inner.maybe_queue_ack(block_ref);
+        }
+        is_new
     }
 
     /// Mark a block as carrying a DAC certificate that failed BLS verification.
@@ -1053,12 +1061,10 @@ impl DagState {
             return true;
         }
 
-        // Mark data-available + queue acknowledgment.
+        // Mark data-available + conditionally queue acknowledgment.
         if !inner.data_availability[auth].contains(&block_ref) {
             inner.data_availability[auth].insert(block_ref);
-            if let Some(pending_acknowledgment) = inner.pending_acknowledgment.as_mut() {
-                pending_acknowledgment.push(block_ref);
-            }
+            inner.maybe_queue_ack(block_ref);
         }
         *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
         true
@@ -1648,10 +1654,27 @@ impl DagStateInner {
         let auth = r.authority as usize;
         if block.transactions().is_some() && !self.data_availability[auth].contains(r) {
             self.data_availability[auth].insert(*r);
-            if let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() {
-                pending_acknowledgment.push(*r);
-            }
+            self.maybe_queue_ack(*r);
         }
+    }
+
+    /// Queue an acknowledgment for `block_ref` only when all prerequisites are
+    /// met. For StarfishL the block must be both data-available and
+    /// DAC-certified; other protocols only require data availability.
+    fn maybe_queue_ack(&mut self, block_ref: BlockReference) {
+        let Some(pending) = self.pending_acknowledgment.as_mut() else {
+            return;
+        };
+        let auth = block_ref.authority as usize;
+        if !self.data_availability[auth].contains(&block_ref) {
+            return;
+        }
+        if self.consensus_protocol == ConsensusProtocol::StarfishL
+            && !self.dac_certificates[auth].contains_key(&block_ref)
+        {
+            return;
+        }
+        pending.push(block_ref);
     }
 
     pub fn get_pending_acknowledgment(&mut self, round_number: RoundNumber) -> Vec<BlockReference> {
