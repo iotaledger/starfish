@@ -112,7 +112,7 @@ pub enum Operation {
         skip_testbed_configuration: bool,
 
         /// Consensus to deploy. Available options:
-        /// starfish | starfish-s | starfish-pull |
+        /// starfish | starfish-s | starfish-l | starfish-pull |
         /// mysticeti | cordial-miners
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,

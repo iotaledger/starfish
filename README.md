@@ -10,7 +10,7 @@ a partially synchronous BFT protocol in which validators employ an uncertified D
 The theoretical description of Starfish is available
 at https://eprint.iacr.org/2025/567.
 
-Three versions of Starfish are available in this repository:
+Four versions of Starfish are available in this repository:
 
 - **`starfish`**: Theory-aligned version
   - Higher bandwidth usage (up to 4x)
@@ -23,6 +23,11 @@ Three versions of Starfish are available in this repository:
 - **`starfish-s`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
   - Lower latency when validators hold full leader payloads
+
+- **`starfish-l`**: BLS-optimized variant
+  - Uses BLS aggregate signatures to reduce communication complexity
+  - Embeds compact aggregate certificates (round, leader, data availability) in block headers
+  - Async BLS verification service offloads signature processing from the critical path
 
 The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
 
@@ -165,7 +170,7 @@ NUM_VALIDATORS=10 DESIRED_TPS=100 CONSENSUS=starfish-s \
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
 | `DESIRED_TPS` | 100 | Target transactions per second |
-| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-pull`, `cordial-miners`, `mysticeti` |
+| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-l`, `starfish-pull`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
 | `TEST_TIME` | 300 | Duration in seconds |
