@@ -9,7 +9,7 @@ use crate::{
     committee::Committee,
     crypto::TransactionsCommitment,
     encoder::{Encoder, ShardEncoder},
-    types::{AuthorityIndex, BlockHeader, ProvableShard, Shard, TransactionData},
+    types::{AuthorityIndex, ProvableShard, Shard, TransactionData},
 };
 
 pub type Decoder = ReedSolomonDecoder;
@@ -22,7 +22,7 @@ pub fn decode_shards(
     decoder: &mut Decoder,
     committee: &Committee,
     encoder: &mut Encoder,
-    header: &BlockHeader,
+    merkle_root: TransactionsCommitment,
     shards: &[Option<Shard>],
     own_id: AuthorityIndex,
 ) -> Option<(TransactionData, ProvableShard)> {
@@ -78,7 +78,7 @@ pub fn decode_shards(
             own_id as usize,
         );
 
-    if computed_merkle_root == header.merkle_root() {
+    if computed_merkle_root == merkle_root {
         let transactions =
             reconstruct_transactions_from_shards(&recovered_transactions, info_length);
         let own_shard = ProvableShard::new(
@@ -204,7 +204,7 @@ mod tests {
             &mut decoder,
             &committee,
             &mut encoder,
-            block.header(),
+            block.merkle_root(),
             &shard_slots,
             own_id,
         );
@@ -253,7 +253,7 @@ mod tests {
             &mut decoder,
             &committee,
             &mut encoder,
-            block.header(),
+            block.merkle_root(),
             &shard_slots,
             own_id,
         );
@@ -296,7 +296,7 @@ mod tests {
             &mut decoder,
             &committee,
             &mut encoder,
-            block.header(),
+            block.merkle_root(),
             &shard_slots,
             own_id,
         );

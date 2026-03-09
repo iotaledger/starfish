@@ -24,11 +24,11 @@ use tokio::{
 
 use crate::{
     committee::Committee,
+    crypto::TransactionsCommitment,
     decoder,
     metrics::Metrics,
     types::{
-        AuthorityIndex, BlockHeader, BlockReference, ReconstructedTransactionData, RoundNumber,
-        Shard,
+        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, Shard,
     },
 };
 
@@ -36,7 +36,7 @@ const EVICTION_TIMEOUT: Duration = Duration::from_secs(1);
 const SEND_TO_CORE_TIMEOUT: Duration = Duration::from_millis(20);
 const NUMBER_OF_RECONSTRUCTION_WORKERS: usize = 5;
 
-type ReconstructionJob = (BlockReference, BlockHeader, Vec<Option<Shard>>);
+type ReconstructionJob = (BlockReference, TransactionsCommitment, Vec<Option<Shard>>);
 
 /// Message sent from connection handlers to the shard reconstructor.
 #[derive(Clone, Debug)]
@@ -46,8 +46,8 @@ pub enum ShardMessage {
         block_reference: BlockReference,
         shard: Shard,
         shard_index: usize,
-        /// Block header needed to initialize the accumulator.
-        block_header: Box<BlockHeader>,
+        /// Merkle root (transactions commitment) for verification after reconstruction.
+        merkle_root: TransactionsCommitment,
     },
     /// Full block with transactions arrived — stop collecting shards.
     FullBlock(BlockReference),
@@ -55,14 +55,14 @@ pub enum ShardMessage {
 
 /// Collects shards for a single block until reconstruction threshold is met.
 struct ShardAccumulator {
-    header: BlockHeader,
+    merkle_root: TransactionsCommitment,
     shards: Vec<Option<Shard>>,
     shard_count: usize,
 }
 
 impl ShardAccumulator {
     fn new(
-        header: BlockHeader,
+        merkle_root: TransactionsCommitment,
         committee_size: usize,
         initial_shard: Option<(Shard, usize)>,
     ) -> Self {
@@ -73,7 +73,7 @@ impl ShardAccumulator {
             shard_count = 1;
         }
         Self {
-            header,
+            merkle_root,
             shards,
             shard_count,
         }
@@ -102,12 +102,12 @@ pub type DecodedBlocks = Vec<ReconstructedTransactionData>;
 
 /// Public handle for the running shard reconstructor.
 pub struct ShardReconstructorHandle {
-    shard_message_sender: Sender<ShardMessage>,
+    shard_message_sender: Sender<Vec<ShardMessage>>,
     join_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ShardReconstructorHandle {
-    pub fn shard_message_sender(&self) -> Sender<ShardMessage> {
+    pub fn shard_message_sender(&self) -> Sender<Vec<ShardMessage>> {
         self.shard_message_sender.clone()
     }
 
@@ -137,8 +137,8 @@ struct ShardReconstructor {
     shard_accumulators: BTreeMap<BlockReference, ShardAccumulator>,
     processed_blocks: BTreeSet<BlockReference>,
     reconstruction_queue: AHashSet<BlockReference>,
-    // Incoming shard messages
-    shard_rx: Receiver<ShardMessage>,
+    // Incoming shard messages (batched)
+    shard_rx: Receiver<Vec<ShardMessage>>,
     // Worker pool channels
     ready_tx: Sender<ReconstructionJob>,
     ready_rx: Arc<Mutex<Receiver<ReconstructionJob>>>,
@@ -231,12 +231,12 @@ impl ShardReconstructor {
                     };
 
                     match job {
-                        Some((block_reference, header, shards)) => {
+                        Some((block_reference, merkle_root, shards)) => {
                             let decoded = decoder::decode_shards(
                                 &mut rs_decoder,
                                 &committee,
                                 &mut encoder,
-                                &header,
+                                merkle_root,
                                 &shards,
                                 own_id,
                             );
@@ -292,9 +292,13 @@ impl ShardReconstructor {
 
         loop {
             tokio::select! {
-                msg = self.shard_rx.recv() => {
-                    match msg {
-                        Some(msg) => self.handle_message(msg).await,
+                msgs = self.shard_rx.recv() => {
+                    match msgs {
+                        Some(msgs) => {
+                            for msg in msgs {
+                                self.handle_message(msg).await;
+                            }
+                        }
                         None => {
                             tracing::debug!("Shard channel closed, shutting down reconstructor");
                             break;
@@ -328,7 +332,7 @@ impl ShardReconstructor {
                 block_reference,
                 shard,
                 shard_index,
-                block_header,
+                merkle_root,
             } => {
                 if self.processed_blocks.contains(&block_reference)
                     || self.reconstruction_queue.contains(&block_reference)
@@ -344,7 +348,7 @@ impl ShardReconstructor {
                     .shard_accumulators
                     .entry(block_reference)
                     .or_insert_with(|| {
-                        ShardAccumulator::new(*block_header, self.committee_size, None)
+                        ShardAccumulator::new(merkle_root, self.committee_size, None)
                     });
                 acc.update_with_shard(shard, shard_index);
 
@@ -356,7 +360,7 @@ impl ShardReconstructor {
                     self.reconstruction_queue.insert(block_reference);
                     if self
                         .ready_tx
-                        .send((block_reference, acc.header, acc.shards))
+                        .send((block_reference, acc.merkle_root, acc.shards))
                         .await
                         .is_err()
                     {
@@ -495,7 +499,7 @@ mod tests {
         let (block, shards) =
             make_test_block_and_shards(transactions, 0, &committee, &mut encoder, &signers[0]);
 
-        let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
+        let mut acc = ShardAccumulator::new(block.merkle_root(), committee_size, None);
         assert!(!acc.is_ready(info_length));
 
         acc.update_with_shard(shards[1].clone(), 1);
@@ -517,7 +521,7 @@ mod tests {
         let (block, shards) =
             make_test_block_and_shards(transactions, 0, &committee, &mut encoder, &signers[0]);
 
-        let mut acc = ShardAccumulator::new(block.header().clone(), committee_size, None);
+        let mut acc = ShardAccumulator::new(block.merkle_root(), committee_size, None);
         acc.update_with_shard(shards[0].clone(), 0);
         acc.update_with_shard(shards[0].clone(), 0); // duplicate
         assert!(!acc.is_ready(info_length));
@@ -555,17 +559,17 @@ mod tests {
         let block_ref = *block.reference();
         let sender = handle.shard_message_sender();
 
-        for (i, shard) in shards[..info_length].iter().enumerate() {
-            sender
-                .send(ShardMessage::Shard {
-                    block_reference: block_ref,
-                    shard: shard.clone(),
-                    shard_index: i,
-                    block_header: Box::new(block.header().clone()),
-                })
-                .await
-                .unwrap();
-        }
+        let batch: Vec<_> = shards[..info_length]
+            .iter()
+            .enumerate()
+            .map(|(i, shard)| ShardMessage::Shard {
+                block_reference: block_ref,
+                shard: shard.clone(),
+                shard_index: i,
+                merkle_root: block.merkle_root(),
+            })
+            .collect();
+        sender.send(batch).await.unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(5), decoded_rx.recv()).await;
         assert!(
@@ -619,31 +623,32 @@ mod tests {
         let sender = handle.shard_message_sender();
 
         sender
-            .send(ShardMessage::Shard {
+            .send(vec![ShardMessage::Shard {
                 block_reference: block_ref,
                 shard: shards[0].clone(),
                 shard_index: 0,
-                block_header: Box::new(block.header().clone()),
-            })
+                merkle_root: block.merkle_root(),
+            }])
             .await
             .unwrap();
 
         sender
-            .send(ShardMessage::FullBlock(block_ref))
+            .send(vec![ShardMessage::FullBlock(block_ref)])
             .await
             .unwrap();
 
-        for (i, shard) in shards.iter().enumerate().skip(1) {
-            sender
-                .send(ShardMessage::Shard {
-                    block_reference: block_ref,
-                    shard: shard.clone(),
-                    shard_index: i,
-                    block_header: Box::new(block.header().clone()),
-                })
-                .await
-                .unwrap();
-        }
+        let remaining: Vec<_> = shards
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, shard)| ShardMessage::Shard {
+                block_reference: block_ref,
+                shard: shard.clone(),
+                shard_index: i,
+                merkle_root: block.merkle_root(),
+            })
+            .collect();
+        sender.send(remaining).await.unwrap();
 
         let result = tokio::time::timeout(Duration::from_millis(200), decoded_rx.recv()).await;
         assert!(
