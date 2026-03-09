@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    config::StorageBackend,
+    config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
@@ -78,6 +78,25 @@ impl ConsensusProtocol {
                 | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::StarfishS
         )
+    }
+
+    pub fn default_dissemination_mode(self) -> DisseminationMode {
+        match self {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
+                DisseminationMode::Pull
+            }
+            ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => DisseminationMode::PushCausal,
+        }
+    }
+
+    pub fn resolve_dissemination_mode(self, configured: DisseminationMode) -> DisseminationMode {
+        match configured {
+            DisseminationMode::ProtocolDefault => self.default_dissemination_mode(),
+            other => other,
+        }
     }
 }
 
@@ -681,7 +700,8 @@ impl DagState {
         if inner.dac_certificates[block_ref.authority as usize].contains_key(&block_ref) {
             return false;
         }
-        let is_new = inner.rejected_dac_certificates[block_ref.authority as usize].insert(block_ref);
+        let is_new =
+            inner.rejected_dac_certificates[block_ref.authority as usize].insert(block_ref);
         if is_new {
             tracing::debug!("Rejected DAC for {}", block_ref);
         }
@@ -826,11 +846,7 @@ impl DagState {
             .all(|auth| blocks.iter().any(|b| b.authority() == *auth))
     }
 
-    pub fn has_block_quorum_at_round(
-        &self,
-        round: RoundNumber,
-        committee: &Committee,
-    ) -> bool {
+    pub fn has_block_quorum_at_round(&self, round: RoundNumber, committee: &Committee) -> bool {
         let inner = self.dag_state_inner.read();
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
@@ -2123,7 +2139,7 @@ mod tests {
     use super::{CACHED_ROUNDS, ConsensusProtocol, DagState};
     use crate::{
         committee::Committee,
-        config::StorageBackend,
+        config::{DisseminationMode, StorageBackend},
         crypto::BlsSignatureBytes,
         metrics::Metrics,
         types::{AuthoritySet, BlockReference, BlsAggregateCertificate},
@@ -2269,5 +2285,34 @@ mod tests {
             super::DacCertificateVerificationState::Verified
         );
         assert!(!dag_state.mark_dac_certified(rejected, cert));
+    }
+
+    #[test]
+    fn consensus_protocol_resolves_dissemination_defaults() {
+        assert_eq!(
+            ConsensusProtocol::Mysticeti.default_dissemination_mode(),
+            DisseminationMode::Pull
+        );
+        assert_eq!(
+            ConsensusProtocol::StarfishPull.default_dissemination_mode(),
+            DisseminationMode::Pull
+        );
+        assert_eq!(
+            ConsensusProtocol::CordialMiners.default_dissemination_mode(),
+            DisseminationMode::PushCausal
+        );
+        assert_eq!(
+            ConsensusProtocol::Starfish.default_dissemination_mode(),
+            DisseminationMode::PushCausal
+        );
+        assert_eq!(
+            ConsensusProtocol::StarfishL
+                .resolve_dissemination_mode(DisseminationMode::ProtocolDefault),
+            DisseminationMode::PushCausal
+        );
+        assert_eq!(
+            ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushUseful),
+            DisseminationMode::PushUseful
+        );
     }
 }
