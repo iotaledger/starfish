@@ -4,12 +4,12 @@
 # Configuration Parameters
 #----------------------------------------------------------------------
 # Recommend < physical cores. Hard limit is 128
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}
-DESIRED_TPS=${DESIRED_TPS:-1000}
+NUM_VALIDATORS=${NUM_VALIDATORS:-16}
+DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-s, starfish-l, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}
+CONSENSUS=${CONSENSUS:-starfish-l}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, equivocating-chains-bomb, random-drop

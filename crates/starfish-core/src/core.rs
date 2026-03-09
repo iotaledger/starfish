@@ -438,6 +438,27 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
+        let voted_leader_ref = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
+        {
+            self.select_starfish_l_voted_leader(clock_round)
+        } else {
+            None
+        };
+
+        // StarfishL must not drain the pending frontier before the previous
+        // round certificate is available, otherwise timeout retries can rebuild
+        // the same round from a truncated queue.
+        let aggregate_round_sig =
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                if clock_round <= 1 {
+                    None
+                } else {
+                    Some(self.dag_state.round_certificate(clock_round - 1)?)
+                }
+            } else {
+                None
+            };
+
         let pending_transactions = timed!(
             self.metrics,
             "Core::new_block::get_pending_transactions",
@@ -446,14 +467,8 @@ impl<H: BlockHandler> Core<H> {
         let (mut transactions, block_references) = timed!(
             self.metrics,
             "Core::new_block::collect_transactions_and_references",
-            self.collect_transactions_and_references(pending_transactions)
+            self.collect_transactions_and_references(pending_transactions, clock_round)
         );
-        let voted_leader_ref = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
-        {
-            self.select_starfish_l_voted_leader(clock_round)
-        } else {
-            None
-        };
         timed!(
             self.metrics,
             "Core::new_block::prepare_last_blocks",
@@ -481,18 +496,10 @@ impl<H: BlockHandler> Core<H> {
             self.calculate_authority_bounds(number_of_blocks_to_create)
         );
 
-        // For StarfishL: require aggregate round/leader certs before creating block.
-        let (aggregate_round_sig, certified_leader) =
+        let certified_leader =
             if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-                // Round cert for clock_round - 1 (the round we just completed).
-                let round_cert = if clock_round <= 1 {
-                    None
-                } else {
-                    Some(self.dag_state.round_certificate(clock_round - 1)?)
-                };
-
                 // Leader cert for leader of clock_round - 1 (if we include that leader).
-                let certified_leader = if clock_round <= 2 {
+                if clock_round <= 2 {
                     None
                 } else {
                     let leader_round = clock_round - 1;
@@ -505,11 +512,9 @@ impl<H: BlockHandler> Core<H> {
                                 .leader_certificate(leader_ref)
                                 .map(|cert| (*leader_ref, cert))
                         })
-                };
-
-                (round_cert, certified_leader)
+                }
             } else {
-                (None, None)
+                None
             };
 
         // Create and store blocks
@@ -570,6 +575,7 @@ impl<H: BlockHandler> Core<H> {
     fn collect_transactions_and_references(
         &self,
         pending: Vec<MetaTransaction>,
+        block_round: RoundNumber,
     ) -> (Vec<BaseTransaction>, Vec<BlockReference>) {
         let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
@@ -581,7 +587,7 @@ impl<H: BlockHandler> Core<H> {
                 MetaTransaction::Include(include) => pending_refs.push(include),
             }
         }
-        let block_references = self.compress_pending_block_references(&pending_refs);
+        let block_references = self.compress_pending_block_references(&pending_refs, block_round);
         (transactions, block_references)
     }
 
@@ -678,6 +684,8 @@ impl<H: BlockHandler> Core<H> {
             }
         }
         block_references.extend(block_references_without_own.iter().cloned());
+        let mut seen_references = AHashSet::new();
+        block_references.retain(|reference| seen_references.insert(*reference));
 
         let prev_round_ref_count = block_references
             .iter()
@@ -779,14 +787,27 @@ impl<H: BlockHandler> Core<H> {
     fn compress_pending_block_references(
         &self,
         pending_refs: &[BlockReference],
+        block_round: RoundNumber,
     ) -> Vec<BlockReference> {
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
-            && self
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+            if self
                 .committee
-                .elect_leader(self.dag_state.threshold_clock_round())
+                .elect_leader(block_round)
                 != self.authority
-        {
-            return Vec::new();
+            {
+                return Vec::new();
+            }
+
+            // StarfishL leaders keep the full frontier so their header preserves
+            // the direct previous-round quorum required by the protocol.
+            let mut seen_references = AHashSet::new();
+            return pending_refs
+                .iter()
+                .copied()
+                .filter(|reference| {
+                    reference.authority != self.authority && seen_references.insert(*reference)
+                })
+                .collect();
         }
 
         let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();

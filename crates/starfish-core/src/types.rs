@@ -994,7 +994,7 @@ impl VerifiedBlock {
                         self.header.block_references.len() <= 2,
                         "StarfishL non-leader block may reference only the author's previous block and the previous-round leader"
                     );
-                    let self_ref = *self
+                    let _self_ref = *self
                         .header
                         .block_references
                         .iter()
@@ -1004,10 +1004,6 @@ impl VerifiedBlock {
                                 "StarfishL non-leader block must reference its own previous block"
                             )
                         })?;
-                    ensure!(
-                        self_ref.round + 1 == round,
-                        "StarfishL non-leader block must reference the immediately previous own round"
-                    );
                 }
                 if let Some((leader_ref, _)) = self.header.voted_leader() {
                     ensure!(
@@ -1495,6 +1491,48 @@ mod tests {
         assert!(err.to_string().contains(
             "StarfishL non-leader block may reference only the author's previous block and the previous-round leader"
         ));
+    }
+
+    #[test]
+    fn verifies_starfish_l_non_leader_may_reference_latest_own_block_from_earlier_round() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let bls_signers = BlsSigner::new_for_test(committee.len());
+        let info_length = committee.info_length();
+        let parity_length = committee.len() - info_length;
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let transactions = vec![];
+        let encoded_transactions =
+            encoder.encode_transactions(&transactions, info_length, parity_length);
+        let mut block = VerifiedBlock::new_with_signer(
+            0,
+            5,
+            vec![BlockReference::new_test(0, 3), BlockReference::new_test(0, 4)],
+            Some(BlockReference::new_test(0, 4)),
+            vec![],
+            0,
+            &signers[0],
+            Some(&bls_signers[0]),
+            Some(committee.as_ref()),
+            vec![],
+            transactions,
+            Some(encoded_transactions),
+            ConsensusProtocol::StarfishL,
+            None,
+            None,
+            None,
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::StarfishL,
+            )
+            .expect("non-leader StarfishL block should allow skipped own rounds");
     }
 }
 
