@@ -264,13 +264,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn start(&mut self) {
-        // Data requester is needed in theory only for StarfishPull. However, we enable
-        // it for Starfish as well because of the practical way we update the
-        // DAG known by other validators
+        // Data requester is needed for Starfish protocols because of the practical
+        // way we update the DAG known by other validators
         if matches!(
             self.consensus_protocol,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
         ) {
@@ -394,8 +392,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                     blocks_with_transactions.push(block);
                 }
-                ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
+                ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL => {
                     if block.transactions().is_some() {
@@ -413,8 +410,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         // First process blocks without transactions (causal history shards/headers)
         if matches!(
             self.consensus_protocol,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
         ) {
@@ -734,7 +730,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             self.consensus_protocol,
             ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
-                | ConsensusProtocol::StarfishPull
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
@@ -781,8 +776,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     ) -> bool {
         if matches!(
             self.consensus_protocol,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
         ) {
@@ -908,7 +902,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
-                | ConsensusProtocol::StarfishPull
         );
         let gc_round = Arc::new(AtomicU64::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {

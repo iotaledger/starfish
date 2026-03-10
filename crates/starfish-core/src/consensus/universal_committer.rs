@@ -229,8 +229,7 @@ pub struct UniversalCommitterBuilder {
 impl UniversalCommitterBuilder {
     pub fn new(committee: Arc<Committee>, dag_state: DagState, metrics: Arc<Metrics>) -> Self {
         match dag_state.consensus_protocol {
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Mysticeti
+            ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => Self {

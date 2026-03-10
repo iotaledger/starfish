@@ -50,7 +50,6 @@ pub enum DacCertificateVerificationState {
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum ConsensusProtocol {
     Mysticeti,
-    StarfishPull,
     CordialMiners,
     Starfish,
     StarfishS,
@@ -61,20 +60,18 @@ impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
         match s {
             "mysticeti" => ConsensusProtocol::Mysticeti,
-            "starfish-pull" => ConsensusProtocol::StarfishPull,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish" => ConsensusProtocol::Starfish,
             "starfish-l" => ConsensusProtocol::StarfishL,
             "starfish-s" => ConsensusProtocol::StarfishS,
-            _ => ConsensusProtocol::StarfishPull, // Default to Starfish
+            _ => ConsensusProtocol::Starfish,
         }
     }
 
     pub fn supports_acknowledgments(self) -> bool {
         matches!(
             self,
-            ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishL
                 | ConsensusProtocol::StarfishS
         )
@@ -82,9 +79,7 @@ impl ConsensusProtocol {
 
     pub fn default_dissemination_mode(self) -> DisseminationMode {
         match self {
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::StarfishPull => {
-                DisseminationMode::Pull
-            }
+            ConsensusProtocol::Mysticeti => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
@@ -480,9 +475,6 @@ impl DagState {
         let byzantine_strategy = ByzantineStrategy::from_strategy_str(byzantine_strategy.as_str());
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
-            ConsensusProtocol::StarfishPull => {
-                tracing::info!("Starting Starfish-Pull protocol")
-            }
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
             ConsensusProtocol::StarfishL => tracing::info!("Starting Starfish-L protocol"),
             ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
@@ -2363,8 +2355,7 @@ mod tests {
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => TransactionsCommitment::default(),
         };
@@ -2388,7 +2379,6 @@ mod tests {
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
         assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
-        assert!(ConsensusProtocol::StarfishPull.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
@@ -2617,10 +2607,6 @@ mod tests {
     fn consensus_protocol_resolves_dissemination_defaults() {
         assert_eq!(
             ConsensusProtocol::Mysticeti.default_dissemination_mode(),
-            DisseminationMode::Pull
-        );
-        assert_eq!(
-            ConsensusProtocol::StarfishPull.default_dissemination_mode(),
             DisseminationMode::Pull
         );
         assert_eq!(

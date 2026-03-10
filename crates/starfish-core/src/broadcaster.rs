@@ -79,8 +79,7 @@ impl BroadcasterParameters {
                 dissemination_mode,
                 causal_push_shard_round_lag,
             },
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL
             | ConsensusProtocol::CordialMiners => Self {
@@ -329,7 +328,7 @@ where
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL
-            | ConsensusProtocol::StarfishPull => {
+            => {
                 let mut refs_to_send = block_references;
                 let remaining_extra_budget =
                     batch_other_block_size.saturating_sub(refs_to_send.len());
@@ -781,7 +780,7 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
         ConsensusProtocol::Starfish
         | ConsensusProtocol::StarfishS
         | ConsensusProtocol::StarfishL
-        | ConsensusProtocol::StarfishPull => PushOtherBlocksFormat::HeadersAndShards,
+        => PushOtherBlocksFormat::HeadersAndShards,
         ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
             PushOtherBlocksFormat::FullBlocks
         }

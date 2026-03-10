@@ -132,7 +132,7 @@ impl Linearizer {
     /// Collect all blocks in the history of committed leader that have
     /// acknowledgment support. Uses BFS with per-level batch fetching.
     ///
-    /// When `direct_ack` is false (Starfish/StarfishPull/StarfishS): accumulate
+    /// When `direct_ack` is false (Starfish/StarfishS): accumulate
     /// votes per ack_ref, commit when quorum is reached.
     /// When `direct_ack` is true (StarfishL): only self-acks count — the DAC
     /// certificate provides the availability guarantee directly.
@@ -254,9 +254,7 @@ impl Linearizer {
                 ConsensusProtocol::StarfishL => {
                     self.collect_subdag_starfish(dag_state, leader_block, true)
                 }
-                ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishPull
-                | ConsensusProtocol::StarfishS => {
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
                     self.collect_subdag_starfish(dag_state, leader_block, false)
                 }
                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {

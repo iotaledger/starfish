@@ -92,8 +92,7 @@ impl PartialOrd for BlockReference {
 // Protocol-specific field groups.
 // ---------------------------------------------------------------------------
 
-/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL,
-/// StarfishPull).
+/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL).
 ///
 /// Acknowledgments are a compressed representation: a suffix of
 /// `block_references` is shared with the acknowledgment list (`intersection`),
@@ -678,7 +677,6 @@ impl VerifiedBlock {
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishPull
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => {
                 if let Some(ref encoded) = encoded_transactions {
@@ -938,8 +936,7 @@ impl VerifiedBlock {
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<Option<ProvableShard>> {
         match consensus_protocol {
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => {
                 let info_length = committee.info_length();
@@ -1145,9 +1142,7 @@ impl VerifiedBlock {
                     );
                 }
             }
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::StarfishS => {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),
                     "Threshold clock is not valid"

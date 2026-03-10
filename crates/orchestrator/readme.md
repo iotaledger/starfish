@@ -118,10 +118,10 @@ on the remote machines and running one validator per instance.
 One dedicated instance will take care of processing incoming metrics,
 so make sure that `committee_size`<`number_instances`.
 For example, the following command benchmarks a committee of `10` validators
-running `Starfish-Pull` consensus protocol under a constant load of 1000 tx/s:
+running `Starfish` consensus protocol under a constant load of 1000 tx/s:
 
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus starfish-pull --committee 10 --loads 1000
+cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 1000
 ```
 
 In a network of 10 validators, each with a corresponding load generator,
@@ -129,7 +129,7 @@ each load generator submits a fixed load of 100 tx/s
 or more precisely 10 tx every 100ms.
 Performance measurements are collected by regularly scraping
 the Prometheus metrics exposed by the load generators.
-There are 6 options for consensus protocols: `starfish`, `starfish-s`, `starfish-l`, `starfish-pull`, `mysticeti`, and `cordial-miners`.
+There are 5 options for consensus protocols: `starfish`, `starfish-s`, `starfish-l`, `mysticeti`, and `cordial-miners`.
 
 To run with Byzantine validators:
 

@@ -617,8 +617,7 @@ impl<H: BlockHandler> Core<H> {
         let parity_length = self.committee.len() - info_length;
 
         match self.dag_state.consensus_protocol {
-            ConsensusProtocol::StarfishPull
-            | ConsensusProtocol::Starfish
+            ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => Some(self.encoder.encode_transactions(
                 transactions,

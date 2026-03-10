@@ -295,7 +295,6 @@ mod smoke_tests {
     }
 
     #[test_case("mysticeti", 0)]
-    #[test_case("starfish-pull", 20)]
     #[test_case("cordial-miners", 40)]
     #[test_case("starfish", 60)]
     #[test_case("starfish-s", 80)]
@@ -387,7 +386,6 @@ mod smoke_tests {
     }
 
     #[test_case("mysticeti", 100)]
-    #[test_case("starfish-pull", 120)]
     #[test_case("cordial-miners", 140)]
     #[test_case("starfish", 160)]
     #[test_case("starfish-s", 180)]
@@ -450,7 +448,6 @@ mod smoke_tests {
     }
 
     #[test_case("mysticeti", 200)]
-    #[test_case("starfish-pull", 220)]
     #[test_case("cordial-miners", 240)]
     #[test_case("starfish", 260)]
     #[test_case("starfish-s", 280)]
@@ -650,7 +647,6 @@ mod smoke_tests {
     }
 
     #[test_case("mysticeti", 500)]
-    #[test_case("starfish-pull", 520)]
     #[test_case("cordial-miners", 540)]
     #[test_case("starfish", 560)]
     #[test_case("starfish-s", 580)]

@@ -16,10 +16,6 @@ Four versions of Starfish are available in this repository:
   - Higher bandwidth usage (up to 4x)
   - Better latency guarantees with Byzantine nodes under low load
 
-- **`starfish-pull`**: More scalable version
-  - Lower bandwidth usage in happy case
-  - Better handling of higher throughput and larger number of validators
-
 - **`starfish-s`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
   - Lower latency when validators hold full leader payloads
@@ -170,7 +166,7 @@ NUM_VALIDATORS=10 DESIRED_TPS=100 CONSENSUS=starfish-s \
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
 | `DESIRED_TPS` | 100 | Target transactions per second |
-| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-l`, `starfish-pull`, `cordial-miners`, `mysticeti` |
+| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-l`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
 | `TEST_TIME` | 300 | Duration in seconds |
