@@ -385,14 +385,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             infer_peer_knowledge_from_received_batch(&mut ck, &full_blocks, &headers, &shards);
         }
 
-        // Separate full blocks by whether they carry transactions
         let mut blocks_with_transactions = Vec::new();
         let mut blocks_without_transactions = Vec::new();
         for block in full_blocks {
-            if block.transactions().is_some() {
-                blocks_with_transactions.push(block);
-            } else {
-                blocks_without_transactions.push(block);
+            match self.consensus_protocol {
+                // In full-block protocols, an empty payload is still a complete
+                // block and must follow the normal add_blocks path.
+                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                    blocks_with_transactions.push(block);
+                }
+                ConsensusProtocol::StarfishPull
+                | ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishL => {
+                    if block.transactions().is_some() {
+                        blocks_with_transactions.push(block);
+                    } else {
+                        blocks_without_transactions.push(block);
+                    }
+                }
             }
         }
 

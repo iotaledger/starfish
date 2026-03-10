@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-l, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-s}
+CONSENSUS=${CONSENSUS:-mysticeti}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -24,7 +24,7 @@ STORAGE_BACKEND=rocksdb
 TRANSACTION_MODE=all_zero
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
+#DISSEMINATION_MODE=${DISSEMINATION_MODE:-pull}
 # Set to 1 to overlay 10s latency on the f farthest peers
 #ADVERSARIAL_LATENCY=1
 DATA_DIR="scripts/data"
@@ -187,19 +187,7 @@ echo -e \
     "${CYAN}Generating docker-compose.yml for" \
     "$NUM_VALIDATORS validators...${RESET}"
 
-RUST_LOG="warn"
-RUST_LOG+=",starfish_core::block_manager=trace"
-RUST_LOG+=",starfish_core::block_handler=trace"
-RUST_LOG+=",starfish_core::consensus=trace"
-RUST_LOG+=",starfish_core::net_sync=DEBUG"
-RUST_LOG+=",starfish_core::core=DEBUG"
-RUST_LOG+=",starfish_core::synchronizer=DEBUG"
-RUST_LOG+=",starfish_core::transactions_generator=DEBUG"
-RUST_LOG+=",starfish_core::validator=trace"
-RUST_LOG+=",starfish_core::network=trace"
-RUST_LOG+=",starfish_core::dag_state=trace"
-RUST_LOG+=",starfish_core::threshold_core=trace"
-RUST_LOG+=",starfish_core::syncer=trace"
+RUST_LOG="debug"
 
 {
     # Header: networks and volumes

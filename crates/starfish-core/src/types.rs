@@ -970,6 +970,9 @@ impl VerifiedBlock {
                 // externally via `process_standalone_shards`.
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                let empty_transactions = Vec::new();
+                let empty_transactions_commitment =
+                    TransactionsCommitment::new_from_transactions(&empty_transactions);
                 if let Some(td) = &self.transaction_data {
                     let transactions_commitment =
                         TransactionsCommitment::new_from_transactions(&td.transactions);
@@ -977,6 +980,8 @@ impl VerifiedBlock {
                         transactions_commitment == self.header.transactions_commitment,
                         "Incorrect Merkle root"
                     );
+                } else if self.header.transactions_commitment == empty_transactions_commitment {
+                    return Ok(None);
                 } else {
                     bail!("The peer didn't include transactions in block");
                 }
@@ -1679,6 +1684,61 @@ mod tests {
             err.to_string()
                 .contains("CordialMiners blocks must not carry acknowledgments")
         );
+    }
+
+    #[test]
+    fn verifies_empty_mysticeti_block_without_transaction_data() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let mut block = VerifiedBlock::new_with_signer(
+            0,
+            2,
+            vec![
+                BlockReference::new_test(0, 1),
+                BlockReference::new_test(1, 1),
+                BlockReference::new_test(2, 1),
+            ],
+            None,
+            vec![],
+            0,
+            &signers[0],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Mysticeti,
+            None,
+            None,
+            None,
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Mysticeti,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn verifies_empty_cordial_miners_block_without_transaction_data() {
+        let (mut block, committee) = make_cordial_miners_block(0, 2, vec![]);
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::CordialMiners,
+            )
+            .unwrap();
     }
 
     #[test]
