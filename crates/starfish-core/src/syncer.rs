@@ -19,7 +19,8 @@ use crate::{
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
     types::{
-        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, VerifiedBlock,
+        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, Stake,
+        VerifiedBlock,
     },
 };
 
@@ -31,6 +32,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
     pub(crate) subscribed_by_authorities: AHashSet<AuthorityIndex>,
+    subscriber_stake: Stake,
     pub(crate) metrics: Arc<Metrics>,
     bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
 }
@@ -65,6 +67,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
     ) -> Self {
         let committee_size = core.committee().len();
+        let own_stake = core
+            .committee()
+            .get_stake(core.authority())
+            .expect("Own authority should exist in committee");
         Self {
             core,
             force_new_block: false,
@@ -73,6 +79,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
             subscribed_by_authorities: AHashSet::with_capacity(committee_size),
+            subscriber_stake: own_stake,
             metrics,
             bls_tx,
         }
@@ -158,17 +165,21 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    fn try_new_block(&mut self) -> bool {
-        self.maybe_start_proposal_wait();
+    pub(crate) fn recompute_subscriber_stake(&mut self) {
         let committee = self.core.committee();
         let own_authority = self.core.authority();
-        let mut subscriber_stake = committee.get_total_stake(&self.subscribed_by_authorities);
+        let mut stake = committee.get_total_stake(&self.subscribed_by_authorities);
         if !self.subscribed_by_authorities.contains(&own_authority) {
-            subscriber_stake += committee
+            stake += committee
                 .get_stake(own_authority)
                 .expect("Own authority should exist in committee");
         }
-        if !committee.is_quorum(subscriber_stake) {
+        self.subscriber_stake = stake;
+    }
+
+    fn try_new_block(&mut self) -> bool {
+        self.maybe_start_proposal_wait();
+        if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
         }
         if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
