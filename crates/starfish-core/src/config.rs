@@ -50,6 +50,8 @@ pub struct NodeParameters {
     pub dissemination_mode: DisseminationMode,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
+    #[serde(default = "node_defaults::default_enable_starfish_s_adaptive_acknowledgments")]
+    pub enable_starfish_s_adaptive_acknowledgments: bool,
 }
 
 pub mod node_defaults {
@@ -82,6 +84,10 @@ pub mod node_defaults {
     pub fn default_causal_push_shard_round_lag() -> super::RoundNumber {
         0
     }
+
+    pub fn default_enable_starfish_s_adaptive_acknowledgments() -> bool {
+        false
+    }
 }
 
 impl Default for NodeParameters {
@@ -96,6 +102,8 @@ impl Default for NodeParameters {
             adversarial_latency: node_defaults::default_adversarial_latency(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
+            enable_starfish_s_adaptive_acknowledgments:
+                node_defaults::default_enable_starfish_s_adaptive_acknowledgments(),
         }
     }
 }
@@ -112,6 +120,8 @@ impl NodeParameters {
             adversarial_latency: node_defaults::default_adversarial_latency(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
+            enable_starfish_s_adaptive_acknowledgments:
+                node_defaults::default_enable_starfish_s_adaptive_acknowledgments(),
         }
     }
 }

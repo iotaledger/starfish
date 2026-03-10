@@ -99,6 +99,8 @@ impl ConsensusProtocol {
     }
 }
 
+const STARFISH_S_HINT_WINDOW_LEADER_ROUNDS: usize = 10;
+
 #[allow(unused)]
 #[derive(Clone, Debug, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ByzantineStrategy {
@@ -150,6 +152,7 @@ pub struct DagState {
     /// Immutable genesis blocks, one per authority. Cached for the lifetime
     /// of the node to prevent eviction.
     genesis: Vec<Data<VerifiedBlock>>,
+    starfish_s_adaptive_acknowledgments: bool,
 }
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
@@ -162,6 +165,41 @@ const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
 /// Per-authority DAG: round → (digest → (parents, known_by_bitmask)).
 type DagAuthorityMap =
     BTreeMap<RoundNumber, HashMap<BlockDigest, (Vec<BlockReference>, AuthorityBitmask)>>;
+
+#[derive(Default)]
+struct StarfishSLeaderRoundHints {
+    voter_masks: AHashMap<AuthorityIndex, u128>,
+    complaint_counts: Vec<u16>,
+}
+
+impl StarfishSLeaderRoundHints {
+    fn new(committee_size: usize) -> Self {
+        Self {
+            voter_masks: AHashMap::new(),
+            complaint_counts: vec![0; committee_size],
+        }
+    }
+
+    fn apply_mask_delta(&mut self, mask: u128, delta: i32) {
+        for (authority, count) in self.complaint_counts.iter_mut().enumerate() {
+            if mask & (1u128 << authority) == 0 {
+                continue;
+            }
+            if delta > 0 {
+                *count = count.saturating_add(delta as u16);
+            } else {
+                *count = count.saturating_sub((-delta) as u16);
+            }
+        }
+    }
+
+    fn update_vote(&mut self, voter: AuthorityIndex, mask: u128) {
+        if let Some(previous_mask) = self.voter_masks.insert(voter, mask) {
+            self.apply_mask_delta(previous_mask, -1);
+        }
+        self.apply_mask_delta(mask, 1);
+    }
+}
 
 struct DagStateInner {
     store: Arc<dyn Store>,
@@ -212,6 +250,10 @@ struct DagStateInner {
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with DAC certificates that failed BLS verification.
     rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
+    /// For StarfishS, keep the recent complaint masks reported by voters about
+    /// leader blocks, keyed by leader authority then leader round.
+    starfish_s_leader_hints: Vec<BTreeMap<RoundNumber, StarfishSLeaderRoundHints>>,
+    starfish_s_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
 }
@@ -225,6 +267,7 @@ impl DagState {
         byzantine_strategy: String,
         consensus: String,
         storage_backend: &StorageBackend,
+        starfish_s_adaptive_acknowledgments: bool,
     ) -> RecoveredState {
         assert!(
             committee.len() <= 128,
@@ -277,6 +320,8 @@ impl DagState {
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            starfish_s_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
+            starfish_s_adaptive_acknowledgments,
             consensus_protocol,
         };
         let mut builder = RecoveredStateBuilder::new();
@@ -452,6 +497,7 @@ impl DagState {
             consensus_protocol,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
+            starfish_s_adaptive_acknowledgments,
         };
         builder.build(store, dag_state)
     }
@@ -784,6 +830,12 @@ impl DagState {
             .get_pending_acknowledgment(round_number)
     }
 
+    pub fn requeue_pending_acknowledgment(&self, block_refs: Vec<BlockReference>) {
+        self.dag_state_inner
+            .write()
+            .requeue_pending_acknowledgment(block_refs);
+    }
+
     pub fn get_blocks_by_round(&self, round: RoundNumber) -> Vec<Data<VerifiedBlock>> {
         self.dag_state_inner.read().get_blocks_by_round(round)
     }
@@ -890,7 +942,7 @@ impl DagState {
         false
     }
 
-    /// Check if a quorum of blocks at `round` have `strong_vote == Some(true)`.
+    /// Check if a quorum of blocks at `round` carry a StarfishS strong vote.
     pub fn has_strong_votes_quorum_at_round(
         &self,
         round: RoundNumber,
@@ -900,11 +952,48 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            if block.strong_vote() == Some(true) && aggregator.add(block.authority(), committee) {
+            if block.is_strong_vote() && aggregator.add(block.authority(), committee) {
                 return true;
             }
         }
         false
+    }
+
+    pub fn starfish_s_excluded_ack_authorities(&self) -> u128 {
+        if self.consensus_protocol != ConsensusProtocol::StarfishS
+            || !self.starfish_s_adaptive_acknowledgments
+        {
+            return 0;
+        }
+
+        let inner = self.dag_state_inner.read();
+        let mut scores = vec![0usize; self.committee.len()];
+        for hints in inner.starfish_s_leader_hints[inner.authority as usize]
+            .iter()
+            .rev()
+            .take(STARFISH_S_HINT_WINDOW_LEADER_ROUNDS)
+            .map(|(_, hints)| hints)
+        {
+            for (authority, score) in scores.iter_mut().enumerate() {
+                *score += hints.complaint_counts[authority] as usize;
+            }
+        }
+
+        let exclude_limit = self.committee.validity_threshold() as usize;
+        let mut ranked: Vec<_> = scores
+            .into_iter()
+            .enumerate()
+            .filter(|(_, score)| *score > 0)
+            .collect();
+        ranked.sort_by(|(left_auth, left_score), (right_auth, right_score)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_auth.cmp(right_auth))
+        });
+        ranked.truncate(exclude_limit);
+        ranked.into_iter().fold(0u128, |mask, (authority, _)| {
+            mask | (1u128 << authority)
+        })
     }
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {
@@ -1607,6 +1696,42 @@ impl DagStateInner {
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
+        self.update_starfish_s_leader_hints(&block);
+    }
+
+    fn update_starfish_s_leader_hints(&mut self, block: &VerifiedBlock) {
+        if self.consensus_protocol != ConsensusProtocol::StarfishS
+            || !self.starfish_s_adaptive_acknowledgments
+        {
+            return;
+        }
+        let Some(mask) = block.strong_vote() else {
+            return;
+        };
+        let leader_round = block.round().saturating_sub(1);
+        if leader_round == 0 {
+            return;
+        }
+        let leader_authority = (leader_round % self.committee_size as u64) as AuthorityIndex;
+        let Some(leader_ref) = block
+            .block_references()
+            .iter()
+            .find(|r| r.round == leader_round && r.authority == leader_authority)
+        else {
+            return;
+        };
+
+        let leader_history = &mut self.starfish_s_leader_hints[leader_ref.authority as usize];
+        let entry = leader_history
+            .entry(leader_ref.round)
+            .or_insert_with(|| StarfishSLeaderRoundHints::new(self.committee_size));
+        entry.update_vote(block.authority(), mask);
+        while leader_history.len() > STARFISH_S_HINT_WINDOW_LEADER_ROUNDS {
+            let Some(oldest_round) = leader_history.keys().next().copied() else {
+                break;
+            };
+            leader_history.remove(&oldest_round);
+        }
     }
 
     fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
@@ -1742,6 +1867,16 @@ impl DagStateInner {
             });
         *pending_acknowledgment = to_keep;
         to_return
+    }
+
+    pub fn requeue_pending_acknowledgment(&mut self, block_refs: Vec<BlockReference>) {
+        let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
+            return;
+        };
+        if block_refs.is_empty() {
+            return;
+        }
+        pending_acknowledgment.extend(block_refs);
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -2143,33 +2278,75 @@ mod tests {
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
-        crypto::{BLS_SIGNATURE_SIZE, BlsSignatureBytes},
+        crypto::{
+            BLS_SIGNATURE_SIZE, BlsSignatureBytes, SignatureBytes, TransactionsCommitment,
+        },
+        data::Data,
         metrics::Metrics,
-        types::{AuthoritySet, BlockReference, BlsAggregateCertificate},
+        types::{
+            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, RoundNumber,
+            VerifiedBlock,
+        },
     };
 
     fn open_test_dag_state() -> DagState {
+        open_test_dag_state_for("starfish-l", 0)
+    }
+
+    fn open_test_dag_state_for(consensus: &str, authority: AuthorityIndex) -> DagState {
+        open_test_dag_state_for_with_feature(consensus, authority, false)
+    }
+
+    fn open_test_dag_state_for_with_feature(
+        consensus: &str,
+        authority: AuthorityIndex,
+        enable_starfish_s_adaptive_acknowledgments: bool,
+    ) -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
         let (metrics, _reporter) = Metrics::new(
             &registry,
             Some(committee.as_ref()),
-            Some("starfish-l"),
+            Some(consensus),
             None,
         );
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         std::mem::forget(dir);
         DagState::open(
-            0,
+            authority,
             path,
             metrics,
             committee,
             "honest".to_string(),
-            "starfish-l".to_string(),
+            consensus.to_string(),
             &StorageBackend::Rocksdb,
+            enable_starfish_s_adaptive_acknowledgments,
         )
         .dag_state
+    }
+
+    fn make_starfish_s_vote_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        leader_ref: BlockReference,
+        strong_vote_mask: u128,
+    ) -> Data<VerifiedBlock> {
+        let own_previous = BlockReference::new_test(authority, round - 1);
+        let mut block = VerifiedBlock::new(
+            authority,
+            round,
+            vec![own_previous, leader_ref],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            TransactionsCommitment::default(),
+            Some(strong_vote_mask),
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
     }
 
     #[test]
@@ -2180,6 +2357,66 @@ mod tests {
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
+    }
+
+    #[test]
+    fn starfish_s_adaptive_acknowledgments_only_uses_local_leader_history() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, true);
+        let own_leader_ref = BlockReference::new_test(0, 4);
+        let other_leader_ref = BlockReference::new_test(1, 1);
+
+        dag_state.insert_general_blocks(vec![
+            make_starfish_s_vote_block(1, 5, own_leader_ref, 1u128 << 1),
+            make_starfish_s_vote_block(2, 5, own_leader_ref, 1u128 << 1),
+            make_starfish_s_vote_block(3, 5, own_leader_ref, 1u128 << 0),
+            make_starfish_s_vote_block(0, 2, other_leader_ref, 1u128 << 2),
+            make_starfish_s_vote_block(2, 2, other_leader_ref, 1u128 << 2),
+        ]);
+
+        let excluded = dag_state.starfish_s_excluded_ack_authorities();
+        assert_ne!(excluded & (1u128 << 1), 0);
+        assert_ne!(excluded & (1u128 << 0), 0);
+        assert_eq!(excluded & (1u128 << 2), 0);
+    }
+
+    #[test]
+    fn starfish_s_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, true);
+        let leader_rounds = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44];
+        let mut blocks = Vec::new();
+        for leader_round in leader_rounds {
+            let leader_ref = BlockReference::new_test(0, leader_round);
+            let complaint_mask = if leader_round == 4 {
+                1u128 << 1
+            } else {
+                1u128 << 2
+            };
+            blocks.push(make_starfish_s_vote_block(
+                1,
+                leader_round + 1,
+                leader_ref,
+                complaint_mask,
+            ));
+        }
+        dag_state.insert_general_blocks(blocks);
+
+        let excluded = dag_state.starfish_s_excluded_ack_authorities();
+        assert_eq!(excluded & (1u128 << 1), 0);
+        assert_ne!(excluded & (1u128 << 2), 0);
+    }
+
+    #[test]
+    fn starfish_s_adaptive_acknowledgments_can_be_disabled() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, false);
+        let own_leader_ref = BlockReference::new_test(0, 4);
+        dag_state.insert_general_block(make_starfish_s_vote_block(
+            1,
+            5,
+            own_leader_ref,
+            1u128 << 1,
+        ));
+
+        assert_eq!(dag_state.starfish_s_excluded_ack_authorities(), 0);
     }
 
     #[test]

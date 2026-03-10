@@ -104,6 +104,7 @@ impl Validator {
             byzantine_strategy,
             consensus,
             &parameters.storage_backend,
+            public_config.parameters.enable_starfish_s_adaptive_acknowledgments,
         );
 
         // Rest of the function remains the same

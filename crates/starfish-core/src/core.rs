@@ -489,6 +489,8 @@ impl<H: BlockHandler> Core<H> {
             } else {
                 Vec::new()
             };
+        let acknowledgment_references = self
+            .filter_starfish_s_leader_acknowledgments(clock_round, acknowledgment_references);
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = timed!(
             self.metrics,
@@ -614,15 +616,14 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// For StarfishS, compute whether this block carries a strong vote for the
-    /// current leader. A strong vote is true when the party votes for the
-    /// leader AND has data available for the leader block and all blocks in
-    /// the leader's acknowledgment_references.
+    /// For StarfishS, compute the strong-vote hint mask for the current
+    /// leader. `Some(0)` means the vote is strong; `Some(nonzero)` records the
+    /// authorities whose payloads are still missing locally.
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
         block_references: &[BlockReference],
-    ) -> Option<bool> {
+    ) -> Option<u128> {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS {
             return None;
         }
@@ -630,7 +631,7 @@ impl<H: BlockHandler> Core<H> {
         // The leader is from the previous round.
         let leader_round = clock_round.saturating_sub(1);
         if leader_round == 0 {
-            return Some(false);
+            return None;
         }
         let leader = self.committee.elect_leader(leader_round);
 
@@ -640,14 +641,12 @@ impl<H: BlockHandler> Core<H> {
             .find(|r| r.round == leader_round && r.authority == leader);
 
         let Some(leader_ref) = leader_ref else {
-            // We don't vote for the leader → not a strong vote.
-            return Some(false);
+            return None;
         };
 
-        // We vote for the leader. Check data availability for the leader block
-        // and all blocks in the leader's acknowledgment_references.
+        let mut missing_mask = 0u128;
         if !self.dag_state.is_data_available(leader_ref) {
-            return Some(false);
+            missing_mask |= 1u128 << leader_ref.authority;
         }
 
         let leader_block = self
@@ -657,11 +656,38 @@ impl<H: BlockHandler> Core<H> {
 
         for ack_ref in leader_block.acknowledgments() {
             if !self.dag_state.is_data_available(&ack_ref) {
-                return Some(false);
+                missing_mask |= 1u128 << ack_ref.authority;
             }
         }
 
-        Some(true)
+        Some(missing_mask)
+    }
+
+    fn filter_starfish_s_leader_acknowledgments(
+        &self,
+        clock_round: RoundNumber,
+        acknowledgment_references: Vec<BlockReference>,
+    ) -> Vec<BlockReference> {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS
+            || self.committee.elect_leader(clock_round) != self.authority
+        {
+            return acknowledgment_references;
+        }
+
+        let excluded_authors = self
+            .dag_state
+            .starfish_s_excluded_ack_authorities();
+        if excluded_authors == 0 {
+            return acknowledgment_references;
+        }
+
+        let (to_include, to_requeue): (Vec<_>, Vec<_>) = acknowledgment_references
+            .into_iter()
+            .partition(|ack_ref| excluded_authors & (1u128 << ack_ref.authority) == 0);
+        if !to_requeue.is_empty() {
+            self.dag_state.requeue_pending_acknowledgment(to_requeue);
+        }
+        to_include
     }
 
     fn build_block(

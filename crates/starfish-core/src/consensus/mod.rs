@@ -26,9 +26,9 @@ pub const WAVE_LENGTH: RoundNumber = 3;
 pub struct VoterInfo {
     /// Set of (leader_block_ref, voter_block_ref) pairs at the voting round.
     pub voters: AHashSet<(BlockReference, BlockReference)>,
-    /// strong_vote value for each voter block (populated for StarfishS, empty
+    /// strong-vote mask for each voter block (populated for StarfishS, empty
     /// otherwise).
-    pub voter_strong_votes: AHashMap<BlockReference, Option<bool>>,
+    pub voter_strong_votes: AHashMap<BlockReference, Option<u128>>,
 }
 
 /// Metastate for Starfish-S committed leader slots.
