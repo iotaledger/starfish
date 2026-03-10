@@ -86,7 +86,7 @@ impl LeaderStatus {
 
     /// Whether the leader slot is final for sequencing purposes.
     /// A Commit(Pending) is decided but NOT final — it blocks the sequencing
-    /// prefix. For non-StarfishS protocols (metastate is None), is_final ==
+    /// prefix. For non-StarfishS protocols (metastate is None), is_final =>
     /// is_decided.
     pub fn is_final(&self) -> bool {
         match self {
