@@ -263,6 +263,10 @@ impl BlockHeader {
         self.transactions_commitment
     }
 
+    pub fn has_empty_payload(&self) -> bool {
+        self.transactions_commitment == TransactionsCommitment::default()
+    }
+
     pub fn strong_vote(&self) -> Option<bool> {
         self.strong_vote
     }
@@ -594,9 +598,14 @@ impl VerifiedBlock {
             serialized: None,
         };
 
+        let transaction_data = if transactions.is_empty() {
+            None
+        } else {
+            Some(TransactionData::new(transactions))
+        };
         Self {
             header,
-            transaction_data: Some(TransactionData::new(transactions)),
+            transaction_data,
         }
     }
 
@@ -662,11 +671,15 @@ impl VerifiedBlock {
             | ConsensusProtocol::StarfishPull
             | ConsensusProtocol::StarfishS
             | ConsensusProtocol::StarfishL => {
-                TransactionsCommitment::new_from_encoded_transactions(
-                    encoded_transactions.as_ref().unwrap(),
-                    authority as usize,
-                )
-                .0
+                if let Some(ref encoded) = encoded_transactions {
+                    TransactionsCommitment::new_from_encoded_transactions(
+                        encoded,
+                        authority as usize,
+                    )
+                    .0
+                } else {
+                    TransactionsCommitment::default()
+                }
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 TransactionsCommitment::new_from_transactions(&transactions)
@@ -797,6 +810,10 @@ impl VerifiedBlock {
         self.header.merkle_root()
     }
 
+    pub fn has_empty_payload(&self) -> bool {
+        self.header.has_empty_payload()
+    }
+
     pub fn strong_vote(&self) -> Option<bool> {
         self.header.strong_vote()
     }
@@ -910,6 +927,11 @@ impl VerifiedBlock {
                 let info_length = committee.info_length();
                 let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
+                    if td.transactions.is_empty()
+                        && self.header.has_empty_payload()
+                    {
+                        return Ok(None);
+                    }
                     let encoded_transactions =
                         encoder.encode_transactions(&td.transactions, info_length, parity_length);
                     let (transactions_commitment, merkle_proof_bytes) =

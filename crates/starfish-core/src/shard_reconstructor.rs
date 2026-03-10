@@ -336,6 +336,9 @@ impl ShardReconstructor {
                 shard_index,
                 merkle_root,
             } => {
+                if merkle_root == TransactionsCommitment::default() {
+                    return;
+                }
                 if block_reference.round > self.highest_seen_round {
                     self.highest_seen_round = block_reference.round;
                 }
