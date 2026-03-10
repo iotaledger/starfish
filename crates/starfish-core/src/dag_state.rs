@@ -19,6 +19,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
+    crypto::TransactionsCommitment,
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     network::ShardPayload,
@@ -1813,7 +1814,12 @@ impl DagStateInner {
     pub fn update_data_availability(&mut self, block: &VerifiedBlock) {
         let r = block.reference();
         let auth = r.authority as usize;
-        if block.has_empty_payload() {
+        let is_empty_full_block = matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners
+        ) && block.transactions().is_none()
+            && block.merkle_root() == TransactionsCommitment::new_from_transactions(&Vec::new());
+        if block.has_empty_payload() || is_empty_full_block {
             self.data_availability[auth].insert(*r);
             return;
         }
@@ -2334,6 +2340,42 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_empty_full_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        consensus_protocol: ConsensusProtocol,
+    ) -> Data<VerifiedBlock> {
+        let block_refs = if round == 0 {
+            Vec::new()
+        } else {
+            vec![BlockReference::new_test(authority, round - 1)]
+        };
+        let empty_transactions = Vec::new();
+        let merkle_root = match consensus_protocol {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                TransactionsCommitment::new_from_transactions(&empty_transactions)
+            }
+            ConsensusProtocol::StarfishPull
+            | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishS
+            | ConsensusProtocol::StarfishL => TransactionsCommitment::default(),
+        };
+        let mut block = VerifiedBlock::new(
+            authority,
+            round,
+            block_refs,
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions,
+            merkle_root,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
@@ -2342,6 +2384,28 @@ mod tests {
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
+    }
+
+    #[test]
+    fn empty_full_blocks_are_data_available_for_mysticeti() {
+        let dag_state = open_test_dag_state_for("mysticeti", 0);
+        let block = make_empty_full_block(1, 1, ConsensusProtocol::Mysticeti);
+        let reference = *block.reference();
+
+        dag_state.insert_general_block(block);
+
+        assert!(dag_state.is_data_available(&reference));
+    }
+
+    #[test]
+    fn empty_full_blocks_are_data_available_for_cordial_miners() {
+        let dag_state = open_test_dag_state_for("cordial-miners", 0);
+        let block = make_empty_full_block(1, 1, ConsensusProtocol::CordialMiners);
+        let reference = *block.reference();
+
+        dag_state.insert_general_block(block);
+
+        assert!(dag_state.is_data_available(&reference));
     }
 
     #[test]
