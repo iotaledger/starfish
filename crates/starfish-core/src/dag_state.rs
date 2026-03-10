@@ -979,21 +979,12 @@ impl DagState {
             }
         }
 
-        let exclude_limit = self.committee.validity_threshold() as usize;
-        let mut ranked: Vec<_> = scores
+        let blame_threshold = self.committee.validity_threshold() as usize;
+        scores
             .into_iter()
             .enumerate()
-            .filter(|(_, score)| *score > 0)
-            .collect();
-        ranked.sort_by(|(left_auth, left_score), (right_auth, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_auth.cmp(right_auth))
-        });
-        ranked.truncate(exclude_limit);
-        ranked.into_iter().fold(0u128, |mask, (authority, _)| {
-            mask | (1u128 << authority)
-        })
+            .filter(|(_, score)| *score >= blame_threshold)
+            .fold(0u128, |mask, (authority, _)| mask | (1u128 << authority))
     }
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {
@@ -2375,7 +2366,7 @@ mod tests {
 
         let excluded = dag_state.starfish_s_excluded_ack_authorities();
         assert_ne!(excluded & (1u128 << 1), 0);
-        assert_ne!(excluded & (1u128 << 0), 0);
+        assert_eq!(excluded & (1u128 << 0), 0);
         assert_eq!(excluded & (1u128 << 2), 0);
     }
 

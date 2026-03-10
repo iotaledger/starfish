@@ -371,6 +371,7 @@ where
                 }
 
                 let headers = self.inner.dag_state.get_header_only_blocks(&refs_to_send);
+                let shards = self.inner.dag_state.get_shard_payloads(&refs_to_send);
                 {
                     let mut sent = self.sent_to_peer.write();
                     for block in headers.iter() {
@@ -387,7 +388,7 @@ where
                     .send(NetworkMessage::Batch(BlockBatch {
                         full_blocks: Vec::new(),
                         headers,
-                        shards: Vec::new(),
+                        shards,
                         useful_headers_authors: 0,
                         useful_shards_authors: 0,
                     }))
@@ -928,13 +929,11 @@ where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    let committee_size = inner.committee.len();
-    let own_index = inner.dag_state.get_own_authority_index();
-    let mut authorities_with_missing_blocks: AHashSet<AuthorityIndex> =
-        (0..committee_size as AuthorityIndex).collect();
-    authorities_with_missing_blocks.remove(&own_index);
+    // In pull mode only own blocks are proactively disseminated;
+    // peers obtain other blocks via MissingParentsRequest.
+    let authorities_with_missing_blocks: AHashSet<AuthorityIndex> = AHashSet::new();
     let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = broadcaster_parameters.batch_other_block_size;
+    let batch_other_block_size = 0;
     let peer = format_authority_index(to_whom_authority_index);
     let blocks = {
         let sent = sent_to_peer.read();

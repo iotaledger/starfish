@@ -653,9 +653,7 @@ impl<H: BlockHandler> Core<H> {
             .iter()
             .find(|r| r.round == leader_round && r.authority == leader);
 
-        let Some(leader_ref) = leader_ref else {
-            return None;
-        };
+        let leader_ref = leader_ref?;
 
         let mut missing_mask = 0u128;
         if !self.dag_state.is_data_available(leader_ref) {
