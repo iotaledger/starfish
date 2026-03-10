@@ -90,9 +90,10 @@ impl Validator {
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
-        // Apply leader_timeout from Parameters to the consensus config.
+        // Apply timeouts from Parameters to the consensus config.
         let mut public_config = public_config;
         public_config.parameters.leader_timeout = parameters.leader_timeout;
+        public_config.parameters.soft_block_timeout = parameters.soft_block_timeout;
 
         // Open the DAG state.
         let rocks_path = private_config.rocksdb();
@@ -104,7 +105,9 @@ impl Validator {
             byzantine_strategy,
             consensus,
             &parameters.storage_backend,
-            public_config.parameters.enable_starfish_s_adaptive_acknowledgments,
+            public_config
+                .parameters
+                .enable_starfish_s_adaptive_acknowledgments,
         );
 
         // Rest of the function remains the same
@@ -276,7 +279,7 @@ mod smoke_tests {
             .all_metric_addresses()
             .map(|a| a.to_owned())
             .collect();
-        let timeout = config::node_defaults::default_leader_timeout() * 5;
+        let timeout = config::param_defaults::default_leader_timeout() * 5;
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
@@ -341,7 +344,7 @@ mod smoke_tests {
             .skip(1)
             .map(|a| a.to_owned())
             .collect();
-        let timeout = config::node_defaults::default_leader_timeout() * 20;
+        let timeout = config::param_defaults::default_leader_timeout() * 20;
         tokio::select! {
             _ = await_for_commits(addresses) => (),
             _ = time::sleep(timeout) => panic!(
@@ -372,7 +375,7 @@ mod smoke_tests {
             .next()
             .map(|a| a.to_owned())
             .unwrap();
-        let timeout = config::node_defaults::default_leader_timeout() * 5;
+        let timeout = config::param_defaults::default_leader_timeout() * 5;
         tokio::select! {
             _ = await_for_commits(vec![address]) => (),
             _ = time::sleep(timeout) => panic!("[{consensus}] Late validator failed to commit"),
@@ -431,7 +434,7 @@ mod smoke_tests {
             .skip(1)
             .map(|a| a.to_owned())
             .collect();
-        let timeout = config::node_defaults::default_leader_timeout() * 15;
+        let timeout = config::param_defaults::default_leader_timeout() * 15;
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),

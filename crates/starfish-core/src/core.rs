@@ -922,7 +922,6 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn proposed_block_stats(&self, block: &Data<VerifiedBlock>) {
-        self.metrics.created_own_blocks.inc();
         self.metrics
             .proposed_block_size_bytes
             .observe(block.serialized_bytes().len());
@@ -980,7 +979,22 @@ impl<H: BlockHandler> Core<H> {
     ///
     /// The algorithm to calling is roughly:
     /// if timeout || commit_ready_new_block then try_new_block(..)
+    pub fn ready_new_block_relaxed(
+        &self,
+        connected_authorities: &AHashSet<AuthorityIndex>,
+    ) -> bool {
+        self.ready_new_block_impl(connected_authorities, true)
+    }
+
     pub fn ready_new_block(&self, connected_authorities: &AHashSet<AuthorityIndex>) -> bool {
+        self.ready_new_block_impl(connected_authorities, false)
+    }
+
+    fn ready_new_block_impl(
+        &self,
+        connected_authorities: &AHashSet<AuthorityIndex>,
+        relaxed: bool,
+    ) -> bool {
         let quorum_round = self.dag_state.threshold_clock_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
 
@@ -1016,7 +1030,8 @@ impl<H: BlockHandler> Core<H> {
             }
 
             // StarfishS: also require a quorum of strong votes at leader_round.
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishS
+            if !relaxed
+                && self.dag_state.consensus_protocol == ConsensusProtocol::StarfishS
                 && !self
                     .dag_state
                     .has_strong_votes_quorum_at_round(leader_round, &self.committee)

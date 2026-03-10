@@ -92,7 +92,7 @@ pub struct Metrics {
     pub block_bundle_size_bytes: HistogramSender<usize>,
     pub proposed_block_refs: Histogram,
     pub proposed_block_acks: Histogram,
-    pub created_own_blocks: IntCounter,
+    pub created_own_blocks: IntCounterVec,
     pub previous_round_refs: Histogram,
     pub commit_gap: Histogram,
 
@@ -352,8 +352,7 @@ impl Metrics {
             .unwrap(),
             shard_reconstruction_lag: {
                 let buckets = vec![
-                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
-                    16.0, 32.0, 64.0, 128.0, 256.0,
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0,
                 ];
                 register_histogram_with_registry!(
                     HistogramOpts::new(
@@ -699,9 +698,10 @@ impl Metrics {
                 )
                 .unwrap()
             },
-            created_own_blocks: register_int_counter_with_registry!(
+            created_own_blocks: register_int_counter_vec_with_registry!(
                 "created_own_blocks",
                 "Total number of blocks created by this validator",
+                &["reason"],
                 registry,
             )
             .unwrap(),

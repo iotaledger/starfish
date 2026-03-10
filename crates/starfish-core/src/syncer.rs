@@ -24,6 +24,31 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, Copy)]
+pub enum BlockCreationReason {
+    NewBlocks,
+    NewHeaders,
+    TransactionData,
+    CertificateEvent,
+    ForceTimeout,
+    RelaxedTimeout,
+    PostCommit,
+}
+
+impl BlockCreationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewBlocks => "new_blocks",
+            Self::NewHeaders => "new_headers",
+            Self::TransactionData => "transaction_data",
+            Self::CertificateEvent => "certificate_event",
+            Self::ForceTimeout => "force_timeout",
+            Self::RelaxedTimeout => "relaxed_timeout",
+            Self::PostCommit => "post_commit",
+        }
+    }
+}
+
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
     force_new_block: bool,
@@ -107,7 +132,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
-            self.try_new_block();
+            self.try_new_block(BlockCreationReason::NewBlocks);
         }
         (
             pending_blocks_with_transactions,
@@ -128,7 +153,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
-            self.try_new_block();
+            self.try_new_block(BlockCreationReason::NewHeaders);
         }
         (missing_parents, processed_refs)
     }
@@ -138,7 +163,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         self.core.add_transaction_data(items);
         self.maybe_start_proposal_wait();
-        self.try_new_block();
+        self.try_new_block(BlockCreationReason::TransactionData);
     }
 
     /// Apply BLS certificate events from the BLS verification service.
@@ -147,7 +172,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
         if apply_certificate_events(self.core.dag_state(), events) {
             self.maybe_start_proposal_wait();
-            self.try_new_block();
+            self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
     }
@@ -158,7 +183,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.force_new_block = true;
             tracing::debug!("Attempt to force new block after timeout");
             self.maybe_start_proposal_wait();
-            self.try_new_block();
+            self.try_new_block(BlockCreationReason::ForceTimeout);
             true
         } else {
             false
@@ -177,33 +202,68 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.subscriber_stake = stake;
     }
 
-    fn try_new_block(&mut self) -> bool {
+    /// Attempt block creation with relaxed readiness (skips StarfishS
+    /// strong-vote quorum requirement) for a specific threshold-clock round.
+    /// This acts only once we are still in that round and have not yet proposed
+    /// into it.
+    pub fn try_new_block_relaxed(&mut self, threshold_round: RoundNumber) -> bool {
+        if self.core.dag_state().threshold_clock_round() != threshold_round {
+            return false;
+        }
+        if self.core.last_proposed() >= threshold_round {
+            return false;
+        }
         self.maybe_start_proposal_wait();
         if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
         }
-        if self.force_new_block || self.core.ready_new_block(&self.connected_authorities) {
-            tracing::debug!("Attempt to create new block in syncer after one trigger");
-            if let Some(ref block) = self.core.try_new_block() {
-                if let Some(started_at) = self.proposal_wait_started_at.take() {
-                    self.metrics
-                        .proposal_wait_time_total_us
-                        .inc_by(started_at.elapsed().as_micros() as u64);
-                }
-                // Send own block and DAC partial sig to BLS service.
-                if let Some(ref bls_tx) = self.bls_tx {
-                    let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
-                    if let Some((block_ref, auth, sig)) =
-                        self.core.generate_own_dac_partial_sig(block)
-                    {
-                        let _ =
-                            bls_tx.try_send(BlsServiceMessage::DacPartialSig(block_ref, auth, sig));
-                    }
-                }
-                self.signals.new_block_ready();
-                self.force_new_block = false;
-                return true;
+        if self
+            .core
+            .ready_new_block_relaxed(&self.connected_authorities)
+        {
+            return self.create_new_block(BlockCreationReason::RelaxedTimeout);
+        }
+        false
+    }
+
+    fn try_new_block(&mut self, reason: BlockCreationReason) -> bool {
+        self.maybe_start_proposal_wait();
+        if !self.core.committee().is_quorum(self.subscriber_stake) {
+            return false;
+        }
+        let effective_reason = if self.force_new_block {
+            BlockCreationReason::ForceTimeout
+        } else if !self.core.ready_new_block(&self.connected_authorities) {
+            return false;
+        } else {
+            reason
+        };
+        self.create_new_block(effective_reason)
+    }
+
+    fn create_new_block(&mut self, reason: BlockCreationReason) -> bool {
+        tracing::debug!("Attempt to create new block in syncer after one trigger");
+        if let Some(ref block) = self.core.try_new_block() {
+            if let Some(started_at) = self.proposal_wait_started_at.take() {
+                self.metrics
+                    .proposal_wait_time_total_us
+                    .inc_by(started_at.elapsed().as_micros() as u64);
             }
+            self.metrics
+                .created_own_blocks
+                .with_label_values(&[reason.as_str()])
+                .inc();
+            // Send own block and DAC partial sig to BLS service.
+            if let Some(ref bls_tx) = self.bls_tx {
+                let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
+                if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block)
+                {
+                    let _ = bls_tx.try_send(BlsServiceMessage::DacPartialSig(block_ref, auth, sig));
+                }
+            }
+            self.signals.new_block_ready();
+            self.force_new_block = false;
+            return true;
         }
         false
     }
@@ -255,7 +315,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
         self.core
             .handle_committed_subdag(committed_subdag, any_decided);
-        self.try_new_block();
+        self.try_new_block(BlockCreationReason::PostCommit);
     }
 
     pub fn cleanup(&mut self) {

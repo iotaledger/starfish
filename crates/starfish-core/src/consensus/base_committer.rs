@@ -328,8 +328,7 @@ impl BaseCommitter {
             voting_blocks
                 .iter()
                 .filter(|b| {
-                    voter_info.voters.contains(&(leader_ref, *b.reference()))
-                        && b.is_strong_blame()
+                    voter_info.voters.contains(&(leader_ref, *b.reference())) && b.is_strong_blame()
                 })
                 .map(|b| b.authority()),
         );

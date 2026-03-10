@@ -481,7 +481,7 @@ where
         let sample_timeout = broadcaster_parameters.sample_timeout;
         let withholding_timeout = Duration::from_millis(450);
         loop {
-            let notified = inner.notify.notified();
+            let notified = inner.block_ready_notify.notified();
             match byzantine_strategy {
                 // Don't send your leader block for at least timeout
                 Some(ByzantineStrategy::TimeoutLeader) => {
@@ -647,7 +647,7 @@ where
     ) -> Option<()> {
         let sample_timeout = broadcaster_parameters.sample_timeout;
         loop {
-            let block_notified = inner.notify.notified();
+            let block_notified = inner.block_ready_notify.notified();
             let threshold_clock_notified = inner.threshold_clock_notify.notified();
             let trigger = select! {
                 _ = sleep(sample_timeout) => "timeout",

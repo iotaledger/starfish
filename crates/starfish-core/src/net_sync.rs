@@ -829,7 +829,7 @@ pub(crate) struct NetworkSyncSignals {
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     syncer: CoreThreadDispatcher<H, NetworkSyncSignals, C>,
     pub dag_state: DagState,
-    pub notify: Arc<Notify>,
+    pub block_ready_notify: Arc<Notify>,
     pub threshold_clock_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
     pub dissemination_mode: crate::config::DisseminationMode,
@@ -841,6 +841,8 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub cordial_knowledge: CordialKnowledgeHandle,
     /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
+    pub leader_timeout: Duration,
+    pub soft_block_timeout: Duration,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -854,7 +856,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         bls_cert_aggregator: Option<crate::bls_certificate_aggregator::BlsCertificateAggregator>,
     ) -> Self {
         let handle = Handle::current();
-        let notify = Arc::new(Notify::new());
+        let block_ready_notify = Arc::new(Notify::new());
         let threshold_clock_notify = Arc::new(Notify::new());
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
@@ -876,7 +878,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut syncer = Syncer::new(
             core,
             NetworkSyncSignals {
-                block_ready_notify: notify.clone(),
+                block_ready_notify: block_ready_notify.clone(),
                 threshold_clock_notify: threshold_clock_notify.clone(),
             },
             commit_observer,
@@ -922,7 +924,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
 
         let inner = Arc::new(NetworkSyncerInner {
-            notify,
+            block_ready_notify,
             dag_state: dag_state.clone(),
             syncer,
             threshold_clock_notify,
@@ -934,6 +936,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shard_tx: parking_lot::Mutex::new(shard_tx),
             cordial_knowledge: cordial_knowledge_handle,
             peer_senders: parking_lot::RwLock::new(AHashMap::new()),
+            leader_timeout: node_parameters.leader_timeout,
+            soft_block_timeout: node_parameters.soft_block_timeout,
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
@@ -1056,6 +1060,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
         let leader_timeout_task = handle.spawn(Self::leader_timeout_task(inner.clone()));
+        let soft_block_timeout_task =
+            if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishS {
+                Some(handle.spawn(Self::soft_block_timeout_task(inner.clone())))
+            } else {
+                None
+            };
 
         let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
         let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone(), bls_service.clone()));
@@ -1087,7 +1097,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         join_all(
             connections
                 .into_values()
-                .chain([leader_timeout_task, commit_timeout_task, cleanup_task].into_iter()),
+                .chain([leader_timeout_task, commit_timeout_task, cleanup_task].into_iter())
+                .chain(soft_block_timeout_task),
         )
         .await;
         Arc::try_unwrap(block_fetcher)
@@ -1157,9 +1168,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     }
 
     async fn leader_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
-        let leader_timeout = Duration::from_millis(600);
+        let leader_timeout = inner.leader_timeout;
         loop {
-            let notified = inner.notify.notified();
+            let notified = inner.threshold_clock_notify.notified();
             let round = inner
                 .dag_state
                 .last_own_block_ref()
@@ -1168,12 +1179,45 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             select! {
                 _sleep = sleep(leader_timeout) => {
                     tracing::debug!("Timeout in round {round}");
-                    // todo - more then one round timeout can happen, need to fix this
                     inner.syncer.force_new_block(round).await;
-
                 }
                 _notified = notified => {
-                    // restart loop
+                    // Round advanced — restart timer
+                }
+                _stopped = inner.stopped() => {
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// StarfishS soft timeout: attempt block creation using the base Starfish
+    /// readiness check (no strong-vote quorum requirement).
+    async fn soft_block_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
+        let soft_timeout = inner.soft_block_timeout;
+        let mut armed_round = inner.dag_state.threshold_clock_round();
+        loop {
+            while inner.dag_state.threshold_clock_round() <= armed_round {
+                let notified = inner.threshold_clock_notify.notified();
+                select! {
+                    _notified = notified => {}
+                    _stopped = inner.stopped() => {
+                        return None;
+                    }
+                }
+            }
+
+            armed_round = inner.dag_state.threshold_clock_round();
+            let notified = inner.threshold_clock_notify.notified();
+            select! {
+                _sleep = sleep(soft_timeout) => {
+                    tracing::debug!(
+                        "StarfishS soft block timeout in threshold round {armed_round}"
+                    );
+                    inner.syncer.try_new_block_relaxed(armed_round).await;
+                }
+                _notified = notified => {
+                    // Round advanced — restart timer
                 }
                 _stopped = inner.stopped() => {
                     return None;
@@ -1185,7 +1229,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     async fn commit_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let commit_timeout = Duration::from_millis(10);
         loop {
-            let notified = inner.notify.notified();
+            let notified = inner.block_ready_notify.notified();
             let round = inner
                 .dag_state
                 .last_own_block_ref()

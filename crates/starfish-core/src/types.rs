@@ -945,9 +945,7 @@ impl VerifiedBlock {
                 let info_length = committee.info_length();
                 let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
-                    if td.transactions.is_empty()
-                        && self.header.has_empty_payload()
-                    {
+                    if td.transactions.is_empty() && self.header.has_empty_payload() {
                         return Ok(None);
                     }
                     let encoded_transactions =

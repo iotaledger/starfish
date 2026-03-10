@@ -44,6 +44,9 @@ enum CoreThreadCommand {
     ),
     AddTransactionData(Vec<ReconstructedTransactionData>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
+    /// Attempt block creation with relaxed readiness checks (StarfishS soft
+    /// timeout).
+    TryNewBlockRelaxed(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),
     Cleanup(oneshot::Sender<()>),
     /// Indicate that a connection to an authority was established.
@@ -119,6 +122,13 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub async fn force_new_block(&self, round: RoundNumber) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::ForceNewBlock(round, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    pub async fn try_new_block_relaxed(&self, round: RoundNumber) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::TryNewBlockRelaxed(round, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop");
     }
@@ -217,6 +227,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["force_new_block"])
                         .inc();
                     self.syncer.force_new_block(round);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::TryNewBlockRelaxed(round, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["try_new_block_relaxed"])
+                        .inc();
+                    self.syncer.try_new_block_relaxed(round);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ForceCommit(sender) => {

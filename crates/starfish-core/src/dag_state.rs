@@ -2269,9 +2269,7 @@ mod tests {
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
-        crypto::{
-            BLS_SIGNATURE_SIZE, BlsSignatureBytes, SignatureBytes, TransactionsCommitment,
-        },
+        crypto::{BLS_SIGNATURE_SIZE, BlsSignatureBytes, SignatureBytes, TransactionsCommitment},
         data::Data,
         metrics::Metrics,
         types::{
@@ -2295,12 +2293,8 @@ mod tests {
     ) -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(
-            &registry,
-            Some(committee.as_ref()),
-            Some(consensus),
-            None,
-        );
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some(consensus), None);
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         std::mem::forget(dir);

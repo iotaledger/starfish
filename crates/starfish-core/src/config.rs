@@ -34,7 +34,7 @@ pub trait ImportExport: Serialize + DeserializeOwned {
 pub struct NodeParameters {
     #[serde(default = "node_defaults::default_wave_length")]
     pub wave_length: RoundNumber,
-    #[serde(default = "node_defaults::default_leader_timeout")]
+    #[serde(default = "param_defaults::default_leader_timeout")]
     pub leader_timeout: Duration,
     #[serde(default = "node_defaults::default_max_block_size")]
     pub max_block_size: usize,
@@ -52,6 +52,8 @@ pub struct NodeParameters {
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(default = "node_defaults::default_enable_starfish_s_adaptive_acknowledgments")]
     pub enable_starfish_s_adaptive_acknowledgments: bool,
+    #[serde(default = "param_defaults::default_soft_block_timeout")]
+    pub soft_block_timeout: Duration,
 }
 
 pub mod node_defaults {
@@ -59,9 +61,6 @@ pub mod node_defaults {
         3
     }
 
-    pub fn default_leader_timeout() -> std::time::Duration {
-        std::time::Duration::from_millis(600)
-    }
     pub fn default_max_block_size() -> usize {
         4 * 1024 * 1024
     }
@@ -86,7 +85,7 @@ pub mod node_defaults {
     }
 
     pub fn default_enable_starfish_s_adaptive_acknowledgments() -> bool {
-        true
+        false
     }
 }
 
@@ -94,7 +93,7 @@ impl Default for NodeParameters {
     fn default() -> Self {
         Self {
             wave_length: node_defaults::default_wave_length(),
-            leader_timeout: node_defaults::default_leader_timeout(),
+            leader_timeout: param_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency: node_defaults::default_mimic_latency(),
@@ -104,6 +103,7 @@ impl Default for NodeParameters {
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_starfish_s_adaptive_acknowledgments:
                 node_defaults::default_enable_starfish_s_adaptive_acknowledgments(),
+            soft_block_timeout: param_defaults::default_soft_block_timeout(),
         }
     }
 }
@@ -112,7 +112,7 @@ impl NodeParameters {
     pub fn default_with_latency(mimic_latency: bool) -> Self {
         Self {
             wave_length: node_defaults::default_wave_length(),
-            leader_timeout: node_defaults::default_leader_timeout(),
+            leader_timeout: param_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),
             enable_broadcaster: node_defaults::default_enable_broadcaster(),
             mimic_latency,
@@ -122,6 +122,7 @@ impl NodeParameters {
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_starfish_s_adaptive_acknowledgments:
                 node_defaults::default_enable_starfish_s_adaptive_acknowledgments(),
+            soft_block_timeout: param_defaults::default_soft_block_timeout(),
         }
     }
 }
@@ -358,6 +359,9 @@ pub struct Parameters {
     /// Leader timeout for the consensus protocol.
     #[serde(default = "param_defaults::default_leader_timeout")]
     pub leader_timeout: Duration,
+    /// StarfishS soft block-creation timeout (relaxed readiness).
+    #[serde(default = "param_defaults::default_soft_block_timeout")]
+    pub soft_block_timeout: Duration,
 }
 
 impl Parameters {
@@ -371,7 +375,7 @@ impl Parameters {
     }
 }
 
-mod param_defaults {
+pub(crate) mod param_defaults {
     use super::Duration;
 
     pub fn default_load() -> usize {
@@ -389,6 +393,10 @@ mod param_defaults {
     pub fn default_leader_timeout() -> Duration {
         Duration::from_millis(600)
     }
+
+    pub fn default_soft_block_timeout() -> Duration {
+        Duration::from_millis(300)
+    }
 }
 
 impl Default for Parameters {
@@ -400,6 +408,7 @@ impl Default for Parameters {
             transaction_mode: TransactionMode::default(),
             storage_backend: StorageBackend::default(),
             leader_timeout: param_defaults::default_leader_timeout(),
+            soft_block_timeout: param_defaults::default_soft_block_timeout(),
         }
     }
 }
