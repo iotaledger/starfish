@@ -406,6 +406,13 @@ impl<H: BlockHandler> Core<H> {
         self.pending.push(MetaTransaction::Payload(transactions));
     }
 
+    fn requeue_transactions(&mut self, transactions: Vec<BaseTransaction>) {
+        if transactions.is_empty() {
+            return;
+        }
+        self.pending.push(MetaTransaction::Payload(transactions));
+    }
+
     fn sort_includes_in_pending(&mut self) {
         let mut include_positions = Vec::new();
         let mut includes = Vec::new();
@@ -469,6 +476,10 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions, clock_round)
         );
+        let starfish_s_excluded_authors = self.starfish_s_excluded_ack_authors(clock_round);
+        if starfish_s_excluded_authors & (1u128 << self.authority) != 0 {
+            self.requeue_transactions(std::mem::take(&mut transactions));
+        }
         timed!(
             self.metrics,
             "Core::new_block::prepare_last_blocks",
@@ -489,8 +500,10 @@ impl<H: BlockHandler> Core<H> {
             } else {
                 Vec::new()
             };
-        let acknowledgment_references = self
-            .filter_starfish_s_leader_acknowledgments(clock_round, acknowledgment_references);
+        let acknowledgment_references = self.filter_starfish_s_leader_acknowledgments(
+            starfish_s_excluded_authors,
+            acknowledgment_references,
+        );
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = timed!(
             self.metrics,
@@ -663,20 +676,21 @@ impl<H: BlockHandler> Core<H> {
         Some(missing_mask)
     }
 
-    fn filter_starfish_s_leader_acknowledgments(
-        &self,
-        clock_round: RoundNumber,
-        acknowledgment_references: Vec<BlockReference>,
-    ) -> Vec<BlockReference> {
+    fn starfish_s_excluded_ack_authors(&self, clock_round: RoundNumber) -> u128 {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS
             || self.committee.elect_leader(clock_round) != self.authority
         {
-            return acknowledgment_references;
+            return 0;
         }
 
-        let excluded_authors = self
-            .dag_state
-            .starfish_s_excluded_ack_authorities();
+        self.dag_state.starfish_s_excluded_ack_authorities()
+    }
+
+    fn filter_starfish_s_leader_acknowledgments(
+        &self,
+        excluded_authors: u128,
+        acknowledgment_references: Vec<BlockReference>,
+    ) -> Vec<BlockReference> {
         if excluded_authors == 0 {
             return acknowledgment_references;
         }
