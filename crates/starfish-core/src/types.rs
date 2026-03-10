@@ -183,8 +183,10 @@ pub struct BlockHeader {
     pub(crate) ack: AckFields,
 
     // -- Protocol-specific extensions -----------------------------------------
-    /// Strong vote flag (StarfishS only). None for all other protocols.
-    pub(crate) strong_vote: Option<bool>,
+    /// StarfishS strong-vote hint mask. `Some(0)` means a strong vote;
+    /// `Some(nonzero)` means the voter is missing payload from the authorities
+    /// whose bits are set.
+    pub(crate) strong_vote: Option<u128>,
     /// BLS certificate fields (StarfishL only). None for all other protocols.
     pub(crate) bls: Option<Box<BlsFields>>,
 
@@ -267,8 +269,16 @@ impl BlockHeader {
         self.transactions_commitment == TransactionsCommitment::default()
     }
 
-    pub fn strong_vote(&self) -> Option<bool> {
+    pub fn strong_vote(&self) -> Option<u128> {
         self.strong_vote
+    }
+
+    pub fn is_strong_vote(&self) -> bool {
+        self.strong_vote == Some(0)
+    }
+
+    pub fn is_strong_blame(&self) -> bool {
+        self.strong_vote.is_some_and(|mask| mask != 0)
     }
 
     pub fn bls(&self) -> Option<&BlsFields> {
@@ -560,7 +570,7 @@ impl VerifiedBlock {
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
         merkle_root: TransactionsCommitment,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
         bls: Option<BlsFields>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
@@ -662,7 +672,7 @@ impl VerifiedBlock {
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     ) -> Self {
@@ -814,8 +824,16 @@ impl VerifiedBlock {
         self.header.has_empty_payload()
     }
 
-    pub fn strong_vote(&self) -> Option<bool> {
+    pub fn strong_vote(&self) -> Option<u128> {
         self.header.strong_vote()
+    }
+
+    pub fn is_strong_vote(&self) -> bool {
+        self.header.is_strong_vote()
+    }
+
+    pub fn is_strong_blame(&self) -> bool {
+        self.header.is_strong_blame()
     }
 
     // --- Payload accessors ---

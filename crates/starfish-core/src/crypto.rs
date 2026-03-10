@@ -164,7 +164,7 @@ impl BlockDigest {
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
         merkle_root: TransactionsCommitment,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -189,7 +189,7 @@ impl BlockDigest {
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -214,7 +214,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
     ) {
         authority.crypto_hash(hasher);
         round.crypto_hash(hasher);
@@ -226,9 +226,9 @@ impl BlockDigest {
         }
         meta_creation_time_ns.crypto_hash(hasher);
         transactions_commitment.crypto_hash(hasher);
-        // Conditional hashing: only hash when Some for backward compatibility
-        if let Some(sv) = strong_vote {
-            [sv as u8].crypto_hash(hasher);
+        // Conditional hashing: only hash when Some for backward compatibility.
+        if let Some(mask) = strong_vote {
+            mask.crypto_hash(hasher);
         }
     }
 }
@@ -322,7 +322,7 @@ impl Signer {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<bool>,
+        strong_vote: Option<u128>,
     ) -> SignatureBytes {
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(

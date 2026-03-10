@@ -231,7 +231,7 @@ impl Linearizer {
     ) -> StakeAggregator<QuorumThreshold> {
         let mut holders = StakeAggregator::<QuorumThreshold>::new();
         for block in dag_state.get_blocks_by_round(round) {
-            if block.strong_vote() == Some(true) {
+            if block.is_strong_vote() {
                 holders.add(block.authority(), &self.committee);
             }
         }
