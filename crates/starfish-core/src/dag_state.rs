@@ -1697,6 +1697,10 @@ impl DagStateInner {
     pub fn update_data_availability(&mut self, block: &VerifiedBlock) {
         let r = block.reference();
         let auth = r.authority as usize;
+        if block.has_empty_payload() {
+            self.data_availability[auth].insert(*r);
+            return;
+        }
         if block.transactions().is_some() && !self.data_availability[auth].contains(r) {
             self.data_availability[auth].insert(*r);
             self.maybe_queue_ack(*r);

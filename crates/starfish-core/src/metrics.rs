@@ -350,12 +350,21 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            shard_reconstruction_lag: register_histogram_with_registry!(
-                "shard_reconstruction_lag",
-                "Round lag between DAG head and reconstructed block",
-                registry,
-            )
-            .unwrap(),
+            shard_reconstruction_lag: {
+                let buckets = vec![
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                    16.0, 32.0, 64.0, 128.0, 256.0,
+                ];
+                register_histogram_with_registry!(
+                    HistogramOpts::new(
+                        "shard_reconstruction_lag",
+                        "Round lag between DAG head and reconstructed block",
+                    )
+                    .buckets(buckets),
+                    registry,
+                )
+                .unwrap()
+            },
             used_additional_blocks_total: register_int_counter_with_registry!(
                 "used_additional_blocks_total",
                 "Total number of times additional blocks that were used in batches",

@@ -2600,7 +2600,7 @@
         "y": 77
       },
       "id": 230,
-      "title": "Proposal wait time",
+      "title": "Waiting time after advancing round",
       "targets": [
         {
           "datasource": {

@@ -595,6 +595,9 @@ impl<H: BlockHandler> Core<H> {
         &mut self,
         transactions: &[BaseTransaction],
     ) -> Option<Vec<Shard>> {
+        if transactions.is_empty() {
+            return None;
+        }
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
@@ -869,6 +872,9 @@ impl<H: BlockHandler> Core<H> {
         block: &Data<VerifiedBlock>,
     ) -> Option<(BlockReference, AuthorityIndex, BlsSignatureBytes)> {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishL {
+            return None;
+        }
+        if block.has_empty_payload() {
             return None;
         }
         let own_ref = *block.reference();

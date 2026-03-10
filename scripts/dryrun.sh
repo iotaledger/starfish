@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-l, starfish-pull,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-l}
+CONSENSUS=${CONSENSUS:-starfish-s}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -26,7 +26,7 @@ TRANSACTION_MODE=all_zero
 #   push-causal | push-useful
 DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
 # Set to 1 to overlay 10s latency on the f farthest peers
-# ADVERSARIAL_LATENCY=1
+ADVERSARIAL_LATENCY=1
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
