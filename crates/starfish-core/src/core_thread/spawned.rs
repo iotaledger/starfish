@@ -254,6 +254,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .inc();
                     self.syncer.connected_authorities.remove(&authority);
                     self.syncer.subscribed_by_authorities.remove(&authority);
+                    self.syncer.recompute_subscriber_stake();
                     self.syncer
                         .metrics
                         .subscribed_to_peers
@@ -270,6 +271,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["peer_subscribed"])
                         .inc();
                     self.syncer.subscribed_by_authorities.insert(authority);
+                    self.syncer.recompute_subscriber_stake();
                     self.syncer
                         .metrics
                         .subscribed_by_peers
