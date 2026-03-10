@@ -1640,6 +1640,11 @@ impl DagStateInner {
             self.index[auth] = self.index[auth].split_off(&threshold);
             self.shard_index[auth] = self.shard_index[auth].split_off(&threshold);
             self.dag[auth] = self.dag[auth].split_off(&threshold);
+            if auth == self.authority as usize {
+                for own_blocks_by_peer in &mut self.own_blocks {
+                    *own_blocks_by_peer = own_blocks_by_peer.split_off(&threshold);
+                }
+            }
 
             let split_ref = BlockReference {
                 authority: auth as AuthorityIndex,
@@ -2275,12 +2280,15 @@ mod tests {
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
-        crypto::{BLS_SIGNATURE_SIZE, BlsSignatureBytes, SignatureBytes, TransactionsCommitment},
+        crypto::{
+            BLS_SIGNATURE_SIZE, BlsSignatureBytes, BlockDigest, SignatureBytes,
+            TransactionsCommitment,
+        },
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, RoundNumber,
-            VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate,
+            RoundNumber, VerifiedBlock,
         },
     };
 
@@ -2539,6 +2547,30 @@ mod tests {
         assert!(dag_state.has_dac_certificate(&authority_without_eviction));
         assert!(!dag_state.has_rejected_dac_certificate(&rejected_pruned));
         assert!(dag_state.has_rejected_dac_certificate(&rejected_kept));
+    }
+
+    #[test]
+    fn cleanup_prunes_own_block_indexes_for_evicted_rounds() {
+        let dag_state = open_test_dag_state_for("starfish", 0);
+
+        {
+            let mut inner = dag_state.dag_state_inner.write();
+            inner.last_seen_by_authority[0] = CACHED_ROUNDS + 10;
+            for peer in 0..inner.committee_size {
+                inner.own_blocks[peer].insert(4, BlockDigest::default());
+                inner.own_blocks[peer].insert(10, BlockDigest::default());
+                inner.own_blocks[peer].insert(12, BlockDigest::default());
+            }
+        }
+
+        dag_state.cleanup();
+
+        let inner = dag_state.dag_state_inner.read();
+        for own_blocks_by_peer in &inner.own_blocks {
+            assert!(!own_blocks_by_peer.contains_key(&4));
+            assert!(own_blocks_by_peer.contains_key(&10));
+            assert!(own_blocks_by_peer.contains_key(&12));
+        }
     }
 
     #[test]

@@ -441,7 +441,7 @@ where
         self.own_blocks = Some(handle);
     }
 
-    pub async fn start_push_batch_stream(&mut self) {
+    pub async fn start_push_batch_stream(&mut self, round: RoundNumber) {
         if let Some(existing) = self.push_blocks.take() {
             existing.abort();
             existing.await.ok();
@@ -451,6 +451,7 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
+            round,
             self.parameters.clone(),
             self.metrics.clone(),
             self.sent_to_peer.clone(),
@@ -641,6 +642,7 @@ where
         to_whom_authority_index: AuthorityIndex,
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
+        mut round: RoundNumber,
         broadcaster_parameters: BroadcasterParameters,
         metrics: Arc<Metrics>,
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
@@ -675,6 +677,7 @@ where
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
+                        &mut round,
                         broadcaster_parameters.clone(),
                         sent_to_peer.clone(),
                         &metrics,
@@ -687,6 +690,7 @@ where
                         inner.clone(),
                         to.clone(),
                         to_whom_authority_index,
+                        &mut round,
                         broadcaster_parameters.clone(),
                         sent_to_peer.clone(),
                         &metrics,
@@ -968,6 +972,7 @@ where
 fn select_push_batch_parts<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     to_whom_authority_index: AuthorityIndex,
+    own_round: RoundNumber,
     broadcaster_parameters: &BroadcasterParameters,
     sent_to_peer: &Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     selection_mode: PushSelectionMode,
@@ -978,14 +983,11 @@ where
 {
     let own_authority = inner.dag_state.get_own_authority_index();
     let other_blocks_format = push_transport_format(inner.dag_state.consensus_protocol);
-    let own_blocks = {
-        let sent = sent_to_peer.read();
-        inner.dag_state.get_unsent_own_blocks(
-            &sent,
-            to_whom_authority_index,
-            broadcaster_parameters.batch_own_block_size,
-        )
-    };
+    let own_blocks = inner.dag_state.get_own_transmission_blocks(
+        to_whom_authority_index,
+        own_round,
+        broadcaster_parameters.batch_own_block_size,
+    );
     let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
 
     let (mut other_refs, mut shard_refs, useful_headers, useful_shards) = match selection_mode {
@@ -1129,6 +1131,7 @@ async fn send_push_batch<H, C>(
     inner: Arc<NetworkSyncerInner<H, C>>,
     to: Sender<NetworkMessage>,
     to_whom_authority_index: AuthorityIndex,
+    round: &mut RoundNumber,
     broadcaster_parameters: BroadcasterParameters,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     metrics: &Metrics,
@@ -1142,10 +1145,14 @@ where
     let plan = select_push_batch_parts(
         &inner,
         to_whom_authority_index,
+        *round,
         &broadcaster_parameters,
         &sent_to_peer,
         selection_mode,
     )?;
+    if let Some(max_round) = plan.own_blocks.iter().map(|block| block.round()).max() {
+        *round = max_round;
+    }
     report_useful_authorities(
         metrics,
         &peer.to_string(),
