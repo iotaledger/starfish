@@ -255,6 +255,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 .created_own_blocks
                 .with_label_values(&[reason.as_str()])
                 .inc();
+            self.maybe_presign_round(block.round() + 1);
             // Send own block and DAC partial sig to BLS service.
             if let Some(ref bls_tx) = self.bls_tx {
                 let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
@@ -286,6 +287,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
         let current_threshold_round = self.core.dag_state().threshold_clock_round();
         if current_threshold_round > previous_threshold_round {
+            // Common case: round r was already pre-signed when creating our
+            // block in round r-1. Keep a fallback here for skipped rounds so
+            // we still contribute to the round-r certificate once we learn we
+            // can advance.
             self.maybe_presign_round(current_threshold_round);
             self.signals
                 .threshold_clock_round_advanced(current_threshold_round);
