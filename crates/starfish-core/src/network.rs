@@ -310,6 +310,8 @@ fn bind_addr(mut local_peer: SocketAddr) -> SocketAddr {
     local_peer
 }
 
+const NETWORK_MESSAGE_CHANNEL_CAPACITY: usize = 1_000;
+
 struct Worker {
     peer: SocketAddr,
     peer_id: usize,
@@ -640,8 +642,10 @@ impl Worker {
     }
 
     async fn make_connection(&self) -> Option<WorkerConnection> {
-        let (network_in_sender, network_in_receiver) = mpsc::channel(16);
-        let (network_out_sender, network_out_receiver) = mpsc::channel(16);
+        let (network_in_sender, network_in_receiver) =
+            mpsc::channel(NETWORK_MESSAGE_CHANNEL_CAPACITY);
+        let (network_out_sender, network_out_receiver) =
+            mpsc::channel(NETWORK_MESSAGE_CHANNEL_CAPACITY);
         let connection = Connection {
             peer_id: self.peer_id,
             sender: network_out_sender,

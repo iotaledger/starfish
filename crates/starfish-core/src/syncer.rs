@@ -53,6 +53,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
     force_new_block: bool,
     proposal_wait_started_at: Option<Instant>,
+    proposal_wait_round: Option<RoundNumber>,
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
@@ -96,10 +97,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .committee()
             .get_stake(core.authority())
             .expect("Own authority should exist in committee");
-        let mut syncer = Self {
+        Self {
             core,
             force_new_block: false,
             proposal_wait_started_at: None,
+            proposal_wait_round: None,
             signals,
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
@@ -107,9 +109,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             subscriber_stake: own_stake,
             metrics,
             bls_tx,
-        };
-        syncer.maybe_presign_round(1);
-        syncer
+        }
     }
 
     pub fn add_blocks(
@@ -130,7 +130,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             used_additional_blocks,
             _processed_blocks,
         ) = self.core.add_blocks(blocks);
-        self.maybe_start_proposal_wait();
+        self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
@@ -151,7 +151,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let previous_threshold_round = self.core.dag_state().threshold_clock_round();
         let (success, missing_parents, processed_refs, _processed_blocks) =
             self.core.add_headers(headers);
-        self.maybe_start_proposal_wait();
+        self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
@@ -164,7 +164,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// creation.
     pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
         self.core.add_transaction_data(items);
-        self.maybe_start_proposal_wait();
+        self.maybe_update_proposal_wait();
         self.try_new_block(BlockCreationReason::TransactionData);
     }
 
@@ -173,7 +173,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// retry both paths immediately when DAG state changed.
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
         if apply_certificate_events(self.core.dag_state(), events) {
-            self.maybe_start_proposal_wait();
+            self.maybe_update_proposal_wait();
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
@@ -184,7 +184,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.metrics.leader_timeout_total.inc();
             self.force_new_block = true;
             tracing::debug!("Attempt to force new block after timeout");
-            self.maybe_start_proposal_wait();
+            self.maybe_update_proposal_wait();
             self.try_new_block(BlockCreationReason::ForceTimeout);
             true
         } else {
@@ -215,7 +215,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if self.core.last_proposed() >= threshold_round {
             return false;
         }
-        self.maybe_start_proposal_wait();
+        self.maybe_update_proposal_wait();
         if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
         }
@@ -229,7 +229,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self, reason: BlockCreationReason) -> bool {
-        self.maybe_start_proposal_wait();
+        self.maybe_update_proposal_wait();
         if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
         }
@@ -245,17 +245,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     fn create_new_block(&mut self, reason: BlockCreationReason) -> bool {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
-        if let Some(ref block) = self.core.try_new_block() {
+        if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
                     .proposal_wait_time_total_us
                     .inc_by(started_at.elapsed().as_micros() as u64);
             }
-            self.metrics
-                .created_own_blocks
-                .with_label_values(&[reason.as_str()])
-                .inc();
-            self.maybe_presign_round(block.round() + 1);
+            self.proposal_wait_round = None;
             // Send own block and DAC partial sig to BLS service.
             if let Some(ref bls_tx) = self.bls_tx {
                 let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
@@ -275,34 +271,34 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         false
     }
 
-    fn maybe_start_proposal_wait(&mut self) {
-        if self.proposal_wait_started_at.is_some() {
+    fn maybe_update_proposal_wait(&mut self) {
+        let threshold_round = self.core.dag_state().threshold_clock_round();
+        if threshold_round <= self.core.last_proposed() {
             return;
         }
-        if self.core.dag_state().threshold_clock_round() > self.core.last_proposed() {
-            self.proposal_wait_started_at = Some(Instant::now());
+
+        match self.proposal_wait_round {
+            None => {
+                self.proposal_wait_round = Some(threshold_round);
+                self.proposal_wait_started_at = Some(Instant::now());
+            }
+            Some(wait_round) if threshold_round > wait_round => {
+                if let Some(started_at) = self.proposal_wait_started_at.replace(Instant::now()) {
+                    self.metrics
+                        .proposal_wait_time_total_us
+                        .inc_by(started_at.elapsed().as_micros() as u64);
+                }
+                self.proposal_wait_round = Some(threshold_round);
+            }
+            _ => {}
         }
     }
 
     fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
         let current_threshold_round = self.core.dag_state().threshold_clock_round();
         if current_threshold_round > previous_threshold_round {
-            // Common case: round r was already pre-signed when creating our
-            // block in round r-1. Keep a fallback here for skipped rounds so
-            // we still contribute to the round-r certificate once we learn we
-            // can advance.
-            self.maybe_presign_round(current_threshold_round);
             self.signals
                 .threshold_clock_round_advanced(current_threshold_round);
-        }
-    }
-
-    fn maybe_presign_round(&mut self, round: RoundNumber) {
-        let Some(sig) = self.core.precompute_round_sig(round) else {
-            return;
-        };
-        if let Some(ref bls_tx) = self.bls_tx {
-            let _ = bls_tx.try_send(BlsServiceMessage::PartialSig(sig));
         }
     }
 

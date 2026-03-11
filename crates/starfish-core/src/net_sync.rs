@@ -994,16 +994,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         crate::types::PartialSigKind::Dac(block_ref) => {
                             let target = block_ref.authority;
                             let msg = NetworkMessage::PartialSig(partial_sig);
-                            if let Some(sender) = routing_inner.peer_senders.read().get(&target) {
-                                let _ = sender.try_send(msg);
+                            let sender = routing_inner.peer_senders.read().get(&target).cloned();
+                            if let Some(sender) = sender {
+                                let _ = sender.send(msg).await;
                             }
                         }
                         crate::types::PartialSigKind::Round(_)
                         | crate::types::PartialSigKind::Leader(_) => {
-                            for sender in routing_inner.peer_senders.read().values() {
-                                let _ = sender
-                                    .try_send(NetworkMessage::PartialSig(partial_sig.clone()));
-                            }
+                            let senders: Vec<_> =
+                                routing_inner.peer_senders.read().values().cloned().collect();
+                            join_all(
+                                senders.into_iter().map(|sender| {
+                                    let partial_sig = partial_sig.clone();
+                                    async move {
+                                        let _ = sender
+                                            .send(NetworkMessage::PartialSig(partial_sig))
+                                            .await;
+                                    }
+                                }),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1017,9 +1027,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let task = handle.spawn(async move {
                 while let Some(partial_sig) = rx.recv().await {
                     // Pre-computed sigs are always round/leader, broadcast to all.
-                    for sender in routing_inner.peer_senders.read().values() {
-                        let _ = sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
-                    }
+                    let senders: Vec<_> =
+                        routing_inner.peer_senders.read().values().cloned().collect();
+                    join_all(
+                        senders.into_iter().map(|sender| {
+                            let partial_sig = partial_sig.clone();
+                            async move {
+                                let _ = sender
+                                    .send(NetworkMessage::PartialSig(partial_sig))
+                                    .await;
+                            }
+                        }),
+                    )
+                    .await;
                 }
             });
             (Some(tx), Some(task))
@@ -1037,6 +1057,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             >();
             crate::bls_service::start_bls_service(
                 aggregator,
+                bls_tx.clone(),
                 bls_rx,
                 event_tx,
                 metrics.clone(),
@@ -1044,6 +1065,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 own_authority,
                 bls_committee,
                 bls_broadcast_tx,
+                dag_state.clone(),
+                inner.block_ready_notify.clone(),
+                inner.threshold_clock_notify.clone(),
             );
             let bls_handle = BlsServiceHandle::new(bls_tx);
             let event_inner = inner.clone();
