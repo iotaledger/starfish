@@ -617,6 +617,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         let mut seen_in_batch = AHashSet::with_capacity(incoming_digests.len());
         let mut verified_data_blocks = Vec::new();
         let mut verified_has_shard = Vec::new();
+        let mut verified_block_shards = Vec::new();
         let shard_tx = self.inner.shard_tx.lock().clone();
 
         for (data_block, digest) in blocks.into_iter().zip(incoming_digests) {
@@ -648,12 +649,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     break;
                 }
             };
-            // Insert shard sidecar into DAG index
-            if let Some(s) = shard.as_ref() {
-                self.inner
-                    .dag_state
-                    .insert_shard(*block.reference(), s.clone());
-            }
             if let Some(ck) = connection_knowledge.as_ref() {
                 let mut ck = ck.write();
                 ck.mark_header_useful_from_peer(*block.reference());
@@ -670,8 +665,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block.serialized_header_bytes().is_some(),
                 "header must be preserialized before entering core"
             );
-            verified_data_blocks.push(Data::new(block));
+            let block = Data::new(block);
+            verified_data_blocks.push(block.clone());
             verified_has_shard.push(has_shard);
+            verified_block_shards.push((block, shard));
         }
 
         // Notify reconstructor to stop collecting shards for these blocks (batched).
@@ -716,7 +713,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     shards: shard_refs,
                 });
             let (_pending_block_references, missing_parents, _processed_additional_blocks) =
-                self.inner.syncer.add_blocks(verified_data_blocks).await;
+                self.inner.syncer.add_blocks(verified_block_shards).await;
             if !missing_parents.is_empty() {
                 tracing::debug!(
                     "Missing parents when processing block from peer {:?}: {:?}",

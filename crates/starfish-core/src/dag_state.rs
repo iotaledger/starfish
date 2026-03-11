@@ -754,6 +754,67 @@ impl DagState {
         is_new
     }
 
+    /// Apply a batch of BLS certificate events while holding the DAG write
+    /// lock once.
+    pub fn apply_certificate_events(
+        &self,
+        events: Vec<crate::bls_certificate_aggregator::CertificateEvent>,
+    ) -> bool {
+        use crate::bls_certificate_aggregator::CertificateEvent;
+
+        let mut inner = self.dag_state_inner.write();
+        let mut changed = false;
+        for event in events {
+            match event {
+                CertificateEvent::Round(round, certificate) => {
+                    changed |= inner
+                        .round_certificates
+                        .insert(round, certificate)
+                        .is_none();
+                }
+                CertificateEvent::Leader(leader_ref, certificate) => {
+                    changed |= inner.leader_certificates[leader_ref.authority as usize]
+                        .insert(leader_ref, certificate)
+                        .is_none();
+                }
+                CertificateEvent::Dac(block_ref, certificate) => {
+                    if inner.rejected_dac_certificates[block_ref.authority as usize]
+                        .contains(&block_ref)
+                    {
+                        continue;
+                    }
+                    let is_new = inner.dac_certificates[block_ref.authority as usize]
+                        .insert(block_ref, certificate)
+                        .is_none();
+                    if is_new {
+                        tracing::debug!("Certified DAC for {}", block_ref);
+                        inner.maybe_queue_ack(block_ref);
+                    }
+                    changed |= is_new;
+                }
+                CertificateEvent::DacRejected(block_ref) => {
+                    if inner.dac_certificates[block_ref.authority as usize].contains_key(&block_ref)
+                    {
+                        continue;
+                    }
+                    let is_new = inner.rejected_dac_certificates[block_ref.authority as usize]
+                        .insert(block_ref);
+                    if is_new {
+                        tracing::debug!("Rejected DAC for {}", block_ref);
+                    }
+                    changed |= is_new;
+                }
+                CertificateEvent::PrecomputedRoundSig(round, sig) => {
+                    inner.precomputed_round_sigs.insert(round, sig);
+                }
+                CertificateEvent::PrecomputedLeaderSig(leader_ref, sig) => {
+                    inner.precomputed_leader_sigs.insert(leader_ref, sig);
+                }
+            }
+        }
+        changed
+    }
+
     /// Check whether the given round has a confirmed BLS certificate.
     pub fn has_round_certificate(&self, round: RoundNumber) -> bool {
         self.dag_state_inner
@@ -995,6 +1056,87 @@ impl DagState {
         false
     }
 
+    /// Batched readiness check used by block creation to avoid repeatedly
+    /// cloning the same round view under separate DAG read locks.
+    pub fn is_ready_for_new_block(
+        &self,
+        quorum_round: RoundNumber,
+        leaders: &[AuthorityIndex],
+        relaxed: bool,
+        authority: AuthorityIndex,
+        committee: &Committee,
+    ) -> bool {
+        let inner = self.dag_state_inner.read();
+        let leader_round = quorum_round - 1;
+        let blocks = inner.get_blocks_by_round(leader_round);
+        if blocks.is_empty() {
+            return false;
+        }
+        if !leaders
+            .iter()
+            .all(|leader| blocks.iter().any(|block| block.authority() == *leader))
+        {
+            return false;
+        }
+
+        if leader_round >= 2 {
+            let prev_leader = committee.elect_leader(leader_round - 1);
+            let mut votes = StakeAggregator::<QuorumThreshold>::new();
+            let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
+            let count_strong_votes =
+                !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishS;
+
+            for block in &blocks {
+                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishL {
+                    block
+                        .header()
+                        .voted_leader()
+                        .is_some_and(|(leader_ref, _)| {
+                            leader_ref.authority == prev_leader
+                                && leader_ref.round == leader_round - 1
+                        })
+                } else {
+                    block.block_references().iter().any(|reference| {
+                        reference.authority == prev_leader && reference.round == leader_round - 1
+                    })
+                };
+                if votes_for_leader {
+                    votes.add(block.authority(), committee);
+                }
+                if count_strong_votes && block.is_strong_vote() {
+                    strong_votes.add(block.authority(), committee);
+                }
+            }
+
+            if !votes.is_quorum(committee) {
+                return false;
+            }
+            if count_strong_votes && !strong_votes.is_quorum(committee) {
+                return false;
+            }
+        }
+
+        if self.consensus_protocol == ConsensusProtocol::StarfishL {
+            let prev_round = quorum_round.saturating_sub(1);
+            if prev_round > 0 && !inner.round_certificates.contains_key(&prev_round) {
+                return false;
+            }
+            if prev_round > 0 && committee.elect_leader(quorum_round) == authority {
+                let mut block_votes = StakeAggregator::<QuorumThreshold>::new();
+                for block in &blocks {
+                    if block_votes.add(block.authority(), committee) {
+                        break;
+                    }
+                }
+                if !block_votes.is_quorum(committee) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     pub fn starfish_s_excluded_ack_authorities(&self) -> u128 {
         if self.consensus_protocol != ConsensusProtocol::StarfishS
             || !self.starfish_s_adaptive_acknowledgments
@@ -1196,6 +1338,35 @@ impl DagState {
             .entry(block_ref.round)
             .or_default()
             .insert(block_ref.digest, shard);
+    }
+
+    /// Batch-insert shard sidecars, persisting all bytes first and then
+    /// updating the in-memory index under one DAG write lock.
+    pub fn insert_shards_batch(&self, shards: Vec<(BlockReference, ProvableShard)>) {
+        if shards.is_empty() {
+            return;
+        }
+
+        let mut prepared = Vec::with_capacity(shards.len());
+        for (block_ref, mut shard) in shards {
+            shard.preserialize();
+            let shard_bytes = shard
+                .serialized_bytes()
+                .expect("shard should be preserialized");
+            self.store
+                .store_shard_data_bytes(&block_ref, shard_bytes)
+                .expect("Failed to store shard data");
+            prepared.push((block_ref, shard));
+        }
+
+        let mut inner = self.dag_state_inner.write();
+        for (block_ref, shard) in prepared {
+            let auth = block_ref.authority as usize;
+            inner.shard_index[auth]
+                .entry(block_ref.round)
+                .or_default()
+                .insert(block_ref.digest, shard);
+        }
     }
 
     /// Check whether the shard index contains a shard for this block.
@@ -1415,6 +1586,19 @@ impl DagState {
 
     pub fn last_available_commit(&self) -> RoundNumber {
         self.dag_state_inner.read().last_available_commit
+    }
+
+    /// Update commit-related metadata under one write lock and return the new
+    /// per-authority committed-round snapshot.
+    pub fn update_commit_state(&self, commit: &CommittedSubDag) -> Vec<RoundNumber> {
+        let mut inner = self.dag_state_inner.write();
+        inner.last_available_commit = inner.last_available_commit.max(commit.anchor.round);
+        for block in &commit.blocks {
+            let auth = block.authority() as usize;
+            inner.last_committed_rounds[auth] =
+                inner.last_committed_rounds[auth].max(block.round());
+        }
+        inner.last_committed_rounds.clone()
     }
 
     /// Update last_committed_rounds for all authorities in a committed subdag.

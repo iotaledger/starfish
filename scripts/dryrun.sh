@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-s, starfish-l,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-s}
+CONSENSUS=${CONSENSUS:-starfish-l}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,

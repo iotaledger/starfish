@@ -112,7 +112,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedBlock>>,
+        blocks: Vec<(Data<VerifiedBlock>, Option<crate::types::ProvableShard>)>,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,

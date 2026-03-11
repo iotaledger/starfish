@@ -85,7 +85,7 @@ pub mod node_defaults {
     }
 
     pub fn default_enable_starfish_s_adaptive_acknowledgments() -> bool {
-        false
+        true
     }
 }
 

@@ -24,30 +24,7 @@ use crate::{
 /// Apply certificate events to a `DagState`, returning `true` if any new
 /// certificate was learned.
 pub fn apply_certificate_events(dag_state: &DagState, events: Vec<CertificateEvent>) -> bool {
-    let mut changed = false;
-    for event in events {
-        match event {
-            CertificateEvent::Round(round, cert) => {
-                changed |= dag_state.mark_round_certified(round, cert);
-            }
-            CertificateEvent::Leader(leader_ref, cert) => {
-                changed |= dag_state.mark_leader_certified(leader_ref, cert);
-            }
-            CertificateEvent::Dac(block_ref, cert) => {
-                changed |= dag_state.mark_dac_certified(block_ref, cert);
-            }
-            CertificateEvent::DacRejected(block_ref) => {
-                changed |= dag_state.mark_dac_rejected(block_ref);
-            }
-            CertificateEvent::PrecomputedRoundSig(round, sig) => {
-                dag_state.store_precomputed_round_sig(round, sig);
-            }
-            CertificateEvent::PrecomputedLeaderSig(leader_ref, sig) => {
-                dag_state.store_precomputed_leader_sig(leader_ref, sig);
-            }
-        }
-    }
-    changed
+    dag_state.apply_certificate_events(events)
 }
 
 /// Events emitted when a new verified certificate is completed.

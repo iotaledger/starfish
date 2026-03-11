@@ -32,7 +32,7 @@ use crate::{
     store::Store,
     types::{
         AuthorityIndex, BaseTransaction, BlockReference, BlsAggregateCertificate, Encoder,
-        PartialSig, PartialSigKind, ReconstructedTransactionData, RoundNumber, Shard,
+        PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData, RoundNumber, Shard,
         VerifiedBlock,
     },
 };
@@ -221,7 +221,7 @@ impl<H: BlockHandler> Core<H> {
     #[allow(clippy::type_complexity)]
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<Data<VerifiedBlock>>,
+        blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
     ) -> (
         bool,
         Vec<BlockReference>,
@@ -233,6 +233,19 @@ impl<H: BlockHandler> Core<H> {
             .metrics
             .utilization_timer
             .utilization_timer("Core::add_blocks");
+        let mut block_shards = Vec::new();
+        let blocks: Vec<_> = blocks
+            .into_iter()
+            .map(|(block, shard)| {
+                if let Some(shard) = shard {
+                    block_shards.push((*block.reference(), shard));
+                }
+                block
+            })
+            .collect();
+        if !block_shards.is_empty() {
+            self.dag_state.insert_shards_batch(block_shards);
+        }
         let block_references_with_transactions: Vec<_> = blocks
             .iter()
             .filter(|b| b.transactions().is_some())
@@ -1037,63 +1050,19 @@ impl<H: BlockHandler> Core<H> {
             "Attempt ready new block, quorum round {}, Before exist at authority round",
             quorum_round
         );
-        if !self
-            .dag_state
-            .all_blocks_exists_at_authority_round(&leaders, leader_round)
-        {
-            return false;
-        }
-
-        // Wait for a quorum of blocks at leader_round that voted for
-        // the leader of leader_round - 1.
-        if leader_round >= 2 {
-            let prev_leader = self.committee.elect_leader(leader_round - 1);
-            if !self.dag_state.has_votes_quorum_at_round(
-                leader_round,
-                prev_leader,
-                leader_round - 1,
-                &self.committee,
-            ) {
-                return false;
-            }
-
-            // StarfishS: also require a quorum of strong votes at leader_round.
-            if !relaxed
-                && self.dag_state.consensus_protocol == ConsensusProtocol::StarfishS
-                && !self
-                    .dag_state
-                    .has_strong_votes_quorum_at_round(leader_round, &self.committee)
-            {
-                return false;
-            }
-        }
-
-        // StarfishL: require round certificate for the previous round.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-            let prev_round = quorum_round.saturating_sub(1);
-            if prev_round > 0 && !self.dag_state.has_round_certificate(prev_round) {
-                return false;
-            }
-            if prev_round > 0
-                && self.committee.elect_leader(quorum_round) == self.authority
-                && !self
-                    .dag_state
-                    .has_block_quorum_at_round(prev_round, &self.committee)
-            {
-                return false;
-            }
-        }
-
-        true
+        self.dag_state.is_ready_for_new_block(
+            quorum_round,
+            &leaders,
+            relaxed,
+            self.authority,
+            &self.committee,
+        )
     }
 
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>, _any_decided: bool) {
         let mut commit_data = vec![];
         for commit in &committed {
-            self.dag_state
-                .update_last_available_commit(commit.anchor.round);
-            self.dag_state.update_last_committed_rounds(commit);
-            let committed_rounds = self.dag_state.last_committed_rounds();
+            let committed_rounds = self.dag_state.update_commit_state(commit);
             commit_data.push(CommitData::new(commit, committed_rounds));
         }
         let store_start = std::time::Instant::now();

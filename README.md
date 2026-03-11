@@ -13,15 +13,15 @@ at https://eprint.iacr.org/2025/567.
 Four versions of Starfish are available in this repository:
 
 - **`starfish`**: Theory-aligned version
-  - Higher bandwidth usage (up to 4x)
-  - Better latency guarantees with Byzantine nodes under low load
+  - By default uses Push dissemination strategy for headers and shards
+  - Better latency guarantees with Byzantine nodes
 
 - **`starfish-s`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
-  - Lower latency when validators hold full leader payloads
+  - Lower latency when validators have same acknowledgments as a leader
 
 - **`starfish-l`**: BLS-optimized variant
-  - Uses BLS aggregate signatures to reduce communication complexity
+  - Uses BLS aggregate signatures to reduce communication complexity for header metadata
   - Embeds compact aggregate certificates (round, leader, data availability) in block headers
   - Async BLS verification service offloads signature processing from the critical path
 
@@ -29,7 +29,7 @@ The repository also supports other partially synchronous uncertified DAG-based c
 
 - **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).
 Validators use a bandwidth efficient pull-based block dissemination strategy:
-they push their own blocks and request the peers about missing ancestors only. A scalable BFT protocol.
+they push their own blocks and request the peers about missing ancestors only. 
 - **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174).
 Validators use a push-based block dissemination strategy,
 pushing all unknown history of blocks to their peers.
