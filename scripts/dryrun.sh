@@ -6,7 +6,7 @@
 # Recommend < physical cores. Hard limit is 128
 NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
-# Options: starfish, starfish-s, starfish-l, starfish-pull,
+# Options: starfish, starfish-s, starfish-l,
 #          cordial-miners, mysticeti
 CONSENSUS=${CONSENSUS:-starfish-s}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
@@ -19,9 +19,9 @@ TEST_TIME=${TEST_TIME:-3000}
 # instead of AWS RTT table
 # UNIFORM_LATENCY_MS=100
 # Storage backend: rocksdb (default) | tidehunter
-STORAGE_BACKEND=rocksdb
+STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
 # Transaction payload mode: all_zero (default) | random
-TRANSACTION_MODE=all_zero
+TRANSACTION_MODE=${TRANSACTION_MODE:-all_zero}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
 DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}

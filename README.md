@@ -39,7 +39,14 @@ but it is overall a less scalable solution.
 ## Key Features of Starfish
 
 - Starfish is a Byzantine Fault Tolerant protocol capable of tolerating up to 1/3 of Byzantine nodes in a partially synchronous network.
-- It uses push-based dissemination strategy that incorporates Reed-Solomon coding for the transaction data to amortize communication costs
+- It supports four configurable block dissemination modes:
+  - `protocol-default` — uses the protocol's native strategy
+    (pull for Mysticeti, push-causal for Starfish/CordialMiners)
+  - `pull` — push own blocks only; request missing ancestors
+  - `push-causal` — push blocks with their causal history
+  - `push-useful` — push blocks likely unknown to the receiver
+- It incorporates Reed-Solomon coding for transaction data
+  to amortize communication costs
 - It provides a linear amortized communication complexity for a large enough transaction load
 - It achieves high throughput (~200-300K tx/sec for 10-100 validators) and subsecond end-to-end latency for up to 150K tx/sec
 
@@ -146,6 +153,14 @@ cargo run --release --bin starfish -- local-benchmark \
         --duration-secs 100
 ```
 
+Additional local-benchmark flags:
+
+- `--dissemination-mode <MODE>` — override dissemination strategy
+  (`protocol-default`, `pull`, `push-causal`, `push-useful`)
+- `--adversarial-latency` — overlay 10s latency on f farthest peers
+- `--uniform-latency-ms <FLOAT>` — uniform latency instead of
+  AWS RTT table
+
 ### Local dryrun with monitoring
 
 The dryrun script launches a Docker-based local testbed with Prometheus and Grafana:
@@ -157,19 +172,23 @@ The dryrun script launches a Docker-based local testbed with Prometheus and Graf
 Configuration via environment variables:
 
 ```bash
-NUM_VALIDATORS=10 DESIRED_TPS=100 CONSENSUS=starfish-s \
+NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-s \
   NUM_BYZANTINE_NODES=2 BYZANTINE_STRATEGY=random-drop \
-  TEST_TIME=300 ./scripts/dryrun.sh
+  TEST_TIME=3000 ./scripts/dryrun.sh
 ```
 
 | Variable | Default | Description |
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
-| `DESIRED_TPS` | 100 | Target transactions per second |
+| `DESIRED_TPS` | 1000 | Target transactions per second |
 | `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-l`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
-| `TEST_TIME` | 300 | Duration in seconds |
+| `TEST_TIME` | 3000 | Duration in seconds |
+| `DISSEMINATION_MODE` | push-causal | `protocol-default`, `pull`, `push-causal`, `push-useful` |
+| `STORAGE_BACKEND` | rocksdb | `rocksdb` or `tidehunter` |
+| `TRANSACTION_MODE` | all_zero | `all_zero` or `random` |
+| `ADVERSARIAL_LATENCY` | _(unset)_ | Set to `1` to overlay 10s latency on f farthest peers |
 | `UNIFORM_LATENCY_MS` | _(unset)_ | Uniform network latency in ms; overrides AWS RTT table |
 | `CLEAN_MONITORING` | 0 | Set to 1 to wipe Prometheus/Grafana data between runs |
 | `REMOVE_VOLUMES` | 1 | Set to 0 to preserve RocksDB volumes between runs |

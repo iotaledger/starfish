@@ -155,7 +155,68 @@ using the flag `--mimic-extra-latency`. So, the command could be
 cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb --mimic-extra-latency --use-internal-ip-addresses
 ```
 
-## Step 5. Monitoring
+Additional benchmark flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dissemination-mode` | _(protocol default)_ | `protocol-default`, `pull`, `push-causal`, `push-useful` |
+| `--storage-backend` | _(unset)_ | `rocksdb` or `tidehunter` |
+| `--transaction-mode` | _(unset)_ | `all_zero` or `random` |
+| `--protocols` | _(unset)_ | Run multiple protocols in sequence |
+| `--enable-tracing` | false | Enable detailed log traces |
+| `--adversarial-latency` | false | Overlay 10s latency on f farthest peers |
+| `--skip-testbed-update` | false | Skip pulling latest code on remotes |
+| `--skip-testbed-configuration` | false | Skip reconfiguring nodes |
+| `--destroy-testbed-after` | false | Destroy testbed after benchmark |
+
+## Step 5. Benchmark sweeps
+
+The `benchmark-sweep` subcommand performs adaptive
+latency-throughput characterization. It works in two phases:
+a coarse phase that multiplies load aggressively to find the
+throughput region, then a fine phase that narrows in with smaller
+increments. The sweep stops when p50 latency exceeds
+`--sweep-latency-goal-ms` or `--sweep-max-points` measurements
+are collected.
+
+```bash
+cargo run --bin orchestrator -- benchmark-sweep \
+    --consensus starfish --committee 10
+```
+
+Use `--protocols` to sweep multiple protocols in one run:
+
+```bash
+cargo run --bin orchestrator -- benchmark-sweep \
+    --protocols starfish starfish-s starfish-l \
+    --committee 10
+```
+
+Sweep-specific flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--sweep-initial-load` | 2000 | Starting load (tx/s) |
+| `--sweep-latency-goal-ms` | 2000 | Stop when p50 exceeds this (ms) |
+| `--sweep-refine-latency-ms` | 1000 | Switch to fine phase above this (ms) |
+| `--sweep-coarse-multiplier` | 4.0 | Coarse-phase load multiplier |
+| `--sweep-fine-multiplier` | 1.25 | Fine-phase load multiplier |
+| `--sweep-max-points` | 12 | Max measurements per protocol |
+
+All common benchmark flags (`--mimic-extra-latency`,
+`--adversarial-latency`, `--dissemination-mode`, etc.) are also
+accepted.
+
+## Step 6. Summarize results
+
+The `summarize` subcommand prints a summary table from a saved
+benchmark results file:
+
+```bash
+cargo run --bin orchestrator -- summarize --path results.json
+```
+
+## Step 7. Monitoring
 
 The orchestrator provides facilities to monitor metrics on clients and nodes.
 It deploys a [Prometheus](https://prometheus.io) instance and
