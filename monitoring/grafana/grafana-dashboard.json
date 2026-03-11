@@ -5193,14 +5193,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(network_requests_sent_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} \u2014 {{request_type}}",
+          "expr": "sum by (validator) (rate(block_sync_requests_sent{validator=~\"$validator\"}[1m]))",
+          "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Network requests sent (rate)",
+      "title": "Block sync requests",
       "type": "timeseries"
     },
     {
@@ -5291,14 +5291,14 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(network_requests_received_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} \u2014 {{request_type}}",
+          "expr": "sum by (validator) (rate(tx_data_requests_sent{validator=~\"$validator\"}[1m]))",
+          "legendFormat": "{{validator}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Network requests received (rate)",
+      "title": "Tx data requests",
       "type": "timeseries"
     },
     {
