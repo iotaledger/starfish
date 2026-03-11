@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
@@ -13,17 +13,17 @@ use crate::{
     committee::Committee,
     dag_state::DagState,
     data::Data,
-    types::{BlockReference, VerifiedBlock},
+    types::{BlockReference, RoundNumber, VerifiedBlock},
 };
 
 /// Block manager suspends incoming blocks until they are connected to the
 /// existing graph, returning newly connected blocks
 pub struct BlockManager {
     /// Keeps all pending blocks.
-    blocks_pending: HashMap<BlockReference, Data<VerifiedBlock>>,
+    blocks_pending: BTreeMap<BlockReference, Data<VerifiedBlock>>,
     /// Keeps all the blocks (`AHashSet<BlockReference>`) waiting
     /// for `BlockReference` to be processed.
-    block_references_waiting: HashMap<BlockReference, AHashSet<BlockReference>>,
+    block_references_waiting: BTreeMap<BlockReference, AHashSet<BlockReference>>,
     /// Keeps all blocks that need to be synced in order to unblock the
     /// processing of other pending blocks. The indices of the vector
     /// correspond the authority indices.
@@ -175,5 +175,48 @@ impl BlockManager {
 
     pub fn pending_blocks_count(&self) -> usize {
         self.blocks_pending.len()
+    }
+
+    /// Evict all pending/missing entries below the given threshold to prevent
+    /// unbounded growth from permanently-missing blocks (e.g. byzantine
+    /// validators referencing parents they never broadcast).
+    ///
+    /// When a parent entry is evicted from `block_references_waiting`, all
+    /// child blocks that depended on it are recursively removed from
+    /// `blocks_pending` (cascade removal) — otherwise they would be stuck
+    /// forever with no dependency tracking.
+    pub fn cleanup(&mut self, threshold_round: RoundNumber) {
+        let split_ref = BlockReference {
+            round: threshold_round,
+            authority: 0,
+            digest: Default::default(),
+        };
+
+        // `split_off` returns entries >= split_ref, leaving < split_ref in
+        // the original. Swap so `evicted_parents` holds the old entries.
+        let kept = self.block_references_waiting.split_off(&split_ref);
+        let evicted_parents = std::mem::replace(&mut self.block_references_waiting, kept);
+
+        // Cascade: remove children that depended on evicted parents, and
+        // recursively remove their dependents too.
+        let mut to_remove: Vec<BlockReference> = evicted_parents
+            .into_values()
+            .flat_map(|children| children.into_iter())
+            .collect();
+
+        while let Some(child_ref) = to_remove.pop() {
+            self.blocks_pending.remove(&child_ref);
+            if let Some(grandchildren) = self.block_references_waiting.remove(&child_ref) {
+                to_remove.extend(grandchildren);
+            }
+        }
+
+        // Evict remaining old pending blocks (roots with no dependents).
+        self.blocks_pending = self.blocks_pending.split_off(&split_ref);
+
+        // Clean missing sets.
+        for missing_set in &mut self.missing {
+            missing_set.retain(|r| r.round >= threshold_round);
+        }
     }
 }

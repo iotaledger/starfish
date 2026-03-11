@@ -21,7 +21,9 @@ use crate::{
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
     crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
-    dag_state::{ByzantineStrategy, CommitData, ConsensusProtocol, DagState, OwnBlockData},
+    dag_state::{
+        ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, OwnBlockData,
+    },
     data::Data,
     encoder::ShardEncoder,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -966,6 +968,8 @@ impl<H: BlockHandler> Core<H> {
     pub fn cleanup(&mut self) -> RoundNumber {
         self.dag_state.cleanup();
         let threshold = self.dag_state.gc_round();
+        self.block_manager
+            .cleanup(threshold.saturating_sub(CACHED_ROUNDS));
         self.pending_reconstructed_data
             .retain(|block_ref, _| block_ref.round >= threshold);
         self.committer.cleanup(threshold);
