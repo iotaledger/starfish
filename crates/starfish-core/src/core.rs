@@ -159,7 +159,8 @@ impl<H: BlockHandler> Core<H> {
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
-        let bls_cert_aggregator = if dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+        let bls_cert_aggregator = if dag_state.consensus_protocol == ConsensusProtocol::StarfishBls
+        {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
@@ -400,7 +401,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     /// Sign and enqueue a standalone DAC partial signature for a remote block.
-    /// No-op for non-StarfishL or own blocks.
+    /// No-op for non-StarfishBls or own blocks.
     fn sign_and_enqueue_dac(&self, block_ref: &BlockReference) {
         if block_ref.authority == self.authority {
             return;
@@ -465,18 +466,18 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let voted_leader_ref = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
-        {
-            self.select_starfish_l_voted_leader(clock_round)
-        } else {
-            None
-        };
+        let voted_leader_ref =
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+                self.select_starfish_bls_voted_leader(clock_round)
+            } else {
+                None
+            };
 
-        // StarfishL must not drain the pending frontier before the previous
+        // StarfishBls must not drain the pending frontier before the previous
         // round certificate is available, otherwise timeout retries can rebuild
         // the same round from a truncated queue.
         let aggregate_round_sig =
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
                 if clock_round <= 1 {
                     None
                 } else {
@@ -496,8 +497,8 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions, clock_round)
         );
-        let starfish_s_excluded_authors = self.starfish_s_excluded_ack_authors(clock_round);
-        if starfish_s_excluded_authors & (1u128 << self.authority) != 0 {
+        let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
+        if starfish_speed_excluded_authors & (1u128 << self.authority) != 0 {
             self.requeue_transactions(std::mem::take(&mut transactions));
         }
         timed!(
@@ -520,8 +521,8 @@ impl<H: BlockHandler> Core<H> {
             } else {
                 Vec::new()
             };
-        let acknowledgment_references = self.filter_starfish_s_leader_acknowledgments(
-            starfish_s_excluded_authors,
+        let acknowledgment_references = self.filter_starfish_speed_leader_acknowledgments(
+            starfish_speed_excluded_authors,
             acknowledgment_references,
         );
         let number_of_blocks_to_create = self.last_own_block.len();
@@ -531,26 +532,26 @@ impl<H: BlockHandler> Core<H> {
             self.calculate_authority_bounds(number_of_blocks_to_create)
         );
 
-        let certified_leader = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL
-        {
-            // Leader cert for leader of clock_round - 1 (if we include that leader).
-            if clock_round <= 2 {
-                None
+        let certified_leader =
+            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+                // Leader cert for leader of clock_round - 1 (if we include that leader).
+                if clock_round <= 2 {
+                    None
+                } else {
+                    let leader_round = clock_round - 1;
+                    let leader_authority = self.committee.elect_leader(leader_round);
+                    block_references
+                        .iter()
+                        .find(|r| r.round == leader_round && r.authority == leader_authority)
+                        .and_then(|leader_ref| {
+                            self.dag_state
+                                .leader_certificate(leader_ref)
+                                .map(|cert| (*leader_ref, cert))
+                        })
+                }
             } else {
-                let leader_round = clock_round - 1;
-                let leader_authority = self.committee.elect_leader(leader_round);
-                block_references
-                    .iter()
-                    .find(|r| r.round == leader_round && r.authority == leader_authority)
-                    .and_then(|leader_ref| {
-                        self.dag_state
-                            .leader_certificate(leader_ref)
-                            .map(|cert| (*leader_ref, cert))
-                    })
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         // Create and store blocks
         let mut first_block = None;
@@ -638,8 +639,8 @@ impl<H: BlockHandler> Core<H> {
 
         match self.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => Some(self.encoder.encode_transactions(
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => Some(self.encoder.encode_transactions(
                 transactions,
                 info_length,
                 parity_length,
@@ -648,7 +649,7 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// For StarfishS, compute the strong-vote hint mask for the current
+    /// For StarfishSpeed, compute the strong-vote hint mask for the current
     /// leader. `Some(0)` means the vote is strong; `Some(nonzero)` records the
     /// authorities whose payloads are still missing locally.
     fn compute_strong_vote(
@@ -656,7 +657,7 @@ impl<H: BlockHandler> Core<H> {
         clock_round: RoundNumber,
         block_references: &[BlockReference],
     ) -> Option<u128> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
             return None;
         }
 
@@ -693,17 +694,17 @@ impl<H: BlockHandler> Core<H> {
         Some(missing_mask)
     }
 
-    fn starfish_s_excluded_ack_authors(&self, clock_round: RoundNumber) -> u128 {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS
+    fn starfish_speed_excluded_ack_authors(&self, clock_round: RoundNumber) -> u128 {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed
             || self.committee.elect_leader(clock_round) != self.authority
         {
             return 0;
         }
 
-        self.dag_state.starfish_s_excluded_ack_authorities()
+        self.dag_state.starfish_speed_excluded_ack_authorities()
     }
 
-    fn filter_starfish_s_leader_acknowledgments(
+    fn filter_starfish_speed_leader_acknowledgments(
         &self,
         excluded_authors: u128,
         acknowledgment_references: Vec<BlockReference>,
@@ -736,7 +737,7 @@ impl<H: BlockHandler> Core<H> {
         let time_ns = timestamp_utc().as_nanos() as u64 + block_id_in_round as u64;
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
         let mut block_references = vec![own_previous];
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
             if let Some(leader_ref) = voted_leader_ref {
                 if leader_ref != own_previous {
                     block_references.push(leader_ref);
@@ -758,7 +759,7 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let is_starfish_l = self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
+        let is_starfish_l = self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls;
         let bls_signer_opt = if is_starfish_l {
             Some(&self.bls_signer)
         } else {
@@ -869,12 +870,12 @@ impl<H: BlockHandler> Core<H> {
         pending_refs: &[BlockReference],
         block_round: RoundNumber,
     ) -> Vec<BlockReference> {
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
             if self.committee.elect_leader(block_round) != self.authority {
                 return Vec::new();
             }
 
-            // StarfishL leaders keep the full frontier so their header preserves
+            // StarfishBls leaders keep the full frontier so their header preserves
             // the direct previous-round quorum required by the protocol.
             let mut seen_references = AHashSet::new();
             return pending_refs
@@ -910,7 +911,7 @@ impl<H: BlockHandler> Core<H> {
         compressed
     }
 
-    fn select_starfish_l_voted_leader(&self, clock_round: RoundNumber) -> Option<BlockReference> {
+    fn select_starfish_bls_voted_leader(&self, clock_round: RoundNumber) -> Option<BlockReference> {
         let leader_round = clock_round.checked_sub(1)?;
         if leader_round == 0 {
             return None;
@@ -948,7 +949,7 @@ impl<H: BlockHandler> Core<H> {
         &self,
         block: &Data<VerifiedBlock>,
     ) -> Option<(BlockReference, AuthorityIndex, BlsSignatureBytes)> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishL {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishBls {
             return None;
         }
         if block.has_empty_payload() {

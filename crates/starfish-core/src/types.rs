@@ -92,7 +92,7 @@ impl PartialOrd for BlockReference {
 // Protocol-specific field groups.
 // ---------------------------------------------------------------------------
 
-/// Acknowledgment compression fields (Starfish, StarfishS, StarfishL).
+/// Acknowledgment compression fields (Starfish, StarfishSpeed, StarfishBls).
 ///
 /// Acknowledgments are a compressed representation: a suffix of
 /// `block_references` is shared with the acknowledgment list (`intersection`),
@@ -108,9 +108,9 @@ pub struct AckFields {
     pub(crate) extra_references: Vec<BlockReference>,
 }
 
-/// BLS certificate data (StarfishL only).
+/// BLS certificate data (StarfishBls only).
 ///
-/// `round_signature` is always present — every StarfishL block signs the
+/// `round_signature` is always present — every StarfishBls block signs the
 /// canonical round message. `voted_leader` pairs the leader reference with the
 /// partial BLS sig when the block includes the previous-round leader.
 /// `certified_leader` pairs the leader ref with an aggregate certificate once
@@ -199,11 +199,11 @@ pub struct BlockHeader {
     pub(crate) ack: AckFields,
 
     // -- Protocol-specific extensions -----------------------------------------
-    /// StarfishS strong-vote hint mask. `Some(0)` means a strong vote;
+    /// StarfishSpeed strong-vote hint mask. `Some(0)` means a strong vote;
     /// `Some(nonzero)` means the voter is missing payload from the authorities
     /// whose bits are set.
     pub(crate) strong_vote: Option<u128>,
-    /// BLS certificate fields (StarfishL only). None for all other protocols.
+    /// BLS certificate fields (StarfishBls only). None for all other protocols.
     pub(crate) bls: Option<Box<BlsFields>>,
 
     // -- Cache (not serialized) -----------------------------------------------
@@ -696,8 +696,8 @@ impl VerifiedBlock {
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => {
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => {
                 if let Some(ref encoded) = encoded_transactions {
                     TransactionsCommitment::new_from_encoded_transactions(
                         encoded,
@@ -734,7 +734,7 @@ impl VerifiedBlock {
             strong_vote,
         );
 
-        // Build BLS fields if a BLS signer is provided (StarfishL).
+        // Build BLS fields if a BLS signer is provided (StarfishBls).
         let bls = bls_signer.map(|bs| {
             // Round signature: use pre-computed if available, else sign now.
             let round_signature = precomputed_round_sig
@@ -957,8 +957,8 @@ impl VerifiedBlock {
     ) -> eyre::Result<Option<ProvableShard>> {
         match consensus_protocol {
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => {
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => {
                 let info_length = committee.info_length();
                 let parity_length = committee.len() - info_length;
                 if let Some(td) = self.transaction_data.as_ref() {
@@ -1063,18 +1063,18 @@ impl VerifiedBlock {
             );
         }
         match consensus_protocol {
-            ConsensusProtocol::StarfishL => {
+            ConsensusProtocol::StarfishBls => {
                 let bls = self
                     .header
                     .bls()
-                    .ok_or_else(|| eyre::eyre!("StarfishL block is missing BLS fields"))?;
+                    .ok_or_else(|| eyre::eyre!("StarfishBls block is missing BLS fields"))?;
                 ensure!(
                     bls.round_signature != BlsSignatureBytes::default(),
-                    "StarfishL block is missing round BLS signature"
+                    "StarfishBls block is missing round BLS signature"
                 );
                 ensure!(
                     self.header.acknowledgment_bls_signatures().len() == acknowledgments.len(),
-                    "StarfishL acknowledgment count {} does not match DAC certificate count {}",
+                    "StarfishBls acknowledgment count {} does not match DAC certificate count {}",
                     acknowledgments.len(),
                     self.header.acknowledgment_bls_signatures().len()
                 );
@@ -1082,12 +1082,12 @@ impl VerifiedBlock {
                 if is_round_leader {
                     ensure!(
                         threshold_clock_valid_block_header(&self.header, committee),
-                        "StarfishL leader block must reference a quorum of previous-round blocks"
+                        "StarfishBls leader block must reference a quorum of previous-round blocks"
                     );
                 } else {
                     ensure!(
                         self.header.block_references.len() <= 2,
-                        "StarfishL non-leader block may reference only \
+                        "StarfishBls non-leader block may reference only \
                          the author's previous block and the \
                          previous-round leader"
                     );
@@ -1098,24 +1098,24 @@ impl VerifiedBlock {
                         .find(|r| r.authority == self.authority())
                         .ok_or_else(|| {
                             eyre::eyre!(
-                                "StarfishL non-leader block must reference its own previous block"
+                                "StarfishBls non-leader block must reference its own previous block"
                             )
                         })?;
                 }
                 if let Some((leader_ref, _)) = self.header.voted_leader() {
                     ensure!(
                         leader_ref.round + 1 == round,
-                        "StarfishL leader vote {:?} must target the previous round",
+                        "StarfishBls leader vote {:?} must target the previous round",
                         leader_ref
                     );
                     ensure!(
                         leader_ref.authority == committee.elect_leader(leader_ref.round),
-                        "StarfishL leader vote {:?} must target the scheduled leader",
+                        "StarfishBls leader vote {:?} must target the scheduled leader",
                         leader_ref
                     );
                     ensure!(
                         self.header.block_references.contains(leader_ref),
-                        "StarfishL leader vote {:?} must also appear in block references",
+                        "StarfishBls leader vote {:?} must also appear in block references",
                         leader_ref
                     );
                 } else if !is_round_leader && round > 1 {
@@ -1124,7 +1124,7 @@ impl VerifiedBlock {
                             .block_references
                             .iter()
                             .all(|r| r.authority == self.authority()),
-                        "StarfishL non-leader block without a leader \
+                        "StarfishBls non-leader block without a leader \
                          vote must not reference other parties"
                     );
                 }
@@ -1134,42 +1134,42 @@ impl VerifiedBlock {
                 {
                     ensure!(
                         ack_ref.authority == self.authority(),
-                        "StarfishL acknowledgment {:?} must target the block author's own data",
+                        "StarfishBls acknowledgment {:?} must target the block author's own data",
                         ack_ref
                     );
                     ensure!(
                         ack_ref.round < round,
-                        "StarfishL acknowledgment {:?} must be from a past round",
+                        "StarfishBls acknowledgment {:?} must be from a past round",
                         ack_ref
                     );
                     ensure!(
                         !cert.is_empty(),
-                        "StarfishL acknowledgment {:?} is missing DAC certificate",
+                        "StarfishBls acknowledgment {:?} is missing DAC certificate",
                         ack_ref
                     );
                 }
                 if let Some(cert) = self.header.bls_aggregate_round_signature() {
                     ensure!(
                         !cert.is_empty(),
-                        "StarfishL aggregate round certificate must not be empty"
+                        "StarfishBls aggregate round certificate must not be empty"
                     );
                 }
                 if let Some((leader_ref, cert)) = self.header.certified_leader() {
                     ensure!(
                         !cert.is_empty(),
-                        "StarfishL certified leader {:?} must not have an empty certificate",
+                        "StarfishBls certified leader {:?} must not have an empty certificate",
                         leader_ref
                     );
                 }
             }
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),
                     "Threshold clock is not valid"
                 );
                 ensure!(
                     self.header.bls().is_none(),
-                    "Only StarfishL blocks may carry BLS fields"
+                    "Only StarfishBls blocks may carry BLS fields"
                 );
             }
             ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
@@ -1183,7 +1183,7 @@ impl VerifiedBlock {
                 );
                 ensure!(
                     self.header.bls().is_none(),
-                    "Only StarfishL blocks may carry BLS fields"
+                    "Only StarfishBls blocks may carry BLS fields"
                 );
             }
         }
@@ -1372,7 +1372,7 @@ mod tests {
         BlsAggregateCertificate::new(bls_signers[signer as usize].sign_digest(&digest), signers)
     }
 
-    fn make_starfish_l_block(
+    fn make_starfish_bls_block(
         authority: AuthorityIndex,
         round: RoundNumber,
         acknowledgments: Vec<BlockReference>,
@@ -1419,7 +1419,7 @@ mod tests {
             dac_certs,
             transactions,
             Some(encoded_transactions),
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             None,
             None,
             None,
@@ -1508,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn aligns_starfish_l_ack_certificates_with_compressed_ack_order() {
+    fn aligns_starfish_bls_ack_certificates_with_compressed_ack_order() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let bls_signers = BlsSigner::new_for_test(committee.len());
@@ -1539,7 +1539,7 @@ mod tests {
             vec![cert_d, cert_c],
             transactions,
             Some(encoded_transactions),
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             None,
             None,
             None,
@@ -1555,16 +1555,16 @@ mod tests {
     }
 
     #[test]
-    fn verifies_starfish_l_ack_count_matches_dac_certificates() {
+    fn verifies_starfish_bls_ack_count_matches_dac_certificates() {
         let ack_ref = BlockReference::new_test(0, 1);
         let bls_signers = BlsSigner::new_for_test(4);
         let dac_cert = single_signer_cert(crypto::bls_dac_message(&ack_ref), 0, &bls_signers);
-        let (mut block, committee) = make_starfish_l_block(0, 2, vec![ack_ref], vec![dac_cert]);
+        let (mut block, committee) = make_starfish_bls_block(0, 2, vec![ack_ref], vec![dac_cert]);
         block
             .header
             .bls
             .as_mut()
-            .expect("StarfishL block should carry BLS fields")
+            .expect("StarfishBls block should carry BLS fields")
             .acknowledgment_signatures
             .clear();
 
@@ -1575,25 +1575,25 @@ mod tests {
                 0,
                 1,
                 &mut encoder,
-                ConsensusProtocol::StarfishL,
+                ConsensusProtocol::StarfishBls,
             )
             .unwrap_err();
 
         assert!(
             err.to_string().contains(
-                "StarfishL acknowledgment count 1 does not match DAC certificate count 0"
+                "StarfishBls acknowledgment count 1 does not match DAC certificate count 0"
             )
         );
     }
 
     #[test]
-    fn verifies_starfish_l_acks_target_only_own_past_blocks() {
+    fn verifies_starfish_bls_acks_target_only_own_past_blocks() {
         let invalid_ack_ref = BlockReference::new_test(1, 1);
         let bls_signers = BlsSigner::new_for_test(4);
         let dac_cert =
             single_signer_cert(crypto::bls_dac_message(&invalid_ack_ref), 1, &bls_signers);
         let (mut block, committee) =
-            make_starfish_l_block(0, 2, vec![invalid_ack_ref], vec![dac_cert]);
+            make_starfish_bls_block(0, 2, vec![invalid_ack_ref], vec![dac_cert]);
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
         let err = block
@@ -1602,7 +1602,7 @@ mod tests {
                 0,
                 1,
                 &mut encoder,
-                ConsensusProtocol::StarfishL,
+                ConsensusProtocol::StarfishBls,
             )
             .unwrap_err();
         assert!(
@@ -1616,7 +1616,7 @@ mod tests {
             0,
             &bls_signers,
         );
-        let (mut block, committee) = make_starfish_l_block(
+        let (mut block, committee) = make_starfish_bls_block(
             0,
             2,
             vec![own_current_round_ack],
@@ -1628,14 +1628,14 @@ mod tests {
                 0,
                 1,
                 &mut encoder,
-                ConsensusProtocol::StarfishL,
+                ConsensusProtocol::StarfishBls,
             )
             .unwrap_err();
         assert!(err.to_string().contains("must be from a past round"));
     }
 
     #[test]
-    fn verifies_starfish_l_non_leader_references_only_self_chain() {
+    fn verifies_starfish_bls_non_leader_references_only_self_chain() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let bls_signers = BlsSigner::new_for_test(committee.len());
@@ -1662,7 +1662,7 @@ mod tests {
             vec![],
             transactions,
             Some(encoded_transactions),
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             None,
             None,
             None,
@@ -1678,12 +1678,12 @@ mod tests {
                 0,
                 1,
                 &mut encoder,
-                ConsensusProtocol::StarfishL,
+                ConsensusProtocol::StarfishBls,
             )
             .unwrap_err();
         assert!(
             err.to_string()
-                .contains("StarfishL non-leader block may reference only",)
+                .contains("StarfishBls non-leader block may reference only",)
         );
     }
 
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_starfish_l_non_leader_may_reference_latest_own_block_from_earlier_round() {
+    fn verifies_starfish_bls_non_leader_may_reference_latest_own_block_from_earlier_round() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let bls_signers = BlsSigner::new_for_test(committee.len());
@@ -1793,7 +1793,7 @@ mod tests {
             vec![],
             transactions,
             Some(encoded_transactions),
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             None,
             None,
             None,
@@ -1808,9 +1808,9 @@ mod tests {
                 0,
                 1,
                 &mut encoder,
-                ConsensusProtocol::StarfishL,
+                ConsensusProtocol::StarfishBls,
             )
-            .expect("non-leader StarfishL block should allow skipped own rounds");
+            .expect("non-leader StarfishBls block should allow skipped own rounds");
     }
 }
 

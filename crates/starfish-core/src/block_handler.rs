@@ -323,7 +323,7 @@ impl CommitObserver for RealCommitHandler {
                 self.metrics.benchmark_duration.inc_by(delta);
             }
         }
-        if dag_state.consensus_protocol == crate::dag_state::ConsensusProtocol::StarfishL {
+        if dag_state.consensus_protocol == crate::dag_state::ConsensusProtocol::StarfishBls {
             let mut pending = dag_state.read_pending_not_certified();
             pending.append(&mut committed);
             let (certified, unresolved) = self.drain_certified_commits(dag_state, pending);

@@ -53,15 +53,16 @@ jobs:
         run: |
           docker create --name extract ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} || \
           docker create --name extract ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          docker cp extract:/usr/local/bin/starfish ./starfish-linux-amd64
+          mkdir -p target
+          docker cp extract:/usr/local/bin/starfish ./target/starfish-linux-amd64
           docker rm extract
-          chmod +x ./starfish-linux-amd64
+          chmod +x ./target/starfish-linux-amd64
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: starfish-linux-amd64
-          path: ./starfish-linux-amd64
+          path: ./target/starfish-linux-amd64
           retention-days: 30
 
       - name: Update nightly release
@@ -70,7 +71,7 @@ jobs:
           tag_name: nightly
           name: Nightly Build
           prerelease: true
-          files: ./starfish-linux-amd64
+          files: ./target/starfish-linux-amd64
           body: |
             Rolling nightly build from `main` branch.
             **Commit**: ${{ github.sha }}

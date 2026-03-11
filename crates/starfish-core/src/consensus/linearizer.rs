@@ -132,9 +132,9 @@ impl Linearizer {
     /// Collect all blocks in the history of committed leader that have
     /// acknowledgment support. Uses BFS with per-level batch fetching.
     ///
-    /// When `direct_ack` is false (Starfish/StarfishS): accumulate
+    /// When `direct_ack` is false (Starfish/StarfishSpeed): accumulate
     /// votes per ack_ref, commit when quorum is reached.
-    /// When `direct_ack` is true (StarfishL): only self-acks count — the DAC
+    /// When `direct_ack` is true (StarfishBls): only self-acks count — the DAC
     /// certificate provides the availability guarantee directly.
     fn collect_subdag_starfish(
         &mut self,
@@ -251,10 +251,10 @@ impl Linearizer {
             let optimistic_data_holders = (metastate == Some(CommitMetastate::Opt))
                 .then(|| self.collect_strong_vote_holders(dag_state, leader_block.round() + 1));
             let mut sub_dag = match consensus_protocol {
-                ConsensusProtocol::StarfishL => {
+                ConsensusProtocol::StarfishBls => {
                     self.collect_subdag_starfish(dag_state, leader_block, true)
                 }
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishS => {
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
                     self.collect_subdag_starfish(dag_state, leader_block, false)
                 }
                 ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
@@ -262,10 +262,10 @@ impl Linearizer {
                 }
             };
 
-            // For StarfishS Opt: additionally include blocks from the leader's
+            // For StarfishSpeed Opt: additionally include blocks from the leader's
             // acknowledgment_references. The strong vote quorum guarantees data
             // availability.
-            if consensus_protocol == ConsensusProtocol::StarfishS {
+            if consensus_protocol == ConsensusProtocol::StarfishSpeed {
                 if let Some(data_holders) = optimistic_data_holders.as_ref() {
                     let data_holder_votes: Vec<_> = data_holders.voters().collect();
                     let mut refs_to_fetch = Vec::new();
@@ -298,7 +298,7 @@ impl Linearizer {
                 .blocks
                 .iter()
                 .map(|x| match consensus_protocol {
-                    ConsensusProtocol::StarfishL => self.potential_data_holders(),
+                    ConsensusProtocol::StarfishBls => self.potential_data_holders(),
                     _ => self
                         .votes
                         .get(x.reference())

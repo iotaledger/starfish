@@ -176,21 +176,21 @@ impl BaseCommitter {
         // the anchor. Otherwise skip it.
         match certified_leader_blocks.pop() {
             Some(certified_leader_block) => {
-                // For StarfishS: Opt if path passes through StrongQC, Std otherwise.
-                let metastate = if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishS
-                {
-                    let has_strong = potential_certificates.iter().any(|cert| {
-                        self.is_certificate(cert, &certified_leader_block, voter_info)
-                            && self.carries_strong_qc(cert, &certified_leader_block, voter_info)
-                    });
-                    if has_strong {
-                        Some(CommitMetastate::Opt)
+                // For StarfishSpeed: Opt if path passes through StrongQC, Std otherwise.
+                let metastate =
+                    if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishSpeed {
+                        let has_strong = potential_certificates.iter().any(|cert| {
+                            self.is_certificate(cert, &certified_leader_block, voter_info)
+                                && self.carries_strong_qc(cert, &certified_leader_block, voter_info)
+                        });
+                        if has_strong {
+                            Some(CommitMetastate::Opt)
+                        } else {
+                            Some(CommitMetastate::Std)
+                        }
                     } else {
-                        Some(CommitMetastate::Std)
-                    }
-                } else {
-                    None
-                };
+                        None
+                    };
                 LeaderStatus::Commit(certified_leader_block.clone(), metastate)
             }
             None => LeaderStatus::Skip(leader, leader_round),
@@ -305,8 +305,8 @@ impl BaseCommitter {
         )
     }
 
-    /// Determine the commit metastate for StarfishS direct decide.
-    /// Returns `None` for non-StarfishS protocols.
+    /// Determine the commit metastate for StarfishSpeed direct decide.
+    /// Returns `None` for non-StarfishSpeed protocols.
     /// - Opt: 2f+1 certifying blocks each carrying a StrongQC
     /// - Std: strong blame quorum at the voting round
     /// - Pending: neither strong vote nor strong blame quorum
@@ -316,7 +316,7 @@ impl BaseCommitter {
         voting_round: RoundNumber,
         voter_info: &VoterInfo,
     ) -> Option<CommitMetastate> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishS {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
             return None;
         }
 
@@ -421,8 +421,8 @@ impl BaseCommitter {
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
             .filter(|l| {
-                if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
-                    // StarfishL: require BLS leader certificate instead of DAG-edge quorum.
+                if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+                    // StarfishBls: require BLS leader certificate instead of DAG-edge quorum.
                     self.dag_state.has_leader_certificate(l.reference())
                 } else {
                     self.enough_leader_support(certifying_round, l, voter_info)

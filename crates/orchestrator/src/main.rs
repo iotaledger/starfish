@@ -116,7 +116,8 @@ pub enum Operation {
         skip_testbed_configuration: bool,
 
         /// Consensus to deploy. Available options:
-        /// starfish | starfish-s | starfish-l | mysticeti | cordial-miners
+        /// starfish | starfish-speed | starfish-bls | mysticeti |
+        /// cordial-miners
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,
 
@@ -340,7 +341,7 @@ async fn main() -> eyre::Result<()> {
     }
 }
 
-const DOCKER_BINARY_OUTPUT: &str = "./starfish-linux-amd64";
+const DOCKER_BINARY_OUTPUT: &str = "./target/starfish-linux-amd64";
 
 /// Build the starfish binary inside Docker and extract the resulting Linux
 /// x86_64 binary.

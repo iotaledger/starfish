@@ -26,12 +26,12 @@ pub const WAVE_LENGTH: RoundNumber = 3;
 pub struct VoterInfo {
     /// Set of (leader_block_ref, voter_block_ref) pairs at the voting round.
     pub voters: AHashSet<(BlockReference, BlockReference)>,
-    /// strong-vote mask for each voter block (populated for StarfishS, empty
-    /// otherwise).
+    /// strong-vote mask for each voter block (populated for StarfishSpeed,
+    /// empty otherwise).
     pub voter_strong_votes: AHashMap<BlockReference, Option<u128>>,
 }
 
-/// Metastate for Starfish-S committed leader slots.
+/// Metastate for Starfish-Speed committed leader slots.
 /// Determines the sequencing action for committed leaders.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum CommitMetastate {
@@ -51,8 +51,8 @@ pub enum CommitMetastate {
 /// debugging, testing, and composition with advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    /// Committed leader block with optional metastate (Some for StarfishS, None
-    /// for others).
+    /// Committed leader block with optional metastate (Some for StarfishSpeed,
+    /// None for others).
     Commit(Data<VerifiedBlock>, Option<CommitMetastate>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
@@ -86,7 +86,7 @@ impl LeaderStatus {
 
     /// Whether the leader slot is final for sequencing purposes.
     /// A Commit(Pending) is decided but NOT final — it blocks the sequencing
-    /// prefix. For non-StarfishS protocols (metastate is None), is_final =>
+    /// prefix. For non-StarfishSpeed protocols (metastate is None), is_final =>
     /// is_decided.
     pub fn is_final(&self) -> bool {
         match self {

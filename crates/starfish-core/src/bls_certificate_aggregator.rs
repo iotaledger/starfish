@@ -653,7 +653,7 @@ mod tests {
         types::{BaseTransaction, VerifiedBlock},
     };
 
-    fn make_starfish_l_block(
+    fn make_starfish_bls_block(
         committee: &Committee,
         signers: &[Signer],
         bls_signers: &[BlsSigner],
@@ -700,7 +700,7 @@ mod tests {
             dac_certs,
             transactions,
             Some(encoded_transactions),
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             None,
             None,
             None,
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn learns_embedded_dac_certificate_from_received_starfish_l_block() {
+    fn learns_embedded_dac_certificate_from_received_starfish_bls_block() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let bls_signers = BlsSigner::new_for_test(committee.len());
@@ -736,7 +736,7 @@ mod tests {
             vec![0, 1, 2]
         );
 
-        let carrier = make_starfish_l_block(
+        let carrier = make_starfish_bls_block(
             committee.as_ref(),
             &signers,
             &bls_signers,
@@ -813,7 +813,7 @@ mod tests {
             cert.expect("quorum partials should build a DAC cert for the previous own block")
         };
 
-        let carrier = make_starfish_l_block(
+        let carrier = make_starfish_bls_block(
             committee.as_ref(),
             &signers,
             &bls_signers,
@@ -858,7 +858,7 @@ mod tests {
         }
         let dac_cert = dac_cert.expect("quorum partials should build a DAC cert");
 
-        let mut carrier = make_starfish_l_block(
+        let mut carrier = make_starfish_bls_block(
             committee.as_ref(),
             &signers,
             &bls_signers,
@@ -871,7 +871,7 @@ mod tests {
             .header
             .bls
             .as_mut()
-            .expect("StarfishL block should carry BLS fields")
+            .expect("StarfishBls block should carry BLS fields")
             .aggregate_round_signature = Some(dac_cert);
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);
@@ -911,7 +911,7 @@ mod tests {
         }
         let dac_cert = dac_cert.expect("quorum partials should build a DAC cert");
 
-        let mut carrier = make_starfish_l_block(
+        let mut carrier = make_starfish_bls_block(
             committee.as_ref(),
             &signers,
             &bls_signers,
@@ -924,7 +924,7 @@ mod tests {
             .header
             .bls
             .as_mut()
-            .expect("StarfishL block should carry BLS fields")
+            .expect("StarfishBls block should carry BLS fields")
             .certified_leader = Some((leader_ref, dac_cert));
 
         let mut remote_aggregator = BlsCertificateAggregator::new(committee);

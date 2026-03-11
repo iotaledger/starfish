@@ -40,7 +40,7 @@ fn peer_can_serve_missing_data(
     peer_id: AuthorityIndex,
 ) -> bool {
     match consensus_protocol {
-        ConsensusProtocol::StarfishL => holders.votes.contains(peer_id),
+        ConsensusProtocol::StarfishBls => holders.votes.contains(peer_id),
         _ => !holders.votes.contains(own_id) && holders.votes.contains(peer_id),
     }
 }
@@ -80,8 +80,8 @@ impl BroadcasterParameters {
                 causal_push_shard_round_lag,
             },
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::CordialMiners => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
@@ -136,6 +136,7 @@ pub struct DataRequester<H: BlockHandler, C: CommitObserver> {
     /// The sender to the network.
     sender: Sender<NetworkMessage>,
     inner: Arc<NetworkSyncerInner<H, C>>,
+    metrics: Arc<Metrics>,
     /// The handle of the task disseminating our own blocks.
     data_requester: Option<JoinHandle<Option<()>>>,
     parameters: BroadcasterParameters,
@@ -150,12 +151,14 @@ where
         to_whom_authority_index: AuthorityIndex,
         sender: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
+        metrics: Arc<Metrics>,
         parameters: BroadcasterParameters,
     ) -> Self {
         Self {
             to_whom_authority_index,
             sender,
             inner,
+            metrics,
             data_requester: None,
             parameters,
         }
@@ -179,6 +182,7 @@ where
             self.to_whom_authority_index,
             self.sender.clone(),
             self.inner.clone(),
+            self.metrics.clone(),
             self.parameters.clone(),
         ));
         self.data_requester = Some(handle);
@@ -188,6 +192,7 @@ where
         peer_id: AuthorityIndex,
         to: Sender<NetworkMessage>,
         inner: Arc<NetworkSyncerInner<H, C>>,
+        metrics: Arc<Metrics>,
         parameters: BroadcasterParameters,
     ) -> Option<()> {
         let peer = format_authority_index(peer_id);
@@ -230,6 +235,10 @@ where
                 .collect();
             if !to_request.is_empty() {
                 tracing::debug!("Data from blocks {to_request:?} is requested from {peer}");
+                metrics
+                    .tx_data_requests_sent
+                    .with_label_values(&[&peer_id.to_string()])
+                    .inc();
                 to.send(NetworkMessage::MissingTxDataRequest(to_request))
                     .await
                     .ok()?;
@@ -326,8 +335,8 @@ where
 
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => {
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => {
                 let mut refs_to_send = block_references;
                 let remaining_extra_budget =
                     batch_other_block_size.saturating_sub(refs_to_send.len());
@@ -436,6 +445,7 @@ where
             self.inner.clone(),
             round,
             self.parameters.clone(),
+            self.metrics.clone(),
             self.sent_to_peer.clone(),
         ));
         self.own_blocks = Some(handle);
@@ -466,6 +476,7 @@ where
         inner: Arc<NetworkSyncerInner<H, C>>,
         mut round: RoundNumber,
         broadcaster_parameters: BroadcasterParameters,
+        metrics: Arc<Metrics>,
         sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     ) -> Option<()> {
         let committee_size = inner.committee.len();
@@ -496,6 +507,7 @@ where
                         to_whom_authority_index,
                         &mut round,
                         batch_byzantine_own_block_size,
+                        &metrics,
                         sent_to_peer.clone(),
                     )
                     .await?;
@@ -520,6 +532,7 @@ where
                                 to_whom_authority_index,
                                 &mut round,
                                 batch_byzantine_own_block_size,
+                                &metrics,
                                 sent_to_peer.clone(),
                             )
                             .await?;
@@ -542,6 +555,7 @@ where
                                 to_whom_authority_index,
                                 &mut round,
                                 batch_byzantine_own_block_size,
+                                &metrics,
                                 sent_to_peer.clone(),
                             )
                             .await?;
@@ -560,6 +574,7 @@ where
                             to_whom_authority_index,
                             &mut round,
                             batch_byzantine_own_block_size,
+                            &metrics,
                             sent_to_peer.clone(),
                         )
                         .await?;
@@ -575,6 +590,7 @@ where
                         to_whom_authority_index,
                         &mut round,
                         batch_byzantine_own_block_size,
+                        &metrics,
                         sent_to_peer.clone(),
                     )
                     .await?;
@@ -589,6 +605,7 @@ where
                         to_whom_authority_index,
                         &mut round,
                         batch_byzantine_own_block_size,
+                        &metrics,
                         sent_to_peer.clone(),
                     )
                     .await?;
@@ -606,6 +623,7 @@ where
                             to_whom_authority_index,
                             &mut round,
                             batch_byzantine_own_block_size,
+                            &metrics,
                             sent_to_peer.clone(),
                         )
                         .await?;
@@ -621,6 +639,7 @@ where
                         to_whom_authority_index,
                         &mut round,
                         batch_own_block_size,
+                        &metrics,
                         sent_to_peer.clone(),
                     )
                     .await?;
@@ -713,6 +732,7 @@ async fn send_own_block_batch<H, C>(
     to_whom_authority_index: AuthorityIndex,
     round: &mut RoundNumber,
     batch_size: usize,
+    metrics: &Metrics,
     sent_to_peer: Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
 ) -> Option<()>
 where
@@ -732,9 +752,11 @@ where
         }
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    to.send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
-        .await
-        .ok()?;
+    let batch = BlockBatch::full_only(blocks);
+    if let Ok(size) = bincode::serialized_size(&batch) {
+        metrics.block_bundle_size_bytes.observe(size as usize);
+    }
+    to.send(NetworkMessage::Batch(batch)).await.ok()?;
     Some(())
 }
 
@@ -779,8 +801,8 @@ struct PushBatchParts {
 fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
     match consensus_protocol {
         ConsensusProtocol::Starfish
-        | ConsensusProtocol::StarfishS
-        | ConsensusProtocol::StarfishL => PushOtherBlocksFormat::HeadersAndShards,
+        | ConsensusProtocol::StarfishSpeed
+        | ConsensusProtocol::StarfishBls => PushOtherBlocksFormat::HeadersAndShards,
         ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
             PushOtherBlocksFormat::FullBlocks
         }
@@ -1277,10 +1299,10 @@ mod tests {
     }
 
     #[test]
-    fn starfish_l_can_request_from_any_peer_even_if_own_is_in_holder_set() {
+    fn starfish_bls_can_request_from_any_peer_even_if_own_is_in_holder_set() {
         let holders = holder_set(&[0, 1, 2, 3]);
         assert!(peer_can_serve_missing_data(
-            ConsensusProtocol::StarfishL,
+            ConsensusProtocol::StarfishBls,
             &holders,
             0,
             1,
@@ -1288,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn non_starfish_l_only_requests_from_known_remote_holders() {
+    fn non_starfish_bls_only_requests_from_known_remote_holders() {
         let remote_holders = holder_set(&[1, 2, 3]);
         assert!(peer_can_serve_missing_data(
             ConsensusProtocol::Starfish,

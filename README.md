@@ -7,20 +7,22 @@
 
 The code in this repository is a prototype of Starfish,
 a partially synchronous BFT protocol in which validators employ an uncertified DAG.
+Starfish uses Reed-Solomon encoding for transaction data. This allows to amortize the transaction communication costs and achieve better communication complexity under high load and Byzantine environment.
 The theoretical description of Starfish is available
 at https://eprint.iacr.org/2025/567.
 
-Four versions of Starfish are available in this repository:
+Three versions of Starfish are available in this repository:
 
 - **`starfish`**: Theory-aligned version
   - By default uses Push dissemination strategy for headers and shards
   - Better latency guarantees with Byzantine nodes
+  - 
 
-- **`starfish-s`**: Strong-vote optimistic variant
+- **`starfish-speed`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
-  - Lower latency when validators have same acknowledgments as a leader
+  - Lower latency when validators have same acknowledgments as a leader. Matches
 
-- **`starfish-l`**: BLS-optimized variant
+- **`starfish-bls`**: BLS-optimized variant
   - Uses BLS aggregate signatures to reduce communication complexity for header metadata
   - Embeds compact aggregate certificates (round, leader, data availability) in block headers
   - Async BLS verification service offloads signature processing from the critical path
@@ -172,7 +174,7 @@ The dryrun script launches a Docker-based local testbed with Prometheus and Graf
 Configuration via environment variables:
 
 ```bash
-NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-s \
+NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-speed \
   NUM_BYZANTINE_NODES=2 BYZANTINE_STRATEGY=random-drop \
   TEST_TIME=3000 ./scripts/dryrun.sh
 ```
@@ -181,7 +183,7 @@ NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-s \
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
 | `DESIRED_TPS` | 1000 | Target transactions per second |
-| `CONSENSUS` | starfish-s | Protocol: `starfish`, `starfish-s`, `starfish-l`, `cordial-miners`, `mysticeti` |
+| `CONSENSUS` | starfish-speed | Protocol: `starfish`, `starfish-speed`, `starfish-bls`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
 | `TEST_TIME` | 3000 | Duration in seconds |

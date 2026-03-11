@@ -45,7 +45,7 @@ enum CoreThreadCommand {
     ),
     AddTransactionData(Vec<ReconstructedTransactionData>, oneshot::Sender<()>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
-    /// Attempt block creation with relaxed readiness checks (StarfishS soft
+    /// Attempt block creation with relaxed readiness checks (StarfishSpeed soft
     /// timeout).
     TryNewBlockRelaxed(RoundNumber, oneshot::Sender<()>),
     ForceCommit(oneshot::Sender<()>),

@@ -202,7 +202,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.subscriber_stake = stake;
     }
 
-    /// Attempt block creation with relaxed readiness (skips StarfishS
+    /// Attempt block creation with relaxed readiness (skips StarfishSpeed
     /// strong-vote quorum requirement) for a specific threshold-clock round.
     /// This acts only once we are still in that round and have not yet proposed
     /// into it.

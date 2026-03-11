@@ -35,5 +35,4 @@ results/
 
 # Local tooling
 .claude/
-starfish-linux-amd64
 .claude/settings.local.json

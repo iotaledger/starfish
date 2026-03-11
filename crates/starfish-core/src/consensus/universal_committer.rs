@@ -84,7 +84,7 @@ impl UniversalCommitter {
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
-                        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {
+                        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
                             if let Some((leader_ref, _)) = vb.header().voted_leader() {
                                 if leader_ref.round == round && leader_ref.authority == leader {
                                     voters.insert((*leader_ref, vb_ref));
@@ -123,7 +123,7 @@ impl UniversalCommitter {
                 drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
-                // If the leader is not final (undecided, or Commit(Pending) for StarfishS),
+                // If the leader is not final (undecided, or Commit(Pending) for StarfishSpeed),
                 // try to resolve via indirect rule.
                 let timer_indirect_decide = self
                     .metrics
@@ -159,7 +159,8 @@ impl UniversalCommitter {
             // Filter out all the genesis.
             .filter(|x| x.round() > 0)
             // Stop the sequence upon encountering a non-final leader.
-            // For StarfishS, Commit(Pending) blocks sequencing; for others is_final == is_decided.
+            // For StarfishSpeed, Commit(Pending) blocks sequencing; for others is_final ==
+            // is_decided.
             .take_while(|x| x.is_final())
             .inspect(|x| {
                 let key = (x.authority(), x.round());
@@ -231,8 +232,8 @@ impl UniversalCommitterBuilder {
         match dag_state.consensus_protocol {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => Self {
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => Self {
                 committee,
                 dag_state,
                 metrics,

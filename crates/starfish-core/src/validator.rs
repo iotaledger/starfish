@@ -106,7 +106,7 @@ impl Validator {
             &parameters.storage_backend,
             public_config
                 .parameters
-                .enable_starfish_s_adaptive_acknowledgments,
+                .enable_starfish_speed_adaptive_acknowledgments,
         );
 
         // Rest of the function remains the same
@@ -124,7 +124,8 @@ impl Validator {
             RealCommitHandler::new_with_handler(committee.clone(), metrics.clone());
         tracing::info!("Commit handler");
 
-        let is_starfish_l = recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
+        let is_starfish_l =
+            recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls;
         let (partial_sig_tx, partial_sig_rx) = if is_starfish_l {
             let (tx, rx) = mpsc::unbounded_channel::<crate::types::PartialSig>();
             (Some(tx), Some(rx))
@@ -302,8 +303,8 @@ mod smoke_tests {
     #[test_case("mysticeti", 0)]
     #[test_case("cordial-miners", 40)]
     #[test_case("starfish", 60)]
-    #[test_case("starfish-s", 80)]
-    #[test_case("starfish-l", 100)]
+    #[test_case("starfish-speed", 80)]
+    #[test_case("starfish-bls", 100)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -393,8 +394,8 @@ mod smoke_tests {
     #[test_case("mysticeti", 100)]
     #[test_case("cordial-miners", 140)]
     #[test_case("starfish", 160)]
-    #[test_case("starfish-s", 180)]
-    #[test_case("starfish-l", 200)]
+    #[test_case("starfish-speed", 180)]
+    #[test_case("starfish-bls", 200)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
@@ -455,8 +456,8 @@ mod smoke_tests {
     #[test_case("mysticeti", 200)]
     #[test_case("cordial-miners", 240)]
     #[test_case("starfish", 260)]
-    #[test_case("starfish-s", 280)]
-    #[test_case("starfish-l", 300)]
+    #[test_case("starfish-speed", 280)]
+    #[test_case("starfish-bls", 300)]
     #[tokio::test]
     async fn validator_crash_faults(consensus: &str, port_offset: u16) {
         run_crash_faults_test(consensus, port_offset).await;
@@ -654,8 +655,8 @@ mod smoke_tests {
     #[test_case("mysticeti", 500)]
     #[test_case("cordial-miners", 540)]
     #[test_case("starfish", 560)]
-    #[test_case("starfish-s", 580)]
-    #[test_case("starfish-l", 600)]
+    #[test_case("starfish-speed", 580)]
+    #[test_case("starfish-bls", 600)]
     #[tokio::test(flavor = "multi_thread")]
     async fn validator_lifecycle_and_recovery(consensus: &str, port_offset: u16) {
         run_lifecycle_test(consensus, port_offset).await;

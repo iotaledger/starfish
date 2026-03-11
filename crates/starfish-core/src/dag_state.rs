@@ -52,8 +52,8 @@ pub enum ConsensusProtocol {
     Mysticeti,
     CordialMiners,
     Starfish,
-    StarfishS,
-    StarfishL,
+    StarfishSpeed,
+    StarfishBls,
 }
 
 impl ConsensusProtocol {
@@ -62,8 +62,8 @@ impl ConsensusProtocol {
             "mysticeti" => ConsensusProtocol::Mysticeti,
             "cordial-miners" => ConsensusProtocol::CordialMiners,
             "starfish" => ConsensusProtocol::Starfish,
-            "starfish-l" => ConsensusProtocol::StarfishL,
-            "starfish-s" => ConsensusProtocol::StarfishS,
+            "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
+            "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -72,8 +72,8 @@ impl ConsensusProtocol {
         matches!(
             self,
             ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishL
-                | ConsensusProtocol::StarfishS
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::StarfishSpeed
         )
     }
 
@@ -82,8 +82,8 @@ impl ConsensusProtocol {
             ConsensusProtocol::Mysticeti => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => DisseminationMode::PushCausal,
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
         }
     }
 
@@ -95,7 +95,7 @@ impl ConsensusProtocol {
     }
 }
 
-const STARFISH_S_HINT_WINDOW_LEADER_ROUNDS: usize = 10;
+const STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS: usize = 10;
 
 #[allow(unused)]
 #[derive(Clone, Debug, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -148,7 +148,7 @@ pub struct DagState {
     /// Immutable genesis blocks, one per authority. Cached for the lifetime
     /// of the node to prevent eviction.
     genesis: Vec<Data<VerifiedBlock>>,
-    starfish_s_adaptive_acknowledgments: bool,
+    starfish_speed_adaptive_acknowledgments: bool,
 }
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
@@ -163,12 +163,12 @@ type DagAuthorityMap =
     BTreeMap<RoundNumber, HashMap<BlockDigest, (Vec<BlockReference>, AuthorityBitmask)>>;
 
 #[derive(Default)]
-struct StarfishSLeaderRoundHints {
+struct StarfishSpeedLeaderRoundHints {
     voter_masks: AHashMap<AuthorityIndex, u128>,
     complaint_counts: Vec<u16>,
 }
 
-impl StarfishSLeaderRoundHints {
+impl StarfishSpeedLeaderRoundHints {
     fn new(committee_size: usize) -> Self {
         Self {
             voter_masks: AHashMap::new(),
@@ -235,27 +235,27 @@ struct DagStateInner {
     last_committed_rounds: Vec<RoundNumber>,
     /// Threshold clock tracking quorum round advancement.
     threshold_clock: ThresholdClockAggregator,
-    /// Verified BLS round certificates keyed by round (StarfishL).
+    /// Verified BLS round certificates keyed by round (StarfishBls).
     round_certificates: BTreeMap<RoundNumber, BlsAggregateCertificate>,
-    /// Leader references with confirmed BLS leader certificates (StarfishL).
+    /// Leader references with confirmed BLS leader certificates (StarfishBls).
     /// Stored per-authority in round order so cleanup can `split_off()` at the
     /// eviction frontier instead of scanning the full certificate set.
     leader_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
-    /// Block references with confirmed BLS DAC certificates (StarfishL).
+    /// Block references with confirmed BLS DAC certificates (StarfishBls).
     /// Stored per-authority in round order for the same reason as leaders.
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with DAC certificates that failed BLS verification.
     rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
-    /// For StarfishS, keep the recent complaint masks reported by voters about
-    /// leader blocks, keyed by leader authority then leader round.
-    starfish_s_leader_hints: Vec<BTreeMap<RoundNumber, StarfishSLeaderRoundHints>>,
-    starfish_s_adaptive_acknowledgments: bool,
+    /// For StarfishSpeed, keep the recent complaint masks reported by voters
+    /// about leader blocks, keyed by leader authority then leader round.
+    starfish_speed_leader_hints: Vec<BTreeMap<RoundNumber, StarfishSpeedLeaderRoundHints>>,
+    starfish_speed_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
-    /// Pre-computed BLS round partial signatures (StarfishL). Keyed by the
+    /// Pre-computed BLS round partial signatures (StarfishBls). Keyed by the
     /// round the signature covers.
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
-    /// Pre-computed BLS leader partial signatures (StarfishL). Keyed by the
+    /// Pre-computed BLS leader partial signatures (StarfishBls). Keyed by the
     /// leader block reference the signature covers.
     precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
 }
@@ -269,7 +269,7 @@ impl DagState {
         byzantine_strategy: String,
         consensus: String,
         storage_backend: &StorageBackend,
-        starfish_s_adaptive_acknowledgments: bool,
+        starfish_speed_adaptive_acknowledgments: bool,
     ) -> RecoveredState {
         assert!(
             committee.len() <= 128,
@@ -322,8 +322,8 @@ impl DagState {
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            starfish_s_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
-            starfish_s_adaptive_acknowledgments,
+            starfish_speed_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
+            starfish_speed_adaptive_acknowledgments,
             consensus_protocol,
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
@@ -484,8 +484,8 @@ impl DagState {
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
-            ConsensusProtocol::StarfishL => tracing::info!("Starting Starfish-L protocol"),
-            ConsensusProtocol::StarfishS => tracing::info!("Starting Starfish-S protocol"),
+            ConsensusProtocol::StarfishBls => tracing::info!("Starting Starfish-BLS protocol"),
+            ConsensusProtocol::StarfishSpeed => tracing::info!("Starting Starfish-Speed protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
         }
         let dag_state = Self {
@@ -498,7 +498,7 @@ impl DagState {
             consensus_protocol,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
-            starfish_s_adaptive_acknowledgments,
+            starfish_speed_adaptive_acknowledgments,
         };
         builder.build(store, dag_state)
     }
@@ -1019,7 +1019,7 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishL {
+            let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
                 block
                     .header()
                     .voted_leader()
@@ -1039,7 +1039,8 @@ impl DagState {
         false
     }
 
-    /// Check if a quorum of blocks at `round` carry a StarfishS strong vote.
+    /// Check if a quorum of blocks at `round` carry a StarfishSpeed strong
+    /// vote.
     pub fn has_strong_votes_quorum_at_round(
         &self,
         round: RoundNumber,
@@ -1084,10 +1085,11 @@ impl DagState {
             let mut votes = StakeAggregator::<QuorumThreshold>::new();
             let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
             let count_strong_votes =
-                !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishS;
+                !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
 
             for block in &blocks {
-                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishL {
+                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls
+                {
                     block
                         .header()
                         .voted_leader()
@@ -1116,7 +1118,7 @@ impl DagState {
             }
         }
 
-        if self.consensus_protocol == ConsensusProtocol::StarfishL {
+        if self.consensus_protocol == ConsensusProtocol::StarfishBls {
             let prev_round = quorum_round.saturating_sub(1);
             if prev_round > 0 && !inner.round_certificates.contains_key(&prev_round) {
                 return false;
@@ -1137,19 +1139,19 @@ impl DagState {
         true
     }
 
-    pub fn starfish_s_excluded_ack_authorities(&self) -> u128 {
-        if self.consensus_protocol != ConsensusProtocol::StarfishS
-            || !self.starfish_s_adaptive_acknowledgments
+    pub fn starfish_speed_excluded_ack_authorities(&self) -> u128 {
+        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
+            || !self.starfish_speed_adaptive_acknowledgments
         {
             return 0;
         }
 
         let inner = self.dag_state_inner.read();
         let mut scores = vec![0usize; self.committee.len()];
-        for hints in inner.starfish_s_leader_hints[inner.authority as usize]
+        for hints in inner.starfish_speed_leader_hints[inner.authority as usize]
             .iter()
             .rev()
-            .take(STARFISH_S_HINT_WINDOW_LEADER_ROUNDS)
+            .take(STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS)
             .map(|(_, hints)| hints)
         {
             for (authority, score) in scores.iter_mut().enumerate() {
@@ -2010,12 +2012,12 @@ impl DagStateInner {
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
-        self.update_starfish_s_leader_hints(&block);
+        self.update_starfish_speed_leader_hints(&block);
     }
 
-    fn update_starfish_s_leader_hints(&mut self, block: &VerifiedBlock) {
-        if self.consensus_protocol != ConsensusProtocol::StarfishS
-            || !self.starfish_s_adaptive_acknowledgments
+    fn update_starfish_speed_leader_hints(&mut self, block: &VerifiedBlock) {
+        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
+            || !self.starfish_speed_adaptive_acknowledgments
         {
             return;
         }
@@ -2036,12 +2038,12 @@ impl DagStateInner {
             return;
         };
 
-        let leader_history = &mut self.starfish_s_leader_hints[leader_ref.authority as usize];
+        let leader_history = &mut self.starfish_speed_leader_hints[leader_ref.authority as usize];
         let entry = leader_history
             .entry(leader_ref.round)
-            .or_insert_with(|| StarfishSLeaderRoundHints::new(self.committee_size));
+            .or_insert_with(|| StarfishSpeedLeaderRoundHints::new(self.committee_size));
         entry.update_vote(block.authority(), mask);
-        while leader_history.len() > STARFISH_S_HINT_WINDOW_LEADER_ROUNDS {
+        while leader_history.len() > STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS {
             let Some(oldest_round) = leader_history.keys().next().copied() else {
                 break;
             };
@@ -2153,7 +2155,7 @@ impl DagStateInner {
     }
 
     /// Queue an acknowledgment for `block_ref` only when all prerequisites are
-    /// met. For StarfishL the block must be both data-available and
+    /// met. For StarfishBls the block must be both data-available and
     /// DAC-certified; other protocols only require data availability.
     fn maybe_queue_ack(&mut self, block_ref: BlockReference) {
         let Some(pending) = self.pending_acknowledgment.as_mut() else {
@@ -2163,7 +2165,7 @@ impl DagStateInner {
         if !self.data_availability[auth].contains(&block_ref) {
             return;
         }
-        if self.consensus_protocol == ConsensusProtocol::StarfishL
+        if self.consensus_protocol == ConsensusProtocol::StarfishBls
             && (block_ref.authority != self.authority
                 || !self.dac_certificates[auth].contains_key(&block_ref))
         {
@@ -2179,7 +2181,7 @@ impl DagStateInner {
         let current_round = round_number;
         let (to_return, to_keep): (Vec<_>, Vec<_>) =
             pending_acknowledgment.drain(..).partition(|x| {
-                if self.consensus_protocol == ConsensusProtocol::StarfishL {
+                if self.consensus_protocol == ConsensusProtocol::StarfishBls {
                     x.round < current_round
                 } else {
                     x.round <= current_round
@@ -2611,7 +2613,7 @@ mod tests {
     };
 
     fn open_test_dag_state() -> DagState {
-        open_test_dag_state_for("starfish-l", 0)
+        open_test_dag_state_for("starfish-bls", 0)
     }
 
     fn open_test_dag_state_for(consensus: &str, authority: AuthorityIndex) -> DagState {
@@ -2621,7 +2623,7 @@ mod tests {
     fn open_test_dag_state_for_with_feature(
         consensus: &str,
         authority: AuthorityIndex,
-        enable_starfish_s_adaptive_acknowledgments: bool,
+        enable_starfish_speed_adaptive_acknowledgments: bool,
     ) -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
@@ -2638,12 +2640,12 @@ mod tests {
             "honest".to_string(),
             consensus.to_string(),
             &StorageBackend::Rocksdb,
-            enable_starfish_s_adaptive_acknowledgments,
+            enable_starfish_speed_adaptive_acknowledgments,
         )
         .dag_state
     }
 
-    fn make_starfish_s_vote_block(
+    fn make_starfish_speed_vote_block(
         authority: AuthorityIndex,
         round: RoundNumber,
         leader_ref: BlockReference,
@@ -2682,8 +2684,8 @@ mod tests {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL => TransactionsCommitment::default(),
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::StarfishBls => TransactionsCommitment::default(),
         };
         let mut block = VerifiedBlock::new(
             authority,
@@ -2706,8 +2708,8 @@ mod tests {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
         assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
-        assert!(ConsensusProtocol::StarfishS.supports_acknowledgments());
-        assert!(ConsensusProtocol::StarfishL.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishSpeed.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishBls.supports_acknowledgments());
     }
 
     #[test]
@@ -2733,28 +2735,28 @@ mod tests {
     }
 
     #[test]
-    fn starfish_s_adaptive_acknowledgments_only_uses_local_leader_history() {
-        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, true);
+    fn starfish_speed_adaptive_acknowledgments_only_uses_local_leader_history() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let own_leader_ref = BlockReference::new_test(0, 4);
         let other_leader_ref = BlockReference::new_test(1, 1);
 
         dag_state.insert_general_blocks(vec![
-            make_starfish_s_vote_block(1, 5, own_leader_ref, 1u128 << 1),
-            make_starfish_s_vote_block(2, 5, own_leader_ref, 1u128 << 1),
-            make_starfish_s_vote_block(3, 5, own_leader_ref, 1u128 << 0),
-            make_starfish_s_vote_block(0, 2, other_leader_ref, 1u128 << 2),
-            make_starfish_s_vote_block(2, 2, other_leader_ref, 1u128 << 2),
+            make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
+            make_starfish_speed_vote_block(2, 5, own_leader_ref, 1u128 << 1),
+            make_starfish_speed_vote_block(3, 5, own_leader_ref, 1u128 << 0),
+            make_starfish_speed_vote_block(0, 2, other_leader_ref, 1u128 << 2),
+            make_starfish_speed_vote_block(2, 2, other_leader_ref, 1u128 << 2),
         ]);
 
-        let excluded = dag_state.starfish_s_excluded_ack_authorities();
+        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
         assert_ne!(excluded & (1u128 << 1), 0);
         assert_eq!(excluded & (1u128 << 0), 0);
         assert_eq!(excluded & (1u128 << 2), 0);
     }
 
     #[test]
-    fn starfish_s_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
-        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, true);
+    fn starfish_speed_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let leader_rounds = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44];
         let mut blocks = Vec::new();
         for leader_round in leader_rounds {
@@ -2764,7 +2766,7 @@ mod tests {
             } else {
                 1u128 << 2
             };
-            blocks.push(make_starfish_s_vote_block(
+            blocks.push(make_starfish_speed_vote_block(
                 1,
                 leader_round + 1,
                 leader_ref,
@@ -2773,23 +2775,23 @@ mod tests {
         }
         dag_state.insert_general_blocks(blocks);
 
-        let excluded = dag_state.starfish_s_excluded_ack_authorities();
+        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
         assert_eq!(excluded & (1u128 << 1), 0);
         assert_ne!(excluded & (1u128 << 2), 0);
     }
 
     #[test]
-    fn starfish_s_adaptive_acknowledgments_can_be_disabled() {
-        let dag_state = open_test_dag_state_for_with_feature("starfish-s", 0, false);
+    fn starfish_speed_adaptive_acknowledgments_can_be_disabled() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, false);
         let own_leader_ref = BlockReference::new_test(0, 4);
-        dag_state.insert_general_block(make_starfish_s_vote_block(
+        dag_state.insert_general_block(make_starfish_speed_vote_block(
             1,
             5,
             own_leader_ref,
             1u128 << 1,
         ));
 
-        assert_eq!(dag_state.starfish_s_excluded_ack_authorities(), 0);
+        assert_eq!(dag_state.starfish_speed_excluded_ack_authorities(), 0);
     }
 
     #[test]
@@ -2982,7 +2984,7 @@ mod tests {
             DisseminationMode::PushCausal
         );
         assert_eq!(
-            ConsensusProtocol::StarfishL
+            ConsensusProtocol::StarfishBls
                 .resolve_dissemination_mode(DisseminationMode::ProtocolDefault),
             DisseminationMode::PushCausal
         );

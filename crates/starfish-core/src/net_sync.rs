@@ -245,6 +245,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             peer_id,
             connection.sender.clone(),
             inner.clone(),
+            metrics.clone(),
             broadcaster_parameters,
         );
 
@@ -275,8 +276,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
         ) {
             self.data_requester.start().await;
         }
@@ -406,8 +407,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL => {
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls => {
                     if block.transactions().is_some() {
                         blocks_with_transactions.push(block);
                     } else {
@@ -424,8 +425,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
         ) {
             self.process_blocks_without_transactions(blocks_without_transactions)
                 .await;
@@ -750,8 +751,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
@@ -796,8 +797,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
         ) {
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
@@ -921,8 +922,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let is_starfish = matches!(
             dag_state.consensus_protocol,
             ConsensusProtocol::Starfish
-                | ConsensusProtocol::StarfishS
-                | ConsensusProtocol::StarfishL
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
@@ -1126,7 +1127,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let handle = Handle::current();
         let leader_timeout_task = handle.spawn(Self::leader_timeout_task(inner.clone()));
         let soft_block_timeout_task =
-            if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishS {
+            if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishSpeed {
                 Some(handle.spawn(Self::soft_block_timeout_task(inner.clone())))
             } else {
                 None
@@ -1256,8 +1257,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
-    /// StarfishS soft timeout: attempt block creation using the base Starfish
-    /// readiness check (no strong-vote quorum requirement).
+    /// StarfishSpeed soft timeout: attempt block creation using the base
+    /// Starfish readiness check (no strong-vote quorum requirement).
     async fn soft_block_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let soft_timeout = inner.soft_block_timeout;
         let mut armed_round = inner.dag_state.threshold_clock_round();
@@ -1277,7 +1278,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             select! {
                 _sleep = sleep(soft_timeout) => {
                     tracing::debug!(
-                        "StarfishS soft block timeout in threshold round {armed_round}"
+                        "StarfishSpeed soft block timeout in threshold round {armed_round}"
                     );
                     inner.syncer.try_new_block_relaxed(armed_round).await;
                 }
