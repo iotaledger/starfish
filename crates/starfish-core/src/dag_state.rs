@@ -156,7 +156,7 @@ type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
 /// Number of rounds to keep in memory per authority beyond the evicted
 /// frontier. Must be >= 2 * MAX_TRAVERSAL_DEPTH to guarantee consensus
 /// traversals can complete without storage fallback.
-const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
+pub(crate) const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
 
 /// Per-authority DAG: round → (digest → (parents, known_by_bitmask)).
 type DagAuthorityMap =
@@ -1001,10 +1001,42 @@ impl DagState {
         self.dag_state_inner.read().shard_count(block_reference)
     }
 
+    fn get_blocks_with_store_fallback(
+        &self,
+        refs: &[BlockReference],
+    ) -> Vec<Option<Data<VerifiedBlock>>> {
+        let mut blocks = vec![None; refs.len()];
+        let mut missing_refs = Vec::new();
+        let mut missing_indices = Vec::new();
+
+        {
+            let inner = self.dag_state_inner.read();
+            for (index, reference) in refs.iter().enumerate() {
+                if let Some(block) = inner.get_block(*reference) {
+                    blocks[index] = Some(block);
+                } else {
+                    missing_refs.push(*reference);
+                    missing_indices.push(index);
+                }
+            }
+        }
+
+        if !missing_refs.is_empty() {
+            let fetched = self
+                .store
+                .get_blocks(&missing_refs)
+                .expect("Storage batch read failed");
+            for (index, block) in missing_indices.into_iter().zip(fetched) {
+                blocks[index] = block;
+            }
+        }
+
+        blocks
+    }
+
     /// Batch variant of `get_storage_block` — single read lock for N lookups.
     pub fn get_storage_blocks(&self, refs: &[BlockReference]) -> Vec<Option<Data<VerifiedBlock>>> {
-        let inner = self.dag_state_inner.read();
-        refs.iter().map(|r| inner.get_storage_block(*r)).collect()
+        self.get_blocks_with_store_fallback(refs)
     }
 
     /// Batch variant of `get_transmission_block` — single read lock for N
@@ -1013,36 +1045,95 @@ impl DagState {
         &self,
         refs: &[BlockReference],
     ) -> Vec<Option<Data<VerifiedBlock>>> {
-        let inner = self.dag_state_inner.read();
-        refs.iter()
-            .map(|r| inner.get_transmission_block(*r))
-            .collect()
+        self.get_blocks_with_store_fallback(refs)
     }
 
     /// Fetch blocks as header-only for the given references.
     pub fn get_header_only_blocks(&self, refs: &[BlockReference]) -> Vec<Data<VerifiedBlock>> {
-        let inner = self.dag_state_inner.read();
-        refs.iter()
-            .filter_map(|r| {
-                inner
-                    .get_storage_block(*r)
-                    .map(|block| Data::new(block.as_header_only()))
-            })
-            .collect()
+        self.get_transmission_parts(refs, &[]).0
     }
 
     /// Fetch shard payloads for the given references from the shard sidecar
     /// index, with store fallback.
     pub fn get_shard_payloads(&self, refs: &[BlockReference]) -> Vec<ShardPayload> {
-        refs.iter()
-            .filter_map(|r| {
-                let shard = self.get_shard(r)?;
-                Some(ShardPayload {
-                    block_reference: *r,
+        self.get_transmission_parts(&[], refs).1
+    }
+
+    /// Fetch header-only blocks and shard payloads together to avoid repeated
+    /// per-reference storage lookups on dissemination paths.
+    pub fn get_transmission_parts(
+        &self,
+        header_refs: &[BlockReference],
+        shard_refs: &[BlockReference],
+    ) -> (Vec<Data<VerifiedBlock>>, Vec<ShardPayload>) {
+        let mut header_slots = vec![None; header_refs.len()];
+        let mut missing_header_refs = Vec::new();
+        let mut missing_header_indices = Vec::new();
+
+        let mut shard_slots = vec![None; shard_refs.len()];
+        let mut missing_shard_refs = Vec::new();
+        let mut missing_shard_indices = Vec::new();
+
+        {
+            let inner = self.dag_state_inner.read();
+
+            for (index, reference) in header_refs.iter().enumerate() {
+                if let Some(block) = inner.get_block(*reference) {
+                    header_slots[index] = Some(Data::new(block.as_header_only()));
+                } else {
+                    missing_header_refs.push(*reference);
+                    missing_header_indices.push(index);
+                }
+            }
+
+            for (index, reference) in shard_refs.iter().enumerate() {
+                let auth = reference.authority as usize;
+                if let Some(shard) = inner.shard_index[auth]
+                    .get(&reference.round)
+                    .and_then(|m| m.get(&reference.digest))
+                {
+                    shard_slots[index] = Some(shard.clone());
+                } else {
+                    missing_shard_refs.push(*reference);
+                    missing_shard_indices.push(index);
+                }
+            }
+        }
+
+        if !missing_header_refs.is_empty() {
+            let fetched = self
+                .store
+                .get_blocks(&missing_header_refs)
+                .expect("Storage batch read failed");
+            for (index, block) in missing_header_indices.into_iter().zip(fetched) {
+                header_slots[index] = block.map(|block| Data::new(block.as_header_only()));
+            }
+        }
+
+        if !missing_shard_refs.is_empty() {
+            let fetched = self
+                .store
+                .get_shard_data_batch(&missing_shard_refs)
+                .expect("Failed to read shard batch from store");
+            for (index, shard) in missing_shard_indices.into_iter().zip(fetched) {
+                shard_slots[index] = shard;
+            }
+        }
+
+        let headers = header_slots.into_iter().flatten().collect();
+        let shards = shard_refs
+            .iter()
+            .copied()
+            .zip(shard_slots)
+            .filter_map(|(block_reference, shard)| {
+                shard.map(|shard| ShardPayload {
+                    block_reference,
                     shard,
                 })
             })
-            .collect()
+            .collect();
+
+        (headers, shards)
     }
 
     /// Insert a shard into the sidecar index and persist to store.
@@ -2273,13 +2364,13 @@ mod tests {
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
         crypto::{
-            BLS_SIGNATURE_SIZE, BlsSignatureBytes, BlockDigest, SignatureBytes,
+            BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
             TransactionsCommitment,
         },
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate,
+            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, ProvableShard,
             RoundNumber, VerifiedBlock,
         },
     };
@@ -2561,6 +2652,44 @@ mod tests {
             assert!(own_blocks_by_peer.contains_key(&10));
             assert!(own_blocks_by_peer.contains_key(&12));
         }
+    }
+
+    #[test]
+    fn transmission_parts_fetch_headers_and_shards_from_store_after_eviction() {
+        let dag_state = open_test_dag_state_for("starfish", 0);
+        let block = make_empty_full_block(1, 4, ConsensusProtocol::Starfish);
+        let reference = *block.reference();
+        let shard = ProvableShard::new(
+            vec![1, 2, 3],
+            0,
+            Vec::new(),
+            TransactionsCommitment::default(),
+        );
+
+        dag_state.insert_general_block(block);
+        dag_state.insert_shard(reference, shard.clone());
+
+        {
+            let mut inner = dag_state.dag_state_inner.write();
+            inner.last_seen_by_authority[1] = CACHED_ROUNDS + 10;
+        }
+        dag_state.cleanup();
+
+        let (headers, shards) = dag_state.get_transmission_parts(&[reference], &[reference]);
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].reference(), reference);
+        assert!(!headers[0].has_transaction_data());
+
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].block_reference, reference);
+        assert_eq!(shards[0].shard.shard(), shard.shard());
+        assert_eq!(shards[0].shard.shard_index(), shard.shard_index());
+        assert_eq!(shards[0].shard.merkle_proof(), shard.merkle_proof());
+        assert_eq!(
+            shards[0].shard.transactions_commitment(),
+            shard.transactions_commitment()
+        );
     }
 
     #[test]

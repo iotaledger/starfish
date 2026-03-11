@@ -249,6 +249,83 @@ impl Store for RocksStore {
         }
     }
 
+    fn get_blocks(
+        &self,
+        references: &[BlockReference],
+    ) -> io::Result<Vec<Option<Data<VerifiedBlock>>>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let keys: Vec<Vec<u8>> = references
+            .iter()
+            .map(|reference| serialize(reference).map_err(io::Error::other))
+            .collect::<io::Result<_>>()?;
+
+        let cf_headers = self.cf(CF_HEADERS)?;
+        let header_results = self
+            .db
+            .batched_multi_get_cf(&cf_headers, keys.iter(), false);
+        let headers: Vec<Option<BlockHeader>> = header_results
+            .into_iter()
+            .map(|result| {
+                result
+                    .map_err(io::Error::other)?
+                    .map(|bytes| deserialize(bytes.as_ref()).map_err(io::Error::other))
+                    .transpose()
+            })
+            .collect::<io::Result<_>>()?;
+
+        let cf_tx_data = self.cf(CF_TX_DATA)?;
+        let tx_results = self
+            .db
+            .batched_multi_get_cf(&cf_tx_data, keys.iter(), false);
+        let tx_data: Vec<Option<TransactionData>> = tx_results
+            .into_iter()
+            .map(|result| {
+                result
+                    .map_err(io::Error::other)?
+                    .map(|bytes| deserialize(bytes.as_ref()).map_err(io::Error::other))
+                    .transpose()
+            })
+            .collect::<io::Result<_>>()?;
+
+        let mut blocks: Vec<Option<Data<VerifiedBlock>>> = headers
+            .into_iter()
+            .zip(tx_data)
+            .map(|(header, tx)| {
+                header.map(|header| Data::new(VerifiedBlock::from_parts(header, tx)))
+            })
+            .collect();
+
+        let missing_indices: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| block.is_none().then_some(index))
+            .collect();
+        if missing_indices.is_empty() {
+            return Ok(blocks);
+        }
+
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        let legacy_results = self.db.batched_multi_get_cf(
+            &cf_blocks,
+            missing_indices.iter().map(|&index| &keys[index]),
+            false,
+        );
+
+        for (index, result) in missing_indices.into_iter().zip(legacy_results) {
+            blocks[index] = match result.map_err(io::Error::other)? {
+                Some(bytes) => Some(
+                    Data::from_bytes(bytes.as_ref().to_vec().into()).map_err(io::Error::other)?,
+                ),
+                None => None,
+            };
+        }
+
+        Ok(blocks)
+    }
+
     fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>> {
         let mut blocks = Vec::new();
         let mut seen = AHashSet::new();
@@ -450,5 +527,30 @@ impl Store for RocksStore {
         let key = serialize(reference).map_err(io::Error::other)?;
         let cf = self.cf(CF_SHARD_DATA)?;
         self.point_read_cf(&cf, &key)
+    }
+
+    fn get_shard_data_batch(
+        &self,
+        references: &[BlockReference],
+    ) -> io::Result<Vec<Option<ProvableShard>>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let keys: Vec<Vec<u8>> = references
+            .iter()
+            .map(|reference| serialize(reference).map_err(io::Error::other))
+            .collect::<io::Result<_>>()?;
+        let cf = self.cf(CF_SHARD_DATA)?;
+        self.db
+            .batched_multi_get_cf(&cf, keys.iter(), false)
+            .into_iter()
+            .map(|result| {
+                result
+                    .map_err(io::Error::other)?
+                    .map(|bytes| deserialize(bytes.as_ref()).map_err(io::Error::other))
+                    .transpose()
+            })
+            .collect()
     }
 }

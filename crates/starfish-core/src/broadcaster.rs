@@ -327,8 +327,7 @@ where
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishS
-            | ConsensusProtocol::StarfishL
-            => {
+            | ConsensusProtocol::StarfishL => {
                 let mut refs_to_send = block_references;
                 let remaining_extra_budget =
                     batch_other_block_size.saturating_sub(refs_to_send.len());
@@ -369,8 +368,10 @@ where
                     }
                 }
 
-                let headers = self.inner.dag_state.get_header_only_blocks(&refs_to_send);
-                let shards = self.inner.dag_state.get_shard_payloads(&refs_to_send);
+                let (headers, shards) = self
+                    .inner
+                    .dag_state
+                    .get_transmission_parts(&refs_to_send, &refs_to_send);
                 {
                     let mut sent = self.sent_to_peer.write();
                     for block in headers.iter() {
@@ -779,8 +780,7 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
     match consensus_protocol {
         ConsensusProtocol::Starfish
         | ConsensusProtocol::StarfishS
-        | ConsensusProtocol::StarfishL
-        => PushOtherBlocksFormat::HeadersAndShards,
+        | ConsensusProtocol::StarfishL => PushOtherBlocksFormat::HeadersAndShards,
         ConsensusProtocol::CordialMiners | ConsensusProtocol::Mysticeti => {
             PushOtherBlocksFormat::FullBlocks
         }
@@ -1116,13 +1116,18 @@ where
                 useful_shards_authors: 0,
             }
         }
-        PushOtherBlocksFormat::HeadersAndShards => BlockBatch {
-            full_blocks: plan.own_blocks,
-            headers: inner.dag_state.get_header_only_blocks(&plan.other_refs),
-            shards: inner.dag_state.get_shard_payloads(&plan.shard_refs),
-            useful_headers_authors: plan.useful_headers,
-            useful_shards_authors: plan.useful_shards,
-        },
+        PushOtherBlocksFormat::HeadersAndShards => {
+            let (headers, shards) = inner
+                .dag_state
+                .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
+            BlockBatch {
+                full_blocks: plan.own_blocks,
+                headers,
+                shards,
+                useful_headers_authors: plan.useful_headers,
+                useful_shards_authors: plan.useful_shards,
+            }
+        }
     }
 }
 

@@ -66,14 +66,92 @@ pub enum CordialKnowledgeMessage {
 // ConnectionKnowledge — per-peer tracker
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Default)]
+struct RoundCursor {
+    round: RoundNumber,
+    index: usize,
+}
+
+struct SharedKnowledgeState {
+    committee_size: usize,
+    header_index: Vec<BTreeMap<RoundNumber, Vec<BlockReference>>>,
+    shard_index: Vec<BTreeMap<RoundNumber, Vec<BlockReference>>>,
+    known_headers: AHashSet<BlockReference>,
+    known_shards: AHashSet<BlockReference>,
+}
+
+impl SharedKnowledgeState {
+    fn new(committee_size: usize) -> Self {
+        Self {
+            committee_size,
+            header_index: vec![BTreeMap::new(); committee_size],
+            shard_index: vec![BTreeMap::new(); committee_size],
+            known_headers: AHashSet::new(),
+            known_shards: AHashSet::new(),
+        }
+    }
+
+    fn insert_header(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority >= self.committee_size || !self.known_headers.insert(block_ref) {
+            return;
+        }
+        self.header_index[authority]
+            .entry(block_ref.round)
+            .or_default()
+            .push(block_ref);
+    }
+
+    fn insert_shard(&mut self, block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority >= self.committee_size || !self.known_shards.insert(block_ref) {
+            return;
+        }
+        self.shard_index[authority]
+            .entry(block_ref.round)
+            .or_default()
+            .push(block_ref);
+    }
+
+    fn insert_headers(&mut self, headers: &[BlockReference]) {
+        for block_ref in headers {
+            self.insert_header(*block_ref);
+        }
+    }
+
+    fn insert_shards(&mut self, shards: &[BlockReference]) {
+        for block_ref in shards {
+            self.insert_shard(*block_ref);
+        }
+    }
+
+    fn evict_below(&mut self, rounds: &[RoundNumber]) {
+        for (authority, threshold) in rounds.iter().enumerate() {
+            if authority >= self.committee_size {
+                break;
+            }
+            let split_round = threshold.saturating_add(1);
+            self.header_index[authority] = self.header_index[authority].split_off(&split_round);
+            self.shard_index[authority] = self.shard_index[authority].split_off(&split_round);
+        }
+        self.known_headers.retain(|block_ref| {
+            let authority = block_ref.authority as usize;
+            authority >= rounds.len() || block_ref.round > rounds[authority]
+        });
+        self.known_shards.retain(|block_ref| {
+            let authority = block_ref.authority as usize;
+            authority >= rounds.len() || block_ref.round > rounds[authority]
+        });
+    }
+}
+
 /// Per-peer tracker: what headers and shards this peer doesn't know about yet.
 pub struct ConnectionKnowledge {
     peer: AuthorityIndex,
     committee_size: usize,
-    /// `headers_not_known[authority]` = `{ round → set of block refs }`
-    headers_not_known: Vec<BTreeMap<RoundNumber, AHashSet<BlockReference>>>,
-    /// `shards_not_known[authority]` = `{ round → set of block refs }`
-    shards_not_known: Vec<BTreeMap<RoundNumber, AHashSet<BlockReference>>>,
+    shared: Arc<RwLock<SharedKnowledgeState>>,
+    header_cursors: Vec<RoundCursor>,
+    shard_cursors: Vec<RoundCursor>,
     /// Headers we know this peer already has, so later `NewHeader` events do
     /// not re-queue them.
     known_headers: AHashSet<BlockReference>,
@@ -94,56 +172,6 @@ pub struct ConnectionKnowledge {
 }
 
 impl ConnectionKnowledge {
-    fn take_unsent_refs(
-        maps: &mut [BTreeMap<RoundNumber, AHashSet<BlockReference>>],
-        limit: usize,
-        excluded_authority: Option<AuthorityIndex>,
-        allowed_authorities: u128,
-    ) -> Vec<BlockReference> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let mut result = Vec::with_capacity(limit);
-        // Fair draining across authorities: take at most one ref per authority
-        // per pass to avoid starving useful authorities when one authority has a
-        // deep backlog (e.g. under equivocation).
-        while result.len() < limit {
-            let mut made_progress = false;
-            for (authority, authority_map) in maps.iter_mut().enumerate() {
-                if excluded_authority == Some(authority as AuthorityIndex) {
-                    continue;
-                }
-                if allowed_authorities & (1u128 << authority) == 0 {
-                    continue;
-                }
-
-                let picked = authority_map
-                    .iter()
-                    .next()
-                    .and_then(|(&round, refs)| refs.iter().next().copied().map(|r| (round, r)));
-                let Some((round, block_ref)) = picked else {
-                    continue;
-                };
-
-                if let Some(round_set) = authority_map.get_mut(&round) {
-                    round_set.remove(&block_ref);
-                    if round_set.is_empty() {
-                        authority_map.remove(&round);
-                    }
-                }
-                result.push(block_ref);
-                made_progress = true;
-                if result.len() >= limit {
-                    break;
-                }
-            }
-            if !made_progress {
-                break;
-            }
-        }
-        result
-    }
-
     fn recent_authors_bitmask(
         last_useful_rounds: &[Option<RoundNumber>],
         current_round: RoundNumber,
@@ -159,25 +187,177 @@ impl ConnectionKnowledge {
         mask
     }
 
-    fn drain_ref(
-        authority_map: &mut BTreeMap<RoundNumber, AHashSet<BlockReference>>,
-        round: RoundNumber,
-        block_ref: BlockReference,
-    ) {
-        if let Some(round_set) = authority_map.get_mut(&round) {
-            round_set.remove(&block_ref);
-            if round_set.is_empty() {
-                authority_map.remove(&round);
+    fn next_from_cursor(
+        index: &BTreeMap<RoundNumber, Vec<BlockReference>>,
+        cursor: &mut RoundCursor,
+        known: &mut AHashSet<BlockReference>,
+        max_round: Option<RoundNumber>,
+    ) -> Option<BlockReference> {
+        let start_round = cursor.round.max(1);
+        for (&round, refs) in index.range(start_round..) {
+            if let Some(max_round) = max_round {
+                if round > max_round {
+                    return None;
+                }
+            }
+            let start_index = if round == cursor.round {
+                cursor.index
+            } else {
+                0
+            };
+            for (index_in_round, block_ref) in refs.iter().copied().enumerate().skip(start_index) {
+                cursor.round = round;
+                cursor.index = index_in_round + 1;
+                if known.insert(block_ref) {
+                    return Some(block_ref);
+                }
+            }
+            cursor.round = round.saturating_add(1);
+            cursor.index = 0;
+        }
+        None
+    }
+
+    fn take_from_cursors(
+        &mut self,
+        is_header: bool,
+        limit: usize,
+        excluded_authority: Option<AuthorityIndex>,
+        allowed_authorities: u128,
+        max_round: Option<RoundNumber>,
+    ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let shared_handle = self.shared.clone();
+        let shared = shared_handle.read();
+        let indexes = if is_header {
+            &shared.header_index
+        } else {
+            &shared.shard_index
+        };
+        let cursors = if is_header {
+            &mut self.header_cursors
+        } else {
+            &mut self.shard_cursors
+        };
+        let known = if is_header {
+            &mut self.known_headers
+        } else {
+            &mut self.known_shards
+        };
+
+        let mut result = Vec::with_capacity(limit);
+        while result.len() < limit {
+            let mut made_progress = false;
+            for authority in 0..self.committee_size {
+                let authority_index = authority as AuthorityIndex;
+                if authority_index == self.peer
+                    || excluded_authority == Some(authority_index)
+                    || allowed_authorities & (1u128 << authority) == 0
+                {
+                    continue;
+                }
+                let Some(block_ref) = Self::next_from_cursor(
+                    &indexes[authority],
+                    &mut cursors[authority],
+                    known,
+                    max_round,
+                ) else {
+                    continue;
+                };
+                result.push(block_ref);
+                made_progress = true;
+                if result.len() >= limit {
+                    break;
+                }
+            }
+            if !made_progress {
+                break;
             }
         }
+        result
+    }
+
+    fn take_from_exact_round(
+        &mut self,
+        is_header: bool,
+        limit: usize,
+        round: RoundNumber,
+        excluded_authority: Option<AuthorityIndex>,
+        allowed_authorities: u128,
+    ) -> Vec<BlockReference> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let shared_handle = self.shared.clone();
+        let shared = shared_handle.read();
+        let indexes = if is_header {
+            &shared.header_index
+        } else {
+            &shared.shard_index
+        };
+        let known = if is_header {
+            &mut self.known_headers
+        } else {
+            &mut self.known_shards
+        };
+
+        let mut result = Vec::with_capacity(limit);
+        while result.len() < limit {
+            let mut made_progress = false;
+            for authority in 0..self.committee_size {
+                let authority_index = authority as AuthorityIndex;
+                if authority_index == self.peer
+                    || excluded_authority == Some(authority_index)
+                    || allowed_authorities & (1u128 << authority) == 0
+                {
+                    continue;
+                }
+                let Some(refs) = indexes[authority].get(&round) else {
+                    continue;
+                };
+                let Some(block_ref) = refs
+                    .iter()
+                    .copied()
+                    .find(|block_ref| known.insert(*block_ref))
+                else {
+                    continue;
+                };
+                result.push(block_ref);
+                made_progress = true;
+                if result.len() >= limit {
+                    break;
+                }
+            }
+            if !made_progress {
+                break;
+            }
+        }
+        result
     }
 
     pub fn new(peer: AuthorityIndex, committee_size: usize) -> Self {
+        Self::new_with_shared(
+            peer,
+            committee_size,
+            Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size))),
+        )
+    }
+
+    fn new_with_shared(
+        peer: AuthorityIndex,
+        committee_size: usize,
+        shared: Arc<RwLock<SharedKnowledgeState>>,
+    ) -> Self {
         Self {
             peer,
             committee_size,
-            headers_not_known: vec![BTreeMap::new(); committee_size],
-            shards_not_known: vec![BTreeMap::new(); committee_size],
+            shared,
+            header_cursors: vec![RoundCursor::default(); committee_size],
+            shard_cursors: vec![RoundCursor::default(); committee_size],
             known_headers: AHashSet::new(),
             known_shards: AHashSet::new(),
             last_useful_headers_to_peer_round: vec![None; committee_size],
@@ -189,31 +369,12 @@ impl ConnectionKnowledge {
 
     /// Record that a new header exists that this peer may not know about.
     pub fn new_header(&mut self, block_ref: BlockReference) {
-        // Don't track the peer's own blocks — they obviously know them.
-        if block_ref.authority == self.peer {
-            return;
-        }
-        let authority = block_ref.authority as usize;
-        if authority < self.committee_size && !self.known_headers.contains(&block_ref) {
-            self.headers_not_known[authority]
-                .entry(block_ref.round)
-                .or_default()
-                .insert(block_ref);
-        }
+        self.shared.write().insert_header(block_ref);
     }
 
     /// Record that a new shard exists that this peer may not know about.
     pub fn new_shard(&mut self, block_ref: BlockReference) {
-        if block_ref.authority == self.peer {
-            return;
-        }
-        let authority = block_ref.authority as usize;
-        if authority < self.committee_size && !self.known_shards.contains(&block_ref) {
-            self.shards_not_known[authority]
-                .entry(block_ref.round)
-                .or_default()
-                .insert(block_ref);
-        }
+        self.shared.write().insert_shard(block_ref);
     }
 
     /// Mark a header as known by this peer (received from them or inferred).
@@ -221,12 +382,6 @@ impl ConnectionKnowledge {
         let authority = block_ref.authority as usize;
         if authority < self.committee_size {
             self.known_headers.insert(block_ref);
-            if let Some(round_set) = self.headers_not_known[authority].get_mut(&block_ref.round) {
-                round_set.remove(&block_ref);
-                if round_set.is_empty() {
-                    self.headers_not_known[authority].remove(&block_ref.round);
-                }
-            }
         }
     }
 
@@ -235,12 +390,6 @@ impl ConnectionKnowledge {
         let authority = block_ref.authority as usize;
         if authority < self.committee_size {
             self.known_shards.insert(block_ref);
-            if let Some(round_set) = self.shards_not_known[authority].get_mut(&block_ref.round) {
-                round_set.remove(&block_ref);
-                if round_set.is_empty() {
-                    self.shards_not_known[authority].remove(&block_ref.round);
-                }
-            }
         }
     }
 
@@ -255,7 +404,7 @@ impl ConnectionKnowledge {
     /// Drain the oldest unknown headers, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_headers(&mut self, limit: usize) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.headers_not_known, limit, None, u128::MAX)
+        self.take_from_cursors(true, limit, None, u128::MAX, None)
     }
 
     /// Drain the oldest unknown headers, excluding a single authority.
@@ -264,12 +413,7 @@ impl ConnectionKnowledge {
         limit: usize,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        Self::take_unsent_refs(
-            &mut self.headers_not_known,
-            limit,
-            Some(excluded_authority),
-            u128::MAX,
-        )
+        self.take_from_cursors(true, limit, Some(excluded_authority), u128::MAX, None)
     }
 
     /// Drain the oldest unknown headers, but only for authorities currently
@@ -279,12 +423,7 @@ impl ConnectionKnowledge {
         limit: usize,
         allowed_authorities: u128,
     ) -> Vec<BlockReference> {
-        Self::take_unsent_refs(
-            &mut self.headers_not_known,
-            limit,
-            None,
-            allowed_authorities,
-        )
+        self.take_from_cursors(true, limit, None, allowed_authorities, None)
     }
 
     pub fn take_unsent_headers_at_round_excluding_authority(
@@ -293,40 +432,13 @@ impl ConnectionKnowledge {
         round: RoundNumber,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let mut result = Vec::with_capacity(limit);
-        while result.len() < limit {
-            let mut made_progress = false;
-            for (authority, authority_map) in self.headers_not_known.iter_mut().enumerate() {
-                if excluded_authority == authority as AuthorityIndex {
-                    continue;
-                }
-                let picked = authority_map
-                    .get(&round)
-                    .and_then(|refs| refs.iter().next().copied());
-                let Some(block_ref) = picked else {
-                    continue;
-                };
-                Self::drain_ref(authority_map, round, block_ref);
-                result.push(block_ref);
-                made_progress = true;
-                if result.len() >= limit {
-                    break;
-                }
-            }
-            if !made_progress {
-                break;
-            }
-        }
-        result
+        self.take_from_exact_round(true, limit, round, Some(excluded_authority), u128::MAX)
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_shards(&mut self, limit: usize) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.shards_not_known, limit, None, u128::MAX)
+        self.take_from_cursors(false, limit, None, u128::MAX, None)
     }
 
     /// Drain the oldest unknown shards, but only for authorities currently
@@ -336,7 +448,7 @@ impl ConnectionKnowledge {
         limit: usize,
         allowed_authorities: u128,
     ) -> Vec<BlockReference> {
-        Self::take_unsent_refs(&mut self.shards_not_known, limit, None, allowed_authorities)
+        self.take_from_cursors(false, limit, None, allowed_authorities, None)
     }
 
     pub fn take_unsent_shards_up_to_round(
@@ -344,38 +456,7 @@ impl ConnectionKnowledge {
         limit: usize,
         round: RoundNumber,
     ) -> Vec<BlockReference> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let mut result = Vec::with_capacity(limit);
-        while result.len() < limit {
-            let mut made_progress = false;
-            for authority_map in &mut self.shards_not_known {
-                let picked =
-                    authority_map
-                        .range(..=round)
-                        .next()
-                        .and_then(|(&picked_round, refs)| {
-                            refs.iter()
-                                .next()
-                                .copied()
-                                .map(|block_ref| (picked_round, block_ref))
-                        });
-                let Some((picked_round, block_ref)) = picked else {
-                    continue;
-                };
-                Self::drain_ref(authority_map, picked_round, block_ref);
-                result.push(block_ref);
-                made_progress = true;
-                if result.len() >= limit {
-                    break;
-                }
-            }
-            if !made_progress {
-                break;
-            }
-        }
-        result
+        self.take_from_cursors(false, limit, None, u128::MAX, Some(round))
     }
 
     pub fn take_unsent_shards_up_to_round_excluding_authority(
@@ -384,54 +465,33 @@ impl ConnectionKnowledge {
         round: RoundNumber,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let mut result = Vec::with_capacity(limit);
-        while result.len() < limit {
-            let mut made_progress = false;
-            for (authority, authority_map) in self.shards_not_known.iter_mut().enumerate() {
-                if excluded_authority == authority as AuthorityIndex {
-                    continue;
-                }
-                let picked =
-                    authority_map
-                        .range(..=round)
-                        .next()
-                        .and_then(|(&picked_round, refs)| {
-                            refs.iter()
-                                .next()
-                                .copied()
-                                .map(|block_ref| (picked_round, block_ref))
-                        });
-                let Some((picked_round, block_ref)) = picked else {
-                    continue;
-                };
-                Self::drain_ref(authority_map, picked_round, block_ref);
-                result.push(block_ref);
-                made_progress = true;
-                if result.len() >= limit {
-                    break;
-                }
-            }
-            if !made_progress {
-                break;
-            }
-        }
-        result
+        self.take_from_cursors(
+            false,
+            limit,
+            Some(excluded_authority),
+            u128::MAX,
+            Some(round),
+        )
     }
 
-    /// Evict all entries below the given per-authority rounds.
-    pub fn evict_below(&mut self, rounds: &[RoundNumber]) {
+    fn evict_local_below(&mut self, rounds: &[RoundNumber]) {
         for (authority, threshold) in rounds.iter().enumerate() {
             if authority >= self.committee_size {
                 break;
             }
             let split_round = threshold.saturating_add(1);
-            self.headers_not_known[authority] =
-                self.headers_not_known[authority].split_off(&split_round);
-            self.shards_not_known[authority] =
-                self.shards_not_known[authority].split_off(&split_round);
+            if self.header_cursors[authority].round < split_round {
+                self.header_cursors[authority] = RoundCursor {
+                    round: split_round,
+                    index: 0,
+                };
+            }
+            if self.shard_cursors[authority].round < split_round {
+                self.shard_cursors[authority] = RoundCursor {
+                    round: split_round,
+                    index: 0,
+                };
+            }
         }
         self.known_headers.retain(|block_ref| {
             let authority = block_ref.authority as usize;
@@ -441,6 +501,12 @@ impl ConnectionKnowledge {
             let authority = block_ref.authority as usize;
             authority >= rounds.len() || block_ref.round > rounds[authority]
         });
+    }
+
+    /// Evict all entries below the given per-authority rounds.
+    pub fn evict_below(&mut self, rounds: &[RoundNumber]) {
+        self.shared.write().evict_below(rounds);
+        self.evict_local_below(rounds);
     }
 
     /// Record that a header received from this peer was useful to us.
@@ -550,16 +616,36 @@ impl ConnectionKnowledge {
 #[cfg(test)]
 impl ConnectionKnowledge {
     pub fn unknown_headers_count(&self) -> usize {
-        self.headers_not_known
+        let shared = self.shared.read();
+        shared
+            .header_index
             .iter()
-            .map(|m| m.values().map(|s| s.len()).sum::<usize>())
+            .enumerate()
+            .filter(|(authority, _)| *authority as AuthorityIndex != self.peer)
+            .map(|(_, rounds)| {
+                rounds
+                    .values()
+                    .flat_map(|refs| refs.iter())
+                    .filter(|block_ref| !self.known_headers.contains(block_ref))
+                    .count()
+            })
             .sum()
     }
 
     pub fn unknown_shards_count(&self) -> usize {
-        self.shards_not_known
+        let shared = self.shared.read();
+        shared
+            .shard_index
             .iter()
-            .map(|m| m.values().map(|s| s.len()).sum::<usize>())
+            .enumerate()
+            .filter(|(authority, _)| *authority as AuthorityIndex != self.peer)
+            .map(|(_, rounds)| {
+                rounds
+                    .values()
+                    .flat_map(|refs| refs.iter())
+                    .filter(|block_ref| !self.known_shards.contains(block_ref))
+                    .count()
+            })
             .sum()
     }
 }
@@ -572,6 +658,7 @@ impl ConnectionKnowledge {
 /// DAG events and propagates them to per-peer trackers.
 pub struct CordialKnowledge {
     committee_size: usize,
+    shared: Arc<RwLock<SharedKnowledgeState>>,
     /// One per peer, shared with connection tasks via `Arc<RwLock<>>`.
     connection_knowledges: Vec<Arc<RwLock<ConnectionKnowledge>>>,
     /// Receives events from DagState / core / shard reconstructor.
@@ -584,25 +671,15 @@ impl CordialKnowledge {
         while let Some(msg) = self.receiver.recv().await {
             match msg {
                 CordialKnowledgeMessage::NewHeader(block_ref) => {
-                    for ck in &self.connection_knowledges {
-                        ck.write().new_header(block_ref);
-                    }
+                    self.shared.write().insert_header(block_ref);
                 }
                 CordialKnowledgeMessage::NewShard(block_ref) => {
-                    for ck in &self.connection_knowledges {
-                        ck.write().new_shard(block_ref);
-                    }
+                    self.shared.write().insert_shard(block_ref);
                 }
                 CordialKnowledgeMessage::DagParts { headers, shards } => {
-                    for ck in &self.connection_knowledges {
-                        let mut ck = ck.write();
-                        for block_ref in &headers {
-                            ck.new_header(*block_ref);
-                        }
-                        for block_ref in &shards {
-                            ck.new_shard(*block_ref);
-                        }
-                    }
+                    let mut shared = self.shared.write();
+                    shared.insert_headers(&headers);
+                    shared.insert_shards(&shards);
                 }
                 CordialKnowledgeMessage::HeaderReceivedFrom { peer, block_ref } => {
                     let idx = peer as usize;
@@ -634,8 +711,9 @@ impl CordialKnowledge {
                     }
                 }
                 CordialKnowledgeMessage::EvictBelow(rounds) => {
+                    self.shared.write().evict_below(&rounds);
                     for ck in &self.connection_knowledges {
-                        ck.write().evict_below(&rounds);
+                        ck.write().evict_local_below(&rounds);
                     }
                 }
             }
@@ -661,12 +739,14 @@ impl CordialKnowledgeHandle {
     /// The caller should spawn `actor.run()` on a tokio runtime.
     pub fn new(committee_size: usize) -> (Self, CordialKnowledge) {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+        let shared = Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size)));
 
         let connection_knowledges: Vec<_> = (0..committee_size)
             .map(|i| {
-                Arc::new(RwLock::new(ConnectionKnowledge::new(
+                Arc::new(RwLock::new(ConnectionKnowledge::new_with_shared(
                     i as AuthorityIndex,
                     committee_size,
+                    shared.clone(),
                 )))
             })
             .collect();
@@ -678,6 +758,7 @@ impl CordialKnowledgeHandle {
 
         let actor = CordialKnowledge {
             committee_size,
+            shared,
             connection_knowledges,
             receiver,
         };

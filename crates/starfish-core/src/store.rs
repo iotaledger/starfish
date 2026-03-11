@@ -20,6 +20,16 @@ pub trait Store: Send + Sync + 'static {
 
     fn get_block(&self, reference: &BlockReference) -> io::Result<Option<Data<VerifiedBlock>>>;
 
+    fn get_blocks(
+        &self,
+        references: &[BlockReference],
+    ) -> io::Result<Vec<Option<Data<VerifiedBlock>>>> {
+        references
+            .iter()
+            .map(|reference| self.get_block(reference))
+            .collect()
+    }
+
     fn get_blocks_by_round(&self, round: RoundNumber) -> io::Result<Vec<Data<VerifiedBlock>>>;
 
     fn store_commits(&self, committed_sub_dags: Vec<CommitData>) -> io::Result<()>;
@@ -37,6 +47,16 @@ pub trait Store: Send + Sync + 'static {
     fn store_shard_data_bytes(&self, reference: &BlockReference, bytes: &[u8]) -> io::Result<()>;
 
     fn get_shard_data(&self, reference: &BlockReference) -> io::Result<Option<ProvableShard>>;
+
+    fn get_shard_data_batch(
+        &self,
+        references: &[BlockReference],
+    ) -> io::Result<Vec<Option<ProvableShard>>> {
+        references
+            .iter()
+            .map(|reference| self.get_shard_data(reference))
+            .collect()
+    }
 
     /// Return the most recently stored commit (highest leader round).
     fn read_last_commit(&self) -> io::Result<Option<CommitData>>;
