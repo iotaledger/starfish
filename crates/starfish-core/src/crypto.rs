@@ -13,7 +13,7 @@ use zeroize::Zeroize;
 
 use crate::{
     crypto,
-    serde::{ByteRepr, BytesVisitor},
+    serde::ByteRepr,
     types::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
         Shard, TimestampNs,
@@ -63,7 +63,7 @@ pub struct BlockDigest([u8; BLOCK_DIGEST_SIZE]);
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Default, Hash)]
 pub struct TransactionsCommitment([u8; TRANSACTIONS_DIGEST_SIZE]);
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct PublicKey(ed25519_consensus::VerificationKey);
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Hash)]
@@ -71,7 +71,7 @@ pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 
 // Box ensures value is not copied in memory when Signer itself is moved around
 // for better security
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Clone)]
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 pub type Blake3Hasher = blake3::Hasher;
 
@@ -295,6 +295,79 @@ impl<T: AsBytes> CryptoHash for T {
     }
 }
 
+fn serialize_fixed_bytes<S: Serializer, const N: usize>(
+    bytes: &[u8; N],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&hex::encode(bytes))
+    } else {
+        serializer.serialize_bytes(bytes)
+    }
+}
+
+struct FixedBytesVisitor<const N: usize> {
+    type_name: &'static str,
+}
+
+impl<const N: usize> FixedBytesVisitor<N> {
+    fn new(type_name: &'static str) -> Self {
+        Self { type_name }
+    }
+}
+
+impl<'de, const N: usize> de::Visitor<'de> for FixedBytesVisitor<N> {
+    type Value = [u8; N];
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} as {} raw bytes or {} hex characters",
+            self.type_name,
+            N,
+            N * 2
+        )
+    }
+
+    fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        if v.len() != N {
+            return Err(E::custom(format!(
+                "Invalid {} length: {}",
+                self.type_name,
+                v.len()
+            )));
+        }
+        let mut buf = [0u8; N];
+        buf.copy_from_slice(v);
+        Ok(buf)
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+        self.visit_bytes(&v)
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        let decoded = hex::decode(v)
+            .map_err(|e| E::custom(format!("Invalid {} hex encoding: {e}", self.type_name)))?;
+        self.visit_bytes(&decoded)
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+        self.visit_str(&v)
+    }
+}
+
+fn deserialize_fixed_bytes<'de, D: Deserializer<'de>, const N: usize>(
+    deserializer: D,
+    type_name: &'static str,
+) -> Result<[u8; N], D::Error> {
+    if deserializer.is_human_readable() {
+        deserializer.deserialize_str(FixedBytesVisitor::new(type_name))
+    } else {
+        deserializer.deserialize_bytes(FixedBytesVisitor::new(type_name))
+    }
+}
+
 impl PublicKey {
     pub fn verify_signature_in_block(
         &self,
@@ -315,6 +388,16 @@ impl PublicKey {
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(self.0.as_ref());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, ed25519_consensus::Error> {
+        ed25519_consensus::VerificationKey::try_from(*bytes).map(Self)
     }
 }
 
@@ -419,6 +502,20 @@ impl fmt::Display for Signer {
     }
 }
 
+impl Serialize for PublicKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_fixed_bytes(&self.to_bytes(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = deserialize_fixed_bytes::<D, 32>(deserializer, "public key")?;
+        PublicKey::from_bytes(&bytes)
+            .map_err(|e| de::Error::custom(format!("Invalid public key: {e:?}")))
+    }
+}
+
 impl Default for SignatureBytes {
     fn default() -> Self {
         Self([0u8; 64])
@@ -439,13 +536,13 @@ impl ByteRepr for SignatureBytes {
 impl Serialize for SignatureBytes {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
+        serialize_fixed_bytes(&self.0, serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for SignatureBytes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_bytes(BytesVisitor::new())
+        deserialize_fixed_bytes::<D, SIGNATURE_SIZE>(deserializer, "signature").map(Self)
     }
 }
 
@@ -493,23 +590,24 @@ impl fmt::Display for TransactionsCommitment {
 impl Serialize for TransactionsCommitment {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
+        serialize_fixed_bytes(&self.0, serializer)
     }
 }
 impl Serialize for BlockDigest {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
+        serialize_fixed_bytes(&self.0, serializer)
     }
 }
 impl<'de> Deserialize<'de> for TransactionsCommitment {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_bytes(BytesVisitor::new())
+        deserialize_fixed_bytes::<D, BLOCK_DIGEST_SIZE>(deserializer, "transactions commitment")
+            .map(Self)
     }
 }
 impl<'de> Deserialize<'de> for BlockDigest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_bytes(BytesVisitor::new())
+        deserialize_fixed_bytes::<D, BLOCK_DIGEST_SIZE>(deserializer, "block digest").map(Self)
     }
 }
 
@@ -585,13 +683,13 @@ impl ByteRepr for BlsSignatureBytes {
 impl Serialize for BlsSignatureBytes {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
+        serialize_fixed_bytes(&self.0, serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for BlsSignatureBytes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_bytes(BytesVisitor::new())
+        deserialize_fixed_bytes::<D, BLS_SIGNATURE_SIZE>(deserializer, "BLS signature").map(Self)
     }
 }
 
@@ -646,35 +744,15 @@ impl Eq for BlsPublicKey {}
 
 impl Serialize for BlsPublicKey {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.to_bytes())
+        serialize_fixed_bytes(&self.to_bytes(), serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for BlsPublicKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct BlsPkVisitor;
-        impl<'de> de::Visitor<'de> for BlsPkVisitor {
-            type Value = BlsPublicKey;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("96-byte BLS public key")
-            }
-            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-                if v.len() != BLS_PUBLIC_KEY_SIZE {
-                    return Err(E::custom(format!(
-                        "Invalid BLS public key length: {}",
-                        v.len()
-                    )));
-                }
-                let mut buf = [0u8; BLS_PUBLIC_KEY_SIZE];
-                buf.copy_from_slice(v);
-                BlsPublicKey::from_bytes(&buf)
-                    .map_err(|e| E::custom(format!("Invalid BLS public key: {:?}", e)))
-            }
-            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
-                self.visit_bytes(&v)
-            }
-        }
-        deserializer.deserialize_bytes(BlsPkVisitor)
+        let bytes = deserialize_fixed_bytes::<D, BLS_PUBLIC_KEY_SIZE>(deserializer, "BLS public key")?;
+        BlsPublicKey::from_bytes(&bytes)
+            .map_err(|e| de::Error::custom(format!("Invalid BLS public key: {:?}", e)))
     }
 }
 
@@ -730,36 +808,31 @@ impl fmt::Display for BlsSigner {
 
 impl Serialize for BlsSigner {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0.to_bytes())
+        let bytes = self.0.to_bytes();
+        serialize_fixed_bytes(&bytes, serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for BlsSigner {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct BlsSkVisitor;
-        impl<'de> de::Visitor<'de> for BlsSkVisitor {
-            type Value = BlsSigner;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("32-byte BLS secret key")
-            }
-            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-                if v.len() != 32 {
-                    return Err(E::custom(format!(
-                        "Invalid BLS secret key length: {}",
-                        v.len()
-                    )));
-                }
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(v);
-                let sk = bls::SecretKey::from_bytes(&buf)
-                    .map_err(|e| E::custom(format!("Invalid BLS secret key: {:?}", e)))?;
-                Ok(BlsSigner(Box::new(sk)))
-            }
-            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
-                self.visit_bytes(&v)
-            }
-        }
-        deserializer.deserialize_bytes(BlsSkVisitor)
+        let bytes = deserialize_fixed_bytes::<D, 32>(deserializer, "BLS secret key")?;
+        let sk = bls::SecretKey::from_bytes(&bytes)
+            .map_err(|e| de::Error::custom(format!("Invalid BLS secret key: {:?}", e)))?;
+        Ok(BlsSigner(Box::new(sk)))
+    }
+}
+
+impl Serialize for Signer {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes: [u8; 32] = (*self.0).clone().into();
+        serialize_fixed_bytes(&bytes, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Signer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = deserialize_fixed_bytes::<D, 32>(deserializer, "signing key")?;
+        Ok(Signer(Box::new(ed25519_consensus::SigningKey::from(bytes))))
     }
 }
 
@@ -843,6 +916,7 @@ pub fn dummy_bls_public_key() -> BlsPublicKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn bls_sign_verify_roundtrip() {
@@ -891,5 +965,52 @@ mod tests {
         let encoded = bincode::serialize(&sig).unwrap();
         let decoded: BlsSignatureBytes = bincode::deserialize(&encoded).unwrap();
         assert_eq!(sig, decoded);
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct CryptoYamlFixture {
+        signer: Signer,
+        public_key: PublicKey,
+        block_digest: BlockDigest,
+        transactions_commitment: TransactionsCommitment,
+        signature: SignatureBytes,
+        bls_signer: BlsSigner,
+        bls_public_key: BlsPublicKey,
+        bls_signature: BlsSignatureBytes,
+    }
+
+    #[test]
+    fn crypto_types_roundtrip_through_yaml() {
+        let signer = Signer::new_for_test(1).pop().unwrap();
+        let public_key = signer.public_key();
+        let bls_signer = dummy_bls_signer();
+        let fixture = CryptoYamlFixture {
+            signer,
+            public_key,
+            block_digest: BlockDigest([7u8; BLOCK_DIGEST_SIZE]),
+            transactions_commitment: TransactionsCommitment([8u8; TRANSACTIONS_DIGEST_SIZE]),
+            signature: SignatureBytes([9u8; SIGNATURE_SIZE]),
+            bls_public_key: bls_signer.public_key(),
+            bls_signature: bls_signer.sign_digest(&[5u8; 32]),
+            bls_signer,
+        };
+
+        let yaml = serde_yaml::to_string(&fixture).unwrap();
+        let decoded: CryptoYamlFixture = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(fixture.signer.public_key(), decoded.signer.public_key());
+        assert_eq!(fixture.public_key, decoded.public_key);
+        assert_eq!(fixture.block_digest, decoded.block_digest);
+        assert_eq!(
+            fixture.transactions_commitment,
+            decoded.transactions_commitment
+        );
+        assert!(fixture.signature == decoded.signature);
+        assert_eq!(fixture.bls_public_key, decoded.bls_public_key);
+        assert_eq!(fixture.bls_signature, decoded.bls_signature);
+        assert_eq!(
+            fixture.bls_signer.public_key(),
+            decoded.bls_signer.public_key()
+        );
     }
 }
