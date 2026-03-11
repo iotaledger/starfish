@@ -796,7 +796,7 @@ impl CordialKnowledgeHandle {
 mod tests {
     use super::*;
 
-    fn block_ref(authority: AuthorityIndex, round: u64) -> BlockReference {
+    fn block_ref(authority: AuthorityIndex, round: RoundNumber) -> BlockReference {
         BlockReference {
             authority,
             round,

@@ -733,7 +733,7 @@ impl<H: BlockHandler> Core<H> {
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
     ) -> Data<VerifiedBlock> {
-        let time_ns = timestamp_utc().as_nanos() + block_id_in_round as u128;
+        let time_ns = timestamp_utc().as_nanos() as u64 + block_id_in_round as u64;
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
         let mut block_references = vec![own_previous];
         if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishL {

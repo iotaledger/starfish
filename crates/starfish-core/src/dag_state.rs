@@ -2026,7 +2026,8 @@ impl DagStateInner {
         if leader_round == 0 {
             return;
         }
-        let leader_authority = (leader_round % self.committee_size as u64) as AuthorityIndex;
+        let leader_authority =
+            (leader_round % self.committee_size as RoundNumber) as AuthorityIndex;
         let Some(leader_ref) = block
             .block_references()
             .iter()

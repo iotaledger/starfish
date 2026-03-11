@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -148,7 +148,7 @@ struct ShardReconstructor {
     // Output channel to core bridge
     decoded_tx: Sender<DecodedBlocks>,
     // Eviction
-    gc_round: Arc<AtomicU64>,
+    gc_round: Arc<AtomicU32>,
     // Highest round seen from incoming shard messages (for lag metric)
     highest_seen_round: RoundNumber,
 }
@@ -162,7 +162,7 @@ pub fn start_shard_reconstructor(
     own_id: AuthorityIndex,
     metrics: Arc<Metrics>,
     decoded_tx: Sender<DecodedBlocks>,
-    gc_round: Arc<AtomicU64>,
+    gc_round: Arc<AtomicU32>,
 ) -> Arc<ShardReconstructorHandle> {
     ShardReconstructor::start(committee, own_id, metrics, decoded_tx, gc_round)
 }
@@ -173,7 +173,7 @@ impl ShardReconstructor {
         own_id: AuthorityIndex,
         metrics: Arc<Metrics>,
         decoded_tx: Sender<DecodedBlocks>,
-        gc_round: Arc<AtomicU64>,
+        gc_round: Arc<AtomicU32>,
     ) -> Arc<ShardReconstructorHandle> {
         let info_length = committee.info_length();
         let committee_size = committee.len();
@@ -558,7 +558,7 @@ mod tests {
         let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None, None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
-        let gc_round = Arc::new(AtomicU64::new(0));
+        let gc_round = Arc::new(AtomicU32::new(0));
 
         let handle =
             start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);
@@ -626,7 +626,7 @@ mod tests {
         let (metrics, _reporter) = Metrics::new(&registry, Some(&committee), None, None);
 
         let (decoded_tx, mut decoded_rx) = mpsc::channel(100);
-        let gc_round = Arc::new(AtomicU64::new(0));
+        let gc_round = Arc::new(AtomicU32::new(0));
 
         let handle =
             start_shard_reconstructor(committee.clone(), own_id, metrics, decoded_tx, gc_round);

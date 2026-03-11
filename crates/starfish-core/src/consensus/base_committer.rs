@@ -15,16 +15,16 @@ use crate::{
 /// The consensus protocol operates in 'waves'. Each wave is
 /// composed of a leader round, at least one voting round,
 /// and one certifying round.
-type WaveNumber = u64;
+type WaveNumber = RoundNumber;
 
 #[derive(Clone)]
 pub struct BaseCommitterOptions {
     /// The length of a wave (minimum 3)
-    pub wave_length: u64,
+    pub wave_length: RoundNumber,
     /// The offset of the first wave. This is used by the pipelined committer to
     /// ensure that each [`BaseCommitter`] instances operates on a different
     /// view of the dag.
-    pub round_offset: u64,
+    pub round_offset: RoundNumber,
 }
 
 impl Default for BaseCommitterOptions {

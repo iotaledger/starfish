@@ -12,7 +12,7 @@ use crate::{
     config::ImportExport,
     crypto::{BlsPublicKey, BlsSigner, PublicKey, Signer, dummy_bls_public_key, dummy_public_key},
     data::Data,
-    types::{AuthorityIndex, AuthoritySet, Stake, VerifiedBlock},
+    types::{AuthorityIndex, AuthoritySet, RoundNumber, Stake, VerifiedBlock},
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -140,8 +140,8 @@ impl Committee {
     }
 
     // TODO: fix to select by stake
-    pub fn elect_leader(&self, r: u64) -> AuthorityIndex {
-        (r % self.authorities.len() as u64) as AuthorityIndex
+    pub fn elect_leader(&self, r: RoundNumber) -> AuthorityIndex {
+        (r % self.authorities.len() as RoundNumber) as AuthorityIndex
     }
 
     pub fn random_authority(&self, rng: &mut impl Rng) -> AuthorityIndex {

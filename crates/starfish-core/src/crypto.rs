@@ -265,6 +265,12 @@ impl CryptoHash for u8 {
     }
 }
 
+impl CryptoHash for u32 {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
+        state.update(&self.to_be_bytes());
+    }
+}
+
 impl CryptoHash for u64 {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());

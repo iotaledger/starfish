@@ -21,8 +21,8 @@ use crate::{
     },
 };
 
-/// Key = round(8B BE) ++ authority(8B BE) ++ digest(32B) = 48 bytes.
-const KEY_SIZE: usize = 48;
+/// Key = round(4B BE) ++ authority(1B) ++ digest(32B) = 37 bytes.
+const KEY_SIZE: usize = 37;
 
 /// Prefix length for `PrefixUniform` key type.
 /// Top 3 bytes of big-endian round → one shard per ~256 rounds, covers rounds
@@ -45,23 +45,23 @@ impl TideHunterStore {
     /// Encode a [`BlockReference`] as a fixed 48-byte big-endian key.
     fn encode_key(reference: &BlockReference) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
-        key[0..8].copy_from_slice(&reference.round.to_be_bytes());
-        key[8..16].copy_from_slice(&reference.authority.to_be_bytes());
-        key[16..48].copy_from_slice(reference.digest.as_ref());
+        key[0..4].copy_from_slice(&reference.round.to_be_bytes());
+        key[4] = reference.authority;
+        key[5..37].copy_from_slice(reference.digest.as_ref());
         key
     }
 
     /// Lower bound key (inclusive) for iterating all blocks at `round`.
     fn round_lower_bound(round: RoundNumber) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
-        key[0..8].copy_from_slice(&round.to_be_bytes());
+        key[0..4].copy_from_slice(&round.to_be_bytes());
         key
     }
 
     /// Upper bound key (exclusive) for iterating all blocks at `round`.
     fn round_upper_bound(round: RoundNumber) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
-        key[0..8].copy_from_slice(&(round + 1).to_be_bytes());
+        key[0..4].copy_from_slice(&(round + 1).to_be_bytes());
         key
     }
 

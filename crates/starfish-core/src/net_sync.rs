@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -860,7 +860,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub dissemination_mode: crate::config::DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
-    pub gc_round: Arc<AtomicU64>,
+    pub gc_round: Arc<AtomicU32>,
     pub shard_tx:
         parking_lot::Mutex<Option<mpsc::Sender<Vec<crate::shard_reconstructor::ShardMessage>>>>,
     pub cordial_knowledge: CordialKnowledgeHandle,
@@ -924,7 +924,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 | ConsensusProtocol::StarfishS
                 | ConsensusProtocol::StarfishL
         );
-        let gc_round = Arc::new(AtomicU64::new(dag_state.gc_round()));
+        let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
             let (decoded_tx, decoded_rx) =
                 mpsc::channel::<crate::shard_reconstructor::DecodedBlocks>(1000);

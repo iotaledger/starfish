@@ -9,7 +9,7 @@ pub struct Transaction {
     data: Vec<u8>,
 }
 
-pub type RoundNumber = u64;
+pub type RoundNumber = u32;
 
 pub type ShardIndex = usize;
 pub type BlockDigest = crate::crypto::BlockDigest;
@@ -102,7 +102,7 @@ pub struct AckFields {
     /// Index into `block_references` where the shared acknowledgment suffix
     /// starts. `None` for legacy blocks where `extra_references` stores the
     /// full logical acknowledgment list.
-    pub(crate) intersection: Option<u32>,
+    pub(crate) intersection: Option<u8>,
     /// Acknowledged references not covered by the trailing
     /// `block_references` suffix.
     pub(crate) extra_references: Vec<BlockReference>,
@@ -274,7 +274,7 @@ impl BlockHeader {
     pub fn meta_creation_time(&self) -> Duration {
         let secs = self.meta_creation_time_ns / NANOS_IN_SEC;
         let nanos = self.meta_creation_time_ns % NANOS_IN_SEC;
-        Duration::new(secs as u64, nanos as u32)
+        Duration::new(secs, nanos as u32)
     }
 
     pub fn merkle_root(&self) -> TransactionsCommitment {
@@ -343,7 +343,7 @@ impl BlockHeader {
 
 fn expand_acknowledgments(
     block_references: &[BlockReference],
-    acknowledgment_intersection: Option<u32>,
+    acknowledgment_intersection: Option<u8>,
     acknowledgment_references: &[BlockReference],
 ) -> Vec<BlockReference> {
     let Some(start) = acknowledgment_intersection else {
@@ -358,7 +358,7 @@ fn expand_acknowledgments(
 
 fn count_acknowledgments(
     block_references: &[BlockReference],
-    acknowledgment_intersection: Option<u32>,
+    acknowledgment_intersection: Option<u8>,
     acknowledgment_references: &[BlockReference],
 ) -> usize {
     let Some(start) = acknowledgment_intersection else {
@@ -372,7 +372,7 @@ fn count_acknowledgments(
 fn compress_acknowledgments(
     block_references: &[BlockReference],
     acknowledgment_references: &[BlockReference],
-) -> (Option<u32>, Vec<BlockReference>) {
+) -> (Option<u8>, Vec<BlockReference>) {
     let acknowledged: AHashSet<_> = acknowledgment_references.iter().copied().collect();
 
     let mut intersection_start = block_references.len();
@@ -393,8 +393,8 @@ fn compress_acknowledgments(
 
     (
         Some(
-            u32::try_from(intersection_start)
-                .expect("block reference intersection should fit into u32"),
+            u8::try_from(intersection_start)
+                .expect("block reference intersection should fit into u8"),
         ),
         extra_acknowledgments,
     )
@@ -1195,8 +1195,8 @@ impl VerifiedBlock {
 )]
 pub struct AuthoritySet(u128); // todo - support more then 128 authorities
 
-pub type TimestampNs = u128;
-const NANOS_IN_SEC: u128 = Duration::from_secs(1).as_nanos();
+pub type TimestampNs = u64;
+const NANOS_IN_SEC: u64 = 1_000_000_000;
 
 const GENESIS_ROUND: RoundNumber = 0;
 

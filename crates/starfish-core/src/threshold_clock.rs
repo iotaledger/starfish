@@ -77,13 +77,13 @@ mod tests {
     use super::*;
     use crate::{
         crypto::{SignatureBytes, TransactionsCommitment},
-        types::{AckFields, AuthorityIndex, BlockDigest},
+        types::{AckFields, AuthorityIndex, BlockDigest, RoundNumber},
     };
 
     fn make_header(
         authority: AuthorityIndex,
-        round: u64,
-        refs: &[(AuthorityIndex, u64)],
+        round: RoundNumber,
+        refs: &[(AuthorityIndex, RoundNumber)],
     ) -> BlockHeader {
         let block_references: Vec<_> = refs
             .iter()
