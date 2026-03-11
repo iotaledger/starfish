@@ -18,7 +18,6 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
-    crypto::BlsSignatureBytes,
     dag_state::{ConsensusProtocol, DagState},
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
@@ -26,7 +25,7 @@ use crate::{
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::{AuthorityIndex, BlockReference},
+    types::AuthorityIndex,
 };
 
 pub struct Validator {
@@ -126,11 +125,16 @@ impl Validator {
         tracing::info!("Commit handler");
 
         let is_starfish_l = recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishL;
-        let (dac_outbox_tx, dac_outbox_rx) = if is_starfish_l {
-            let (tx, rx) = mpsc::unbounded_channel::<(BlockReference, BlsSignatureBytes)>();
+        let (partial_sig_tx, partial_sig_rx) = if is_starfish_l {
+            let (tx, rx) = mpsc::unbounded_channel::<crate::types::PartialSig>();
             (Some(tx), Some(rx))
         } else {
             (None, None)
+        };
+        let bls_signer_for_service = if is_starfish_l {
+            Some(private_config.bls_keypair.clone())
+        } else {
+            None
         };
 
         let (core, bls_cert_aggregator) = Core::open(
@@ -140,7 +144,7 @@ impl Validator {
             private_config,
             metrics.clone(),
             recovered,
-            dac_outbox_tx,
+            partial_sig_tx,
         );
         tracing::info!("Core");
 
@@ -159,8 +163,9 @@ impl Validator {
             commit_handler,
             metrics.clone(),
             public_config.parameters.clone(),
-            dac_outbox_rx,
+            partial_sig_rx,
             bls_cert_aggregator,
+            bls_signer_for_service,
         );
 
         tracing::info!("Validator {authority} listening on {network_address}");

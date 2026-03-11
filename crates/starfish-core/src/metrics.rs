@@ -137,6 +137,9 @@ pub struct Metrics {
     pub bls_standalone_dac_sigs_total: IntCounter,
     pub bls_service_util: IntCounter,
     pub bls_batch_verification_failures_total: IntCounter,
+    pub bls_presign_total: IntCounterVec,
+    pub bls_presign_hit_total: IntCounter,
+    pub bls_presign_miss_total: IntCounter,
 }
 
 pub struct MetricReporter {
@@ -497,6 +500,25 @@ impl Metrics {
             bls_batch_verification_failures_total: register_int_counter_with_registry!(
                 "bls_batch_verification_failures_total",
                 "Total partial signatures that failed batch verification",
+                registry,
+            )
+            .unwrap(),
+            bls_presign_total: register_int_counter_vec_with_registry!(
+                "bls_presign_total",
+                "Total pre-computed BLS partial signatures by kind",
+                &["kind"],
+                registry,
+            )
+            .unwrap(),
+            bls_presign_hit_total: register_int_counter_with_registry!(
+                "bls_presign_hit_total",
+                "Pre-computed BLS sig available at block creation",
+                registry,
+            )
+            .unwrap(),
+            bls_presign_miss_total: register_int_counter_with_registry!(
+                "bls_presign_miss_total",
+                "Pre-computed BLS sig not available at block creation",
                 registry,
             )
             .unwrap(),

@@ -29,7 +29,6 @@ use crate::{
     cordial_knowledge::{ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::BlsSignatureBytes,
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -162,6 +161,13 @@ impl FilterForShards {
         });
         entry.count = self.info_length;
     }
+
+    fn has_full(&self, digest: &BlockDigest) -> bool {
+        self.digests
+            .read()
+            .get(digest)
+            .is_some_and(|status| status.count >= self.info_length)
+    }
 }
 
 fn infer_peer_knowledge_from_received_batch(
@@ -292,11 +298,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             NetworkMessage::MissingTxDataRequest(refs) => {
                 return self.handle_missing_tx_data_request(refs).await;
             }
-            NetworkMessage::DacPartialSig(block_ref, signer, sig) => {
-                if signer == self.peer_id {
+            NetworkMessage::PartialSig(sig) => {
+                // DAC sigs are addressed: accept only if block author is us.
+                // Round/Leader sigs are broadcast: always accept.
+                let dominated = match sig.kind {
+                    crate::types::PartialSigKind::Dac(block_ref) => {
+                        block_ref.authority != self.inner.dag_state.get_own_authority_index()
+                    }
+                    _ => false,
+                };
+                if !dominated {
                     if let Some(ref bls) = self.bls_service {
-                        bls.send(BlsServiceMessage::DacPartialSig(block_ref, signer, sig))
-                            .await;
+                        bls.send(BlsServiceMessage::PartialSig(sig)).await;
                     }
                 }
             }
@@ -600,11 +613,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .inner
             .cordial_knowledge
             .connection_knowledge(self.peer_id);
+        let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
+        let mut seen_in_batch = AHashSet::with_capacity(incoming_digests.len());
         let mut verified_data_blocks = Vec::new();
         let mut verified_has_shard = Vec::new();
         let shard_tx = self.inner.shard_tx.lock().clone();
 
-        for data_block in blocks {
+        for (data_block, digest) in blocks.into_iter().zip(incoming_digests) {
+            if !seen_in_batch.insert(digest)
+                || (self.filter_for_blocks.contains(&digest)
+                    && self.filter_for_shards.has_full(&digest))
+            {
+                self.metrics.filtered_blocks_total.inc();
+                continue;
+            }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
             let shard = match block.verify(
@@ -639,8 +661,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     ck.mark_shard_useful_from_peer(*block.reference());
                 }
             }
-            self.filter_for_blocks.insert_batch(&[block.digest()]);
-            self.filter_for_shards.mark_full(block.digest());
+            self.filter_for_blocks.insert_batch(&[digest]);
+            self.filter_for_shards.mark_full(digest);
             let has_shard = shard.is_some();
             let mut block = block;
             block.preserialize();
@@ -821,8 +843,9 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     main_task: JoinHandle<()>,
     stop: mpsc::Receiver<()>,
     bridge_task: Option<JoinHandle<()>>,
-    dac_routing_task: Option<JoinHandle<()>>,
+    partial_sig_routing_task: Option<JoinHandle<()>>,
     bls_event_task: Option<JoinHandle<()>>,
+    bls_broadcast_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -857,8 +880,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut commit_observer: C,
         metrics: Arc<Metrics>,
         node_parameters: NodeParameters,
-        dac_outbox_rx: Option<mpsc::UnboundedReceiver<(BlockReference, BlsSignatureBytes)>>,
+        partial_sig_outbox_rx: Option<mpsc::UnboundedReceiver<crate::types::PartialSig>>,
         bls_cert_aggregator: Option<crate::bls_certificate_aggregator::BlsCertificateAggregator>,
+        bls_signer: Option<crate::crypto::BlsSigner>,
     ) -> Self {
         let handle = Handle::current();
         let block_ready_notify = Arc::new(Notify::new());
@@ -962,32 +986,70 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             })
         });
-        // Spawn DAC routing task: drains Core's outbox and routes DAC partial
-        // sigs to the target block author via peer_senders.
-        let dac_routing_task = dac_outbox_rx.map(|mut rx| {
+        // Spawn partial-sig routing task: drains Core's outbox and routes
+        // partial sigs by kind — DAC to block author, round/leader to all.
+        let partial_sig_routing_task = partial_sig_outbox_rx.map(|mut rx| {
             let routing_inner = inner.clone();
             handle.spawn(async move {
-                while let Some((block_ref, sig)) = rx.recv().await {
-                    let target = block_ref.authority;
-                    let msg = NetworkMessage::DacPartialSig(
-                        block_ref,
-                        routing_inner.dag_state.get_own_authority_index(),
-                        sig,
-                    );
-                    if let Some(sender) = routing_inner.peer_senders.read().get(&target) {
-                        let _ = sender.try_send(msg);
+                while let Some(partial_sig) = rx.recv().await {
+                    match partial_sig.kind {
+                        crate::types::PartialSigKind::Dac(block_ref) => {
+                            let target = block_ref.authority;
+                            let msg = NetworkMessage::PartialSig(partial_sig);
+                            if let Some(sender) =
+                                routing_inner.peer_senders.read().get(&target)
+                            {
+                                let _ = sender.try_send(msg);
+                            }
+                        }
+                        crate::types::PartialSigKind::Round(_)
+                        | crate::types::PartialSigKind::Leader(_) => {
+                            for sender in routing_inner.peer_senders.read().values() {
+                                let _ = sender
+                                    .try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                            }
+                        }
                     }
                 }
             })
         });
         // Start BLS verification service and event bridge task.
+        // The BLS service gets a broadcast sender for pre-computed partial sigs.
+        let (bls_broadcast_tx, bls_broadcast_task) = if bls_signer.is_some() {
+            let (tx, mut rx) = mpsc::unbounded_channel::<crate::types::PartialSig>();
+            let routing_inner = inner.clone();
+            let task = handle.spawn(async move {
+                while let Some(partial_sig) = rx.recv().await {
+                    // Pre-computed sigs are always round/leader, broadcast to all.
+                    for sender in routing_inner.peer_senders.read().values() {
+                        let _ =
+                            sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                    }
+                }
+            });
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
+
+        let own_authority = dag_state.get_own_authority_index();
+        let bls_committee = inner.committee.clone();
         let (bls_service, bls_event_task) = if let (Some(aggregator), Some(bls_rx), Some(bls_tx)) =
             (bls_cert_aggregator, bls_msg_rx, bls_msg_tx)
         {
             let (event_tx, mut event_rx) = mpsc::unbounded_channel::<
                 Vec<crate::bls_certificate_aggregator::CertificateEvent>,
             >();
-            crate::bls_service::start_bls_service(aggregator, bls_rx, event_tx, metrics.clone());
+            crate::bls_service::start_bls_service(
+                aggregator,
+                bls_rx,
+                event_tx,
+                metrics.clone(),
+                bls_signer,
+                own_authority,
+                bls_committee,
+                bls_broadcast_tx,
+            );
             let bls_handle = BlsServiceHandle::new(bls_tx);
             let event_inner = inner.clone();
             let task = handle.spawn(async move {
@@ -1014,8 +1076,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             main_task,
             stop: stop_receiver,
             bridge_task,
-            dac_routing_task,
+            partial_sig_routing_task,
             bls_event_task,
+            bls_broadcast_task,
             cordial_knowledge_task,
         }
     }
@@ -1031,18 +1094,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         if let Some(bridge_task) = self.bridge_task {
             bridge_task.await.ok();
         }
-        // The DAC routing task holds an `Arc` to `inner` and waits on a
-        // receiver whose sender lives inside the core thread. Abort it here to
-        // break that shutdown cycle before unwrapping `inner`.
-        if let Some(dac_task) = self.dac_routing_task {
-            dac_task.abort();
-            dac_task.await.ok();
+        // The partial-sig routing task holds an `Arc` to `inner` and waits on
+        // a receiver whose sender lives inside the core thread. Abort it here
+        // to break that shutdown cycle before unwrapping `inner`.
+        if let Some(sig_task) = self.partial_sig_routing_task {
+            sig_task.abort();
+            sig_task.await.ok();
         }
         // The BLS event bridge task holds an `Arc` to `inner`. Abort it to
         // allow `Arc::try_unwrap` below.
         if let Some(bls_task) = self.bls_event_task {
             bls_task.abort();
             bls_task.await.ok();
+        }
+        if let Some(bls_broadcast) = self.bls_broadcast_task {
+            bls_broadcast.abort();
+            bls_broadcast.await.ok();
         }
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();

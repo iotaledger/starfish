@@ -39,6 +39,12 @@ pub fn apply_certificate_events(dag_state: &DagState, events: Vec<CertificateEve
             CertificateEvent::DacRejected(block_ref) => {
                 changed |= dag_state.mark_dac_rejected(block_ref);
             }
+            CertificateEvent::PrecomputedRoundSig(round, sig) => {
+                dag_state.store_precomputed_round_sig(round, sig);
+            }
+            CertificateEvent::PrecomputedLeaderSig(leader_ref, sig) => {
+                dag_state.store_precomputed_leader_sig(leader_ref, sig);
+            }
         }
     }
     changed
@@ -51,6 +57,10 @@ pub enum CertificateEvent {
     Leader(BlockReference, BlsAggregateCertificate),
     Dac(BlockReference, BlsAggregateCertificate),
     DacRejected(BlockReference),
+    /// A pre-computed BLS round partial signature produced by the BLS service.
+    PrecomputedRoundSig(RoundNumber, BlsSignatureBytes),
+    /// A pre-computed BLS leader partial signature produced by the BLS service.
+    PrecomputedLeaderSig(BlockReference, BlsSignatureBytes),
 }
 
 enum PartialTaskKind {
@@ -247,6 +257,108 @@ impl BlsCertificateAggregator {
                 continue;
             }
             if let Some(event) = self.add_dac_partial(block_ref, signer, sig) {
+                events.push(event);
+            }
+        }
+        events
+    }
+
+    /// Process a batch of standalone round partial signatures received from
+    /// peers (pre-computed by their BLS service, not embedded in blocks).
+    pub fn add_standalone_round_sigs_batch(
+        &mut self,
+        sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> Vec<CertificateEvent> {
+        let mut tasks = Vec::new();
+        let mut filtered: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
+
+        for (round, signer, sig) in sigs {
+            if self.round_certs.contains_key(&round)
+                || self
+                    .round_stake
+                    .get(&round)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
+                || self
+                    .round_partial_sigs
+                    .get(&round)
+                    .is_some_and(|sigs| sigs.contains_key(&signer))
+            {
+                continue;
+            }
+            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+                continue;
+            };
+            tasks.push(BlsVerificationTask {
+                message: crypto::bls_round_message(round),
+                signature: sig,
+                public_key,
+                block_index: filtered.len(),
+            });
+            filtered.push((round, signer, sig));
+        }
+
+        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
+        let mut events = Vec::new();
+        for (index, (round, signer, sig)) in filtered.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+            if let Some(event) = self.add_round_partial(round, signer, sig) {
+                events.push(event);
+            }
+        }
+        events
+    }
+
+    /// Process a batch of standalone leader partial signatures received from
+    /// peers (pre-computed by their BLS service, not embedded in blocks).
+    pub fn add_standalone_leader_sigs_batch(
+        &mut self,
+        sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> Vec<CertificateEvent> {
+        let mut tasks = Vec::new();
+        let mut filtered: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
+
+        for (leader_ref, signer, sig) in sigs {
+            if self.leader_certs.contains_key(&leader_ref)
+                || self
+                    .leader_stake
+                    .get(&leader_ref)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
+                || self
+                    .leader_partial_sigs
+                    .get(&leader_ref)
+                    .is_some_and(|sigs| sigs.contains_key(&signer))
+            {
+                continue;
+            }
+            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+                continue;
+            };
+            tasks.push(BlsVerificationTask {
+                message: crypto::bls_leader_message(&leader_ref),
+                signature: sig,
+                public_key,
+                block_index: filtered.len(),
+            });
+            filtered.push((leader_ref, signer, sig));
+        }
+
+        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
+        let mut events = Vec::new();
+        for (index, (leader_ref, signer, sig)) in filtered.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+            if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
                 events.push(event);
             }
         }
@@ -612,6 +724,8 @@ mod tests {
             transactions,
             Some(encoded_transactions),
             ConsensusProtocol::StarfishL,
+            None,
+            None,
             None,
             None,
             None,

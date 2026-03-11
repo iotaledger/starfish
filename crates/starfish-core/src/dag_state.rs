@@ -19,7 +19,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
-    crypto::TransactionsCommitment,
+    crypto::{BlsSignatureBytes, TransactionsCommitment},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     network::ShardPayload,
@@ -252,6 +252,12 @@ struct DagStateInner {
     starfish_s_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
+    /// Pre-computed BLS round partial signatures (StarfishL). Keyed by the
+    /// round the signature covers.
+    precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
+    /// Pre-computed BLS leader partial signatures (StarfishL). Keyed by the
+    /// leader block reference the signature covers.
+    precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
 }
 
 impl DagState {
@@ -319,6 +325,8 @@ impl DagState {
             starfish_s_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
             starfish_s_adaptive_acknowledgments,
             consensus_protocol,
+            precomputed_round_sigs: BTreeMap::new(),
+            precomputed_leader_sigs: BTreeMap::new(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -809,6 +817,41 @@ impl DagState {
         self.dag_state_inner.read().dac_certificates[block_ref.authority as usize]
             .get(block_ref)
             .copied()
+    }
+
+    /// Store a pre-computed BLS round partial signature.
+    pub fn store_precomputed_round_sig(&self, round: RoundNumber, sig: BlsSignatureBytes) {
+        self.dag_state_inner
+            .write()
+            .precomputed_round_sigs
+            .insert(round, sig);
+    }
+
+    /// Store a pre-computed BLS leader partial signature.
+    pub fn store_precomputed_leader_sig(&self, leader_ref: BlockReference, sig: BlsSignatureBytes) {
+        self.dag_state_inner
+            .write()
+            .precomputed_leader_sigs
+            .insert(leader_ref, sig);
+    }
+
+    /// Take (remove) a pre-computed BLS round partial signature, if available.
+    pub fn take_precomputed_round_sig(&self, round: RoundNumber) -> Option<BlsSignatureBytes> {
+        self.dag_state_inner
+            .write()
+            .precomputed_round_sigs
+            .remove(&round)
+    }
+
+    /// Take (remove) a pre-computed BLS leader partial signature, if available.
+    pub fn take_precomputed_leader_sig(
+        &self,
+        leader_ref: &BlockReference,
+    ) -> Option<BlsSignatureBytes> {
+        self.dag_state_inner
+            .write()
+            .precomputed_leader_sigs
+            .remove(leader_ref)
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
@@ -1754,6 +1797,13 @@ impl DagStateInner {
             self.rejected_dac_certificates[auth] =
                 self.rejected_dac_certificates[auth].split_off(&split_ref);
         }
+        self.precomputed_round_sigs = self.precomputed_round_sigs.split_off(&min_evicted);
+        let leader_split_ref = BlockReference {
+            authority: 0,
+            round: min_evicted,
+            digest: BlockDigest::default(),
+        };
+        self.precomputed_leader_sigs = self.precomputed_leader_sigs.split_off(&leader_split_ref);
     }
 
     pub fn add_block(

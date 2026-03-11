@@ -32,7 +32,8 @@ use crate::{
     store::Store,
     types::{
         AuthorityIndex, BaseTransaction, BlockReference, BlsAggregateCertificate, Encoder,
-        ReconstructedTransactionData, RoundNumber, Shard, VerifiedBlock,
+        PartialSig, PartialSigKind, ReconstructedTransactionData, RoundNumber, Shard,
+        VerifiedBlock,
     },
 };
 
@@ -58,7 +59,7 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
-    dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
+    partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
@@ -81,7 +82,7 @@ impl<H: BlockHandler> Core<H> {
         private_config: NodePrivateConfig,
         metrics: Arc<Metrics>,
         recovered: RecoveredState,
-        dac_sig_outbox: Option<mpsc::UnboundedSender<(BlockReference, BlsSignatureBytes)>>,
+        partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     ) -> (Self, Option<BlsCertificateAggregator>) {
         let RecoveredState {
             dag_state,
@@ -183,7 +184,7 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
-            dac_sig_outbox,
+            partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
             committer,
@@ -391,12 +392,16 @@ impl<H: BlockHandler> Core<H> {
         if block_ref.authority == self.authority {
             return;
         }
-        let Some(ref outbox) = self.dac_sig_outbox else {
+        let Some(ref outbox) = self.partial_sig_outbox else {
             return;
         };
         let digest = crypto::bls_dac_message(block_ref);
         let sig = self.bls_signer.sign_digest(&digest);
-        let _ = outbox.send((*block_ref, sig));
+        let _ = outbox.send(PartialSig {
+            kind: PartialSigKind::Dac(*block_ref),
+            signer: self.authority,
+            signature: sig,
+        });
     }
 
     fn run_block_handler(&mut self) {
@@ -766,6 +771,24 @@ impl<H: BlockHandler> Core<H> {
             vec![]
         };
 
+        // Look up pre-computed BLS signatures from dag_state.
+        let precomputed_round_sig = if is_starfish_l {
+            let sig = self.dag_state.take_precomputed_round_sig(clock_round);
+            if sig.is_some() {
+                self.metrics.bls_presign_hit_total.inc();
+            } else {
+                self.metrics.bls_presign_miss_total.inc();
+            }
+            sig
+        } else {
+            None
+        };
+        let precomputed_leader_sig = if is_starfish_l {
+            voted_leader_ref.and_then(|r| self.dag_state.take_precomputed_leader_sig(&r))
+        } else {
+            None
+        };
+
         let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -783,6 +806,8 @@ impl<H: BlockHandler> Core<H> {
             strong_vote,
             aggregate_round_sig,
             certified_leader,
+            precomputed_round_sig,
+            precomputed_leader_sig,
         );
 
         self.metrics

@@ -23,7 +23,6 @@ use tokio::{
 
 use crate::{
     config::NodePublicConfig,
-    crypto::BlsSignatureBytes,
     data::Data,
     metrics::{Metrics, print_network_address_table},
     runtime,
@@ -146,8 +145,9 @@ pub enum NetworkMessage {
     /// Request a tx data for a few specific block references (only shards are
     /// sent).
     MissingTxDataRequest(Vec<BlockReference>),
-    /// Standalone DAC partial signature sent directly to the block author.
-    DacPartialSig(BlockReference, AuthorityIndex, BlsSignatureBytes),
+    /// Standalone partial BLS signature (DAC, round pre-sign, or leader
+    /// pre-sign).
+    PartialSig(crate::types::PartialSig),
 }
 
 impl NetworkMessage {
@@ -157,7 +157,7 @@ impl NetworkMessage {
             Self::Batch(_) => "batch",
             Self::MissingParentsRequest(_) => "missing_parents",
             Self::MissingTxDataRequest(_) => "missing_tx_data",
-            Self::DacPartialSig(..) => "dac_partial_sig",
+            Self::PartialSig(..) => "partial_sig",
         }
     }
 }

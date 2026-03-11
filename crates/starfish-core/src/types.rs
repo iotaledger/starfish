@@ -156,6 +156,23 @@ pub struct BlsFields {
     pub(crate) acknowledgment_signatures: Vec<BlsAggregateCertificate>,
 }
 
+/// Discriminator for the three kinds of BLS partial signatures exchanged
+/// between validators (round pre-sign, leader pre-sign, DAC acknowledgment).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum PartialSigKind {
+    Round(RoundNumber),
+    Leader(BlockReference),
+    Dac(BlockReference),
+}
+
+/// A generic BLS partial signature with its kind, signer, and raw bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartialSig {
+    pub kind: PartialSigKind,
+    pub signer: AuthorityIndex,
+    pub signature: BlsSignatureBytes,
+}
+
 // ---------------------------------------------------------------------------
 // BlockHeader — signed, content-addressed block identity.
 // Contains exactly the fields that feed into BlockDigest::new() and
@@ -674,6 +691,8 @@ impl VerifiedBlock {
         strong_vote: Option<u128>,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
+        precomputed_round_sig: Option<BlsSignatureBytes>,
+        precomputed_leader_sig: Option<BlsSignatureBytes>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -717,10 +736,11 @@ impl VerifiedBlock {
 
         // Build BLS fields if a BLS signer is provided (StarfishL).
         let bls = bls_signer.map(|bs| {
-            // Round signature over the canonical round message.
-            let round_signature = bs.sign_digest(&crypto::bls_round_message(round));
+            // Round signature: use pre-computed if available, else sign now.
+            let round_signature = precomputed_round_sig
+                .unwrap_or_else(|| bs.sign_digest(&crypto::bls_round_message(round)));
 
-            // Leader vote: sign the previous-round leader when it is available.
+            // Leader vote: use pre-computed sig if available, else sign now.
             let voted_leader = (|| {
                 let _committee = committee?;
                 let leader_round = round.checked_sub(1)?;
@@ -728,11 +748,11 @@ impl VerifiedBlock {
                     return None;
                 }
                 let leader_ref = voted_leader_ref?;
-                let msg = crypto::bls_leader_message(&leader_ref);
-                Some((leader_ref, bs.sign_digest(&msg)))
+                let sig = precomputed_leader_sig
+                    .unwrap_or_else(|| bs.sign_digest(&crypto::bls_leader_message(&leader_ref)));
+                Some((leader_ref, sig))
             })();
 
-            // Aggregated DAC certificates from the aggregator.
             BlsFields {
                 round_signature,
                 voted_leader,
@@ -1403,6 +1423,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         (block, committee)
     }
@@ -1428,6 +1450,8 @@ mod tests {
             vec![],
             None,
             ConsensusProtocol::CordialMiners,
+            None,
+            None,
             None,
             None,
             None,
@@ -1516,6 +1540,8 @@ mod tests {
             transactions,
             Some(encoded_transactions),
             ConsensusProtocol::StarfishL,
+            None,
+            None,
             None,
             None,
             None,
@@ -1640,6 +1666,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -1706,6 +1734,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -1764,6 +1794,8 @@ mod tests {
             transactions,
             Some(encoded_transactions),
             ConsensusProtocol::StarfishL,
+            None,
+            None,
             None,
             None,
             None,
