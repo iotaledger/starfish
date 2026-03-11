@@ -110,9 +110,8 @@ pub struct AckFields {
 
 /// BLS certificate data (StarfishBls only).
 ///
-/// `round_signature` is always present — every StarfishBls block signs the
-/// canonical round message. `voted_leader` pairs the leader reference with the
-/// partial BLS sig when the block includes the previous-round leader.
+/// `voted_leader` records the previous-round leader reference when the block
+/// votes for it.
 /// `certified_leader` pairs the leader ref with an aggregate certificate once
 /// quorum is reached. `acknowledgment_signatures`
 /// is parallel to the block's acknowledgment list.
@@ -142,11 +141,9 @@ impl BlsAggregateCertificate {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlsFields {
-    /// BLS round signature over the canonical round message.
-    pub(crate) round_signature: BlsSignatureBytes,
-    /// Leader this block votes for, paired with the partial BLS leader sig.
-    /// `None` when the block does not include the previous-round leader.
-    pub(crate) voted_leader: Option<(BlockReference, BlsSignatureBytes)>,
+    /// Leader this block votes for. `None` when the block does not include the
+    /// previous-round leader.
+    pub(crate) voted_leader: Option<BlockReference>,
     /// Aggregate BLS round signature (populated by protocol layer).
     pub(crate) aggregate_round_signature: Option<BlsAggregateCertificate>,
     /// Certified leader: the leader block reference paired with its aggregate
@@ -301,11 +298,7 @@ impl BlockHeader {
         self.bls.as_deref()
     }
 
-    pub fn bls_round_signature(&self) -> Option<&BlsSignatureBytes> {
-        self.bls.as_ref().map(|b| &b.round_signature)
-    }
-
-    pub fn voted_leader(&self) -> Option<&(BlockReference, BlsSignatureBytes)> {
+    pub fn voted_leader(&self) -> Option<&BlockReference> {
         self.bls.as_ref().and_then(|b| b.voted_leader.as_ref())
     }
 
@@ -682,8 +675,8 @@ impl VerifiedBlock {
         acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         signer: &Signer,
-        bls_signer: Option<&BlsSigner>,
-        committee: Option<&Committee>,
+        _bls_signer: Option<&BlsSigner>,
+        _committee: Option<&Committee>,
         aggregate_dac_sigs: Vec<BlsAggregateCertificate>,
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
@@ -691,8 +684,8 @@ impl VerifiedBlock {
         strong_vote: Option<u128>,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
-        precomputed_round_sig: Option<BlsSignatureBytes>,
-        precomputed_leader_sig: Option<BlsSignatureBytes>,
+        _precomputed_round_sig: Option<BlsSignatureBytes>,
+        _precomputed_leader_sig: Option<BlsSignatureBytes>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -734,27 +727,18 @@ impl VerifiedBlock {
             strong_vote,
         );
 
-        // Build BLS fields if a BLS signer is provided (StarfishBls).
-        let bls = bls_signer.map(|bs| {
-            // Round signature: use pre-computed if available, else sign now.
-            let round_signature = precomputed_round_sig
-                .unwrap_or_else(|| bs.sign_digest(&crypto::bls_round_message(round)));
-
-            // Leader vote: use pre-computed sig if available, else sign now.
+        // Build BLS fields when the StarfishBls path is active. Partial round
+        // and leader signatures are transported separately via PartialSig
+        // messages, not in the header.
+        let bls = _bls_signer.map(|_| {
             let voted_leader = (|| {
-                let _committee = committee?;
                 let leader_round = round.checked_sub(1)?;
                 if leader_round == 0 {
                     return None;
                 }
-                let leader_ref = voted_leader_ref?;
-                let sig = precomputed_leader_sig
-                    .unwrap_or_else(|| bs.sign_digest(&crypto::bls_leader_message(&leader_ref)));
-                Some((leader_ref, sig))
+                voted_leader_ref
             })();
-
             BlsFields {
-                round_signature,
                 voted_leader,
                 aggregate_round_signature: aggregate_round_sig,
                 certified_leader,
@@ -1064,14 +1048,9 @@ impl VerifiedBlock {
         }
         match consensus_protocol {
             ConsensusProtocol::StarfishBls => {
-                let bls = self
-                    .header
+                self.header
                     .bls()
                     .ok_or_else(|| eyre::eyre!("StarfishBls block is missing BLS fields"))?;
-                ensure!(
-                    bls.round_signature != BlsSignatureBytes::default(),
-                    "StarfishBls block is missing round BLS signature"
-                );
                 ensure!(
                     self.header.acknowledgment_bls_signatures().len() == acknowledgments.len(),
                     "StarfishBls acknowledgment count {} does not match DAC certificate count {}",
@@ -1102,7 +1081,7 @@ impl VerifiedBlock {
                             )
                         })?;
                 }
-                if let Some((leader_ref, _)) = self.header.voted_leader() {
+                if let Some(leader_ref) = self.header.voted_leader() {
                     ensure!(
                         leader_ref.round + 1 == round,
                         "StarfishBls leader vote {:?} must target the previous round",

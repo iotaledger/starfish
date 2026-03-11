@@ -34,23 +34,8 @@ pub enum CertificateEvent {
     Leader(BlockReference, BlsAggregateCertificate),
     Dac(BlockReference, BlsAggregateCertificate),
     DacRejected(BlockReference),
-    /// A pre-computed BLS round partial signature produced by the BLS service.
     PrecomputedRoundSig(RoundNumber, BlsSignatureBytes),
-    /// A pre-computed BLS leader partial signature produced by the BLS service.
     PrecomputedLeaderSig(BlockReference, BlsSignatureBytes),
-}
-
-enum PartialTaskKind {
-    Round {
-        round: RoundNumber,
-        signer: AuthorityIndex,
-        sig: BlsSignatureBytes,
-    },
-    Leader {
-        leader_ref: BlockReference,
-        signer: AuthorityIndex,
-        sig: BlsSignatureBytes,
-    },
 }
 
 /// Number of parallel threads used for BLS batch verification.
@@ -112,48 +97,11 @@ impl BlsCertificateAggregator {
             return (Vec::new(), 0);
         }
 
-        let mut events = Vec::new();
-        let mut tasks = Vec::new();
-        let mut task_kinds = Vec::new();
-
-        for block in blocks {
-            self.collect_partial_tasks(block, &mut tasks, &mut task_kinds);
-        }
-
-        let (invalid, batch_failures) =
-            match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
-                Ok(()) => (AHashSet::new(), 0),
-                Err(bad) => {
-                    let count = bad.len() as u64;
-                    (bad.into_iter().collect(), count)
-                }
-            };
-
-        for (index, kind) in task_kinds.into_iter().enumerate() {
-            if invalid.contains(&index) {
-                continue;
-            }
-
-            match kind {
-                PartialTaskKind::Round { round, signer, sig } => {
-                    if let Some(event) = self.add_round_partial(round, signer, sig) {
-                        events.push(event);
-                    }
-                }
-                PartialTaskKind::Leader {
-                    leader_ref,
-                    signer,
-                    sig,
-                } => {
-                    if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
-                        events.push(event);
-                    }
-                }
-            }
-        }
-
-        events.extend(self.verify_embedded_aggregate_certificates(blocks));
-        (events, batch_failures)
+        // Round and leader partials are transported via standalone PartialSig
+        // messages. Block-carried BLS work is limited to embedded aggregate
+        // certificates, mainly DAC certificates carried alongside
+        // acknowledgments.
+        (self.verify_embedded_aggregate_certificates(blocks), 0)
     }
 
     /// Cleanup state for rounds below the given threshold.
@@ -340,69 +288,6 @@ impl BlsCertificateAggregator {
             }
         }
         events
-    }
-
-    fn collect_partial_tasks(
-        &self,
-        block: &Data<VerifiedBlock>,
-        tasks: &mut Vec<BlsVerificationTask>,
-        task_kinds: &mut Vec<PartialTaskKind>,
-    ) {
-        let author = block.authority();
-        let Some(public_key) = self.committee.get_bls_public_key(author).cloned() else {
-            return;
-        };
-
-        if let Some(sig) = block.header().bls_round_signature() {
-            let round = block.round();
-            if !self.round_certs.contains_key(&round)
-                && !self
-                    .round_stake
-                    .get(&round)
-                    .is_some_and(|s| s.is_quorum(&self.committee))
-                && !self
-                    .round_partial_sigs
-                    .get(&round)
-                    .is_some_and(|sigs| sigs.contains_key(&author))
-            {
-                tasks.push(BlsVerificationTask {
-                    message: crypto::bls_round_message(round),
-                    signature: *sig,
-                    public_key: public_key.clone(),
-                    block_index: task_kinds.len(),
-                });
-                task_kinds.push(PartialTaskKind::Round {
-                    round,
-                    signer: author,
-                    sig: *sig,
-                });
-            }
-        }
-
-        if let Some((leader_ref, sig)) = block.header().voted_leader() {
-            if !self.leader_certs.contains_key(leader_ref)
-                && !self
-                    .leader_stake
-                    .get(leader_ref)
-                    .is_some_and(|s| s.is_quorum(&self.committee))
-                && !self
-                    .leader_partial_sigs
-                    .get(leader_ref)
-                    .is_some_and(|sigs| sigs.contains_key(&author))
-            {
-                tasks.push(BlsVerificationTask {
-                    message: crypto::bls_leader_message(leader_ref),
-                    signature: *sig,
-                    public_key,
-                    block_index: task_kinds.len(),
-                });
-                task_kinds.push(PartialTaskKind::Leader {
-                    leader_ref: *leader_ref,
-                    signer: author,
-                    sig: *sig,
-                });
-            }
-        }
     }
 
     fn verify_embedded_aggregate_certificates(

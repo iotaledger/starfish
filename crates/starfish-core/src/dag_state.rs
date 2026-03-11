@@ -252,11 +252,7 @@ struct DagStateInner {
     starfish_speed_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
-    /// Pre-computed BLS round partial signatures (StarfishBls). Keyed by the
-    /// round the signature covers.
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
-    /// Pre-computed BLS leader partial signatures (StarfishBls). Keyed by the
-    /// leader block reference the signature covers.
     precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
 }
 
@@ -880,7 +876,6 @@ impl DagState {
             .copied()
     }
 
-    /// Store a pre-computed BLS round partial signature.
     pub fn store_precomputed_round_sig(&self, round: RoundNumber, sig: BlsSignatureBytes) {
         self.dag_state_inner
             .write()
@@ -888,15 +883,6 @@ impl DagState {
             .insert(round, sig);
     }
 
-    /// Store a pre-computed BLS leader partial signature.
-    pub fn store_precomputed_leader_sig(&self, leader_ref: BlockReference, sig: BlsSignatureBytes) {
-        self.dag_state_inner
-            .write()
-            .precomputed_leader_sigs
-            .insert(leader_ref, sig);
-    }
-
-    /// Take (remove) a pre-computed BLS round partial signature, if available.
     pub fn take_precomputed_round_sig(&self, round: RoundNumber) -> Option<BlsSignatureBytes> {
         self.dag_state_inner
             .write()
@@ -904,7 +890,22 @@ impl DagState {
             .remove(&round)
     }
 
-    /// Take (remove) a pre-computed BLS leader partial signature, if available.
+    pub fn precomputed_round_sigs(&self) -> Vec<(RoundNumber, BlsSignatureBytes)> {
+        self.dag_state_inner
+            .read()
+            .precomputed_round_sigs
+            .iter()
+            .map(|(round, sig)| (*round, *sig))
+            .collect()
+    }
+
+    pub fn store_precomputed_leader_sig(&self, leader_ref: BlockReference, sig: BlsSignatureBytes) {
+        self.dag_state_inner
+            .write()
+            .precomputed_leader_sigs
+            .insert(leader_ref, sig);
+    }
+
     pub fn take_precomputed_leader_sig(
         &self,
         leader_ref: &BlockReference,
@@ -913,6 +914,15 @@ impl DagState {
             .write()
             .precomputed_leader_sigs
             .remove(leader_ref)
+    }
+
+    pub fn precomputed_leader_sigs(&self) -> Vec<(BlockReference, BlsSignatureBytes)> {
+        self.dag_state_inner
+            .read()
+            .precomputed_leader_sigs
+            .iter()
+            .map(|(leader_ref, sig)| (*leader_ref, *sig))
+            .collect()
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
@@ -1019,14 +1029,14 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
-                block
-                    .header()
-                    .voted_leader()
-                    .is_some_and(|(leader_ref, _)| {
-                        leader_ref.authority == leader && leader_ref.round == leader_round
-                    })
-            } else {
+                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+                    block
+                        .header()
+                        .voted_leader()
+                        .is_some_and(|leader_ref| {
+                            leader_ref.authority == leader && leader_ref.round == leader_round
+                        })
+                } else {
                 block
                     .block_references()
                     .iter()
@@ -1093,7 +1103,7 @@ impl DagState {
                     block
                         .header()
                         .voted_leader()
-                        .is_some_and(|(leader_ref, _)| {
+                        .is_some_and(|leader_ref| {
                             leader_ref.authority == prev_leader
                                 && leader_ref.round == leader_round - 1
                         })

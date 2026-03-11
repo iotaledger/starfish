@@ -96,7 +96,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .committee()
             .get_stake(core.authority())
             .expect("Own authority should exist in committee");
-        Self {
+        let mut syncer = Self {
             core,
             force_new_block: false,
             proposal_wait_started_at: None,
@@ -107,7 +107,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             subscriber_stake: own_stake,
             metrics,
             bls_tx,
-        }
+        };
+        syncer.maybe_presign_round(1);
+        syncer
     }
 
     pub fn add_blocks(
@@ -258,12 +260,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
                 if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block)
                 {
-                    let _ =
-                        bls_tx.try_send(BlsServiceMessage::PartialSig(crate::types::PartialSig {
-                            kind: crate::types::PartialSigKind::Dac(block_ref),
-                            signer: auth,
-                            signature: sig,
-                        }));
+                    let _ = bls_tx.try_send(BlsServiceMessage::PartialSig(crate::types::PartialSig {
+                        kind: crate::types::PartialSigKind::Dac(block_ref),
+                        signer: auth,
+                        signature: sig,
+                    }));
                 }
             }
             self.signals.new_block_ready();
@@ -285,8 +286,18 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
         let current_threshold_round = self.core.dag_state().threshold_clock_round();
         if current_threshold_round > previous_threshold_round {
+            self.maybe_presign_round(current_threshold_round);
             self.signals
                 .threshold_clock_round_advanced(current_threshold_round);
+        }
+    }
+
+    fn maybe_presign_round(&mut self, round: RoundNumber) {
+        let Some(sig) = self.core.precompute_round_sig(round) else {
+            return;
+        };
+        if let Some(ref bls_tx) = self.bls_tx {
+            let _ = bls_tx.try_send(BlsServiceMessage::PartialSig(sig));
         }
     }
 

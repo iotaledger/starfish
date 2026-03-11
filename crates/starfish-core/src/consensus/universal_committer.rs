@@ -85,7 +85,7 @@ impl UniversalCommitter {
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
                         if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                            if let Some((leader_ref, _)) = vb.header().voted_leader() {
+                            if let Some(leader_ref) = vb.header().voted_leader() {
                                 if leader_ref.round == round && leader_ref.authority == leader {
                                     voters.insert((*leader_ref, vb_ref));
                                     voter_strong_votes.insert(vb_ref, vb.strong_vote());

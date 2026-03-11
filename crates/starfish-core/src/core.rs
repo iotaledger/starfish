@@ -59,6 +59,7 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
+    last_presigned_round: RoundNumber,
     partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
@@ -185,6 +186,7 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
+            last_presigned_round: 0,
             partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
@@ -416,6 +418,34 @@ impl<H: BlockHandler> Core<H> {
             signer: self.authority,
             signature: sig,
         });
+    }
+
+    /// Pre-sign the canonical round message once per round, broadcast it
+    /// immediately, and keep it cached for replay to newly connected peers.
+    pub fn precompute_round_sig(&mut self, round: RoundNumber) -> Option<PartialSig> {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishBls
+            || round == 0
+            || self.last_presigned_round >= round
+        {
+            return None;
+        }
+
+        self.last_presigned_round = round;
+        let sig = self.bls_signer.sign_digest(&crypto::bls_round_message(round));
+        self.dag_state.store_precomputed_round_sig(round, sig);
+        let partial_sig = PartialSig {
+            kind: PartialSigKind::Round(round),
+            signer: self.authority,
+            signature: sig,
+        };
+        if let Some(ref outbox) = self.partial_sig_outbox {
+            let _ = outbox.send(partial_sig.clone());
+        }
+        self.metrics
+            .bls_presign_total
+            .with_label_values(&["round"])
+            .inc();
+        Some(partial_sig)
     }
 
     fn run_block_handler(&mut self) {
@@ -785,24 +815,6 @@ impl<H: BlockHandler> Core<H> {
             vec![]
         };
 
-        // Look up pre-computed BLS signatures from dag_state.
-        let precomputed_round_sig = if is_starfish_l {
-            let sig = self.dag_state.take_precomputed_round_sig(clock_round);
-            if sig.is_some() {
-                self.metrics.bls_presign_hit_total.inc();
-            } else {
-                self.metrics.bls_presign_miss_total.inc();
-            }
-            sig
-        } else {
-            None
-        };
-        let precomputed_leader_sig = if is_starfish_l {
-            voted_leader_ref.and_then(|r| self.dag_state.take_precomputed_leader_sig(&r))
-        } else {
-            None
-        };
-
         let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -820,8 +832,8 @@ impl<H: BlockHandler> Core<H> {
             strong_vote,
             aggregate_round_sig,
             certified_leader,
-            precomputed_round_sig,
-            precomputed_leader_sig,
+            None,
+            None,
         );
 
         self.metrics

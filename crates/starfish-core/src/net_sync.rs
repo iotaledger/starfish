@@ -1212,6 +1212,29 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .write()
             .insert(peer_id, connection.sender.clone());
 
+        if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+            for (round, signature) in inner.dag_state.precomputed_round_sigs() {
+                let _ = connection
+                    .sender
+                    .send(NetworkMessage::PartialSig(crate::types::PartialSig {
+                        kind: crate::types::PartialSigKind::Round(round),
+                        signer: own_id,
+                        signature,
+                    }))
+                    .await;
+            }
+            for (leader_ref, signature) in inner.dag_state.precomputed_leader_sigs() {
+                let _ = connection
+                    .sender
+                    .send(NetworkMessage::PartialSig(crate::types::PartialSig {
+                        kind: crate::types::PartialSigKind::Leader(leader_ref),
+                        signer: own_id,
+                        signature,
+                    }))
+                    .await;
+            }
+        }
+
         inner.syncer.authority_connection(peer_id, true).await;
 
         tracing::debug!(

@@ -7,8 +7,9 @@
 //! batch verification and aggregation via [`BlsCertificateAggregator`], and
 //! sends accumulated [`CertificateEvent`]s to the Core thread.
 //!
-//! Additionally, pre-computes round and leader partial signatures for own
-//! blocks and broadcasts them to all peers.
+//! Standalone round partial signatures are pre-computed before block creation,
+//! while leader partial signatures are pre-signed as soon as the corresponding
+//! leader block is received.
 
 use std::sync::Arc;
 
@@ -57,9 +58,6 @@ impl BlsServiceHandle {
 /// Takes the receiving end of the BLS message channel and an event sender
 /// for delivering accumulated certificate events to the Core thread.
 ///
-/// When `bls_signer` is provided, the service also pre-computes round and
-/// leader partial signatures for own blocks and emits them as
-/// `CertificateEvent` variants plus broadcasts via `partial_sig_broadcast`.
 pub fn start_bls_service(
     aggregator: BlsCertificateAggregator,
     receiver: mpsc::Receiver<BlsServiceMessage>,
@@ -94,8 +92,6 @@ async fn run_bls_service(
     partial_sig_broadcast: Option<mpsc::UnboundedSender<PartialSig>>,
 ) {
     let mut aggregator = Some(aggregator);
-    // Track which leader rounds have already been pre-signed (persistent
-    // across batches) to avoid redundant work on equivocated leaders.
     let mut presigned_leader_rounds: AHashSet<RoundNumber> = AHashSet::new();
     while let Some(msg) = receiver.recv().await {
         let _timer = metrics.bls_service_util.utilization_timer();
@@ -155,6 +151,7 @@ async fn run_bls_service(
                 tokio::task::spawn_blocking(move || {
                     let mut events = Vec::new();
                     let mut broadcast_sigs = Vec::new();
+                    let mut local_leader_sigs = Vec::new();
 
                     if !all_blocks.is_empty() {
                         let (new_events, batch_failures) =
@@ -182,27 +179,7 @@ async fn run_bls_service(
                         );
                     }
 
-                    // Pre-sign round r+1 for own blocks at round r.
                     if let Some(ref bs) = bls_signer_clone {
-                        for block in &all_blocks {
-                            if block.authority() == own_authority {
-                                let next_round = block.round() + 1;
-                                let sig = bs.sign_digest(&crypto::bls_round_message(next_round));
-                                events.push(CertificateEvent::PrecomputedRoundSig(next_round, sig));
-                                broadcast_sigs.push(PartialSig {
-                                    kind: PartialSigKind::Round(next_round),
-                                    signer: own_authority,
-                                    signature: sig,
-                                });
-                                metrics_clone
-                                    .bls_presign_total
-                                    .with_label_values(&["round"])
-                                    .inc();
-                            }
-                        }
-
-                        // Pre-sign leader block references — only the first
-                        // leader per round.
                         for block in &all_blocks {
                             let round = block.round();
                             if round > 0
@@ -212,8 +189,8 @@ async fn run_bls_service(
                                 presigned_clone.insert(round);
                                 let leader_ref = *block.reference();
                                 let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
-                                events
-                                    .push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
+                                events.push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
+                                local_leader_sigs.push((leader_ref, own_authority, sig));
                                 broadcast_sigs.push(PartialSig {
                                     kind: PartialSigKind::Leader(leader_ref),
                                     signer: own_authority,
@@ -227,7 +204,12 @@ async fn run_bls_service(
                         }
                     }
 
-                    // Broadcast pre-computed sigs to the network.
+                    if !local_leader_sigs.is_empty() {
+                        events.extend(
+                            worker_aggregator.add_standalone_leader_sigs_batch(local_leader_sigs),
+                        );
+                    }
+
                     if let Some(ref tx) = broadcast_clone {
                         for sig in broadcast_sigs {
                             let _ = tx.send(sig);
