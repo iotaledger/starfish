@@ -790,6 +790,23 @@ impl<H: BlockHandler> Core<H> {
             vec![]
         };
 
+        let precomputed_round_sig = if is_starfish_l {
+            let sig = self.dag_state.take_precomputed_round_sig(clock_round);
+            if sig.is_some() {
+                self.metrics.bls_presign_hit_total.inc();
+            } else {
+                self.metrics.bls_presign_miss_total.inc();
+            }
+            sig
+        } else {
+            None
+        };
+        let precomputed_leader_sig = if is_starfish_l {
+            voted_leader_ref.and_then(|r| self.dag_state.take_precomputed_leader_sig(&r))
+        } else {
+            None
+        };
+
         let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -807,8 +824,8 @@ impl<H: BlockHandler> Core<H> {
             strong_vote,
             aggregate_round_sig,
             certified_leader,
-            None,
-            None,
+            precomputed_round_sig,
+            precomputed_leader_sig,
         );
 
         self.metrics

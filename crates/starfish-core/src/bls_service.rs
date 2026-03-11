@@ -378,6 +378,15 @@ async fn run_round_presign_signal_task(
                 {
                     break;
                 }
+                // Speculatively presign one round ahead so the signature is
+                // ready when the next block is built.
+                if sender
+                    .send(BlsServiceMessage::PresignRound(round + 1))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
         }
     }

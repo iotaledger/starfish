@@ -994,26 +994,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         crate::types::PartialSigKind::Dac(block_ref) => {
                             let target = block_ref.authority;
                             let msg = NetworkMessage::PartialSig(partial_sig);
-                            let sender = routing_inner.peer_senders.read().get(&target).cloned();
-                            if let Some(sender) = sender {
-                                let _ = sender.send(msg).await;
+                            if let Some(sender) =
+                                routing_inner.peer_senders.read().get(&target)
+                            {
+                                let _ = sender.try_send(msg);
                             }
                         }
                         crate::types::PartialSigKind::Round(_)
                         | crate::types::PartialSigKind::Leader(_) => {
-                            let senders: Vec<_> =
-                                routing_inner.peer_senders.read().values().cloned().collect();
-                            join_all(
-                                senders.into_iter().map(|sender| {
-                                    let partial_sig = partial_sig.clone();
-                                    async move {
-                                        let _ = sender
-                                            .send(NetworkMessage::PartialSig(partial_sig))
-                                            .await;
-                                    }
-                                }),
-                            )
-                            .await;
+                            for sender in
+                                routing_inner.peer_senders.read().values()
+                            {
+                                let _ = sender.try_send(
+                                    NetworkMessage::PartialSig(partial_sig.clone()),
+                                );
+                            }
                         }
                     }
                 }
@@ -1027,19 +1022,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let task = handle.spawn(async move {
                 while let Some(partial_sig) = rx.recv().await {
                     // Pre-computed sigs are always round/leader, broadcast to all.
-                    let senders: Vec<_> =
-                        routing_inner.peer_senders.read().values().cloned().collect();
-                    join_all(
-                        senders.into_iter().map(|sender| {
-                            let partial_sig = partial_sig.clone();
-                            async move {
-                                let _ = sender
-                                    .send(NetworkMessage::PartialSig(partial_sig))
-                                    .await;
-                            }
-                        }),
-                    )
-                    .await;
+                    for sender in routing_inner.peer_senders.read().values() {
+                        let _ =
+                            sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                    }
                 }
             });
             (Some(tx), Some(task))
