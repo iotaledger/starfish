@@ -178,6 +178,12 @@ where
             existing.abort();
             existing.await.ok();
         }
+        // Ensure the counter time series exists in Prometheus even if no
+        // requests are ever sent (avoids "no data" in Grafana).
+        self.metrics
+            .tx_data_requests_sent
+            .with_label_values(&[&self.to_whom_authority_index.to_string()])
+            .inc_by(0);
         let handle = Handle::current().spawn(Self::request_missing_data_blocks(
             self.to_whom_authority_index,
             self.sender.clone(),
@@ -1175,16 +1181,18 @@ where
         &broadcaster_parameters,
         &sent_to_peer,
         selection_mode,
-    )?;
+    );
+    let peer_str = peer.to_string();
+    report_useful_authorities(
+        metrics,
+        &peer_str,
+        plan.as_ref().map_or(0, |p| p.useful_headers),
+        plan.as_ref().map_or(0, |p| p.useful_shards),
+    );
+    let plan = plan?;
     if let Some(max_round) = plan.own_blocks.iter().map(|block| block.round()).max() {
         *round = max_round;
     }
-    report_useful_authorities(
-        metrics,
-        &peer.to_string(),
-        plan.useful_headers,
-        plan.useful_shards,
-    );
 
     let batch = materialize_push_batch(&inner, plan);
     if let Ok(size) = bincode::serialized_size(&batch) {

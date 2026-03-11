@@ -21,6 +21,7 @@ use crate::{
 #[derive(Clone)]
 pub struct UniversalCommitter {
     dag_state: DagState,
+    committee: Arc<Committee>,
     committers: Vec<BaseCommitter>,
     metrics: Arc<Metrics>,
     /// Cache of already-final leaders to avoid redundant recomputation.
@@ -85,7 +86,9 @@ impl UniversalCommitter {
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
                         if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                            if let Some(leader_ref) = vb.header().voted_leader() {
+                            if let Some(leader_ref) =
+                                vb.header().starfish_bls_voted_leader(&self.committee)
+                            {
                                 if leader_ref.round == round && leader_ref.authority == leader {
                                     voters.insert((*leader_ref, vb_ref));
                                     voter_strong_votes.insert(vb_ref, vb.strong_vote());
@@ -265,6 +268,7 @@ impl UniversalCommitterBuilder {
 
         UniversalCommitter {
             dag_state: self.dag_state,
+            committee: self.committee,
             committers,
             metrics: self.metrics,
             decided: AHashMap::new(),

@@ -1029,14 +1029,14 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
-                    block
-                        .header()
-                        .voted_leader()
-                        .is_some_and(|leader_ref| {
-                            leader_ref.authority == leader && leader_ref.round == leader_round
-                        })
-                } else {
+            let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+                block
+                    .header()
+                    .starfish_bls_voted_leader(committee)
+                    .is_some_and(|leader_ref| {
+                        leader_ref.authority == leader && leader_ref.round == leader_round
+                    })
+            } else {
                 block
                     .block_references()
                     .iter()
@@ -1102,7 +1102,7 @@ impl DagState {
                 {
                     block
                         .header()
-                        .voted_leader()
+                        .starfish_bls_voted_leader(committee)
                         .is_some_and(|leader_ref| {
                             leader_ref.authority == prev_leader
                                 && leader_ref.round == leader_round - 1

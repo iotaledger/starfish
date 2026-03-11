@@ -8,7 +8,7 @@ NUM_VALIDATORS=${NUM_VALIDATORS:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-bls}
+CONSENSUS=${CONSENSUS:-starfish}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -130,9 +130,8 @@ if [ "$CLEAN_MONITORING" = 1 ]; then
     docker volume rm prometheus_data grafana_data \
         2>/dev/null || true
 fi
-docker volume create prometheus_data 2>/dev/null || true
-docker volume create grafana_data 2>/dev/null || true
-echo -e "${CYAN}Cleaning up previous run data...${RESET}"
+docker volume create prometheus_data >/dev/null 2>&1 || true
+docker volume create grafana_data >/dev/null 2>&1 || true
 rm -f "$DATA_DIR"/*.log \
     "$DATA_DIR"/docker-compose.yml \
     "$DATA_DIR"/prometheus.yaml
@@ -141,11 +140,31 @@ mkdir -p "$DATA_DIR"
 #----------------------------------------------------------------------
 # Build Docker Image
 #----------------------------------------------------------------------
-echo -e "${CYAN}Building starfish Docker image...${RESET}"
-docker build -t starfish . || {
-    echo -e "${RED}Docker build failed${RESET}"
+echo -ne "${CYAN}Building starfish Docker image... ${RESET}"
+BUILD_LOG=$(mktemp)
+BUILD_START=$SECONDS
+docker build -t starfish . > "$BUILD_LOG" 2>&1 &
+BUILD_PID=$!
+while kill -0 "$BUILD_PID" 2>/dev/null; do
+    ELAPSED=$(( SECONDS - BUILD_START ))
+    printf "\r${CYAN}Building starfish Docker image... ${YELLOW}%dm%02ds${RESET}" \
+        $(( ELAPSED / 60 )) $(( ELAPSED % 60 ))
+    sleep 1
+done
+wait "$BUILD_PID"
+BUILD_RC=$?
+ELAPSED=$(( SECONDS - BUILD_START ))
+if [ $BUILD_RC -eq 0 ]; then
+    printf "\r${GREEN}Build OK in %dm%02ds${RESET}%20s\n" \
+        $(( ELAPSED / 60 )) $(( ELAPSED % 60 )) ""
+else
+    printf "\r${RED}Docker build failed after %dm%02ds. Last 30 lines:${RESET}\n" \
+        $(( ELAPSED / 60 )) $(( ELAPSED % 60 ))
+    tail -30 "$BUILD_LOG"
+    rm -f "$BUILD_LOG"
     exit 1
-}
+fi
+rm -f "$BUILD_LOG"
 
 #----------------------------------------------------------------------
 # Generate Prometheus Configuration
@@ -183,10 +202,6 @@ EOT
 #----------------------------------------------------------------------
 # Generate Docker Compose File
 #----------------------------------------------------------------------
-echo -e \
-    "${CYAN}Generating docker-compose.yml for" \
-    "$NUM_VALIDATORS validators...${RESET}"
-
 RUST_LOG="debug"
 
 {
@@ -347,15 +362,30 @@ EOV
 #----------------------------------------------------------------------
 # Launch
 #----------------------------------------------------------------------
-echo -e \
-    "${GREEN}Run dryrun for:" \
-    "${YELLOW}$TEST_TIME${RESET} seconds"
-echo -e \
-    "${GREEN}Number of validators:" \
-    "${YELLOW}$NUM_VALIDATORS${RESET}"
-echo -e \
-    "${CYAN}Deploying consensus protocol:" \
-    "${YELLOW}$CONSENSUS${RESET}"
+echo -e "${CYAN}Started at: $(date)${RESET}"
+echo -e "${GREEN}─── Configuration ───────────────────${RESET}"
+printf "  %-18s ${YELLOW}%s${RESET}\n" \
+    "Validators:" "$NUM_VALIDATORS" \
+    "Consensus:" "$CONSENSUS" \
+    "Dissemination:" "$DISSEMINATION_MODE" \
+    "Target TPS:" "$DESIRED_TPS ($TPS_PER_VALIDATOR/validator)" \
+    "Storage:" "$STORAGE_BACKEND" \
+    "Tx mode:" "$TRANSACTION_MODE" \
+    "Byzantine:" "$NUM_BYZANTINE_NODES" \
+    "Test duration:" "${TEST_TIME}s"
+if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
+    printf "  %-18s ${YELLOW}%s${RESET}\n" \
+        "Uniform latency:" "${UNIFORM_LATENCY_MS}ms"
+fi
+if [ "${ADVERSARIAL_LATENCY:-0}" = 1 ]; then
+    printf "  %-18s ${YELLOW}%s${RESET}\n" \
+        "Adversarial lat.:" "enabled"
+fi
+if (( NUM_BYZANTINE_NODES > 0 )); then
+    printf "  %-18s ${YELLOW}%s${RESET}\n" \
+        "Byzantine strat.:" "$BYZANTINE_STRATEGY"
+fi
+echo -e "${GREEN}─────────────────────────────────────${RESET}"
 
 docker compose -f "$COMPOSE_FILE" up -d || {
     echo -e "${RED}Failed to start services${RESET}"
