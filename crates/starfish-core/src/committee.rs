@@ -101,7 +101,7 @@ impl Committee {
     }
 
     pub fn authorities(&self) -> Range<AuthorityIndex> {
-        0u64..(self.authorities.len() as AuthorityIndex)
+        0..(self.authorities.len() as AuthorityIndex)
     }
 
     /// Return own genesis block and other genesis blocks

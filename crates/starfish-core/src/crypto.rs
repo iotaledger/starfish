@@ -259,6 +259,12 @@ pub trait CryptoHash {
     fn crypto_hash(&self, state: &mut Blake3Hasher);
 }
 
+impl CryptoHash for u8 {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
+        state.update(&self.to_be_bytes());
+    }
+}
+
 impl CryptoHash for u64 {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());

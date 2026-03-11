@@ -993,9 +993,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         crate::types::PartialSigKind::Dac(block_ref) => {
                             let target = block_ref.authority;
                             let msg = NetworkMessage::PartialSig(partial_sig);
-                            if let Some(sender) =
-                                routing_inner.peer_senders.read().get(&target)
-                            {
+                            if let Some(sender) = routing_inner.peer_senders.read().get(&target) {
                                 let _ = sender.try_send(msg);
                             }
                         }
@@ -1019,8 +1017,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 while let Some(partial_sig) = rx.recv().await {
                     // Pre-computed sigs are always round/leader, broadcast to all.
                     for sender in routing_inner.peer_senders.read().values() {
-                        let _ =
-                            sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                        let _ = sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
                     }
                 }
             });

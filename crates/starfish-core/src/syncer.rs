@@ -258,13 +258,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
                 if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block)
                 {
-                    let _ = bls_tx.try_send(BlsServiceMessage::PartialSig(
-                        crate::types::PartialSig {
+                    let _ =
+                        bls_tx.try_send(BlsServiceMessage::PartialSig(crate::types::PartialSig {
                             kind: crate::types::PartialSigKind::Dac(block_ref),
                             signer: auth,
                             signature: sig,
-                        },
-                    ));
+                        }));
                 }
             }
             self.signals.new_block_ready();

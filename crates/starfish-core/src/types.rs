@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-pub type AuthorityIndex = u64;
+pub type AuthorityIndex = u8;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct Transaction {
@@ -1267,7 +1267,7 @@ impl AuthoritySet {
     }
 
     pub fn present(&self) -> impl Iterator<Item = AuthorityIndex> + '_ {
-        (0..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
+        (0u8..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
     }
 
     #[inline]
@@ -1288,7 +1288,7 @@ impl AuthoritySet {
 }
 
 pub fn format_authority_index(i: AuthorityIndex) -> char {
-    ('A' as u64 + i) as u8 as char
+    (b'A' + i) as char
 }
 
 pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {

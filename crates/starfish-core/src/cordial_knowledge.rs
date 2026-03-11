@@ -308,7 +308,7 @@ impl ConnectionKnowledge {
         let mut result = Vec::with_capacity(limit);
         while result.len() < limit {
             let mut made_progress = false;
-            for authority in 0..self.committee_size {
+            for (authority, index_entry) in indexes.iter().enumerate().take(self.committee_size) {
                 let authority_index = authority as AuthorityIndex;
                 if authority_index == self.peer
                     || excluded_authority == Some(authority_index)
@@ -316,7 +316,7 @@ impl ConnectionKnowledge {
                 {
                     continue;
                 }
-                let Some(refs) = indexes[authority].get(&round) else {
+                let Some(refs) = index_entry.get(&round) else {
                     continue;
                 };
                 let Some(block_ref) = refs
@@ -796,7 +796,7 @@ impl CordialKnowledgeHandle {
 mod tests {
     use super::*;
 
-    fn block_ref(authority: u64, round: u64) -> BlockReference {
+    fn block_ref(authority: AuthorityIndex, round: u64) -> BlockReference {
         BlockReference {
             authority,
             round,

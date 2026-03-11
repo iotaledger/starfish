@@ -39,7 +39,7 @@ impl TransactionGenerator {
         runtime::Handle::current().spawn(
             Self {
                 sender,
-                rng: StdRng::seed_from_u64(seed),
+                rng: StdRng::seed_from_u64(seed as u64),
                 parameters,
                 node_public_config,
                 metrics,

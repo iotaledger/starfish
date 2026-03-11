@@ -133,10 +133,8 @@ async fn run_bls_service(
 
         let num_blocks = all_blocks.len();
         let num_dac_sigs = dac_sigs.len();
-        let has_work = num_blocks > 0
-            || num_dac_sigs > 0
-            || !round_sigs.is_empty()
-            || !leader_sigs.is_empty();
+        let has_work =
+            num_blocks > 0 || num_dac_sigs > 0 || !round_sigs.is_empty() || !leader_sigs.is_empty();
 
         let events = if !has_work {
             Vec::new()
@@ -170,8 +168,7 @@ async fn run_bls_service(
                     }
 
                     if !dac_sigs.is_empty() {
-                        events
-                            .extend(worker_aggregator.add_standalone_dac_sigs_batch(dac_sigs));
+                        events.extend(worker_aggregator.add_standalone_dac_sigs_batch(dac_sigs));
                     }
 
                     if !round_sigs.is_empty() {
@@ -190,11 +187,8 @@ async fn run_bls_service(
                         for block in &all_blocks {
                             if block.authority() == own_authority {
                                 let next_round = block.round() + 1;
-                                let sig =
-                                    bs.sign_digest(&crypto::bls_round_message(next_round));
-                                events.push(CertificateEvent::PrecomputedRoundSig(
-                                    next_round, sig,
-                                ));
+                                let sig = bs.sign_digest(&crypto::bls_round_message(next_round));
+                                events.push(CertificateEvent::PrecomputedRoundSig(next_round, sig));
                                 broadcast_sigs.push(PartialSig {
                                     kind: PartialSigKind::Round(next_round),
                                     signer: own_authority,
@@ -212,18 +206,14 @@ async fn run_bls_service(
                         for block in &all_blocks {
                             let round = block.round();
                             if round > 0
-                                && block.authority()
-                                    == committee_clone.elect_leader(round)
+                                && block.authority() == committee_clone.elect_leader(round)
                                 && !presigned_clone.contains(&round)
                             {
                                 presigned_clone.insert(round);
                                 let leader_ref = *block.reference();
-                                let sig = bs.sign_digest(
-                                    &crypto::bls_leader_message(&leader_ref),
-                                );
-                                events.push(CertificateEvent::PrecomputedLeaderSig(
-                                    leader_ref, sig,
-                                ));
+                                let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
+                                events
+                                    .push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
                                 broadcast_sigs.push(PartialSig {
                                     kind: PartialSigKind::Leader(leader_ref),
                                     signer: own_authority,

@@ -32,8 +32,8 @@ use crate::{
     store::Store,
     types::{
         AuthorityIndex, BaseTransaction, BlockReference, BlsAggregateCertificate, Encoder,
-        PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData, RoundNumber, Shard,
-        VerifiedBlock,
+        PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData, RoundNumber,
+        Shard, VerifiedBlock,
     },
 };
 
