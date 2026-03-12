@@ -16,7 +16,6 @@ Three versions of Starfish are available in this repository:
 - **`starfish`**: Theory-aligned version
   - By default uses Push dissemination strategy for headers and shards
   - Better latency guarantees with Byzantine nodes
-  - 
 
 - **`starfish-speed`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
@@ -31,7 +30,7 @@ The repository also supports other partially synchronous uncertified DAG-based c
 
 - **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).
 Validators use a bandwidth efficient pull-based block dissemination strategy:
-they push their own blocks and request the peers about missing ancestors only. 
+they push their own blocks and request the peers about missing ancestors only.
 - **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174).
 Validators use a push-based block dissemination strategy,
 pushing all unknown history of blocks to their peers.

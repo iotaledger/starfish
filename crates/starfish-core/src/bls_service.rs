@@ -63,7 +63,6 @@ impl BlsServiceHandle {
 ///
 /// Takes the receiving end of the BLS message channel and an event sender
 /// for delivering accumulated certificate events to the Core thread.
-///
 pub fn start_bls_service(
     aggregator: BlsCertificateAggregator,
     sender: mpsc::Sender<BlsServiceMessage>,
@@ -238,7 +237,8 @@ async fn run_bls_service(
                                 presigned_clone.insert(round);
                                 let leader_ref = *block.reference();
                                 let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
-                                events.push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
+                                events
+                                    .push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
                                 local_leader_sigs.push((leader_ref, own_authority, sig));
                                 broadcast_sigs.push(PartialSig {
                                     kind: PartialSigKind::Leader(leader_ref),

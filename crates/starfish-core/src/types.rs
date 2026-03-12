@@ -139,8 +139,8 @@ impl BlsAggregateCertificate {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlsFields {
-    /// BLS partial signature on the round message, included as belt-and-suspenders
-    /// alongside standalone `PartialSig` messages.
+    /// BLS partial signature on the round message, included as
+    /// belt-and-suspenders alongside standalone `PartialSig` messages.
     pub(crate) round_signature: BlsSignatureBytes,
     /// Voted leader reference paired with its BLS partial signature.
     /// `None` when the block does not vote for a leader.
@@ -313,11 +313,9 @@ impl BlockHeader {
             return None;
         }
         let leader_authority = committee.elect_leader(leader_round);
-        self.block_references
-            .iter()
-            .find(|reference| {
-                reference.round == leader_round && reference.authority == leader_authority
-            })
+        self.block_references.iter().find(|reference| {
+            reference.round == leader_round && reference.authority == leader_authority
+        })
     }
 
     pub fn bls_aggregate_round_signature(&self) -> Option<&BlsAggregateCertificate> {

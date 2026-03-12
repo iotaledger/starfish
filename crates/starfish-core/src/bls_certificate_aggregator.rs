@@ -178,9 +178,7 @@ impl BlsCertificateAggregator {
                         .get(&round)
                         .is_some_and(|sigs| sigs.contains_key(&signer))
                 {
-                    if let Some(public_key) =
-                        self.committee.get_bls_public_key(signer).cloned()
-                    {
+                    if let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_round_message(round),
                             signature: *sig,
@@ -209,9 +207,7 @@ impl BlsCertificateAggregator {
                         .get(leader_ref)
                         .is_some_and(|sigs| sigs.contains_key(&signer))
                 {
-                    if let Some(public_key) =
-                        self.committee.get_bls_public_key(signer).cloned()
-                    {
+                    if let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_leader_message(leader_ref),
                             signature: *sig,
