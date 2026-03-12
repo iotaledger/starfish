@@ -199,7 +199,7 @@ impl ServerProviderClient for VultrClient {
         Ok(())
     }
 
-    async fn create_instance<S>(&self, region: S, _quantity: usize) -> CloudProviderResult<Instance>
+    async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
     where
         S: Into<String> + Serialize + Send,
     {

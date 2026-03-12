@@ -108,10 +108,27 @@ pub trait ServerProviderClient: Display {
     where
         I: Iterator<Item = &'a Instance> + Send;
 
-    /// Create an instance in a specific region.
-    async fn create_instance<S>(&self, region: S, quantity: usize) -> CloudProviderResult<Instance>
+    /// Create a single instance in a specific region.
+    async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
     where
         S: Into<String> + Serialize + Send;
+
+    /// Create multiple instances in a specific region.
+    async fn create_instances<S>(
+        &self,
+        region: S,
+        quantity: usize,
+    ) -> CloudProviderResult<Vec<Instance>>
+    where
+        S: Into<String> + Serialize + Send,
+    {
+        let region = region.into();
+        let mut instances = Vec::with_capacity(quantity);
+        for _ in 0..quantity {
+            instances.push(self.create_instance(region.clone()).await?);
+        }
+        Ok(instances)
+    }
 
     /// Delete a specific instance. Calling this function ensures we are no
     /// longer billed for the specified instance.
@@ -201,11 +218,7 @@ pub mod test_client {
             Ok(())
         }
 
-        async fn create_instance<S>(
-            &self,
-            region: S,
-            _quantity: usize,
-        ) -> CloudProviderResult<Instance>
+        async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
         where
             S: Into<String> + Serialize + Send,
         {

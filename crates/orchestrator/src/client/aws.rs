@@ -146,6 +146,25 @@ impl AwsClient {
         }
     }
 
+    /// Check whether a (pre-lowercased) error message indicates an API
+    /// throttling / rate-limit error.
+    fn is_throttled_request(message: &str) -> bool {
+        message.contains("requestlimitexceeded")
+            || message.contains("throttl")
+            || message.contains("rate exceeded")
+    }
+
+    fn should_fallback_to_ondemand_for_mixed(message: &str) -> bool {
+        let message = message.to_lowercase();
+        !Self::is_throttled_request(&message)
+            && (message.contains("insufficientspotinstancecapacity")
+                || message.contains("maxspotinstancecountexceeded")
+                || (message.contains("spot")
+                    && (message.contains("capacity")
+                        || message.contains("unavailable")
+                        || message.contains("price too low"))))
+    }
+
     /// Query the image id determining the os of the instances.
     /// NOTE: The image id changes depending on the region.
     async fn find_image_id(&self, client: &aws_sdk_ec2::Client) -> CloudProviderResult<String> {
@@ -344,12 +363,31 @@ impl ServerProviderClient for AwsClient {
         Ok(())
     }
 
-    async fn create_instance<S>(&self, region: S, _quantity: usize) -> CloudProviderResult<Instance>
+    async fn create_instance<S>(&self, region: S) -> CloudProviderResult<Instance>
+    where
+        S: Into<String> + Serialize + Send,
+    {
+        let mut instances = self.create_instances(region, 1).await?;
+        instances.pop().ok_or_else(|| {
+            CloudProviderError::UnexpectedResponse("AWS RunInstances returned no instances".into())
+        })
+    }
+
+    async fn create_instances<S>(
+        &self,
+        region: S,
+        quantity: usize,
+    ) -> CloudProviderResult<Vec<Instance>>
     where
         S: Into<String> + Serialize + Send,
     {
         let region = region.into();
         let testbed_id = &self.settings.testbed_id;
+        let count = i32::try_from(quantity).map_err(|_| {
+            CloudProviderError::UnexpectedResponse(format!(
+                "Requested instance batch is too large for AWS API: {quantity}"
+            ))
+        })?;
 
         let client = self.clients.get(&region).ok_or_else(|| {
             CloudProviderError::RequestError(format!("Undefined region {region:?}"))
@@ -384,8 +422,8 @@ impl ServerProviderClient for AwsClient {
                 .image_id(&image_id)
                 .instance_type(self.settings.specs.as_str().into())
                 .key_name(testbed_id)
-                .min_count(1)
-                .max_count(1)
+                .min_count(count)
+                .max_count(count)
                 .security_groups(&self.settings.testbed_id)
                 .block_device_mappings(storage)
                 .tag_specifications(tags);
@@ -406,17 +444,27 @@ impl ServerProviderClient for AwsClient {
         let (response, got_spot) = match build_request(use_spot).send().await {
             Ok(resp) => (resp, use_spot),
             Err(e) if self.settings.spot == SpotPolicy::Mixed => {
-                eprintln!("Spot request failed in {region}, retrying as on-demand: {e}");
-                (build_request(false).send().await?, false)
+                let error_message = format!("{e:?}");
+                if Self::should_fallback_to_ondemand_for_mixed(&error_message) {
+                    eprintln!("Spot request failed in {region}, retrying as on-demand: {e}");
+                    (build_request(false).send().await?, false)
+                } else {
+                    return Err(e.into());
+                }
             }
             Err(e) => return Err(e.into()),
         };
-        let instance = &response
+        let instances = response
             .instances()
-            .first()
-            .expect("AWS instances list should contain instances");
-
-        Ok(self.make_instance(region, instance, got_spot))
+            .iter()
+            .map(|instance| self.make_instance(region.clone(), instance, got_spot))
+            .collect::<Vec<_>>();
+        if instances.is_empty() {
+            return Err(CloudProviderError::UnexpectedResponse(
+                "AWS RunInstances returned no instances".into(),
+            ));
+        }
+        Ok(instances)
     }
 
     async fn delete_instance(&self, instance: Instance) -> CloudProviderResult<()> {
@@ -484,5 +532,30 @@ impl ServerProviderClient for AwsClient {
             self.image_ids.insert(region.clone(), image_id);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AwsClient;
+
+    #[test]
+    fn mixed_spot_fallback_skips_throttling_errors() {
+        assert!(!AwsClient::should_fallback_to_ondemand_for_mixed(
+            "RequestLimitExceeded: request limit exceeded"
+        ));
+        assert!(!AwsClient::should_fallback_to_ondemand_for_mixed(
+            "ThrottlingException: Rate exceeded"
+        ));
+    }
+
+    #[test]
+    fn mixed_spot_fallback_keeps_capacity_errors() {
+        assert!(AwsClient::should_fallback_to_ondemand_for_mixed(
+            "InsufficientSpotInstanceCapacity: no spot capacity"
+        ));
+        assert!(AwsClient::should_fallback_to_ondemand_for_mixed(
+            "MaxSpotInstanceCountExceeded: too many spot requests"
+        ));
     }
 }

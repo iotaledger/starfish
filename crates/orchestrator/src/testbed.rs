@@ -271,16 +271,28 @@ impl<C: ServerProviderClient> Testbed<C> {
         let mut completed = 0usize;
         display::status(format!("{completed}/{total}"));
 
+        let mut requested_counts = Vec::<(String, usize)>::new();
+        for region in regions {
+            if let Some((_, count)) = requested_counts
+                .iter_mut()
+                .find(|(existing_region, _)| *existing_region == region)
+            {
+                *count += 1;
+            } else {
+                requested_counts.push((region, 1));
+            }
+        }
+
         // Process in batches to respect AWS API rate limits while keeping
         // progress tracking.
-        for chunk in regions.chunks(Self::MAX_CONCURRENT_CREATES) {
+        for chunk in requested_counts.chunks(Self::MAX_CONCURRENT_CREATES) {
             let batch: Vec<_> = chunk
                 .iter()
-                .map(|region| self.client.create_instance(region.clone(), 1))
+                .map(|(region, quantity)| self.client.create_instances(region.clone(), *quantity))
                 .collect();
-            for result in try_join_all(batch).await? {
-                instances.push(result);
-                completed += 1;
+            for mut result in try_join_all(batch).await? {
+                completed += result.len();
+                instances.append(&mut result);
                 let elapsed = start.elapsed().as_secs();
                 display::status(format!("{completed}/{total} {elapsed}s"));
             }

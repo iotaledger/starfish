@@ -9,7 +9,7 @@ specs: m5d.4xlarge
 repository:
   url: https://github.com/iotaledger/starfish.git
   commit: main
-# Use EC2 Spot Instances (cheaper, but may be interrupted).
+# Use EC2 Spot Instances (cheaper, but may be interrupted). Use option mix to first try spot and then fill the rest with on-demand
 # spot: true
 # External monitoring server (optional). Uses this server for Prometheus +
 # Grafana instead of allocating a cloud instance. Accepts [user@]host format.
