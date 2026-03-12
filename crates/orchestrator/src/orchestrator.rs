@@ -5,17 +5,19 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    io::Read,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use flate2::read::GzDecoder;
 use tokio::time::{self, Instant};
 
 use crate::{
     benchmark::{BenchmarkParameters, LatencyThroughputSweepPlan, LatencyThroughputSweepReport},
-    client::Instance,
+    client::{Instance, InstanceStatus},
     display, ensure,
-    error::{TestbedError, TestbedResult},
+    error::{SshError, TestbedError, TestbedResult},
     faults::CrashRecoverySchedule,
     logs::LogsAnalyzer,
     measurements::{Measurement, MeasurementsCollection},
@@ -171,6 +173,96 @@ impl<P> Orchestrator<P> {
 }
 
 impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
+    fn mark_instances_inactive(&mut self, instances: &[Instance]) {
+        for failed in instances {
+            if let Some(instance) = self
+                .instances
+                .iter_mut()
+                .find(|instance| instance.id == failed.id)
+            {
+                instance.status = InstanceStatus::Inactive;
+            }
+        }
+    }
+
+    async fn execute_per_instance_best_effort<S>(
+        &mut self,
+        instances: Vec<(Instance, S)>,
+        context: CommandContext,
+        stage: &str,
+    ) -> Vec<(Instance, (String, String))>
+    where
+        S: Into<String> + Send + 'static + Clone,
+    {
+        let handles = self
+            .ssh_manager
+            .run_per_instance(instances.clone(), context);
+        let mut successes = Vec::new();
+        let mut lost_instances = Vec::new();
+
+        for ((instance, _), handle) in instances.into_iter().zip(handles) {
+            match handle.await {
+                Ok(Ok(output)) => successes.push((instance, output)),
+                Ok(Err(error)) => {
+                    display::error(format!("{stage} failed on {}: {error}", instance.main_ip));
+                    if matches!(
+                        error,
+                        SshError::ConnectionError { .. } | SshError::SessionError { .. }
+                    ) {
+                        lost_instances.push(instance);
+                    }
+                }
+                Err(error) => {
+                    display::error(format!(
+                        "{stage} join failed on {}: {error}",
+                        instance.main_ip
+                    ));
+                }
+            }
+        }
+
+        if !lost_instances.is_empty() {
+            self.mark_instances_inactive(&lost_instances);
+        }
+
+        successes
+    }
+
+    fn log_download_ssh_manager(&self) -> SshConnectionManager {
+        self.ssh_manager.clone().with_retries(0)
+    }
+
+    async fn download_compressed_log(
+        &self,
+        ssh_manager: &SshConnectionManager,
+        instance: &Instance,
+        remote_log_path: &str,
+    ) -> TestbedResult<Vec<u8>> {
+        let connection = ssh_manager.connect(instance.ssh_address()).await?;
+        let remote_archive_path = format!(
+            "/tmp/orchestrator-{}-{}.gz",
+            instance.id,
+            remote_log_path.replace('/', "-")
+        );
+
+        connection.execute(format!(
+            "rm -f {remote_archive_path} && gzip -c {remote_log_path} > {remote_archive_path}"
+        ))?;
+        let compressed_log = connection.download_bytes(&remote_archive_path)?;
+        let _ = connection.execute(format!("rm -f {remote_archive_path}"));
+
+        Ok(compressed_log)
+    }
+
+    fn decompress_log(&self, compressed_log: &[u8], log_label: &str) -> TestbedResult<String> {
+        let mut decoder = GzDecoder::new(compressed_log);
+        let mut log_content = String::new();
+        decoder.read_to_string(&mut log_content).map_err(|error| {
+            TestbedError::LogProcessingError(format!("failed to decompress {log_label}: {error}"))
+        })?;
+        Ok(log_content)
+    }
+
     /// Install the codebase and its dependencies on the testbed.
     pub async fn install(&self) -> TestbedResult<()> {
         display::action("Installing dependencies on all machines");
@@ -354,7 +446,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Cleanup all instances and optionally delete their log files.
-    pub async fn cleanup(&self, delete_logs: bool) -> TestbedResult<()> {
+    pub async fn cleanup(&mut self, delete_logs: bool) -> TestbedResult<()> {
         display::action("Cleaning up testbed");
 
         // Kill all tmux servers and delete the nodes dbs. Optionally clear logs.
@@ -368,9 +460,19 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let command = command.join(" ; ");
 
         // Execute the deletion on all machines.
-        let active = self.instances.iter().filter(|x| x.is_active()).cloned();
-        let context = CommandContext::default();
-        self.ssh_manager.execute(active, command, context).await?;
+        let active: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|x| x.is_active())
+            .cloned()
+            .map(|instance| (instance, command.clone()))
+            .collect();
+        let cleaned = self
+            .execute_per_instance_best_effort(active, CommandContext::default(), "Cleanup")
+            .await;
+        if cleaned.is_empty() {
+            display::warn("Cleanup could not reach any active instance; continuing");
+        }
 
         display::done();
         Ok(())
@@ -523,7 +625,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Collect metrics from the load generators.
     pub async fn run(
-        &self,
+        &mut self,
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<MeasurementsCollection> {
         display::action(format!(
@@ -536,9 +638,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let mut killed_nodes: Vec<Instance> = Vec::new();
 
         // Regularly scrape the client metrics.
+        let client_indices: HashMap<_, _> = clients
+            .iter()
+            .enumerate()
+            .map(|(i, client)| (client.id.clone(), i))
+            .collect();
         let metrics_commands = self
             .protocol_commands
-            .clients_metrics_command(clients, parameters);
+            .clients_metrics_command(clients.clone(), parameters);
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let mut metrics_interval = time::interval(self.settings.scrape_interval);
@@ -561,11 +668,20 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     instances.retain(|(instance, _)| !killed_nodes.contains(instance));
 
                     let stdio = self
-                        .ssh_manager
-                        .execute_per_instance(instances, CommandContext::default())
-                        .await?;
+                        .execute_per_instance_best_effort(
+                            instances,
+                            CommandContext::default(),
+                            "Metrics scrape",
+                        )
+                        .await;
+                    if stdio.is_empty() {
+                        display::warn("All metrics scrapes failed for this interval; continuing benchmark");
+                    }
 
-                    for (i, (stdout, _stderr)) in stdio.iter().enumerate() {
+                    for (instance, (stdout, _stderr)) in &stdio {
+                        let Some(i) = client_indices.get(&instance.id).copied() else {
+                            continue;
+                        };
                         for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
                             aggregator.add(i, label, measurement);
                         }
@@ -608,13 +724,12 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Download the log files from the nodes and clients.
-    pub async fn download_logs(
-        &self,
+    async fn download_logs_from_instances(
+        &mut self,
         parameters: &BenchmarkParameters,
+        clients: &[Instance],
+        nodes: &[Instance],
     ) -> TestbedResult<LogsAnalyzer> {
-        // Select the instances to run.
-        let (clients, nodes, _) = self.select_instances(parameters)?;
-
         // Create a log sub-directory for this run.
         let commit = &self.settings.repository.commit;
         let path: PathBuf = [
@@ -629,24 +744,45 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // NOTE: Our ssh library does not seem to be able to transfers files in parallel
         // reliably.
         let mut log_parsers = Vec::new();
+        let ssh_manager = self.log_download_ssh_manager();
 
         // Download the clients log files.
         display::action("Downloading clients logs");
         for (i, instance) in clients.iter().enumerate() {
             display::status(format!("{}/{}", i + 1, clients.len()));
 
-            let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
-            match connection.download("client.log") {
-                Err(e) => display::error(format!(
-                    "Failed to download client logs from {} - {}",
-                    instance.main_ip, e
-                )),
-                Ok(client_log_content) => {
-                    let client_log_file = [path.clone(), format!("client-{i}.log").into()]
+            match self
+                .download_compressed_log(&ssh_manager, instance, "client.log")
+                .await
+            {
+                Err(e) => {
+                    display::error(format!(
+                        "Failed to download client logs from {} - {}",
+                        instance.main_ip, e
+                    ));
+                    self.mark_instances_inactive(std::slice::from_ref(instance));
+                }
+                Ok(compressed_log) => {
+                    let client_log_file = [path.clone(), format!("client-{i}.log.gz").into()]
                         .iter()
                         .collect::<PathBuf>();
-                    fs::write(&client_log_file, client_log_content.as_bytes())
-                        .expect("Cannot write client log file");
+                    fs::write(&client_log_file, &compressed_log).map_err(|error| {
+                        TestbedError::LogProcessingError(format!(
+                            "failed to write {}: {error}",
+                            client_log_file.display()
+                        ))
+                    })?;
+
+                    let client_log_content = match self.decompress_log(
+                        &compressed_log,
+                        &format!("client log from {}", instance.main_ip),
+                    ) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            display::error(error.to_string());
+                            continue;
+                        }
+                    };
 
                     let mut log_parser = LogsAnalyzer::default();
                     log_parser.set_client_errors(&client_log_content);
@@ -660,18 +796,38 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         for (i, instance) in nodes.iter().enumerate() {
             display::status(format!("{}/{}", i + 1, nodes.len()));
 
-            let connection = self.ssh_manager.connect(instance.ssh_address()).await?;
-            match connection.download("node.log") {
-                Err(e) => display::error(format!(
-                    "Failed to download node logs from {} - {}",
-                    instance.main_ip, e
-                )),
-                Ok(node_log_content) => {
-                    let node_log_file = [path.clone(), format!("node-{i}.log").into()]
+            match self
+                .download_compressed_log(&ssh_manager, instance, "node.log")
+                .await
+            {
+                Err(e) => {
+                    display::error(format!(
+                        "Failed to download node logs from {} - {}",
+                        instance.main_ip, e
+                    ));
+                    self.mark_instances_inactive(std::slice::from_ref(instance));
+                }
+                Ok(compressed_log) => {
+                    let node_log_file = [path.clone(), format!("node-{i}.log.gz").into()]
                         .iter()
                         .collect::<PathBuf>();
-                    fs::write(&node_log_file, node_log_content.as_bytes())
-                        .expect("Cannot write log file");
+                    fs::write(&node_log_file, &compressed_log).map_err(|error| {
+                        TestbedError::LogProcessingError(format!(
+                            "failed to write {}: {error}",
+                            node_log_file.display()
+                        ))
+                    })?;
+
+                    let node_log_content = match self.decompress_log(
+                        &compressed_log,
+                        &format!("node log from {}", instance.main_ip),
+                    ) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            display::error(error.to_string());
+                            continue;
+                        }
+                    };
 
                     let mut log_parser = LogsAnalyzer::default();
                     log_parser.set_node_errors(&node_log_content);
@@ -681,10 +837,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
         display::done();
 
-        Ok(log_parsers
-            .into_iter()
-            .max()
-            .expect("At least one log parser"))
+        if log_parsers.is_empty() {
+            display::warn("No logs could be downloaded; skipping log analysis");
+        }
+
+        Ok(log_parsers.into_iter().max().unwrap_or_default())
     }
 
     async fn prepare_benchmark_suite(&mut self) -> TestbedResult<()> {
@@ -719,6 +876,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     ) -> TestbedResult<Option<MeasurementsCollection>> {
         // Cleanup the testbed (in case the previous run was not completed).
         self.cleanup(true).await?;
+        let (selected_clients, selected_nodes, _) = self.select_instances(parameters)?;
         // Start the instance monitoring tools.
         self.start_monitoring(parameters).await?;
 
@@ -745,7 +903,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         // Download the log files.
         if self.settings.log_processing {
-            let error_counter = self.download_logs(parameters).await?;
+            let error_counter = self
+                .download_logs_from_instances(parameters, &selected_clients, &selected_nodes)
+                .await?;
             error_counter.print_summary();
         }
 

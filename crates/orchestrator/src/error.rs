@@ -103,4 +103,7 @@ pub enum TestbedError {
 
     #[error(transparent)]
     MonitorError(#[from] MonitorError),
+
+    #[error("Failed to process logs: {0}")]
+    LogProcessingError(String),
 }
