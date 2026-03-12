@@ -22,13 +22,15 @@ use tokio::{
 };
 
 use crate::{
-    config::NodePublicConfig,
+    config::{NodeParameters, NodePublicConfig},
     data::Data,
     metrics::{Metrics, print_network_address_table},
     runtime,
     runtime::JoinHandle,
     stat::HistogramSender,
-    types::{AuthorityIndex, BlockReference, ProvableShard, RoundNumber, VerifiedBlock},
+    types::{
+        AuthorityIndex, BlockReference, PartialSig, ProvableShard, RoundNumber, VerifiedBlock,
+    },
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
@@ -147,7 +149,7 @@ pub enum NetworkMessage {
     MissingTxDataRequest(Vec<BlockReference>),
     /// Standalone partial BLS signature (DAC, round pre-sign, or leader
     /// pre-sign).
-    PartialSig(crate::types::PartialSig),
+    PartialSig(PartialSig),
 }
 
 impl NetworkMessage {
@@ -206,7 +208,7 @@ impl Network {
         our_id: usize,
         local_addr: SocketAddr,
         metrics: Arc<Metrics>,
-        node_parameters: &crate::config::NodeParameters,
+        node_parameters: &NodeParameters,
     ) -> Self {
         if our_id >= addresses.len() {
             panic!(
@@ -667,7 +669,7 @@ impl Worker {
 /// If `seed == 0`, the table is initialized with all zeros.
 /// expected mean latency for a quorum of nodes should be below within expected
 /// thresholds
-fn generate_latency_table(n: usize, node_params: &crate::config::NodeParameters) -> Vec<Vec<f64>> {
+fn generate_latency_table(n: usize, node_params: &NodeParameters) -> Vec<Vec<f64>> {
     let mut resulting_table = vec![vec![]; n];
 
     // Priority: uniform_latency_ms > mimic_latency > zero

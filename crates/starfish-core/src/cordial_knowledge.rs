@@ -522,6 +522,13 @@ impl ConnectionKnowledge {
         }
     }
 
+    /// Batch variant: record that multiple headers from this peer were useful.
+    pub fn mark_headers_useful_from_peer(&mut self, block_refs: &[BlockReference]) {
+        for block_ref in block_refs {
+            self.mark_header_useful_from_peer(*block_ref);
+        }
+    }
+
     /// Record that a header from this authority is currently useful to the
     /// peer, based on an explicit request they sent us.
     pub fn mark_header_useful_to_peer(&mut self, block_ref: BlockReference) {
@@ -533,6 +540,13 @@ impl ConnectionKnowledge {
                 None => *entry = Some(block_ref.round),
                 _ => {}
             }
+        }
+    }
+
+    /// Batch variant: record that multiple shards from this peer were useful.
+    pub fn mark_shards_useful_from_peer(&mut self, block_refs: &[BlockReference]) {
+        for block_ref in block_refs {
+            self.mark_shard_useful_from_peer(*block_ref);
         }
     }
 

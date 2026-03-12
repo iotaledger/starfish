@@ -21,24 +21,26 @@ use tokio::{
 
 use crate::{
     block_handler::BlockHandler,
-    bls_service::{BlsServiceHandle, BlsServiceMessage},
+    bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
+    bls_service::{BlsServiceHandle, BlsServiceMessage, start_bls_service},
     broadcaster::{BlockDisseminator, BlockFetcher, BroadcasterParameters, DataRequester},
     committee::Committee,
-    config::NodeParameters,
+    config::{DisseminationMode, NodeParameters},
     consensus::universal_committer::UniversalCommitter,
     cordial_knowledge::{ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage},
     core::Core,
     core_thread::CoreThreadDispatcher,
+    crypto::BlsSigner,
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
-    network::{BlockBatch, Connection, Network, NetworkMessage},
+    network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
-    shard_reconstructor::ShardMessage,
+    shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock,
-        format_authority_index,
+        AuthorityIndex, BlockDigest, BlockReference, PartialSig, PartialSigKind, ProvableShard,
+        RoundNumber, VerifiedBlock, format_authority_index,
     },
 };
 
@@ -70,9 +72,9 @@ impl FilterForBlocks {
         }
     }
 
-    /// Returns `true` if the digest is already tracked in the filter.
-    fn contains(&self, digest: &BlockDigest) -> bool {
-        self.digests.read().contains(digest)
+    fn contains_batch(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let set = self.digests.read();
+        digests.iter().map(|d| set.contains(d)).collect()
     }
 
     fn insert_batch(&self, new_digests: &[BlockDigest]) {
@@ -90,6 +92,32 @@ impl FilterForBlocks {
                 digests.remove(&removed);
             }
         }
+    }
+
+    /// Inserts all digests and returns `true` for each that was genuinely new
+    /// (not already in the filter and not duplicated earlier in the batch).
+    fn insert_and_report_new(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let mut set = self.digests.write();
+        let mut queue = self.queue.write();
+
+        let is_new: Vec<bool> = digests
+            .iter()
+            .map(|d| {
+                if set.insert(*d) {
+                    queue.push_back(*d);
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        while queue.len() > MAX_FILTER_SIZE {
+            if let Some(removed) = queue.pop_front() {
+                set.remove(&removed);
+            }
+        }
+        is_new
     }
 
     /// For each header digest, returns `true` if the digest has not been seen
@@ -137,23 +165,23 @@ impl FilterForShards {
         }
     }
 
-    fn add(&self, digest: BlockDigest, shard_index: usize) {
+    fn add_batch(&self, entries: &[(BlockDigest, usize)]) {
         let mut digests = self.digests.write();
         let mut queue = self.queue.write();
-
-        let entry = digests.entry(digest).or_insert_with(|| {
-            queue.push_back(digest);
-            ShardStatus {
-                count: 0,
-                bitmap: 0,
+        for &(digest, shard_index) in entries {
+            let entry = digests.entry(digest).or_insert_with(|| {
+                queue.push_back(digest);
+                ShardStatus {
+                    count: 0,
+                    bitmap: 0,
+                }
+            });
+            let mask = 1u128 << shard_index;
+            if entry.bitmap & mask == 0 {
+                entry.bitmap |= mask;
+                entry.count += 1;
             }
-        });
-        let mask = 1u128 << shard_index;
-        if entry.bitmap & mask == 0 {
-            entry.bitmap |= mask;
-            entry.count += 1;
         }
-
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 digests.remove(&removed);
@@ -161,26 +189,27 @@ impl FilterForShards {
         }
     }
 
-    /// Mark a digest as fully available (stop accepting further shards).
-    fn mark_full(&self, digest: BlockDigest) {
-        let mut digests = self.digests.write();
-        let mut queue = self.queue.write();
-
-        let entry = digests.entry(digest).or_insert_with(|| {
-            queue.push_back(digest);
-            ShardStatus {
-                count: 0,
-                bitmap: 0,
-            }
-        });
-        entry.count = self.info_length;
+    fn has_full_batch(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let map = self.digests.read();
+        digests
+            .iter()
+            .map(|d| map.get(d).is_some_and(|s| s.count >= self.info_length))
+            .collect()
     }
 
-    fn has_full(&self, digest: &BlockDigest) -> bool {
-        self.digests
-            .read()
-            .get(digest)
-            .is_some_and(|status| status.count >= self.info_length)
+    fn mark_full_batch(&self, batch: &[BlockDigest]) {
+        let mut digests = self.digests.write();
+        let mut queue = self.queue.write();
+        for &digest in batch {
+            let entry = digests.entry(digest).or_insert_with(|| {
+                queue.push_back(digest);
+                ShardStatus {
+                    count: 0,
+                    bitmap: 0,
+                }
+            });
+            entry.count = self.info_length;
+        }
     }
 }
 
@@ -188,7 +217,7 @@ fn infer_peer_knowledge_from_received_batch(
     ck: &mut ConnectionKnowledge,
     full_blocks: &[Data<VerifiedBlock>],
     headers: &[Data<VerifiedBlock>],
-    shards: &[crate::network::ShardPayload],
+    shards: &[ShardPayload],
 ) {
     for block in full_blocks.iter().chain(headers.iter()) {
         // Peer knows this block's header because they sent it.
@@ -317,9 +346,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 // DAC sigs are addressed: accept only if block author is us.
                 // Round/Leader sigs are broadcast: always accept.
                 let dominated = match sig.kind {
-                    crate::types::PartialSigKind::Dac(block_ref) => {
-                        block_ref.authority != self.inner.dag_state.get_own_authority_index()
-                    }
+                    PartialSigKind::Dac(block_ref) => block_ref.authority != self.own_id,
                     _ => false,
                 };
                 if !dominated {
@@ -342,14 +369,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             self.disseminator.disseminate_own_blocks(round).await;
         } else {
             match self.inner.dissemination_mode {
-                crate::config::DisseminationMode::Pull => {
+                DisseminationMode::Pull => {
                     self.disseminator.disseminate_own_blocks(round).await;
                 }
-                crate::config::DisseminationMode::PushCausal
-                | crate::config::DisseminationMode::PushUseful => {
+                DisseminationMode::PushCausal | DisseminationMode::PushUseful => {
                     self.disseminator.start_push_batch_stream(round).await;
                 }
-                crate::config::DisseminationMode::ProtocolDefault => {
+                DisseminationMode::ProtocolDefault => {
                     unreachable!("protocol-default dissemination mode must be resolved")
                 }
             }
@@ -442,7 +468,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
-            self.process_blocks_without_transactions(blocks_without_transactions)
+            self.process_block_headers(blocks_without_transactions)
                 .await;
         }
 
@@ -452,13 +478,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // Then process blocks with transactions
-        self.process_blocks_with_transactions(blocks_with_transactions)
-            .await;
+        self.process_full_blocks(blocks_with_transactions).await;
 
         drop(timer);
     }
 
-    async fn process_standalone_shards(&mut self, shards: Vec<crate::network::ShardPayload>) {
+    async fn process_standalone_shards(&mut self, shards: Vec<ShardPayload>) {
         let maybe_tx = self.inner.shard_tx.lock().clone();
         let Some(shard_tx) = maybe_tx else { return };
         let connection_knowledge = self
@@ -467,12 +492,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .connection_knowledge(self.peer_id);
         let committee_size = self.inner.committee.len();
 
-        let mut batch = Vec::new();
-
+        // --- verify loop (only read locks on filter_for_shards) ---
+        let mut verified: Vec<(BlockReference, ShardMessage, usize)> = Vec::new();
         for payload in shards {
+            let shard_index = payload.shard.shard_index();
             if !self
                 .filter_for_shards
-                .needed(&payload.block_reference.digest, payload.shard.shard_index())
+                .needed(&payload.block_reference.digest, shard_index)
             {
                 continue;
             }
@@ -487,27 +513,39 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 continue;
             }
 
-            if let Some(ck) = connection_knowledge.as_ref() {
-                ck.write()
-                    .mark_shard_useful_from_peer(payload.block_reference);
-            }
-
-            batch.push(ShardMessage::Shard {
-                block_reference: payload.block_reference,
-                merkle_root: payload.shard.transactions_commitment(),
-                shard: payload.shard.shard().clone(),
-                shard_index: payload.shard.shard_index(),
-            });
-            self.filter_for_shards
-                .add(payload.block_reference.digest, payload.shard.shard_index());
+            verified.push((
+                payload.block_reference,
+                ShardMessage::Shard {
+                    block_reference: payload.block_reference,
+                    merkle_root: payload.shard.transactions_commitment(),
+                    shard: payload.shard.shard().clone(),
+                    shard_index,
+                },
+                shard_index,
+            ));
         }
 
+        // --- batch CK update (one write lock) ---
+        if let Some(ck) = connection_knowledge.as_ref() {
+            let refs: Vec<_> = verified.iter().map(|(r, _, _)| *r).collect();
+            ck.write().mark_shards_useful_from_peer(&refs);
+        }
+
+        // --- batch filter update (one write lock) ---
+        let filter_entries: Vec<_> = verified
+            .iter()
+            .map(|(r, _, idx)| (r.digest, *idx))
+            .collect();
+        self.filter_for_shards.add_batch(&filter_entries);
+
+        // --- send batch ---
+        let batch: Vec<_> = verified.into_iter().map(|(_, msg, _)| msg).collect();
         if !batch.is_empty() {
             let _ = shard_tx.send(batch).await;
         }
     }
 
-    async fn process_blocks_without_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_block_headers(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
@@ -516,6 +554,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         let needed_before_verify = self.filter_for_blocks.needed_headers(&incoming_digests);
         let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
 
+        // --- verify loop (no per-block lock acquisition) ---
         for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
             if !is_needed {
                 self.metrics.filtered_blocks_total.inc();
@@ -545,21 +584,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     break;
                 }
             };
-
-            if let Some(ck) = connection_knowledge.as_ref() {
-                let mut ck = ck.write();
-                ck.mark_header_useful_from_peer(*block.reference());
-            }
             verified_blocks.push(block);
         }
 
+        // --- batch connection knowledge update (one lock acquisition) ---
+        if let Some(ck) = connection_knowledge.as_ref() {
+            let refs: Vec<_> = verified_blocks.iter().map(|b| *b.reference()).collect();
+            let mut ck = ck.write();
+            ck.mark_headers_useful_from_peer(&refs);
+        }
+
+        // --- batch filter insert + new-detection (one lock acquisition) ---
+        let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
+        let is_new = self.filter_for_blocks.insert_and_report_new(&digests);
         let mut new_data_blocks = Vec::new();
-        let mut digests_to_insert = Vec::new();
-        for storage_block in verified_blocks {
-            let digest = storage_block.digest();
-            let send_to_core = !self.filter_for_blocks.contains(&digest);
-            digests_to_insert.push(digest);
-            if send_to_core {
+        for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
+            if is_new {
                 let mut storage_block = storage_block;
                 storage_block.preserialize();
                 debug_assert!(
@@ -568,10 +608,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 );
                 new_data_blocks.push(Data::new(storage_block));
             }
-        }
-
-        if !digests_to_insert.is_empty() {
-            self.filter_for_blocks.insert_batch(&digests_to_insert);
         }
 
         tracing::debug!(
@@ -620,23 +656,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_blocks_with_transactions(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_full_blocks(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
             .connection_knowledge(self.peer_id);
         let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
-        let mut seen_in_batch = AHashSet::with_capacity(incoming_digests.len());
-        let mut verified_data_blocks = Vec::new();
-        let mut verified_has_shard = Vec::new();
-        let mut verified_block_shards = Vec::new();
         let shard_tx = self.inner.shard_tx.lock().clone();
 
-        for (data_block, digest) in blocks.into_iter().zip(incoming_digests) {
-            if !seen_in_batch.insert(digest)
-                || (self.filter_for_blocks.contains(&digest)
-                    && self.filter_for_shards.has_full(&digest))
-            {
+        // --- batch pre-filter (one read lock each) ---
+        let block_known = self.filter_for_blocks.contains_batch(&incoming_digests);
+        let shard_full = self.filter_for_shards.has_full_batch(&incoming_digests);
+
+        // --- verify loop (no lock acquisitions) ---
+        let mut verified: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
+        for ((data_block, _digest), (bk, sf)) in blocks
+            .into_iter()
+            .zip(incoming_digests)
+            .zip(block_known.into_iter().zip(shard_full))
+        {
+            if bk && sf {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
@@ -661,17 +700,32 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     break;
                 }
             };
-            if let Some(ck) = connection_knowledge.as_ref() {
-                let mut ck = ck.write();
-                ck.mark_header_useful_from_peer(*block.reference());
-                if shard.is_some() {
-                    ck.mark_shard_useful_from_peer(*block.reference());
-                }
-            }
-            self.filter_for_blocks.insert_batch(&[digest]);
-            self.filter_for_shards.mark_full(digest);
+            verified.push((block, shard));
+        }
+
+        // --- batch CK update (one write lock) ---
+        if let Some(ck) = connection_knowledge.as_ref() {
+            let header_refs: Vec<_> = verified.iter().map(|(b, _)| *b.reference()).collect();
+            let shard_refs: Vec<_> = verified
+                .iter()
+                .filter_map(|(b, s)| s.as_ref().map(|_| *b.reference()))
+                .collect();
+            let mut ck = ck.write();
+            ck.mark_headers_useful_from_peer(&header_refs);
+            ck.mark_shards_useful_from_peer(&shard_refs);
+        }
+
+        // --- batch filter updates (one write lock each) ---
+        let verified_digests: Vec<_> = verified.iter().map(|(b, _)| b.digest()).collect();
+        self.filter_for_blocks.insert_batch(&verified_digests);
+        self.filter_for_shards.mark_full_batch(&verified_digests);
+
+        // --- preserialize + collect ---
+        let mut verified_data_blocks = Vec::new();
+        let mut verified_has_shard = Vec::new();
+        let mut verified_block_shards = Vec::new();
+        for (mut block, shard) in verified {
             let has_shard = shard.is_some();
-            let mut block = block;
             block.preserialize();
             debug_assert!(
                 block.serialized_header_bytes().is_some(),
@@ -687,7 +741,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if let Some(shard_tx) = shard_tx.as_ref() {
             let full_block_msgs: Vec<_> = verified_data_blocks
                 .iter()
-                .map(|b| crate::shard_reconstructor::ShardMessage::FullBlock(*b.reference()))
+                .map(|b| ShardMessage::FullBlock(*b.reference()))
                 .collect();
             if !full_block_msgs.is_empty() {
                 let _ = shard_tx.send(full_block_msgs).await;
@@ -773,7 +827,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.dissemination_mode == crate::config::DisseminationMode::PushUseful {
+            if self.inner.dissemination_mode == DisseminationMode::PushUseful {
                 if let Some(ck) = self
                     .inner
                     .cordial_knowledge
@@ -823,7 +877,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 block_references,
                 self.peer
             );
-            if self.inner.dissemination_mode == crate::config::DisseminationMode::PushUseful {
+            if self.inner.dissemination_mode == DisseminationMode::PushUseful {
                 if let Some(ck) = self
                     .inner
                     .cordial_knowledge
@@ -876,7 +930,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub block_ready_notify: Arc<Notify>,
     pub threshold_clock_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
-    pub dissemination_mode: crate::config::DisseminationMode,
+    pub dissemination_mode: DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
     pub gc_round: Arc<AtomicU32>,
@@ -896,9 +950,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         mut commit_observer: C,
         metrics: Arc<Metrics>,
         node_parameters: NodeParameters,
-        partial_sig_outbox_rx: Option<mpsc::UnboundedReceiver<crate::types::PartialSig>>,
-        bls_cert_aggregator: Option<crate::bls_certificate_aggregator::BlsCertificateAggregator>,
-        bls_signer: Option<crate::crypto::BlsSigner>,
+        partial_sig_outbox_rx: Option<mpsc::UnboundedReceiver<PartialSig>>,
+        bls_cert_aggregator: Option<BlsCertificateAggregator>,
+        bls_signer: Option<BlsSigner>,
     ) -> Self {
         let handle = Handle::current();
         let block_ready_notify = Arc::new(Notify::new());
@@ -945,9 +999,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
-            let (decoded_tx, decoded_rx) =
-                mpsc::channel::<crate::shard_reconstructor::DecodedBlocks>(1000);
-            let reconstructor_handle = crate::shard_reconstructor::start_shard_reconstructor(
+            let (decoded_tx, decoded_rx) = mpsc::channel::<DecodedBlocks>(1000);
+            let reconstructor_handle = start_shard_reconstructor(
                 committee.clone(),
                 dag_state.get_own_authority_index(),
                 metrics.clone(),
@@ -1009,7 +1062,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             handle.spawn(async move {
                 while let Some(partial_sig) = rx.recv().await {
                     match partial_sig.kind {
-                        crate::types::PartialSigKind::Dac(block_ref) => {
+                        PartialSigKind::Dac(block_ref) => {
                             let target = block_ref.authority;
                             let sender = routing_inner.peer_senders.read().get(&target).cloned();
                             if let Some(sender) = sender {
@@ -1020,8 +1073,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .await;
                             }
                         }
-                        crate::types::PartialSigKind::Round(_)
-                        | crate::types::PartialSigKind::Leader(_) => {
+                        PartialSigKind::Round(_) | PartialSigKind::Leader(_) => {
                             let senders: Vec<_> = routing_inner
                                 .peer_senders
                                 .read()
@@ -1043,7 +1095,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Start BLS verification service and event bridge task.
         // The BLS service gets a broadcast sender for pre-computed partial sigs.
         let (bls_broadcast_tx, bls_broadcast_task) = if bls_signer.is_some() {
-            let (tx, mut rx) = mpsc::unbounded_channel::<crate::types::PartialSig>();
+            let (tx, mut rx) = mpsc::unbounded_channel::<PartialSig>();
             let routing_inner = inner.clone();
             let task = handle.spawn(async move {
                 while let Some(partial_sig) = rx.recv().await {
@@ -1073,10 +1125,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let (bls_service, bls_event_task) = if let (Some(aggregator), Some(bls_rx), Some(bls_tx)) =
             (bls_cert_aggregator, bls_msg_rx, bls_msg_tx)
         {
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<
-                Vec<crate::bls_certificate_aggregator::CertificateEvent>,
-            >();
-            crate::bls_service::start_bls_service(
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<CertificateEvent>>();
+            start_bls_service(
                 aggregator,
                 bls_tx.clone(),
                 bls_rx,
@@ -1261,8 +1311,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             for (round, signature) in inner.dag_state.precomputed_round_sigs() {
                 let _ = connection
                     .sender
-                    .send(NetworkMessage::PartialSig(crate::types::PartialSig {
-                        kind: crate::types::PartialSigKind::Round(round),
+                    .send(NetworkMessage::PartialSig(PartialSig {
+                        kind: PartialSigKind::Round(round),
                         signer: own_id,
                         signature,
                     }))
@@ -1271,8 +1321,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             for (leader_ref, signature) in inner.dag_state.precomputed_leader_sigs() {
                 let _ = connection
                     .sender
-                    .send(NetworkMessage::PartialSig(crate::types::PartialSig {
-                        kind: crate::types::PartialSigKind::Leader(leader_ref),
+                    .send(NetworkMessage::PartialSig(PartialSig {
+                        kind: PartialSigKind::Leader(leader_ref),
                         signer: own_id,
                         signature,
                     }))

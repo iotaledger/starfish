@@ -19,8 +19,8 @@ use crate::{
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
     types::{
-        AuthorityIndex, BlockReference, ReconstructedTransactionData, RoundNumber, Stake,
-        VerifiedBlock,
+        AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
+        ReconstructedTransactionData, RoundNumber, Stake, VerifiedBlock,
     },
 };
 
@@ -114,7 +114,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     pub fn add_blocks(
         &mut self,
-        blocks: Vec<(Data<VerifiedBlock>, Option<crate::types::ProvableShard>)>,
+        blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,
@@ -255,8 +255,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             // Send own block and DAC partial sig to BLS service.
             self.send_bls_message(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
             if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block) {
-                self.send_bls_message(BlsServiceMessage::PartialSig(crate::types::PartialSig {
-                    kind: crate::types::PartialSigKind::Dac(block_ref),
+                self.send_bls_message(BlsServiceMessage::PartialSig(PartialSig {
+                    kind: PartialSigKind::Dac(block_ref),
                     signer: auth,
                     signature: sig,
                 }));

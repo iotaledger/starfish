@@ -9,7 +9,7 @@ use crate::{
     committee::Committee,
     crypto::TransactionsCommitment,
     encoder::{Encoder, ShardEncoder},
-    types::{AuthorityIndex, ProvableShard, Shard, TransactionData},
+    types::{AuthorityIndex, BaseTransaction, ProvableShard, Shard, TransactionData},
 };
 
 pub type Decoder = ReedSolomonDecoder;
@@ -97,7 +97,7 @@ pub fn decode_shards(
 fn reconstruct_transactions_from_shards(
     encoded_transactions: &[Shard],
     info_length: usize,
-) -> Vec<crate::types::BaseTransaction> {
+) -> Vec<BaseTransaction> {
     let reconstructed_data: Vec<u8> = encoded_transactions
         .iter()
         .take(info_length)

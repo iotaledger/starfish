@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::{
     client::Instance,
-    ensure,
+    display, ensure,
     error::{SshError, SshResult},
 };
 
@@ -192,14 +192,14 @@ impl SshConnectionManager {
         let mut futures: FuturesUnordered<_> = handles.into_iter().collect();
         let mut results = Vec::with_capacity(total);
         let mut completed = 0usize;
-        crate::display::status(format!("{completed}/{total}"));
+        display::status(format!("{completed}/{total}"));
 
         while let Some(join_result) = futures.next().await {
             let result = join_result.unwrap()?;
             results.push(result);
             completed += 1;
             let elapsed = start.elapsed().as_secs();
-            crate::display::status(format!("{completed}/{total} {elapsed}s"));
+            display::status(format!("{completed}/{total} {elapsed}s"));
         }
         Ok(results)
     }

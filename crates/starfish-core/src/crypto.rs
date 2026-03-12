@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use zeroize::Zeroize;
 
 use crate::{
+    committee::Committee,
     crypto,
     types::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
@@ -840,7 +841,7 @@ pub fn bls_aggregate_public_keys(pubkeys: &[&BlsPublicKey]) -> Option<BlsPublicK
 }
 
 pub fn bls_public_keys_for_signers(
-    committee: &crate::committee::Committee,
+    committee: &Committee,
     signers: AuthoritySet,
 ) -> Option<Vec<&BlsPublicKey>> {
     let mut pubkeys = Vec::new();

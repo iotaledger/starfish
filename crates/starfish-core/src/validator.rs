@@ -25,7 +25,7 @@ use crate::{
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::AuthorityIndex,
+    types::{AuthorityIndex, PartialSig},
 };
 
 pub struct Validator {
@@ -127,7 +127,7 @@ impl Validator {
         let is_starfish_l =
             recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls;
         let (partial_sig_tx, partial_sig_rx) = if is_starfish_l {
-            let (tx, rx) = mpsc::unbounded_channel::<crate::types::PartialSig>();
+            let (tx, rx) = mpsc::unbounded_channel::<PartialSig>();
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -551,7 +551,7 @@ mod smoke_tests {
     /// Start a single validator.
     async fn start_validator(
         authority: usize,
-        committee: &std::sync::Arc<crate::committee::Committee>,
+        committee: &std::sync::Arc<Committee>,
         public_config: &NodePublicConfig,
         dir: &std::path::Path,
         committee_size: usize,

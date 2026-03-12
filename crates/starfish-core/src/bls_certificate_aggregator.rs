@@ -658,7 +658,7 @@ mod tests {
         crypto::{BlsSigner, Signer},
         dag_state::ConsensusProtocol,
         encoder::{Encoder, ShardEncoder},
-        types::{BaseTransaction, VerifiedBlock},
+        types::{AuthoritySet, BaseTransaction, VerifiedBlock},
     };
 
     fn make_starfish_bls_block(
@@ -757,7 +757,7 @@ mod tests {
                     bls_signers[0]
                         .sign_digest(&crypto::bls_dac_message(&BlockReference::new_test(1, 2))),
                     {
-                        let mut signers = crate::types::AuthoritySet::default();
+                        let mut signers = AuthoritySet::default();
                         assert!(signers.insert(0));
                         signers
                     },

@@ -60,7 +60,9 @@ pub struct NodeParameters {
 }
 
 pub mod node_defaults {
-    pub fn default_wave_length() -> super::RoundNumber {
+    use crate::types::RoundNumber;
+
+    pub fn default_wave_length() -> RoundNumber {
         3
     }
 
@@ -83,7 +85,7 @@ pub mod node_defaults {
         false
     }
 
-    pub fn default_causal_push_shard_round_lag() -> super::RoundNumber {
+    pub fn default_causal_push_shard_round_lag() -> RoundNumber {
         0
     }
 

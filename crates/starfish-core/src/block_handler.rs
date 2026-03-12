@@ -14,7 +14,7 @@ use crate::{
         linearizer::{CommittedSubDag, Linearizer},
     },
     crypto::AsBytes,
-    dag_state::{DacCertificateVerificationState, DagState, PendingSubDag},
+    dag_state::{ConsensusProtocol, DacCertificateVerificationState, DagState, PendingSubDag},
     data::Data,
     metrics::Metrics,
     runtime::{self, TimeInstant},
@@ -323,7 +323,7 @@ impl CommitObserver for RealCommitHandler {
                 self.metrics.benchmark_duration.inc_by(delta);
             }
         }
-        if dag_state.consensus_protocol == crate::dag_state::ConsensusProtocol::StarfishBls {
+        if dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
             let mut pending = dag_state.read_pending_not_certified();
             pending.append(&mut committed);
             let (certified, unresolved) = self.drain_certified_commits(dag_state, pending);

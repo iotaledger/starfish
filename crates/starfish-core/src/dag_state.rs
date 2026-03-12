@@ -15,6 +15,8 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "tidehunter")]
+use crate::tidehunter_store::TideHunterStore;
 use crate::{
     bls_certificate_aggregator::CertificateEvent,
     committee::{Committee, QuorumThreshold, StakeAggregator},
@@ -81,10 +83,10 @@ impl ConsensusProtocol {
     pub fn default_dissemination_mode(self) -> DisseminationMode {
         match self {
             ConsensusProtocol::Mysticeti => DisseminationMode::Pull,
-            ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::Starfish
+            ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
+            ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
+            | ConsensusProtocol::StarfishBls => DisseminationMode::PushUseful,
         }
     }
 
@@ -278,10 +280,7 @@ impl DagState {
             StorageBackend::Tidehunter => {
                 tracing::info!("Using TideHunter storage backend");
                 metrics.storage_backend_info.set(1);
-                Arc::new(
-                    crate::tidehunter_store::TideHunterStore::open(&path)
-                        .expect("Failed to open TideHunter"),
-                )
+                Arc::new(TideHunterStore::open(&path).expect("Failed to open TideHunter"))
             }
             #[cfg(not(feature = "tidehunter"))]
             StorageBackend::Tidehunter => {
@@ -685,7 +684,7 @@ impl DagState {
     pub fn get_transactions_commitment(
         &self,
         reference: &BlockReference,
-    ) -> Option<crate::crypto::TransactionsCommitment> {
+    ) -> Option<TransactionsCommitment> {
         self.dag_state_inner
             .read()
             .get_storage_block(*reference)
@@ -2602,7 +2601,7 @@ mod tests {
     use prometheus::Registry;
     use tempfile::TempDir;
 
-    use super::{CACHED_ROUNDS, ConsensusProtocol, DagState};
+    use super::{CACHED_ROUNDS, ConsensusProtocol, DacCertificateVerificationState, DagState};
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
@@ -2960,17 +2959,17 @@ mod tests {
 
         assert_eq!(
             dag_state.dac_certificate_state(&unchecked),
-            super::DacCertificateVerificationState::Unchecked
+            DacCertificateVerificationState::Unchecked
         );
         assert!(dag_state.mark_dac_rejected(rejected));
         assert_eq!(
             dag_state.dac_certificate_state(&rejected),
-            super::DacCertificateVerificationState::Rejected
+            DacCertificateVerificationState::Rejected
         );
         assert!(dag_state.mark_dac_certified(verified, cert));
         assert_eq!(
             dag_state.dac_certificate_state(&verified),
-            super::DacCertificateVerificationState::Verified
+            DacCertificateVerificationState::Verified
         );
         assert!(!dag_state.mark_dac_certified(rejected, cert));
     }
@@ -2987,12 +2986,12 @@ mod tests {
         );
         assert_eq!(
             ConsensusProtocol::Starfish.default_dissemination_mode(),
-            DisseminationMode::PushCausal
+            DisseminationMode::PushUseful
         );
         assert_eq!(
             ConsensusProtocol::StarfishBls
                 .resolve_dissemination_mode(DisseminationMode::ProtocolDefault),
-            DisseminationMode::PushCausal
+            DisseminationMode::PushUseful
         );
         assert_eq!(
             ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushUseful),
