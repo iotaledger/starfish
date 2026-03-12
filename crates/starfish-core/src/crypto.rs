@@ -13,7 +13,6 @@ use zeroize::Zeroize;
 
 use crate::{
     crypto,
-    serde::ByteRepr,
     types::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
         Shard, TimestampNs,
@@ -522,17 +521,6 @@ impl Default for SignatureBytes {
     }
 }
 
-impl ByteRepr for SignatureBytes {
-    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
-        if v.len() != SIGNATURE_SIZE {
-            return Err(E::custom(format!("Invalid signature length: {}", v.len())));
-        }
-        let mut inner = [0u8; SIGNATURE_SIZE];
-        inner.copy_from_slice(v);
-        Ok(Self(inner))
-    }
-}
-
 impl Serialize for SignatureBytes {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -543,34 +531,6 @@ impl Serialize for SignatureBytes {
 impl<'de> Deserialize<'de> for SignatureBytes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserialize_fixed_bytes::<D, SIGNATURE_SIZE>(deserializer, "signature").map(Self)
-    }
-}
-
-impl ByteRepr for BlockDigest {
-    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
-        if v.len() != BLOCK_DIGEST_SIZE {
-            return Err(E::custom(format!(
-                "Invalid block digest length: {}",
-                v.len()
-            )));
-        }
-        let mut inner = [0u8; BLOCK_DIGEST_SIZE];
-        inner.copy_from_slice(v);
-        Ok(Self(inner))
-    }
-}
-
-impl ByteRepr for TransactionsCommitment {
-    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
-        if v.len() != BLOCK_DIGEST_SIZE {
-            return Err(E::custom(format!(
-                "Invalid block digest length: {}",
-                v.len()
-            )));
-        }
-        let mut inner = [0u8; BLOCK_DIGEST_SIZE];
-        inner.copy_from_slice(v);
-        Ok(Self(inner))
     }
 }
 
@@ -666,20 +626,6 @@ impl AsRef<[u8]> for BlsSignatureBytes {
     }
 }
 
-impl ByteRepr for BlsSignatureBytes {
-    fn try_copy_from_slice<E: de::Error>(v: &[u8]) -> Result<Self, E> {
-        if v.len() != BLS_SIGNATURE_SIZE {
-            return Err(E::custom(format!(
-                "Invalid BLS signature length: {}",
-                v.len()
-            )));
-        }
-        let mut inner = [0u8; BLS_SIGNATURE_SIZE];
-        inner.copy_from_slice(v);
-        Ok(Self(inner))
-    }
-}
-
 impl Serialize for BlsSignatureBytes {
     #[inline]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -750,7 +696,8 @@ impl Serialize for BlsPublicKey {
 
 impl<'de> Deserialize<'de> for BlsPublicKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bytes = deserialize_fixed_bytes::<D, BLS_PUBLIC_KEY_SIZE>(deserializer, "BLS public key")?;
+        let bytes =
+            deserialize_fixed_bytes::<D, BLS_PUBLIC_KEY_SIZE>(deserializer, "BLS public key")?;
         BlsPublicKey::from_bytes(&bytes)
             .map_err(|e| de::Error::custom(format!("Invalid BLS public key: {:?}", e)))
     }
