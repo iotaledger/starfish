@@ -34,6 +34,7 @@ use crate::{
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage},
     runtime::{Handle, JoinError, JoinHandle, sleep},
+    shard_reconstructor::ShardMessage,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockDigest, BlockReference, RoundNumber, VerifiedBlock,
@@ -458,8 +459,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn process_standalone_shards(&mut self, shards: Vec<crate::network::ShardPayload>) {
-        use crate::shard_reconstructor::ShardMessage;
-
         let maybe_tx = self.inner.shard_tx.lock().clone();
         let Some(shard_tx) = maybe_tx else { return };
         let connection_knowledge = self

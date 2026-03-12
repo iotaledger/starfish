@@ -18,6 +18,8 @@ use settings::{CloudProvider, Settings};
 use ssh::{CommandContext, SshConnectionManager};
 use testbed::Testbed;
 
+use starfish_core::config::DisseminationMode;
+
 mod benchmark;
 mod client;
 mod display;
@@ -443,8 +445,7 @@ fn load_benchmark_configs(
     Ok((node_parameters, client_parameters))
 }
 
-fn parse_dissemination_mode(mode: &str) -> eyre::Result<starfish_core::config::DisseminationMode> {
-    use starfish_core::config::DisseminationMode;
+fn parse_dissemination_mode(mode: &str) -> eyre::Result<DisseminationMode> {
     match mode {
         "protocol-default" => Ok(DisseminationMode::ProtocolDefault),
         "pull" => Ok(DisseminationMode::Pull),

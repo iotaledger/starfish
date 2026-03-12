@@ -27,3 +27,7 @@ cargo doc --no-deps --all-features
 ```
 
 If any check fails, fix the issue before committing. Do not use `--no-verify` or skip hooks.
+
+## Code Style
+
+- No inline `use` imports inside function bodies. All imports go at the top of their module (including `#[cfg(test)]` modules).

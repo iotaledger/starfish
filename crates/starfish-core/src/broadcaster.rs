@@ -27,7 +27,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     net_sync::NetworkSyncerInner,
-    network::{BlockBatch, NetworkMessage},
+    network::{BlockBatch, NetworkMessage, ShardPayload},
     runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock, format_authority_index},
@@ -303,8 +303,6 @@ where
         peer_id: AuthorityIndex,
         block_references: Vec<BlockReference>,
     ) -> Option<()> {
-        use crate::network::ShardPayload;
-
         let peer = format_authority_index(peer_id);
         let own_index = self.inner.dag_state.get_own_authority_index();
 

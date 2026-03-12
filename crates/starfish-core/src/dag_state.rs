@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    bls_certificate_aggregator::CertificateEvent,
     committee::{Committee, QuorumThreshold, StakeAggregator},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
@@ -752,12 +753,7 @@ impl DagState {
 
     /// Apply a batch of BLS certificate events while holding the DAG write
     /// lock once.
-    pub fn apply_certificate_events(
-        &self,
-        events: Vec<crate::bls_certificate_aggregator::CertificateEvent>,
-    ) -> bool {
-        use crate::bls_certificate_aggregator::CertificateEvent;
-
+    pub fn apply_certificate_events(&self, events: Vec<CertificateEvent>) -> bool {
         let mut inner = self.dag_state_inner.write();
         let mut changed = false;
         for event in events {
