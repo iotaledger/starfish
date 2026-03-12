@@ -106,7 +106,6 @@ unknown-registry = "deny"
 # in the allow list is encountered
 unknown-git = "deny"
 allow-git = [
-  "https://github.com/asonnino/prometheus-parser",
   "https://github.com/MystenLabs/tidehunter",
 ]
 

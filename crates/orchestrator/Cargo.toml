@@ -17,7 +17,7 @@ eyre = { workspace = true }
 futures = { workspace = true }
 itertools = "0.10.5"
 prettytable-rs = "0.10"
-prometheus-parse = { git = "https://github.com/asonnino/prometheus-parser.git", rev = "75334db" }
+prometheus-parse = "0.2"
 rand = "0.8.5"
 reqwest = { workspace = true }
 serde = { workspace = true }

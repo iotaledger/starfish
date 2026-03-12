@@ -852,10 +852,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -2632,12 +2630,13 @@ dependencies = [
 
 [[package]]
 name = "prometheus-parse"
-version = "0.2.3"
-source = "git+https://github.com/asonnino/prometheus-parser.git?rev=75334db#75334dbe2d286edf6d4424abba92a74643333096"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "811031bea65e5a401fb2e1f37d802cca6601e204ac463809a3189352d13b78a5"
 dependencies = [
  "chrono",
- "itertools 0.10.5",
- "lazy_static",
+ "itertools 0.12.1",
+ "once_cell",
  "regex",
 ]
 
