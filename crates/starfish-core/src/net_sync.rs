@@ -43,6 +43,19 @@ use crate::{
 
 const MAX_FILTER_SIZE: usize = 100_000;
 
+async fn send_network_message_reliably(
+    sender: &mpsc::Sender<NetworkMessage>,
+    message: NetworkMessage,
+) {
+    match sender.try_send(message) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(message)) => {
+            let _ = sender.send(message).await;
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
 struct FilterForBlocks {
     digests: parking_lot::RwLock<AHashSet<BlockDigest>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
@@ -310,7 +323,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 };
                 if !dominated {
                     if let Some(ref bls) = self.bls_service {
-                        bls.send(BlsServiceMessage::PartialSig(sig)).await;
+                        bls.send(BlsServiceMessage::PartialSig(sig));
                     }
                 }
             }
@@ -571,8 +584,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if !new_data_blocks.is_empty() {
             // Send block copies to BLS service for signature verification.
             if let Some(ref bls) = self.bls_service {
-                bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()))
-                    .await;
+                bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()));
             }
             // Notify CordialKnowledge about all new headers in one batch.
             let header_refs = new_data_blocks
@@ -694,8 +706,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ref bls) = self.bls_service {
                 bls.send(BlsServiceMessage::ProcessBlocks(
                     verified_data_blocks.clone(),
-                ))
-                .await;
+                ));
             }
             // Notify CordialKnowledge about all new headers and shards in one batch.
             let header_refs: Vec<_> = verified_data_blocks
@@ -905,7 +916,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Create BLS service channel — sender clones go to Syncer (Core thread)
         // and network connection handlers, receiver goes to the BLS service task.
         let (bls_msg_tx, bls_msg_rx) = if bls_cert_aggregator.is_some() {
-            let (tx, rx) = mpsc::channel::<BlsServiceMessage>(10_000);
+            let (tx, rx) = mpsc::unbounded_channel::<BlsServiceMessage>();
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -1001,16 +1012,29 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     match partial_sig.kind {
                         crate::types::PartialSigKind::Dac(block_ref) => {
                             let target = block_ref.authority;
-                            let msg = NetworkMessage::PartialSig(partial_sig);
-                            if let Some(sender) = routing_inner.peer_senders.read().get(&target) {
-                                let _ = sender.try_send(msg);
+                            let sender = routing_inner.peer_senders.read().get(&target).cloned();
+                            if let Some(sender) = sender {
+                                send_network_message_reliably(
+                                    &sender,
+                                    NetworkMessage::PartialSig(partial_sig),
+                                )
+                                .await;
                             }
                         }
                         crate::types::PartialSigKind::Round(_)
                         | crate::types::PartialSigKind::Leader(_) => {
-                            for sender in routing_inner.peer_senders.read().values() {
-                                let _ = sender
-                                    .try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                            let senders: Vec<_> = routing_inner
+                                .peer_senders
+                                .read()
+                                .values()
+                                .cloned()
+                                .collect();
+                            for sender in senders {
+                                send_network_message_reliably(
+                                    &sender,
+                                    NetworkMessage::PartialSig(partial_sig.clone()),
+                                )
+                                .await;
                             }
                         }
                     }
@@ -1025,8 +1049,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let task = handle.spawn(async move {
                 while let Some(partial_sig) = rx.recv().await {
                     // Pre-computed sigs are always round/leader, broadcast to all.
-                    for sender in routing_inner.peer_senders.read().values() {
-                        let _ = sender.try_send(NetworkMessage::PartialSig(partial_sig.clone()));
+                    let senders: Vec<_> = routing_inner
+                        .peer_senders
+                        .read()
+                        .values()
+                        .cloned()
+                        .collect();
+                    for sender in senders {
+                        send_network_message_reliably(
+                            &sender,
+                            NetworkMessage::PartialSig(partial_sig.clone()),
+                        )
+                        .await;
                     }
                 }
             });
@@ -1368,7 +1402,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                     // Notify BLS service to clean up old aggregator state.
                     if let Some(ref bls) = bls_service {
-                        bls.send(BlsServiceMessage::Cleanup(gc_round)).await;
+                        bls.send(BlsServiceMessage::Cleanup(gc_round));
                     }
 
                     // Evict stale entries from CordialKnowledge

@@ -400,13 +400,13 @@ fn compress_acknowledgments(
         .filter(|reference| !shared_suffix.contains(reference))
         .collect();
 
-    (
-        Some(
-            u8::try_from(intersection_start)
-                .expect("block reference intersection should fit into u8"),
-        ),
-        extra_acknowledgments,
-    )
+    let Some(intersection_start) = u8::try_from(intersection_start).ok() else {
+        // Large Starfish-BLS frontiers can exceed the compact suffix index.
+        // Fall back to the legacy full-ack encoding instead of panicking.
+        return (None, acknowledgment_references.to_vec());
+    };
+
+    (Some(intersection_start), extra_acknowledgments)
 }
 
 fn align_acknowledgment_certificates(
@@ -1489,6 +1489,20 @@ mod tests {
         assert_eq!(block.extra_acknowledgment_references(), &vec![d]);
         assert_eq!(block.acknowledgment_count(), 2);
         assert_eq!(block.acknowledgments(), vec![c, d]);
+    }
+
+    #[test]
+    fn falls_back_to_legacy_ack_encoding_when_suffix_index_exceeds_u8() {
+        let block_references: Vec<_> = (0..300)
+            .map(|round| BlockReference::new_test(0, round))
+            .collect();
+        let acknowledgment_references = block_references[290..].to_vec();
+
+        let (intersection, extra_acknowledgments) =
+            compress_acknowledgments(&block_references, &acknowledgment_references);
+
+        assert_eq!(intersection, None);
+        assert_eq!(extra_acknowledgments, acknowledgment_references);
     }
 
     #[test]

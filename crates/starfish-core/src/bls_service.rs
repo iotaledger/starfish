@@ -46,16 +46,16 @@ pub enum BlsServiceMessage {
 /// Handle for sending messages to the BLS service from async contexts.
 #[derive(Clone)]
 pub struct BlsServiceHandle {
-    sender: mpsc::Sender<BlsServiceMessage>,
+    sender: mpsc::UnboundedSender<BlsServiceMessage>,
 }
 
 impl BlsServiceHandle {
-    pub fn new(sender: mpsc::Sender<BlsServiceMessage>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<BlsServiceMessage>) -> Self {
         Self { sender }
     }
 
-    pub async fn send(&self, msg: BlsServiceMessage) {
-        let _ = self.sender.send(msg).await;
+    pub fn send(&self, msg: BlsServiceMessage) {
+        let _ = self.sender.send(msg);
     }
 }
 
@@ -65,8 +65,8 @@ impl BlsServiceHandle {
 /// for delivering accumulated certificate events to the Core thread.
 pub fn start_bls_service(
     aggregator: BlsCertificateAggregator,
-    sender: mpsc::Sender<BlsServiceMessage>,
-    receiver: mpsc::Receiver<BlsServiceMessage>,
+    sender: mpsc::UnboundedSender<BlsServiceMessage>,
+    receiver: mpsc::UnboundedReceiver<BlsServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<CertificateEvent>>,
     metrics: Arc<Metrics>,
     bls_signer: Option<BlsSigner>,
@@ -101,7 +101,7 @@ pub fn start_bls_service(
 #[allow(clippy::too_many_arguments)]
 async fn run_bls_service(
     aggregator: BlsCertificateAggregator,
-    mut receiver: mpsc::Receiver<BlsServiceMessage>,
+    mut receiver: mpsc::UnboundedReceiver<BlsServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<CertificateEvent>>,
     metrics: Arc<Metrics>,
     bls_signer: Option<BlsSigner>,
@@ -332,7 +332,7 @@ async fn run_bls_service(
 }
 
 async fn run_round_presign_signal_task(
-    sender: mpsc::Sender<BlsServiceMessage>,
+    sender: mpsc::UnboundedSender<BlsServiceMessage>,
     dag_state: DagState,
     block_ready_notify: Arc<Notify>,
     threshold_clock_notify: Arc<Notify>,
@@ -346,7 +346,6 @@ async fn run_round_presign_signal_task(
     if bootstrap_round > 0
         && sender
             .send(BlsServiceMessage::PresignRound(bootstrap_round))
-            .await
             .is_err()
     {
         return;
@@ -360,7 +359,6 @@ async fn run_round_presign_signal_task(
                 };
                 if sender
                     .send(BlsServiceMessage::PresignRound(reference.round + 1))
-                    .await
                     .is_err()
                 {
                     break;
@@ -371,10 +369,7 @@ async fn run_round_presign_signal_task(
                 if round == 0 {
                     continue;
                 }
-                if sender
-                    .send(BlsServiceMessage::PresignRound(round))
-                    .await
-                    .is_err()
+                if sender.send(BlsServiceMessage::PresignRound(round)).is_err()
                 {
                     break;
                 }
@@ -382,7 +377,6 @@ async fn run_round_presign_signal_task(
                 // ready when the next block is built.
                 if sender
                     .send(BlsServiceMessage::PresignRound(round + 1))
-                    .await
                     .is_err()
                 {
                     break;

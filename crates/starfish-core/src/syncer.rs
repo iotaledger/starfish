@@ -60,7 +60,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     pub(crate) subscribed_by_authorities: AHashSet<AuthorityIndex>,
     subscriber_stake: Stake,
     pub(crate) metrics: Arc<Metrics>,
-    bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
+    bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -90,7 +90,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
-        bls_tx: Option<mpsc::Sender<BlsServiceMessage>>,
+        bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
     ) -> Self {
         let committee_size = core.committee().len();
         let own_stake = core
@@ -253,23 +253,25 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             }
             self.proposal_wait_round = None;
             // Send own block and DAC partial sig to BLS service.
-            if let Some(ref bls_tx) = self.bls_tx {
-                let _ = bls_tx.try_send(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
-                if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block)
-                {
-                    let _ =
-                        bls_tx.try_send(BlsServiceMessage::PartialSig(crate::types::PartialSig {
-                            kind: crate::types::PartialSigKind::Dac(block_ref),
-                            signer: auth,
-                            signature: sig,
-                        }));
-                }
+            self.send_bls_message(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
+            if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block) {
+                self.send_bls_message(BlsServiceMessage::PartialSig(crate::types::PartialSig {
+                    kind: crate::types::PartialSigKind::Dac(block_ref),
+                    signer: auth,
+                    signature: sig,
+                }));
             }
             self.signals.new_block_ready();
             self.force_new_block = false;
             return true;
         }
         false
+    }
+
+    fn send_bls_message(&self, message: BlsServiceMessage) {
+        if let Some(ref sender) = self.bls_tx {
+            let _ = sender.send(message);
+        }
     }
 
     fn maybe_update_proposal_wait(&mut self) {
