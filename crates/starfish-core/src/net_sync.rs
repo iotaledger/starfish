@@ -754,6 +754,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
+            self.metrics
+                .block_sync_requests_received
+                .with_label_values(&[&self.peer_id.to_string()])
+                .inc();
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
                 block_references,
@@ -800,6 +804,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
+            self.metrics
+                .tx_data_requests_received
+                .with_label_values(&[&self.peer_id.to_string()])
+                .inc();
             tracing::debug!(
                 "Received request missing data {:?} from peer {:?}",
                 block_references,

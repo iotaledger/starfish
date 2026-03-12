@@ -78,7 +78,9 @@ pub struct Metrics {
     pub block_manager_pending_blocks: IntGauge,
     pub core_pending_reconstructed_data: IntGauge,
     pub block_sync_requests_sent: IntCounterVec,
+    pub block_sync_requests_received: IntCounterVec,
     pub tx_data_requests_sent: IntCounterVec,
+    pub tx_data_requests_received: IntCounterVec,
     pub committed_blocks: IntCounterVec,
 
     pub block_committed_latency: HistogramSender<Duration>,
@@ -662,10 +664,24 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            block_sync_requests_received: register_int_counter_vec_with_registry!(
+                "block_sync_requests_received",
+                "Number of block sync requests received per peer",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
             tx_data_requests_sent: register_int_counter_vec_with_registry!(
                 "tx_data_requests_sent",
                 "Number of transaction-data sync requests sent per authority",
                 &["authority"],
+                registry,
+            )
+            .unwrap(),
+            tx_data_requests_received: register_int_counter_vec_with_registry!(
+                "tx_data_requests_received",
+                "Number of transaction-data sync requests received per peer",
+                &["peer"],
                 registry,
             )
             .unwrap(),
