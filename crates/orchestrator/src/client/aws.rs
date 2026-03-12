@@ -146,23 +146,50 @@ impl AwsClient {
         }
     }
 
-    /// Check whether a (pre-lowercased) error message indicates an API
-    /// throttling / rate-limit error.
+    async fn rollback_instances(
+        &self,
+        client: &aws_sdk_ec2::Client,
+        instances: &[Instance],
+    ) -> CloudProviderResult<()> {
+        if instances.is_empty() {
+            return Ok(());
+        }
+
+        let instance_ids = instances
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect();
+        client
+            .terminate_instances()
+            .set_instance_ids(Some(instance_ids))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Check whether an error message indicates an API throttling / rate-limit
+    /// error.
     fn is_throttled_request(message: &str) -> bool {
+        let message = message.to_lowercase();
         message.contains("requestlimitexceeded")
             || message.contains("throttl")
             || message.contains("rate exceeded")
     }
 
-    fn should_fallback_to_ondemand_for_mixed(message: &str) -> bool {
+    fn is_capacity_related_request(message: &str) -> bool {
         let message = message.to_lowercase();
-        !Self::is_throttled_request(&message)
-            && (message.contains("insufficientspotinstancecapacity")
-                || message.contains("maxspotinstancecountexceeded")
-                || (message.contains("spot")
-                    && (message.contains("capacity")
-                        || message.contains("unavailable")
-                        || message.contains("price too low"))))
+        message.contains("insufficientinstancecapacity")
+            || message.contains("insufficient capacity")
+            || message.contains("insufficientspotinstancecapacity")
+            || message.contains("maxspotinstancecountexceeded")
+            || (message.contains("spot")
+                && (message.contains("capacity")
+                    || message.contains("unavailable")
+                    || message.contains("price too low")))
+    }
+
+    fn should_retry_smaller_spot_batch_for_mixed(message: &str) -> bool {
+        !Self::is_throttled_request(message) && Self::is_capacity_related_request(message)
     }
 
     /// Query the image id determining the os of the instances.
@@ -402,7 +429,7 @@ impl ServerProviderClient for AwsClient {
             }
         };
 
-        let build_request = |spot: bool| {
+        let build_request = |count: i32, spot: bool| {
             let tags = TagSpecificationBuilder::default()
                 .resource_type(ResourceType::Instance)
                 .tags(TagBuilder::default().key("Name").value(testbed_id).build())
@@ -441,23 +468,114 @@ impl ServerProviderClient for AwsClient {
         };
 
         let use_spot = matches!(self.settings.spot, SpotPolicy::Spot | SpotPolicy::Mixed);
-        let (response, got_spot) = match build_request(use_spot).send().await {
-            Ok(resp) => (resp, use_spot),
-            Err(e) if self.settings.spot == SpotPolicy::Mixed => {
-                let error_message = format!("{e:?}");
-                if Self::should_fallback_to_ondemand_for_mixed(&error_message) {
-                    eprintln!("Spot request failed in {region}, retrying as on-demand: {e}");
-                    (build_request(false).send().await?, false)
-                } else {
-                    return Err(e.into());
+        if self.settings.spot == SpotPolicy::Mixed {
+            let mut pending_spot_batches = vec![quantity];
+            let mut on_demand_quantity = 0usize;
+            let mut instances = Vec::with_capacity(quantity);
+
+            while let Some(batch_size) = pending_spot_batches.pop() {
+                let batch_count = i32::try_from(batch_size).map_err(|_| {
+                    CloudProviderError::UnexpectedResponse(format!(
+                        "Requested instance batch is too large for AWS API: {batch_size}"
+                    ))
+                })?;
+
+                match build_request(batch_count, true).send().await {
+                    Ok(response) => {
+                        let mut created = response
+                            .instances()
+                            .iter()
+                            .map(|instance| self.make_instance(region.clone(), instance, true))
+                            .collect::<Vec<_>>();
+                        if created.is_empty() {
+                            return Err(CloudProviderError::UnexpectedResponse(
+                                "AWS RunInstances returned no instances".into(),
+                            ));
+                        }
+                        instances.append(&mut created);
+                    }
+                    Err(error) => {
+                        let error_message = format!("{error:?}");
+                        if Self::should_retry_smaller_spot_batch_for_mixed(&error_message)
+                            && batch_size > 1
+                        {
+                            let left = batch_size / 2;
+                            let right = batch_size - left;
+                            eprintln!(
+                                "Spot request for {batch_size} instance(s) in {region} failed, splitting into {left} and {right}: {error}"
+                            );
+                            pending_spot_batches.push(right);
+                            pending_spot_batches.push(left);
+                            continue;
+                        }
+
+                        if Self::should_retry_smaller_spot_batch_for_mixed(&error_message) {
+                            eprintln!(
+                                "Spot request failed for the last instance in {region}, reserving it for on-demand fallback: {error}"
+                            );
+                            on_demand_quantity += batch_size;
+                            continue;
+                        }
+
+                        let original_error: CloudProviderError = error.into();
+                        if let Err(rollback_error) =
+                            self.rollback_instances(client, &instances).await
+                        {
+                            return Err(CloudProviderError::RequestError(format!(
+                                "{original_error}; rollback of {} partially created instance(s) failed: {rollback_error}",
+                                instances.len()
+                            )));
+                        }
+                        return Err(original_error);
+                    }
                 }
             }
-            Err(e) => return Err(e.into()),
-        };
+
+            if on_demand_quantity > 0 {
+                let on_demand_count = i32::try_from(on_demand_quantity).map_err(|_| {
+                    CloudProviderError::UnexpectedResponse(format!(
+                        "Requested instance batch is too large for AWS API: {on_demand_quantity}"
+                    ))
+                })?;
+                eprintln!(
+                    "Retrying {on_demand_quantity} instance(s) in {region} as on-demand after spot halving"
+                );
+                let response = match build_request(on_demand_count, false).send().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let original_error: CloudProviderError = error.into();
+                        if let Err(rollback_error) =
+                            self.rollback_instances(client, &instances).await
+                        {
+                            return Err(CloudProviderError::RequestError(format!(
+                                "{original_error}; rollback of {} partially created instance(s) failed: {rollback_error}",
+                                instances.len()
+                            )));
+                        }
+                        return Err(original_error);
+                    }
+                };
+                let mut created = response
+                    .instances()
+                    .iter()
+                    .map(|instance| self.make_instance(region.clone(), instance, false))
+                    .collect::<Vec<_>>();
+                if created.is_empty() {
+                    return Err(CloudProviderError::UnexpectedResponse(
+                        "AWS RunInstances returned no instances".into(),
+                    ));
+                }
+                instances.append(&mut created);
+            }
+
+            return Ok(instances);
+        }
+
+        let response = build_request(count, use_spot).send().await?;
         let instances = response
             .instances()
             .iter()
-            .map(|instance| self.make_instance(region.clone(), instance, got_spot))
+            .map(|instance| self.make_instance(region.clone(), instance, use_spot))
             .collect::<Vec<_>>();
         if instances.is_empty() {
             return Err(CloudProviderError::UnexpectedResponse(
@@ -541,21 +659,24 @@ mod tests {
 
     #[test]
     fn mixed_spot_fallback_skips_throttling_errors() {
-        assert!(!AwsClient::should_fallback_to_ondemand_for_mixed(
+        assert!(!AwsClient::should_retry_smaller_spot_batch_for_mixed(
             "RequestLimitExceeded: request limit exceeded"
         ));
-        assert!(!AwsClient::should_fallback_to_ondemand_for_mixed(
+        assert!(!AwsClient::should_retry_smaller_spot_batch_for_mixed(
             "ThrottlingException: Rate exceeded"
         ));
     }
 
     #[test]
-    fn mixed_spot_fallback_keeps_capacity_errors() {
-        assert!(AwsClient::should_fallback_to_ondemand_for_mixed(
+    fn mixed_spot_halving_keeps_capacity_errors() {
+        assert!(AwsClient::should_retry_smaller_spot_batch_for_mixed(
             "InsufficientSpotInstanceCapacity: no spot capacity"
         ));
-        assert!(AwsClient::should_fallback_to_ondemand_for_mixed(
+        assert!(AwsClient::should_retry_smaller_spot_batch_for_mixed(
             "MaxSpotInstanceCountExceeded: too many spot requests"
+        ));
+        assert!(AwsClient::should_retry_smaller_spot_batch_for_mixed(
+            "InsufficientInstanceCapacity: Insufficient capacity."
         ));
     }
 }

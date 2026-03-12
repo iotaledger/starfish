@@ -637,6 +637,7 @@ async fn run<C: ServerProviderClient>(
                                 .wrap_err("Failed to destroy monitoring instance")?;
                             display::done();
                         }
+                        display::print_timeline();
                     } else {
                         // No monitoring instance found, just destroy everything.
                         testbed
@@ -1006,6 +1007,8 @@ async fn run<C: ServerProviderClient>(
                     .wrap_err("Failed to destroy monitoring instance")?;
                 display::done();
             }
+
+            display::print_timeline();
         }
     }
     Ok(())

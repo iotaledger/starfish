@@ -591,6 +591,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn run_clients(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         if parameters.load == 0 {
             display::action("Skipping load generators deployment (load = 0)");
+            display::done();
             return Ok(());
         }
 
@@ -845,6 +846,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     async fn prepare_benchmark_suite(&mut self) -> TestbedResult<()> {
+        display::clear_timeline();
         display::header("Preparing testbed");
         if let Some(binary) = &self.settings.pre_built_binary {
             display::config("Pre-built binary", binary);
@@ -950,6 +952,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             i += 1;
         }
 
+        display::print_timeline();
         display::header("Benchmark completed");
         Ok(())
     }
@@ -1022,6 +1025,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             }
         }
 
+        display::print_timeline();
         display::header("Latency-throughput sweep completed");
         Ok(())
     }
