@@ -15,6 +15,7 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     bls_batch_verifier::{BlsBatchVerifier, BlsVerificationTask},
     committee::{Committee, QuorumThreshold, StakeAggregator},
+    config::DEFAULT_BLS_VERIFICATION_WORKERS,
     crypto::{self, BlsSignatureBytes, bls_aggregate, bls_aggregate_public_keys},
     dag_state::DagState,
     data::Data,
@@ -41,6 +42,13 @@ enum PartialTaskKind {
     },
 }
 
+/// Aggregate certificate task extracted from a block header.
+enum AggregateTaskKind {
+    Round(RoundNumber, BlsAggregateCertificate),
+    Leader(BlockReference, BlsAggregateCertificate),
+    Dac(BlockReference, BlsAggregateCertificate),
+}
+
 /// Events emitted when a new verified certificate is completed.
 #[derive(Debug)]
 pub enum CertificateEvent {
@@ -53,7 +61,7 @@ pub enum CertificateEvent {
 }
 
 /// Number of parallel threads used for BLS batch verification.
-pub const BLS_VERIFICATION_WORKERS: usize = 5;
+pub const BLS_VERIFICATION_WORKERS: usize = DEFAULT_BLS_VERIFICATION_WORKERS;
 
 pub struct BlsCertificateAggregator {
     committee: Arc<Committee>,
@@ -83,6 +91,10 @@ pub struct BlsCertificateAggregator {
 impl BlsCertificateAggregator {
     pub fn new(committee: Arc<Committee>) -> Self {
         Self::with_workers(committee, BLS_VERIFICATION_WORKERS)
+    }
+
+    pub fn set_num_workers(&mut self, num_workers: usize) {
+        self.num_workers = num_workers.max(1);
     }
 
     pub fn with_workers(committee: Arc<Committee>, num_workers: usize) -> Self {
@@ -262,37 +274,7 @@ impl BlsCertificateAggregator {
         &mut self,
         sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
     ) -> Vec<CertificateEvent> {
-        let mut tasks = Vec::new();
-        // Track which input indices survive filtering.
-        let mut filtered: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
-
-        for (block_ref, signer, sig) in sigs {
-            // Skip if cert already complete, rejected, duplicate, or quorum
-            // already reached.
-            if self.dac_certs.contains_key(&block_ref)
-                || self.dac_rejections.contains(&block_ref)
-                || self
-                    .dac_stake
-                    .get(&block_ref)
-                    .is_some_and(|s| s.is_quorum(&self.committee))
-                || self
-                    .dac_partial_sigs
-                    .get(&block_ref)
-                    .is_some_and(|sigs| sigs.contains_key(&signer))
-            {
-                continue;
-            }
-            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
-                continue;
-            };
-            tasks.push(BlsVerificationTask {
-                message: crypto::bls_dac_message(&block_ref),
-                signature: sig,
-                public_key,
-                block_index: filtered.len(),
-            });
-            filtered.push((block_ref, signer, sig));
-        }
+        let (tasks, filtered) = self.collect_standalone_dac_tasks(sigs);
 
         let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
             Ok(()) => AHashSet::new(),
@@ -317,33 +299,7 @@ impl BlsCertificateAggregator {
         &mut self,
         sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
     ) -> Vec<CertificateEvent> {
-        let mut tasks = Vec::new();
-        let mut filtered: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
-
-        for (round, signer, sig) in sigs {
-            if self.round_certs.contains_key(&round)
-                || self
-                    .round_stake
-                    .get(&round)
-                    .is_some_and(|s| s.is_quorum(&self.committee))
-                || self
-                    .round_partial_sigs
-                    .get(&round)
-                    .is_some_and(|sigs| sigs.contains_key(&signer))
-            {
-                continue;
-            }
-            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
-                continue;
-            };
-            tasks.push(BlsVerificationTask {
-                message: crypto::bls_round_message(round),
-                signature: sig,
-                public_key,
-                block_index: filtered.len(),
-            });
-            filtered.push((round, signer, sig));
-        }
+        let (tasks, filtered) = self.collect_standalone_round_tasks(sigs);
 
         let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
             Ok(()) => AHashSet::new(),
@@ -368,9 +324,376 @@ impl BlsCertificateAggregator {
         &mut self,
         sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
     ) -> Vec<CertificateEvent> {
-        let mut tasks = Vec::new();
-        let mut filtered: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)> = Vec::new();
+        let (tasks, filtered) = self.collect_standalone_leader_tasks(sigs);
 
+        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
+            Ok(()) => AHashSet::new(),
+            Err(bad) => bad.into_iter().collect(),
+        };
+
+        let mut events = Vec::new();
+        for (index, (leader_ref, signer, sig)) in filtered.into_iter().enumerate() {
+            if invalid.contains(&index) {
+                continue;
+            }
+            if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
+                events.push(event);
+            }
+        }
+        events
+    }
+
+    /// Process all pending BLS work in a single unified verification pass.
+    ///
+    /// Collects verification tasks from block header partials, embedded
+    /// aggregate certificates, and standalone DAC/round/leader sigs, then
+    /// runs one `verify_batch_parallel` call instead of four sequential ones.
+    /// Returns certificate events and the number of batch verification
+    /// failures from block header partials.
+    pub fn process_all(
+        &mut self,
+        blocks: &[Data<VerifiedBlock>],
+        dac_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+        round_sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+        leader_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> (Vec<CertificateEvent>, u64) {
+        // ── Phase 1: Collect all verification tasks ──
+
+        let mut all_tasks: Vec<BlsVerificationTask> = Vec::new();
+
+        // Section 1: block header partials (round + leader from headers).
+        let (block_tasks, block_partial_tasks) = self.collect_partial_tasks(blocks);
+        let section1_offset = all_tasks.len();
+        for mut task in block_tasks {
+            task.block_index = all_tasks.len();
+            all_tasks.push(task);
+        }
+
+        // Section 2: embedded aggregate certificates.
+        let (agg_tasks, agg_entries) = self.collect_embedded_aggregate_tasks(blocks);
+        let section2_offset = all_tasks.len();
+        for mut task in agg_tasks {
+            task.block_index = all_tasks.len();
+            all_tasks.push(task);
+        }
+
+        // Section 3: standalone DAC partials.
+        let (dac_tasks, filtered_dac) = self.collect_standalone_dac_tasks(dac_sigs);
+        let section3_offset = all_tasks.len();
+        for mut task in dac_tasks {
+            task.block_index = all_tasks.len();
+            all_tasks.push(task);
+        }
+
+        // Section 4: standalone round partials.
+        let (round_tasks, filtered_round) = self.collect_standalone_round_tasks(round_sigs);
+        let section4_offset = all_tasks.len();
+        for mut task in round_tasks {
+            task.block_index = all_tasks.len();
+            all_tasks.push(task);
+        }
+
+        // Section 5: standalone leader partials.
+        let (leader_tasks, filtered_leader) = self.collect_standalone_leader_tasks(leader_sigs);
+        let section5_offset = all_tasks.len();
+        for mut task in leader_tasks {
+            task.block_index = all_tasks.len();
+            all_tasks.push(task);
+        }
+
+        if all_tasks.is_empty() {
+            return (Vec::new(), 0);
+        }
+
+        // ── Phase 2: Single unified verification pass ──
+
+        let invalid: AHashSet<usize> =
+            match BlsBatchVerifier::verify_batch_parallel(&all_tasks, self.num_workers) {
+                Ok(()) => AHashSet::new(),
+                Err(bad) => bad.into_iter().collect(),
+            };
+
+        // ── Phase 3: Dispatch verified results ──
+
+        let mut events = Vec::new();
+
+        // Dispatch block header partials.
+        let mut batch_failures = 0u64;
+        for (local_idx, task) in block_partial_tasks.into_iter().enumerate() {
+            if invalid.contains(&(section1_offset + local_idx)) {
+                batch_failures += 1;
+                continue;
+            }
+            match task {
+                PartialTaskKind::Round { round, signer, sig } => {
+                    if let Some(event) = self.add_round_partial(round, signer, sig) {
+                        events.push(event);
+                    }
+                }
+                PartialTaskKind::Leader {
+                    leader_ref,
+                    signer,
+                    sig,
+                } => {
+                    if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
+                        events.push(event);
+                    }
+                }
+            }
+        }
+
+        // Dispatch embedded aggregate certificates.
+        self.dispatch_embedded_aggregates(agg_entries, section2_offset, &invalid, &mut events);
+
+        // Dispatch standalone DAC partials.
+        for (local_idx, (block_ref, signer, sig)) in filtered_dac.into_iter().enumerate() {
+            if invalid.contains(&(section3_offset + local_idx)) {
+                continue;
+            }
+            if let Some(event) = self.add_dac_partial(block_ref, signer, sig) {
+                events.push(event);
+            }
+        }
+
+        // Dispatch standalone round partials.
+        for (local_idx, (round, signer, sig)) in filtered_round.into_iter().enumerate() {
+            if invalid.contains(&(section4_offset + local_idx)) {
+                continue;
+            }
+            if let Some(event) = self.add_round_partial(round, signer, sig) {
+                events.push(event);
+            }
+        }
+
+        // Dispatch standalone leader partials.
+        for (local_idx, (leader_ref, signer, sig)) in filtered_leader.into_iter().enumerate() {
+            if invalid.contains(&(section5_offset + local_idx)) {
+                continue;
+            }
+            if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
+                events.push(event);
+            }
+        }
+
+        (events, batch_failures)
+    }
+
+    /// Collect embedded aggregate certificate tasks from block headers
+    /// without verifying them.
+    fn collect_embedded_aggregate_tasks(
+        &self,
+        blocks: &[Data<VerifiedBlock>],
+    ) -> (Vec<BlsVerificationTask>, Vec<AggregateTaskKind>) {
+        let mut tasks = Vec::new();
+        let mut entries = Vec::new();
+        let mut seen_leaders = AHashSet::new();
+
+        for block in blocks {
+            if let Some(cert) = block.header().bls_aggregate_round_signature() {
+                let certified_round = block.round().saturating_sub(1);
+                if !cert.is_empty()
+                    && certified_round != 0
+                    && !self.round_certs.contains_key(&certified_round)
+                {
+                    if let Some(task) = self.aggregate_same_message_task(
+                        crypto::bls_round_message(certified_round),
+                        cert,
+                    ) {
+                        tasks.push(BlsVerificationTask {
+                            block_index: entries.len(),
+                            ..task
+                        });
+                        entries.push(AggregateTaskKind::Round(certified_round, *cert));
+                    }
+                }
+            }
+
+            if let Some((leader_ref, cert)) = block.header().certified_leader() {
+                if !cert.is_empty()
+                    && !self.leader_certs.contains_key(leader_ref)
+                    && seen_leaders.insert(*leader_ref)
+                {
+                    if let Some(task) = self
+                        .aggregate_same_message_task(crypto::bls_leader_message(leader_ref), cert)
+                    {
+                        tasks.push(BlsVerificationTask {
+                            block_index: entries.len(),
+                            ..task
+                        });
+                        entries.push(AggregateTaskKind::Leader(*leader_ref, *cert));
+                    }
+                }
+            }
+
+            for (ack_ref, cert) in block
+                .acknowledgments()
+                .into_iter()
+                .zip(block.header().acknowledgment_bls_signatures().iter())
+            {
+                if cert.is_empty() {
+                    continue;
+                }
+                if self.dac_certs.contains_key(&ack_ref) {
+                    continue;
+                }
+                if self.dac_rejections.contains(&ack_ref) {
+                    continue;
+                }
+                let Some(task) =
+                    self.aggregate_same_message_task(crypto::bls_dac_message(&ack_ref), cert)
+                else {
+                    continue;
+                };
+                tasks.push(BlsVerificationTask {
+                    block_index: entries.len(),
+                    ..task
+                });
+                entries.push(AggregateTaskKind::Dac(ack_ref, *cert));
+            }
+        }
+
+        (tasks, entries)
+    }
+
+    /// Dispatch verified embedded aggregate entries into certificate state.
+    fn dispatch_embedded_aggregates(
+        &mut self,
+        entries: Vec<AggregateTaskKind>,
+        offset: usize,
+        invalid: &AHashSet<usize>,
+        events: &mut Vec<CertificateEvent>,
+    ) {
+        let mut valid_dacs = AHashMap::new();
+        let mut rejected_dacs = AHashSet::new();
+        for (local_idx, entry) in entries.into_iter().enumerate() {
+            let global_idx = offset + local_idx;
+            match entry {
+                AggregateTaskKind::Round(round, cert) => {
+                    if invalid.contains(&global_idx) {
+                        continue;
+                    }
+                    if self.round_certs.insert(round, cert).is_none() {
+                        events.push(CertificateEvent::Round(round, cert));
+                    }
+                }
+                AggregateTaskKind::Leader(leader_ref, cert) => {
+                    if invalid.contains(&global_idx) {
+                        continue;
+                    }
+                    if self.leader_certs.insert(leader_ref, cert).is_none() {
+                        events.push(CertificateEvent::Leader(leader_ref, cert));
+                    }
+                }
+                AggregateTaskKind::Dac(block_ref, cert) => {
+                    if invalid.contains(&global_idx) {
+                        if !valid_dacs.contains_key(&block_ref) {
+                            rejected_dacs.insert(block_ref);
+                        }
+                    } else {
+                        rejected_dacs.remove(&block_ref);
+                        valid_dacs.entry(block_ref).or_insert(cert);
+                    }
+                }
+            }
+        }
+
+        for (block_ref, cert) in valid_dacs {
+            if self.dac_certs.insert(block_ref, cert).is_none() {
+                events.push(CertificateEvent::Dac(block_ref, cert));
+            }
+        }
+        for block_ref in rejected_dacs {
+            if self.dac_rejections.insert(block_ref) {
+                events.push(CertificateEvent::DacRejected(block_ref));
+            }
+        }
+    }
+
+    /// Collect standalone DAC partial sig tasks without verifying.
+    fn collect_standalone_dac_tasks(
+        &self,
+        sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> (
+        Vec<BlsVerificationTask>,
+        Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) {
+        let mut tasks = Vec::new();
+        let mut filtered = Vec::new();
+        for (block_ref, signer, sig) in sigs {
+            if self.dac_certs.contains_key(&block_ref)
+                || self.dac_rejections.contains(&block_ref)
+                || self
+                    .dac_stake
+                    .get(&block_ref)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
+                || self
+                    .dac_partial_sigs
+                    .get(&block_ref)
+                    .is_some_and(|sigs| sigs.contains_key(&signer))
+            {
+                continue;
+            }
+            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+                continue;
+            };
+            tasks.push(BlsVerificationTask {
+                message: crypto::bls_dac_message(&block_ref),
+                signature: sig,
+                public_key,
+                block_index: filtered.len(),
+            });
+            filtered.push((block_ref, signer, sig));
+        }
+        (tasks, filtered)
+    }
+
+    /// Collect standalone round partial sig tasks without verifying.
+    fn collect_standalone_round_tasks(
+        &self,
+        sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> (
+        Vec<BlsVerificationTask>,
+        Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+    ) {
+        let mut tasks = Vec::new();
+        let mut filtered = Vec::new();
+        for (round, signer, sig) in sigs {
+            if self.round_certs.contains_key(&round)
+                || self
+                    .round_stake
+                    .get(&round)
+                    .is_some_and(|s| s.is_quorum(&self.committee))
+                || self
+                    .round_partial_sigs
+                    .get(&round)
+                    .is_some_and(|sigs| sigs.contains_key(&signer))
+            {
+                continue;
+            }
+            let Some(public_key) = self.committee.get_bls_public_key(signer).cloned() else {
+                continue;
+            };
+            tasks.push(BlsVerificationTask {
+                message: crypto::bls_round_message(round),
+                signature: sig,
+                public_key,
+                block_index: filtered.len(),
+            });
+            filtered.push((round, signer, sig));
+        }
+        (tasks, filtered)
+    }
+
+    /// Collect standalone leader partial sig tasks without verifying.
+    fn collect_standalone_leader_tasks(
+        &self,
+        sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) -> (
+        Vec<BlsVerificationTask>,
+        Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    ) {
+        let mut tasks = Vec::new();
+        let mut filtered = Vec::new();
         for (leader_ref, signer, sig) in sigs {
             if self.leader_certs.contains_key(&leader_ref)
                 || self
@@ -395,22 +718,7 @@ impl BlsCertificateAggregator {
             });
             filtered.push((leader_ref, signer, sig));
         }
-
-        let invalid = match BlsBatchVerifier::verify_batch_parallel(&tasks, self.num_workers) {
-            Ok(()) => AHashSet::new(),
-            Err(bad) => bad.into_iter().collect(),
-        };
-
-        let mut events = Vec::new();
-        for (index, (leader_ref, signer, sig)) in filtered.into_iter().enumerate() {
-            if invalid.contains(&index) {
-                continue;
-            }
-            if let Some(event) = self.add_leader_partial(leader_ref, signer, sig) {
-                events.push(event);
-            }
-        }
-        events
+        (tasks, filtered)
     }
 
     fn verify_embedded_aggregate_certificates(
@@ -421,12 +729,6 @@ impl BlsCertificateAggregator {
         let mut tasks = Vec::new();
         let mut entries = Vec::new();
         let mut seen_leaders = AHashSet::new();
-
-        enum AggregateTaskKind {
-            Round(RoundNumber, BlsAggregateCertificate),
-            Leader(BlockReference, BlsAggregateCertificate),
-            Dac(BlockReference, BlsAggregateCertificate),
-        }
 
         for block in blocks {
             if let Some(cert) = block.header().bls_aggregate_round_signature() {

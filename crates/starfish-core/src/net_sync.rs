@@ -1122,35 +1122,37 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         let own_authority = dag_state.get_own_authority_index();
         let bls_committee = inner.committee.clone();
-        let (bls_service, bls_event_task) = if let (Some(aggregator), Some(bls_rx), Some(bls_tx)) =
-            (bls_cert_aggregator, bls_msg_rx, bls_msg_tx)
-        {
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<CertificateEvent>>();
-            start_bls_service(
-                aggregator,
-                bls_tx.clone(),
-                bls_rx,
-                event_tx,
-                metrics.clone(),
-                bls_signer,
-                own_authority,
-                bls_committee,
-                bls_broadcast_tx,
-                dag_state.clone(),
-                inner.block_ready_notify.clone(),
-                inner.threshold_clock_notify.clone(),
-            );
-            let bls_handle = BlsServiceHandle::new(bls_tx);
-            let event_inner = inner.clone();
-            let task = handle.spawn(async move {
-                while let Some(events) = event_rx.recv().await {
-                    event_inner.syncer.apply_certificate_events(events).await;
-                }
-            });
-            (Some(bls_handle), Some(task))
-        } else {
-            (None, None)
-        };
+        let (bls_service, bls_event_task) =
+            if let (Some(mut aggregator), Some(bls_rx), Some(bls_tx)) =
+                (bls_cert_aggregator, bls_msg_rx, bls_msg_tx)
+            {
+                aggregator.set_num_workers(node_parameters.effective_bls_workers());
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<CertificateEvent>>();
+                start_bls_service(
+                    aggregator,
+                    bls_tx.clone(),
+                    bls_rx,
+                    event_tx,
+                    metrics.clone(),
+                    bls_signer,
+                    own_authority,
+                    bls_committee,
+                    bls_broadcast_tx,
+                    dag_state.clone(),
+                    inner.block_ready_notify.clone(),
+                    inner.threshold_clock_notify.clone(),
+                );
+                let bls_handle = BlsServiceHandle::new(bls_tx);
+                let event_inner = inner.clone();
+                let task = handle.spawn(async move {
+                    while let Some(events) = event_rx.recv().await {
+                        event_inner.syncer.apply_certificate_events(events).await;
+                    }
+                });
+                (Some(bls_handle), Some(task))
+            } else {
+                (None, None)
+            };
 
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(

@@ -178,35 +178,21 @@ async fn run_bls_service(
                 std::mem::replace(&mut presigned_leader_rounds, AHashSet::new());
             let (worker_aggregator, events, returned_rounds, returned_presigned) =
                 tokio::task::spawn_blocking(move || {
-                    let mut events = Vec::new();
                     let mut broadcast_sigs = Vec::new();
                     let mut local_round_sigs = Vec::new();
                     let mut local_leader_sigs = Vec::new();
 
-                    if !all_blocks.is_empty() {
-                        let (new_events, batch_failures) =
-                            worker_aggregator.add_blocks(&all_blocks);
-                        if batch_failures > 0 {
-                            metrics_clone
-                                .bls_batch_verification_failures_total
-                                .inc_by(batch_failures);
-                        }
-                        events.extend(new_events);
-                    }
-
-                    if !dac_sigs.is_empty() {
-                        events.extend(worker_aggregator.add_standalone_dac_sigs_batch(dac_sigs));
-                    }
-
-                    if !round_sigs.is_empty() {
-                        events
-                            .extend(worker_aggregator.add_standalone_round_sigs_batch(round_sigs));
-                    }
-
-                    if !leader_sigs.is_empty() {
-                        events.extend(
-                            worker_aggregator.add_standalone_leader_sigs_batch(leader_sigs),
-                        );
+                    // Single unified verification pass across all task types.
+                    let (mut events, batch_failures) = worker_aggregator.process_all(
+                        &all_blocks,
+                        dac_sigs,
+                        round_sigs,
+                        leader_sigs,
+                    );
+                    if batch_failures > 0 {
+                        metrics_clone
+                            .bls_batch_verification_failures_total
+                            .inc_by(batch_failures);
                     }
 
                     if let Some(ref bs) = bls_signer_clone {
