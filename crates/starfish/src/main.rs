@@ -362,10 +362,10 @@ async fn local_benchmark(
     // Start all validators
     for authority in 0..committee_size {
         tracing::warn!(
-            "Starting validator {authority} in local \
+            "Starting node {authority} in local \
             benchmark mode (committee size: {committee_size})"
         );
-        let working_dir = base_dir.join(format!("validator-{authority}"));
+        let working_dir = base_dir.join(format!("node-{authority}"));
         fs::create_dir_all(&working_dir)?;
         match fs::remove_dir_all(&working_dir) {
             Ok(_) => {}
@@ -479,7 +479,7 @@ async fn run(
     byzantine_strategy: String,
     consensus_protocol: String,
 ) -> Result<()> {
-    tracing::info!("Starting validator {authority}");
+    tracing::info!("Starting node {authority}");
 
     let committee = Committee::load(&committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
@@ -528,7 +528,7 @@ async fn dryrun(
     dissemination_mode: Option<String>,
 ) -> Result<()> {
     tracing::warn!(
-        "Starting validator {authority} in dryrun mode (committee size: {committee_size})"
+        "Starting node {authority} in dryrun mode (committee size: {committee_size})"
     );
     let ips: Vec<IpAddr> = match base_ip {
         Some(IpAddr::V4(v4)) => (0..committee_size)
@@ -572,7 +572,7 @@ async fn dryrun(
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
 
     let base = data_dir.unwrap_or_default();
-    let working_dir = base.join(format!("dryrun-validator-{authority}"));
+    let working_dir = base.join(format!("dryrun-node-{authority}"));
     let mut all_private_config =
         NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
     let private_config = all_private_config.remove(authority as usize);

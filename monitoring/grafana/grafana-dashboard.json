@@ -72,7 +72,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, committee_size{validator=~\"$validator\"})",
+          "expr": "quantile(0.5, committee_size{node=~\"$node\"})",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -212,7 +212,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "max by (protocol) (consensus_protocol_info{validator=~\"$validator\"})",
+          "expr": "max by (protocol) (consensus_protocol_info{node=~\"$node\"})",
           "legendFormat": "{{protocol}}",
           "refId": "A",
           "instant": true
@@ -222,7 +222,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, transaction_mode_info{validator=~\"$validator\"}) == 0",
+          "expr": "quantile(0.5, transaction_mode_info{node=~\"$node\"}) == 0",
           "legendFormat": "AllZero",
           "refId": "B",
           "instant": true
@@ -232,7 +232,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, transaction_mode_info{validator=~\"$validator\"}) == 1",
+          "expr": "quantile(0.5, transaction_mode_info{node=~\"$node\"}) == 1",
           "legendFormat": "Random",
           "refId": "C",
           "instant": true
@@ -242,7 +242,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"}) == 0",
+          "expr": "quantile(0.5, storage_backend_info{node=~\"$node\"}) == 0",
           "legendFormat": "RocksDB",
           "refId": "D",
           "instant": true
@@ -252,7 +252,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "quantile(0.5, storage_backend_info{validator=~\"$validator\"}) == 1",
+          "expr": "quantile(0.5, storage_backend_info{node=~\"$node\"}) == 1",
           "legendFormat": "TideHunter",
           "refId": "E",
           "instant": true
@@ -262,7 +262,7 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
-          "expr": "max by (mode) (dissemination_mode_info{validator=~\"$validator\"})",
+          "expr": "max by (mode) (dissemination_mode_info{node=~\"$node\"})",
           "legendFormat": "{{mode}}",
           "refId": "F",
           "instant": true
@@ -318,7 +318,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, rate(sequenced_transactions_total{validator=~\"$validator\"}[1m]))",
+          "expr": "quantile(0.5, rate(sequenced_transactions_total{node=~\"$node\"}[1m]))",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -373,7 +373,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, block_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
+          "expr": "quantile(0.5, block_committed_latency{v=\"p50\", node=~\"$node\"}) / 1000",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -428,7 +428,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, transaction_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
+          "expr": "quantile(0.5, transaction_committed_latency{v=\"p50\", node=~\"$node\"}) / 1000",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -536,12 +536,12 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(sequenced_transactions_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(sequenced_transactions_total{node=~\"$node\"}[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -641,7 +641,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(block_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
+          "expr": "avg(block_committed_latency{v=\"p50\", node=~\"$node\"}) / 1000",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -657,7 +657,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(transaction_committed_latency{v=\"p50\", validator=~\"$validator\"}) / 1000",
+          "expr": "avg(transaction_committed_latency{v=\"p50\", node=~\"$node\"}) / 1000",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -758,12 +758,12 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "sum by (validator) (rate(committed_blocks{validator=~\"$validator\"}[1m]))",
+          "expr": "sum by (node) (rate(committed_blocks{node=~\"$node\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -859,8 +859,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "commit_index{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "commit_index{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -955,13 +955,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(created_own_blocks{validator=~\"$validator\"}[1m])) by (validator)",
-          "legendFormat": "{{validator}}",
+          "expr": "sum(rate(created_own_blocks{node=~\"$node\"}[1m])) by (node)",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Created blocks per second (by validator)",
+      "title": "Created blocks per second (by node)",
       "type": "timeseries"
     },
     {
@@ -1051,7 +1051,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(created_own_blocks{validator=~\"$validator\"}[1m])) by (reason)",
+          "expr": "sum(rate(created_own_blocks{node=~\"$node\"}[1m])) by (reason)",
           "legendFormat": "{{reason}}",
           "range": true,
           "refId": "A"
@@ -1148,7 +1148,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_sent_total{validator=~\"$validator\"}[1m]))*8/1024/1024",
+          "expr": "avg(rate(bytes_sent_total{node=~\"$node\"}[1m]))*8/1024/1024",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1165,7 +1165,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_received_total{validator=~\"$validator\"}[1m]))*8/1024/1024",
+          "expr": "avg(rate(bytes_received_total{node=~\"$node\"}[1m]))*8/1024/1024",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1267,7 +1267,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(increase(bytes_sent_total{validator=~\"$validator\"}[1m]) + increase(bytes_received_total{validator=~\"$validator\"}[1m])) / avg(increase(sequenced_transactions_bytes{validator=~\"$validator\"}[1m]))",
+          "expr": "avg(increase(bytes_sent_total{node=~\"$node\"}[1m]) + increase(bytes_received_total{node=~\"$node\"}[1m])) / avg(increase(sequenced_transactions_bytes{node=~\"$node\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1370,7 +1370,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_sent_total{validator=~\"$validator\"}[1m]) + rate(bytes_received_total{validator=~\"$validator\"}[1m])) / avg(deriv(dag_highest_round{validator=~\"$validator\"}[1m]))",
+          "expr": "avg(rate(bytes_sent_total{node=~\"$node\"}[1m]) + rate(bytes_received_total{node=~\"$node\"}[1m])) / avg(deriv(dag_highest_round{node=~\"$node\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1473,10 +1473,10 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(utilization_timer{validator=~\"$validator\", proc=~\"Core::.*|BlockManager::.*|Committer::.*|Syncer::.*\"}[1m]) / 1000",
+          "expr": "rate(utilization_timer{node=~\"$node\", proc=~\"Core::.*|BlockManager::.*|Committer::.*|Syncer::.*\"}[1m]) / 1000",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{validator}} - {{proc}}",
+          "legendFormat": "{{node}} - {{proc}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1574,10 +1574,10 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(utilization_timer{validator=~\"$validator\", proc=~\"Network:.*|Broadcaster:.*\"}[1m]) / 1000",
+          "expr": "rate(utilization_timer{node=~\"$node\", proc=~\"Network:.*|Broadcaster:.*\"}[1m]) / 1000",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{validator}} - {{proc}}",
+          "legendFormat": "{{node}} - {{proc}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1585,19 +1585,6 @@
       ],
       "title": "Verification & sending time/s",
       "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 44
-      },
-      "id": 245,
-      "panels": [],
-      "title": "Core Consensus \u2014 Data Source",
-      "type": "row"
     },
     {
       "datasource": {
@@ -1688,7 +1675,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(accepted_blocks_by_source{validator=~\"$validator\"}[1m])) by (source)",
+          "expr": "sum(rate(accepted_blocks_by_source{node=~\"$node\"}[1m])) by (source)",
           "legendFormat": "{{source}}",
           "range": true,
           "refId": "A"
@@ -1784,7 +1771,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(accepted_headers_by_source{validator=~\"$validator\"}[1m])) by (source)",
+          "expr": "sum(rate(accepted_headers_by_source{node=~\"$node\"}[1m])) by (source)",
           "legendFormat": "{{source}}",
           "range": true,
           "refId": "A"
@@ -1880,7 +1867,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(accepted_transactions_by_source{validator=~\"$validator\"}[1m])) by (source)",
+          "expr": "sum(rate(accepted_transactions_by_source{node=~\"$node\"}[1m])) by (source)",
           "legendFormat": "{{source}}",
           "range": true,
           "refId": "A"
@@ -1893,7 +1880,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 44
       },
       "id": 201,
       "panels": [],
@@ -1970,7 +1957,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(committed_leaders_total{validator=~\"$validator\"}[1m])) by (commit_type)",
+          "expr": "sum(rate(committed_leaders_total{node=~\"$node\"}[1m])) by (commit_type)",
           "legendFormat": "{{commit_type}}",
           "range": true,
           "refId": "A"
@@ -2056,8 +2043,8 @@
       },
       "targets": [
         {
-          "expr": "commit_availability_gap{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "commit_availability_gap{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -2132,7 +2119,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(commit_gap_bucket{validator=~\"$validator\"}[1m])) by (le)",
+          "expr": "sum(rate(commit_gap_bucket{node=~\"$node\"}[1m])) by (le)",
           "format": "heatmap",
           "instant": false,
           "legendFormat": "{{le}}",
@@ -2230,8 +2217,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "commit_digest{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "commit_digest{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -2326,8 +2313,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(core_lock_util{validator=~\"$validator\"}[1m]) / 1000000 * 100",
-          "legendFormat": "{{validator}}",
+          "expr": "rate(core_lock_util{node=~\"$node\"}[1m]) / 1000000 * 100",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2423,8 +2410,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "core_queue_length{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "core_queue_length{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2521,8 +2508,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_block_size_bytes{v=\"p50\", validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "proposed_block_size_bytes{v=\"p50\", node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2620,8 +2607,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_transaction_size_bytes{v=\"p50\", validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "proposed_transaction_size_bytes{v=\"p50\", node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2718,8 +2705,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "proposed_header_size_bytes{v=\"p50\", validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "proposed_header_size_bytes{v=\"p50\", node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2816,8 +2803,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "block_bundle_size_bytes{v=\"p50\", validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "block_bundle_size_bytes{v=\"p50\", node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -2913,8 +2900,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(proposed_block_refs_sum{validator=~\"$validator\"}[1m]) / rate(proposed_block_refs_count{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}}",
+          "expr": "rate(proposed_block_refs_sum{node=~\"$node\"}[1m]) / rate(proposed_block_refs_count{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3010,8 +2997,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(proposed_block_acks_sum{validator=~\"$validator\"}[1m]) / rate(proposed_block_acks_count{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}}",
+          "expr": "rate(proposed_block_acks_sum{node=~\"$node\"}[1m]) / rate(proposed_block_acks_count{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3110,9 +3097,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(proposal_wait_time_total_us{validator=~\"$validator\"}[1m]) / 1e6",
+          "expr": "rate(proposal_wait_time_total_us{node=~\"$node\"}[1m]) / 1e6",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -3207,9 +3194,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator) (rate(block_sync_requests_sent{validator=~\"$validator\"}[1m]))",
+          "expr": "sum by (node) (rate(block_sync_requests_sent{node=~\"$node\"}[1m]))",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -3318,9 +3305,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(bls_certificates_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(bls_certificates_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}} {{type}}",
+          "legendFormat": "{{node}} {{type}}",
           "range": true,
           "refId": "A"
         }
@@ -3416,9 +3403,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(bls_dac_rejections_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(bls_dac_rejections_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -3514,9 +3501,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(bls_blocks_processed_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(bls_blocks_processed_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}} blocks",
+          "legendFormat": "{{node}} blocks",
           "range": true,
           "refId": "A"
         },
@@ -3526,9 +3513,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(bls_standalone_dac_sigs_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(bls_standalone_dac_sigs_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}} dac_sigs",
+          "legendFormat": "{{node}} dac_sigs",
           "range": true,
           "refId": "B"
         }
@@ -3626,9 +3613,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(bls_service_util{validator=~\"$validator\"}[1m]) / 10000",
+          "expr": "rate(bls_service_util{node=~\"$node\"}[1m]) / 10000",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -3734,8 +3721,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_highest_round{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} highest",
+          "expr": "dag_highest_round{node=~\"$node\"}",
+          "legendFormat": "{{node}} highest",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3746,8 +3733,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_lowest_round{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} lowest",
+          "expr": "dag_lowest_round{node=~\"$node\"}",
+          "legendFormat": "{{node}} lowest",
           "instant": false,
           "range": true,
           "refId": "B"
@@ -3843,8 +3830,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "dag_blocks_in_memory{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "dag_blocks_in_memory{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -3940,8 +3927,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "block_manager_pending_blocks{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "block_manager_pending_blocks{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -4037,8 +4024,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "missing_blocks{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} auth={{authority}}",
+          "expr": "missing_blocks{node=~\"$node\"}",
+          "legendFormat": "{{node}} auth={{authority}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -4134,8 +4121,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "core_pending_reconstructed_data{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "core_pending_reconstructed_data{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -4244,9 +4231,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(filtered_blocks_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(filtered_blocks_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -4341,8 +4328,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(used_additional_blocks_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}}",
+          "expr": "rate(used_additional_blocks_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -4438,9 +4425,9 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(processed_after_filtering_total{validator=~\"$validator\"}[1m])",
+          "expr": "rate(processed_after_filtering_total{node=~\"$node\"}[1m])",
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -4535,8 +4522,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "max by (validator) (useful_authorities{validator=~\"$validator\", kind=\"headers\"})",
-          "legendFormat": "{{validator}} headers",
+          "expr": "max by (node) (useful_authorities{node=~\"$node\", kind=\"headers\"})",
+          "legendFormat": "{{node}} headers",
           "range": true,
           "refId": "A"
         },
@@ -4546,8 +4533,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "max by (validator) (useful_authorities{validator=~\"$validator\", kind=\"shards\"})",
-          "legendFormat": "{{validator}} shards",
+          "expr": "max by (node) (useful_authorities{node=~\"$node\", kind=\"shards\"})",
+          "legendFormat": "{{node}} shards",
           "range": true,
           "refId": "B"
         }
@@ -4632,32 +4619,32 @@
       },
       "targets": [
         {
-          "expr": "rate(shard_reconstruction_jobs_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} jobs",
+          "expr": "rate(shard_reconstruction_jobs_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}} jobs",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(shard_reconstruction_success_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} success",
+          "expr": "rate(shard_reconstruction_success_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}} success",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "rate(shard_reconstruction_failed_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} failed",
+          "expr": "rate(shard_reconstruction_failed_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}} failed",
           "range": true,
           "refId": "C"
         },
         {
-          "expr": "rate(shard_reconstruction_cancelled_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} cancelled",
+          "expr": "rate(shard_reconstruction_cancelled_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}} cancelled",
           "range": true,
           "refId": "D"
         },
         {
-          "expr": "rate(reconstructed_blocks_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}} sent to core",
+          "expr": "rate(reconstructed_blocks_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}} sent to core",
           "range": true,
           "refId": "E"
         }
@@ -4742,20 +4729,20 @@
       },
       "targets": [
         {
-          "expr": "shard_reconstruction_pending_accumulators{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} pending accumulators",
+          "expr": "shard_reconstruction_pending_accumulators{node=~\"$node\"}",
+          "legendFormat": "{{node}} pending accumulators",
           "range": true,
           "refId": "A"
         },
         {
-          "expr": "shard_reconstruction_queued_jobs{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} queued jobs",
+          "expr": "shard_reconstruction_queued_jobs{node=~\"$node\"}",
+          "legendFormat": "{{node}} queued jobs",
           "range": true,
           "refId": "B"
         },
         {
-          "expr": "shard_reconstruction_pending_decoded_blocks{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}} pending decoded blocks",
+          "expr": "shard_reconstruction_pending_decoded_blocks{node=~\"$node\"}",
+          "legendFormat": "{{node}} pending decoded blocks",
           "range": true,
           "refId": "C"
         }
@@ -4830,7 +4817,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum(rate(shard_reconstruction_lag_bucket{validator=~\"$validator\"}[1m])) by (le)",
+          "expr": "sum(rate(shard_reconstruction_lag_bucket{node=~\"$node\"}[1m])) by (le)",
           "format": "heatmap",
           "instant": false,
           "legendFormat": "{{le}}",
@@ -4942,11 +4929,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_sent_total{validator=~\"$validator\"}[1m])*8/1024/1024",
+          "expr": "rate(bytes_sent_total{node=~\"$node\"}[1m])*8/1024/1024",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -5043,11 +5030,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_received_total{validator=~\"$validator\"}[1m])*8/1024/1024",
+          "expr": "rate(bytes_received_total{node=~\"$node\"}[1m])*8/1024/1024",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
-          "legendFormat": "{{validator}}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -5126,13 +5113,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "rate(process_cpu_seconds_total{validator=~\"$validator\"}[1m])",
-          "legendFormat": "{{validator}}",
+          "expr": "rate(process_cpu_seconds_total{node=~\"$node\"}[1m])",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "CPU usage (per validator)",
+      "title": "CPU usage (per node)",
       "type": "timeseries"
     },
     {
@@ -5205,13 +5192,13 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "process_resident_memory_bytes{validator=~\"$validator\"} / 1048576",
-          "legendFormat": "{{validator}}",
+          "expr": "process_resident_memory_bytes{node=~\"$node\"} / 1048576",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Memory usage (per validator)",
+      "title": "Memory usage (per node)",
       "type": "timeseries"
     },
     {
@@ -5301,8 +5288,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "subscribed_to_peers{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "subscribed_to_peers{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -5397,8 +5384,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "subscribed_by_peers{validator=~\"$validator\"}",
-          "legendFormat": "{{validator}}",
+          "expr": "subscribed_by_peers{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
@@ -5494,8 +5481,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator) (rate(block_sync_requests_sent{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}}",
+          "expr": "sum by (node) (rate(block_sync_requests_sent{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -5592,8 +5579,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator) (rate(tx_data_requests_sent{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}}",
+          "expr": "sum by (node) (rate(tx_data_requests_sent{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -5690,8 +5677,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator, peer) (rate(block_sync_requests_received{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}} <- peer {{peer}}",
+          "expr": "sum by (node, peer) (rate(block_sync_requests_received{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}} <- peer {{peer}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -5702,8 +5689,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator, authority) (rate(block_sync_requests_sent{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}} -> peer {{authority}}",
+          "expr": "sum by (node, authority) (rate(block_sync_requests_sent{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}} -> peer {{authority}}",
           "instant": false,
           "range": true,
           "refId": "B"
@@ -5800,8 +5787,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator, peer) (rate(tx_data_requests_received{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}} <- peer {{peer}}",
+          "expr": "sum by (node, peer) (rate(tx_data_requests_received{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}} <- peer {{peer}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -5812,8 +5799,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator, authority) (rate(tx_data_requests_sent{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}} -> peer {{authority}}",
+          "expr": "sum by (node, authority) (rate(tx_data_requests_sent{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}} -> peer {{authority}}",
           "instant": false,
           "range": true,
           "refId": "B"
@@ -5909,8 +5896,8 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "label_replace(avg by (peer) (connection_latency{v=\"p50\", validator=~\"$validator\"} / 1000), \"validator\", \"$1\", \"peer\", \"(.*)\")",
-          "legendFormat": "{{validator}}",
+          "expr": "label_replace(avg by (peer) (connection_latency{v=\"p50\", node=~\"$node\"} / 1000), \"node\", \"$1\", \"peer\", \"(.*)\")",
+          "legendFormat": "{{node}}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -6007,14 +5994,256 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "sum by (validator, task_type) (rate(core_thread_tasks_total{validator=~\"$validator\"}[1m]))",
-          "legendFormat": "{{validator}} \u2014 {{task_type}}",
+          "expr": "sum by (node, task_type) (rate(core_thread_tasks_total{node=~\"$node\"}[1m]))",
+          "legendFormat": "{{node}} \u2014 {{task_type}}",
           "instant": false,
           "range": true,
           "refId": "A"
         }
       ],
       "title": "Core thread tasks (rate by type)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 218
+      },
+      "id": 249,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_known_headers{node=~\"$node\"}",
+          "legendFormat": "{{node}} known_headers",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_known_shards{node=~\"$node\"}",
+          "legendFormat": "{{node}} known_shards",
+          "instant": false,
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_pending_headers{node=~\"$node\"}",
+          "legendFormat": "{{node}} pending_headers",
+          "instant": false,
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_pending_shards{node=~\"$node\"}",
+          "legendFormat": "{{node}} pending_shards",
+          "instant": false,
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "CordialKnowledge sizes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Fixed-UID-testbed"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 218
+      },
+      "id": 250,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_peer_known_headers{node=~\"$node\"}",
+          "legendFormat": "{{node}} peer={{peer}} headers",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "editorMode": "code",
+          "expr": "ck_peer_known_shards{node=~\"$node\"}",
+          "legendFormat": "{{node}} peer={{peer}} shards",
+          "instant": false,
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "CK per-peer known",
       "type": "timeseries"
     }
   ],
@@ -6025,7 +6254,7 @@
   "templating": {
     "list": [
       {
-        "allValue": "validator-.*",
+        "allValue": "node-.*",
         "current": {
           "selected": true,
           "text": "All",
@@ -6035,14 +6264,14 @@
           "type": "prometheus",
           "uid": "Fixed-UID-testbed"
         },
-        "definition": "label_values(committee_size, validator)",
+        "definition": "label_values(committee_size, node)",
         "includeAll": true,
         "multi": true,
-        "name": "validator",
-        "label": "Validator",
+        "name": "node",
+        "label": "Node",
         "query": {
           "qryType": 1,
-          "query": "label_values(committee_size, validator)"
+          "query": "label_values(committee_size, node)"
         },
         "refresh": 2,
         "type": "query"

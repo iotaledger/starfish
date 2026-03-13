@@ -744,18 +744,18 @@ process_cpu_seconds_total 320
         let report = r#"
 # HELP benchmark_duration Duration of the benchmark
 # TYPE benchmark_duration counter
-benchmark_duration{validator="validator-44"} 300
+benchmark_duration{validator="node-44"} 300
 # HELP block_committed_latency block_committed_latency
 # TYPE block_committed_latency gauge
-block_committed_latency{validator="validator-44",v="count"} 28547
-block_committed_latency{v="p50",validator="validator-44"} 487770
-block_committed_latency{validator="validator-44",v="sum"} 17374616335344112
+block_committed_latency{validator="node-44",v="count"} 28547
+block_committed_latency{v="p50",validator="node-44"} 487770
+block_committed_latency{validator="node-44",v="sum"} 17374616335344112
 # HELP block_committed_latency_squared_micros Squared latency
 # TYPE block_committed_latency_squared_micros counter
-block_committed_latency_squared_micros{validator="validator-44"} 13465046685909033000
+block_committed_latency_squared_micros{validator="node-44"} 13465046685909033000
 # HELP committed_leaders_total Total committed leaders
 # TYPE committed_leaders_total counter
-committed_leaders_total{commit_type="direct-commit",validator="validator-44",authority="0"} 1
+committed_leaders_total{commit_type="direct-commit",validator="node-44",authority="0"} 1
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);

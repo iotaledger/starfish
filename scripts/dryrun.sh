@@ -4,7 +4,7 @@
 # Configuration Parameters
 #----------------------------------------------------------------------
 # Recommend < physical cores. Hard limit is 128
-NUM_VALIDATORS=${NUM_VALIDATORS:-10}
+NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti
@@ -24,7 +24,7 @@ STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
 TRANSACTION_MODE=${TRANSACTION_MODE:-all_zero}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-#DISSEMINATION_MODE=${DISSEMINATION_MODE:-pull}
+DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
 # Set to 1 to overlay 10s latency on the f farthest peers
 #ADVERSARIAL_LATENCY=1
 DATA_DIR="scripts/data"
@@ -40,7 +40,7 @@ GRAFANA_PORT=${GRAFANA_PORT:-3001}
 BASE_IP="172.28.0.10"
 SUBNET="172.28.0.0/24"
 
-TPS_PER_VALIDATOR=$(echo "$DESIRED_TPS / $NUM_VALIDATORS" | bc)
+TPS_PER_NODE=$(echo "$DESIRED_TPS / $NUM_NODES" | bc)
 
 #----------------------------------------------------------------------
 # Terminal Colors
@@ -82,17 +82,17 @@ fi
 # Signal Handling
 #----------------------------------------------------------------------
 cleanup() {
-    echo -e "\n${RED}Terminating validators...${RESET}"
-    # Build validator service names list
-    local validators=""
-    for ((i=0; i<NUM_VALIDATORS; i++)); do
-        validators="$validators validator-$i"
+    echo -e "\n${RED}Terminating nodes...${RESET}"
+    # Build node service names list
+    local nodes=""
+    for ((i=0; i<NUM_NODES; i++)); do
+        nodes="$nodes node-$i"
     done
-    # Stop all validators at once with short timeout
+    # Stop all nodes at once with short timeout
     docker compose -f "$COMPOSE_FILE" \
-        stop -t 1 $validators 2>/dev/null || true
+        stop -t 1 $nodes 2>/dev/null || true
     docker compose -f "$COMPOSE_FILE" \
-        rm -f $validators 2>/dev/null || true
+        rm -f $nodes 2>/dev/null || true
     echo -e \
         "${GREEN}Monitoring still running at:" \
         "${CYAN}http://localhost:${GRAFANA_PORT}${RESET}"
@@ -187,14 +187,14 @@ scrape_configs:
   - job_name: 'starfish-metrics'
     static_configs:
 EOH
-    for ((i=0; i<NUM_VALIDATORS; i++)); do
+    for ((i=0; i<NUM_NODES; i++)); do
         LAST_OCTET=$((${BASE_IP##*.} + i))
-        METRICS_PORT=$((1500 + NUM_VALIDATORS + i))
-        VALIDATOR_NAME="validator-$i"
+        METRICS_PORT=$((1500 + NUM_NODES + i))
+        NODE_NAME="node-$i"
         cat <<EOT
       - targets: ['172.28.0.$LAST_OCTET:$METRICS_PORT']
         labels:
-          validator: '$VALIDATOR_NAME'
+          node: '$NODE_NAME'
 EOT
     done
 } > "$PROMETHEUS_CONFIG"
@@ -289,11 +289,11 @@ services:
     restart: unless-stopped
 EOH
 
-    # Validator services
+    # Node services
     BYZANTINE_COUNT=0
-    for ((i=0; i<NUM_VALIDATORS; i++)); do
+    for ((i=0; i<NUM_NODES; i++)); do
         LAST_OCTET=$((${BASE_IP##*.} + i))
-        VALIDATOR_IP="172.28.0.$LAST_OCTET"
+        NODE_IP="172.28.0.$LAST_OCTET"
 
         if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
             ((BYZANTINE_COUNT++))
@@ -304,10 +304,10 @@ EOH
                 equivocating-chains|equivocating-two-chains|equivocating-chains-bomb)
                     LOAD=0 ;;
                 *)
-                    LOAD=$TPS_PER_VALIDATOR ;;
+                    LOAD=$TPS_PER_NODE ;;
             esac
         else
-            LOAD=$TPS_PER_VALIDATOR
+            LOAD=$TPS_PER_NODE
             EXTRA_FLAGS=""
         fi
 
@@ -334,13 +334,13 @@ EOH
 
         cat <<EOV
 
-  validator-$i:
-    container_name: validator-$i
+  node-$i:
+    container_name: node-$i
     image: starfish
     command: >
       dry-run
       --authority $i
-      --committee-size $NUM_VALIDATORS
+      --committee-size $NUM_NODES
       --load $LOAD
       --base-ip $BASE_IP
       --consensus $CONSENSUS
@@ -353,7 +353,7 @@ EOH
       - RUST_LOG=$RUST_LOG
     networks:
       starfish-net:
-        ipv4_address: $VALIDATOR_IP
+        ipv4_address: $NODE_IP
     restart: unless-stopped
 EOV
     done
@@ -365,10 +365,10 @@ EOV
 echo -e "${CYAN}Started at: $(date)${RESET}"
 echo -e "${GREEN}─── Configuration ───────────────────${RESET}"
 printf "  %-18s ${YELLOW}%s${RESET}\n" \
-    "Validators:" "$NUM_VALIDATORS" \
+    "Nodes:" "$NUM_NODES" \
     "Consensus:" "$CONSENSUS" \
     "Dissemination:" "$DISSEMINATION_MODE" \
-    "Target TPS:" "$DESIRED_TPS ($TPS_PER_VALIDATOR/validator)" \
+    "Target TPS:" "$DESIRED_TPS ($TPS_PER_NODE/node)" \
     "Storage:" "$STORAGE_BACKEND" \
     "Tx mode:" "$TRANSACTION_MODE" \
     "Byzantine:" "$NUM_BYZANTINE_NODES" \
@@ -407,11 +407,11 @@ echo -e "${CYAN}Credentials: admin/admin${RESET}"
 sleep "$TEST_TIME"
 
 # Save logs before cleanup
-echo -e "${CYAN}Saving validator logs...${RESET}"
-for ((i=0; i<NUM_VALIDATORS; i++)); do
+echo -e "${CYAN}Saving node logs...${RESET}"
+for ((i=0; i<NUM_NODES; i++)); do
     docker compose -f "$COMPOSE_FILE" \
-        logs "validator-$i" \
-        > "$DATA_DIR/validator_${i}.log" 2>&1
+        logs "node-$i" \
+        > "$DATA_DIR/node_${i}.log" 2>&1
 done
 
 cleanup

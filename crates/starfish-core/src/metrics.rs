@@ -148,6 +148,14 @@ pub struct Metrics {
     pub accepted_blocks_by_source: IntCounterVec,
     pub accepted_headers_by_source: IntCounterVec,
     pub accepted_transactions_by_source: IntCounterVec,
+
+    // CordialKnowledge collection-size gauges
+    pub ck_known_headers: IntGauge,
+    pub ck_known_shards: IntGauge,
+    pub ck_pending_headers: IntGauge,
+    pub ck_pending_shards: IntGauge,
+    pub ck_peer_known_headers: IntGaugeVec,
+    pub ck_peer_known_shards: IntGaugeVec,
 }
 
 pub struct MetricReporter {
@@ -221,7 +229,7 @@ impl Metrics {
         let (connection_latency_hist, connection_latency_sender) = (0..committee_size)
             .map(|peer| {
                 let (hist, sender) = histogram();
-                ((hist, format!("validator-{peer}")), sender)
+                ((hist, format!("node-{peer}")), sender)
             })
             .unzip();
         let reporter = MetricReporter {
@@ -834,6 +842,45 @@ impl Metrics {
                 "accepted_transactions_by_source",
                 "Total accepted transaction data attachments by data source",
                 &["source"],
+                registry,
+            )
+            .unwrap(),
+
+            ck_known_headers: register_int_gauge_with_registry!(
+                "ck_known_headers",
+                "Global CordialKnowledge header dedup set size",
+                registry,
+            )
+            .unwrap(),
+            ck_known_shards: register_int_gauge_with_registry!(
+                "ck_known_shards",
+                "Global CordialKnowledge shard dedup set size",
+                registry,
+            )
+            .unwrap(),
+            ck_pending_headers: register_int_gauge_with_registry!(
+                "ck_pending_headers",
+                "Total queued headers across all authorities",
+                registry,
+            )
+            .unwrap(),
+            ck_pending_shards: register_int_gauge_with_registry!(
+                "ck_pending_shards",
+                "Total queued shards across all authorities",
+                registry,
+            )
+            .unwrap(),
+            ck_peer_known_headers: register_int_gauge_vec_with_registry!(
+                "ck_peer_known_headers",
+                "Per-peer header dedup set size",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            ck_peer_known_shards: register_int_gauge_vec_with_registry!(
+                "ck_peer_known_shards",
+                "Per-peer shard dedup set size",
+                &["peer"],
                 registry,
             )
             .unwrap(),

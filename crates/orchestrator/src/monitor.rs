@@ -190,7 +190,7 @@ impl Prometheus {
 
         let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
         for (i, (_, nodes_metrics_path)) in nodes_metrics_path.into_iter().enumerate() {
-            let id = format!("validator-{i}");
+            let id = format!("node-{i}");
             let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
             config.push(scrape_config);
         }

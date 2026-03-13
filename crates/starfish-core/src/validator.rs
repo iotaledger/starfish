@@ -64,8 +64,8 @@ impl Validator {
         let registry = Registry::new_custom(
             None,
             Some(HashMap::from([(
-                "validator".to_string(),
-                format!("validator-{authority}"),
+                "node".to_string(),
+                format!("node-{authority}"),
             )])),
         )
         .wrap_err("Failed to create prometheus registry")?;

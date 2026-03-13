@@ -9,31 +9,31 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:1510']
         labels:
-          validator: 'validator-0'
+          node: 'node-0'
       - targets: ['host.docker.internal:1511']
         labels:
-          validator: 'validator-1'
+          node: 'node-1'
       - targets: ['host.docker.internal:1512']
         labels:
-          validator: 'validator-2'
+          node: 'node-2'
       - targets: ['host.docker.internal:1513']
         labels:
-          validator: 'validator-3'
+          node: 'node-3'
       - targets: ['host.docker.internal:1514']
         labels:
-          validator: 'validator-4'
+          node: 'node-4'
       - targets: ['host.docker.internal:1515']
         labels:
-          validator: 'validator-5'
+          node: 'node-5'
       - targets: ['host.docker.internal:1516']
         labels:
-          validator: 'validator-6'
+          node: 'node-6'
       - targets: ['host.docker.internal:1517']
         labels:
-          validator: 'validator-7'
+          node: 'node-7'
       - targets: ['host.docker.internal:1518']
         labels:
-          validator: 'validator-8'
+          node: 'node-8'
       - targets: ['host.docker.internal:1519']
         labels:
-          validator: 'validator-9'
+          node: 'node-9'
