@@ -23,7 +23,7 @@ use crate::{
     committee::{QuorumThreshold, StakeAggregator},
     config::DisseminationMode,
     consensus::universal_committer::UniversalCommitter,
-    dag_state::{ByzantineStrategy, ConsensusProtocol},
+    dag_state::{ByzantineStrategy, ConsensusProtocol, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     net_sync::NetworkSyncerInner,
@@ -321,7 +321,10 @@ where
             shards.len(),
         );
         self.sender
-            .send(NetworkMessage::Batch(BlockBatch::shards_only(shards)))
+            .send(NetworkMessage::Batch(BlockBatch::shards_only(
+                DataSource::TransactionDataRequest,
+                shards,
+            )))
             .await
             .ok()?;
         Some(())
@@ -399,6 +402,7 @@ where
                 );
                 self.sender
                     .send(NetworkMessage::Batch(BlockBatch {
+                        source: DataSource::HeaderRequest,
                         full_blocks: Vec::new(),
                         headers,
                         shards,
@@ -428,7 +432,10 @@ where
                     "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
                 );
                 self.sender
-                    .send(NetworkMessage::Batch(BlockBatch::full_only(blocks)))
+                    .send(NetworkMessage::Batch(BlockBatch::full_only(
+                        DataSource::HeaderRequest,
+                        blocks,
+                    )))
                     .await
                     .ok()?;
             }
@@ -756,7 +763,7 @@ where
         }
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
-    let batch = BlockBatch::full_only(blocks);
+    let batch = BlockBatch::full_only(DataSource::BlockBundleStreaming, blocks);
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
@@ -981,6 +988,7 @@ where
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
+        source: DataSource::BlockBundleStreaming,
         full_blocks: blocks,
         headers: Vec::new(),
         shards: Vec::new(),
@@ -1135,6 +1143,7 @@ where
                     .flatten(),
             );
             BlockBatch {
+                source: DataSource::BlockBundleStreaming,
                 full_blocks,
                 headers: Vec::new(),
                 shards: Vec::new(),
@@ -1147,6 +1156,7 @@ where
                 .dag_state
                 .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
             BlockBatch {
+                source: DataSource::BlockBundleStreaming,
                 full_blocks: plan.own_blocks,
                 headers,
                 shards,

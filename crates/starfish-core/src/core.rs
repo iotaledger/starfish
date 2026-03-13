@@ -22,7 +22,8 @@ use crate::{
     },
     crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
     dag_state::{
-        ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, OwnBlockData,
+        ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, DataSource,
+        OwnBlockData,
     },
     data::Data,
     encoder::ShardEncoder,
@@ -223,6 +224,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn add_blocks(
         &mut self,
         blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
+        source: DataSource,
     ) -> (
         bool,
         Vec<BlockReference>,
@@ -255,7 +257,7 @@ impl<H: BlockHandler> Core<H> {
         let (processed, updated_existing_with_transactions, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_blocks",
-            self.block_manager.add_blocks(blocks)
+            self.block_manager.add_blocks(blocks, source)
         );
         let mut processed_references_with_transactions = AHashSet::new();
         let mut processed_references_without_transactions = Vec::new();
@@ -313,6 +315,7 @@ impl<H: BlockHandler> Core<H> {
     pub fn add_headers(
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
     ) -> (
         bool,
         AHashSet<BlockReference>,
@@ -326,7 +329,7 @@ impl<H: BlockHandler> Core<H> {
         let (processed, _, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_headers",
-            self.block_manager.add_blocks(headers)
+            self.block_manager.add_blocks(headers, source)
         );
         let success = !processed.is_empty();
         let mut processed_refs = Vec::with_capacity(processed.len());
@@ -344,20 +347,29 @@ impl<H: BlockHandler> Core<H> {
     /// Attach recovered transaction data directly to existing blocks in the
     /// DAG. Bypasses the block manager — headers are already accepted and
     /// connected.
-    pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
+    pub fn add_transaction_data(
+        &mut self,
+        items: Vec<ReconstructedTransactionData>,
+        source: DataSource,
+    ) {
         for item in items {
             let block_ref = item.block_reference;
-            self.attach_or_buffer_transaction_data(item);
+            self.attach_or_buffer_transaction_data(item, source);
             self.sign_and_enqueue_dac(&block_ref);
         }
         self.update_pending_metrics();
     }
 
-    fn attach_or_buffer_transaction_data(&mut self, item: ReconstructedTransactionData) {
+    fn attach_or_buffer_transaction_data(
+        &mut self,
+        item: ReconstructedTransactionData,
+        source: DataSource,
+    ) {
         if !self.dag_state.attach_transaction_data(
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
+            source,
         ) {
             self.pending_reconstructed_data
                 .insert(item.block_reference, item);
@@ -393,6 +405,7 @@ impl<H: BlockHandler> Core<H> {
             item.block_reference,
             &item.transaction_data,
             &item.shard_data,
+            DataSource::ShardReconstructor,
         ) {
             self.sign_and_enqueue_dac(&block_ref);
         } else {

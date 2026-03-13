@@ -143,6 +143,11 @@ pub struct Metrics {
     pub bls_presign_total: IntCounterVec,
     pub bls_presign_hit_total: IntCounter,
     pub bls_presign_miss_total: IntCounter,
+
+    // DataSource provenance counters
+    pub accepted_blocks_by_source: IntCounterVec,
+    pub accepted_headers_by_source: IntCounterVec,
+    pub accepted_transactions_by_source: IntCounterVec,
 }
 
 pub struct MetricReporter {
@@ -807,6 +812,28 @@ impl Metrics {
             commit_availability_gap: register_int_gauge_with_registry!(
                 "commit_availability_gap",
                 "Gap between last commit and last commit with available transactions",
+                registry,
+            )
+            .unwrap(),
+
+            accepted_blocks_by_source: register_int_counter_vec_with_registry!(
+                "accepted_blocks_by_source",
+                "Total accepted full blocks by data source",
+                &["source"],
+                registry,
+            )
+            .unwrap(),
+            accepted_headers_by_source: register_int_counter_vec_with_registry!(
+                "accepted_headers_by_source",
+                "Total accepted header-only blocks by data source",
+                &["source"],
+                registry,
+            )
+            .unwrap(),
+            accepted_transactions_by_source: register_int_counter_vec_with_registry!(
+                "accepted_transactions_by_source",
+                "Total accepted transaction data attachments by data source",
+                &["source"],
                 registry,
             )
             .unwrap(),

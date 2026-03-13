@@ -42,6 +42,44 @@ type AuthorityBitmask = u128;
 
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
 
+/// Tracks where block headers and transaction data originate.
+/// Carried on the wire inside `BlockBatch` so the receiver can distinguish
+/// proactive dissemination from sync responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DataSource {
+    /// Regular block-bundle streaming (proactive push/dissemination).
+    BlockBundleStreaming,
+    /// Response to MissingParentsRequest (header/full-block sync).
+    HeaderRequest,
+    /// Response to MissingTxDataRequest (shard/tx-data sync).
+    TransactionDataRequest,
+    /// Transactions reconstructed from erasure-coded shards.
+    ShardReconstructor,
+    /// Block created by this node.
+    OwnBlock,
+    /// Data loaded from storage during recovery.
+    Recover,
+}
+
+impl DataSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockBundleStreaming => "block_bundle_streaming",
+            Self::HeaderRequest => "header_request",
+            Self::TransactionDataRequest => "transaction_data_request",
+            Self::ShardReconstructor => "shard_reconstructor",
+            Self::OwnBlock => "own_block",
+            Self::Recover => "recover",
+        }
+    }
+}
+
+impl std::fmt::Display for DataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DacCertificateVerificationState {
     #[default]
@@ -608,20 +646,57 @@ impl DagState {
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
 
-    pub fn insert_general_block(&self, block: Data<VerifiedBlock>) {
+    pub fn insert_general_block(&self, block: Data<VerifiedBlock>, source: DataSource) {
+        let has_tx = block.has_transaction_data();
         let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(block, authority_index_start, authority_index_end);
+        let label = source.as_str();
+        if has_tx {
+            self.metrics
+                .accepted_blocks_by_source
+                .with_label_values(&[label])
+                .inc();
+        } else {
+            self.metrics
+                .accepted_headers_by_source
+                .with_label_values(&[label])
+                .inc();
+        }
     }
 
     /// Batch-insert multiple blocks, persisting all to the store first, then
     /// acquiring the DAG write lock once for all in-memory mutations.
-    pub fn insert_general_blocks(&self, blocks: Vec<Data<VerifiedBlock>>) {
+    pub fn insert_general_blocks(&self, blocks: Vec<Data<VerifiedBlock>>, source: DataSource) {
         if blocks.is_empty() {
             return;
         }
         let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
+
+        // Record per-source metrics.
+        let label = source.as_str();
+        let mut full_count = 0u64;
+        let mut header_count = 0u64;
+        for block in &blocks {
+            if block.has_transaction_data() {
+                full_count += 1;
+            } else {
+                header_count += 1;
+            }
+        }
+        if full_count > 0 {
+            self.metrics
+                .accepted_blocks_by_source
+                .with_label_values(&[label])
+                .inc_by(full_count);
+        }
+        if header_count > 0 {
+            self.metrics
+                .accepted_headers_by_source
+                .with_label_values(&[label])
+                .inc_by(header_count);
+        }
 
         // Phase 1: persist all blocks to the store batch (no DAG lock needed).
         for block in &blocks {
@@ -1420,6 +1495,7 @@ impl DagState {
         block_ref: BlockReference,
         transaction_data: &TransactionData,
         shard_data: &ProvableShard,
+        source: DataSource,
     ) -> bool {
         let auth = block_ref.authority as usize;
 
@@ -1497,6 +1573,10 @@ impl DagState {
             inner.maybe_queue_ack(block_ref);
         }
         *inner.round_version.entry(block_ref.round).or_insert(0) += 1;
+        self.metrics
+            .accepted_transactions_by_source
+            .with_label_values(&[source.as_str()])
+            .inc();
         true
     }
 
@@ -2601,7 +2681,9 @@ mod tests {
     use prometheus::Registry;
     use tempfile::TempDir;
 
-    use super::{CACHED_ROUNDS, ConsensusProtocol, DacCertificateVerificationState, DagState};
+    use super::{
+        CACHED_ROUNDS, ConsensusProtocol, DacCertificateVerificationState, DagState, DataSource,
+    };
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
@@ -2723,7 +2805,7 @@ mod tests {
         let block = make_empty_full_block(1, 1, ConsensusProtocol::Mysticeti);
         let reference = *block.reference();
 
-        dag_state.insert_general_block(block);
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
 
         assert!(dag_state.is_data_available(&reference));
     }
@@ -2734,7 +2816,7 @@ mod tests {
         let block = make_empty_full_block(1, 1, ConsensusProtocol::CordialMiners);
         let reference = *block.reference();
 
-        dag_state.insert_general_block(block);
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
 
         assert!(dag_state.is_data_available(&reference));
     }
@@ -2745,13 +2827,16 @@ mod tests {
         let own_leader_ref = BlockReference::new_test(0, 4);
         let other_leader_ref = BlockReference::new_test(1, 1);
 
-        dag_state.insert_general_blocks(vec![
-            make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
-            make_starfish_speed_vote_block(2, 5, own_leader_ref, 1u128 << 1),
-            make_starfish_speed_vote_block(3, 5, own_leader_ref, 1u128 << 0),
-            make_starfish_speed_vote_block(0, 2, other_leader_ref, 1u128 << 2),
-            make_starfish_speed_vote_block(2, 2, other_leader_ref, 1u128 << 2),
-        ]);
+        dag_state.insert_general_blocks(
+            vec![
+                make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
+                make_starfish_speed_vote_block(2, 5, own_leader_ref, 1u128 << 1),
+                make_starfish_speed_vote_block(3, 5, own_leader_ref, 1u128 << 0),
+                make_starfish_speed_vote_block(0, 2, other_leader_ref, 1u128 << 2),
+                make_starfish_speed_vote_block(2, 2, other_leader_ref, 1u128 << 2),
+            ],
+            DataSource::BlockBundleStreaming,
+        );
 
         let excluded = dag_state.starfish_speed_excluded_ack_authorities();
         assert_ne!(excluded & (1u128 << 1), 0);
@@ -2778,7 +2863,7 @@ mod tests {
                 complaint_mask,
             ));
         }
-        dag_state.insert_general_blocks(blocks);
+        dag_state.insert_general_blocks(blocks, DataSource::BlockBundleStreaming);
 
         let excluded = dag_state.starfish_speed_excluded_ack_authorities();
         assert_eq!(excluded & (1u128 << 1), 0);
@@ -2789,12 +2874,10 @@ mod tests {
     fn starfish_speed_adaptive_acknowledgments_can_be_disabled() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, false);
         let own_leader_ref = BlockReference::new_test(0, 4);
-        dag_state.insert_general_block(make_starfish_speed_vote_block(
-            1,
-            5,
-            own_leader_ref,
-            1u128 << 1,
-        ));
+        dag_state.insert_general_block(
+            make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
+            DataSource::BlockBundleStreaming,
+        );
 
         assert_eq!(dag_state.starfish_speed_excluded_ack_authorities(), 0);
     }
@@ -2908,7 +2991,7 @@ mod tests {
             TransactionsCommitment::default(),
         );
 
-        dag_state.insert_general_block(block);
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
         dag_state.insert_shard(reference, shard.clone());
 
         {

@@ -14,7 +14,7 @@ use crate::{
     bls_service::BlsServiceMessage,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
-    dag_state::DagState,
+    dag_state::{DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
@@ -115,6 +115,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn add_blocks(
         &mut self,
         blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
+        source: DataSource,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,
@@ -129,7 +130,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             missing_parents,
             used_additional_blocks,
             _processed_blocks,
-        ) = self.core.add_blocks(blocks);
+        ) = self.core.add_blocks(blocks, source);
         self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
@@ -147,10 +148,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn add_headers(
         &mut self,
         headers: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
         let previous_threshold_round = self.core.dag_state().threshold_clock_round();
         let (success, missing_parents, processed_refs, _processed_blocks) =
-            self.core.add_headers(headers);
+            self.core.add_headers(headers, source);
         self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
@@ -162,8 +164,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     /// Attach recovered transaction data to existing blocks and attempt block
     /// creation.
-    pub fn add_transaction_data(&mut self, items: Vec<ReconstructedTransactionData>) {
-        self.core.add_transaction_data(items);
+    pub fn add_transaction_data(
+        &mut self,
+        items: Vec<ReconstructedTransactionData>,
+        source: DataSource,
+    ) {
+        self.core.add_transaction_data(items, source);
         self.maybe_update_proposal_wait();
         self.try_new_block(BlockCreationReason::TransactionData);
     }

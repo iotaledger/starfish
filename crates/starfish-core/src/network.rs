@@ -23,6 +23,7 @@ use tokio::{
 
 use crate::{
     config::{NodeParameters, NodePublicConfig},
+    dag_state::DataSource,
     data::Data,
     metrics::{Metrics, print_network_address_table},
     runtime,
@@ -86,6 +87,8 @@ pub struct ShardPayload {
 /// content the sender would find useful in return on future transmissions.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlockBatch {
+    /// Provenance of this batch — how the sender produced it.
+    pub source: DataSource,
     /// Full blocks (header + transactions + optional shard).
     pub full_blocks: Vec<Data<VerifiedBlock>>,
     /// Header-only blocks (no payload) — causal history the peer may not have.
@@ -104,8 +107,9 @@ impl BlockBatch {
     /// Wrap a flat list of blocks as a batch with only the `full_blocks` field
     /// populated. Used for backward-compatible call sites that don't yet
     /// distinguish headers/shards.
-    pub fn full_only(blocks: Vec<Data<VerifiedBlock>>) -> Self {
+    pub fn full_only(source: DataSource, blocks: Vec<Data<VerifiedBlock>>) -> Self {
         Self {
+            source,
             full_blocks: blocks,
             headers: Vec::new(),
             shards: Vec::new(),
@@ -116,8 +120,9 @@ impl BlockBatch {
 
     /// Wrap a list of shard payloads as a batch with only the `shards` field
     /// populated.
-    pub fn shards_only(shards: Vec<ShardPayload>) -> Self {
+    pub fn shards_only(source: DataSource, shards: Vec<ShardPayload>) -> Self {
         Self {
+            source,
             full_blocks: Vec::new(),
             headers: Vec::new(),
             shards,

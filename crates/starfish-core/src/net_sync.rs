@@ -31,7 +31,7 @@ use crate::{
     core::Core,
     core_thread::CoreThreadDispatcher,
     crypto::BlsSigner,
-    dag_state::{ConsensusProtocol, DagState},
+    dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
@@ -320,6 +320,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
     }
 
     async fn start(&mut self) {
+        // Pre-create received-request time series per peer so Grafana can show
+        // zero-valued lines before the first request arrives.
+        self.metrics
+            .block_sync_requests_received
+            .with_label_values(&[&self.peer_id.to_string()])
+            .inc_by(0);
+
         // Data requester is needed for Starfish protocols because of the practical
         // way we update the DAG known by other validators
         if matches!(
@@ -328,6 +335,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
+            self.metrics
+                .tx_data_requests_received
+                .with_label_values(&[&self.peer_id.to_string()])
+                .inc_by(0);
             self.data_requester.start().await;
         }
     }
@@ -395,6 +406,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .utilization_timer("Network: verify blocks");
 
         let BlockBatch {
+            source,
             full_blocks,
             headers,
             shards,
@@ -474,7 +486,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
-            self.process_block_headers(blocks_without_transactions)
+            self.process_block_headers(blocks_without_transactions, source)
                 .await;
         }
 
@@ -484,7 +496,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // Then process blocks with transactions
-        self.process_full_blocks(blocks_with_transactions).await;
+        self.process_full_blocks(blocks_with_transactions, source)
+            .await;
 
         drop(timer);
     }
@@ -558,7 +571,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_block_headers(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_block_headers(
+        &mut self,
+        blocks: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
+    ) {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
@@ -658,7 +675,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     ));
             }
             let (missing_parents, processed_additional_refs) =
-                self.inner.syncer.add_headers(new_data_blocks).await;
+                self.inner.syncer.add_headers(new_data_blocks, source).await;
             if !missing_parents.is_empty() {
                 let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                 tracing::debug!(
@@ -681,7 +698,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_full_blocks(&mut self, blocks: Vec<Data<VerifiedBlock>>) {
+    async fn process_full_blocks(&mut self, blocks: Vec<Data<VerifiedBlock>>, source: DataSource) {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
@@ -800,8 +817,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     headers: header_refs,
                     shards: shard_refs,
                 });
-            let (_pending_block_references, missing_parents, _processed_additional_blocks) =
-                self.inner.syncer.add_blocks(verified_block_shards).await;
+            let (_pending_block_references, missing_parents, _processed_additional_blocks) = self
+                .inner
+                .syncer
+                .add_blocks(verified_block_shards, source)
+                .await;
             if !missing_parents.is_empty() {
                 tracing::debug!(
                     "Missing parents when processing block from peer {:?}: {:?}",
@@ -1074,7 +1094,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             headers: Vec::new(),
                             shards: shard_refs,
                         });
-                    bridge_inner.syncer.add_transaction_data(items).await;
+                    bridge_inner
+                        .syncer
+                        .add_transaction_data(items, DataSource::ShardReconstructor)
+                        .await;
                 }
             })
         });

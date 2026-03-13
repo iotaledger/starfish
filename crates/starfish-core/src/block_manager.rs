@@ -11,7 +11,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::{
     committee::Committee,
-    dag_state::DagState,
+    dag_state::{DagState, DataSource},
     data::Data,
     types::{BlockReference, RoundNumber, VerifiedBlock},
 };
@@ -44,6 +44,7 @@ impl BlockManager {
     pub fn add_blocks(
         &mut self,
         blocks: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
     ) -> (
         Vec<Data<VerifiedBlock>>,
         Vec<Data<VerifiedBlock>>,
@@ -160,7 +161,7 @@ impl BlockManager {
         }
 
         // Batch-insert all collected blocks under a single DAG write lock.
-        dag_state.insert_general_blocks(blocks_to_insert);
+        dag_state.insert_general_blocks(blocks_to_insert, source);
 
         (
             newly_processed,

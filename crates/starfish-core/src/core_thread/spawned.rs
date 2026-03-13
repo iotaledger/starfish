@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     block_handler::BlockHandler,
     bls_certificate_aggregator::CertificateEvent,
+    dag_state::DataSource,
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
@@ -33,6 +34,7 @@ pub struct CoreThread<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 enum CoreThreadCommand {
     AddBlocks(
         Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
+        DataSource,
         oneshot::Sender<(
             Vec<BlockReference>,
             AHashSet<BlockReference>,
@@ -41,9 +43,14 @@ enum CoreThreadCommand {
     ),
     AddHeaders(
         Vec<Data<VerifiedBlock>>,
+        DataSource,
         oneshot::Sender<(AHashSet<BlockReference>, Vec<BlockReference>)>,
     ),
-    AddTransactionData(Vec<ReconstructedTransactionData>, oneshot::Sender<()>),
+    AddTransactionData(
+        Vec<ReconstructedTransactionData>,
+        DataSource,
+        oneshot::Sender<()>,
+    ),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     /// Attempt block creation with relaxed readiness checks (StarfishSpeed soft
     /// timeout).
@@ -86,13 +93,14 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub async fn add_blocks(
         &self,
         blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
+        source: DataSource,
     ) -> (
         Vec<BlockReference>,
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
         let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::AddBlocks(blocks, sender))
+        self.send(CoreThreadCommand::AddBlocks(blocks, source, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -100,16 +108,21 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     pub async fn add_headers(
         &self,
         headers: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
         let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::AddHeaders(headers, sender))
+        self.send(CoreThreadCommand::AddHeaders(headers, source, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
 
-    pub async fn add_transaction_data(&self, items: Vec<ReconstructedTransactionData>) {
+    pub async fn add_transaction_data(
+        &self,
+        items: Vec<ReconstructedTransactionData>,
+        source: DataSource,
+    ) {
         let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::AddTransactionData(items, sender))
+        self.send(CoreThreadCommand::AddTransactionData(items, source, sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -188,7 +201,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
             metrics.core_lock_dequeued.inc();
             metrics.core_queue_length.dec();
             match command {
-                CoreThreadCommand::AddBlocks(blocks, sender) => {
+                CoreThreadCommand::AddBlocks(blocks, source, sender) => {
                     metrics
                         .core_thread_tasks_total
                         .with_label_values(&["add_blocks"])
@@ -197,7 +210,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         pending_blocks_with_transactions,
                         missing_references,
                         used_additional_references,
-                    ) = self.syncer.add_blocks(blocks);
+                    ) = self.syncer.add_blocks(blocks, source);
                     sender
                         .send((
                             pending_blocks_with_transactions,
@@ -206,20 +219,20 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         ))
                         .ok();
                 }
-                CoreThreadCommand::AddHeaders(headers, sender) => {
+                CoreThreadCommand::AddHeaders(headers, source, sender) => {
                     metrics
                         .core_thread_tasks_total
                         .with_label_values(&["add_headers"])
                         .inc();
-                    let result = self.syncer.add_headers(headers);
+                    let result = self.syncer.add_headers(headers, source);
                     sender.send(result).ok();
                 }
-                CoreThreadCommand::AddTransactionData(items, sender) => {
+                CoreThreadCommand::AddTransactionData(items, source, sender) => {
                     metrics
                         .core_thread_tasks_total
                         .with_label_values(&["add_transaction_data"])
                         .inc();
-                    self.syncer.add_transaction_data(items);
+                    self.syncer.add_transaction_data(items, source);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
