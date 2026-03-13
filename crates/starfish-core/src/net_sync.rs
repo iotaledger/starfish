@@ -137,6 +137,7 @@ impl FilterForBlocks {
 struct ShardStatus {
     count: usize,
     bitmap: u128,
+    full_block_received: bool,
 }
 
 struct FilterForShards {
@@ -159,7 +160,9 @@ impl FilterForShards {
         let digests = self.digests.read();
         match digests.get(digest) {
             Some(status) => {
-                status.count < self.info_length && (status.bitmap & (1u128 << shard_index)) == 0
+                !status.full_block_received
+                    && status.count < self.info_length
+                    && (status.bitmap & (1u128 << shard_index)) == 0
             }
             None => true,
         }
@@ -174,6 +177,7 @@ impl FilterForShards {
                 ShardStatus {
                     count: 0,
                     bitmap: 0,
+                    full_block_received: false,
                 }
             });
             let mask = 1u128 << shard_index;
@@ -193,7 +197,7 @@ impl FilterForShards {
         let map = self.digests.read();
         digests
             .iter()
-            .map(|d| map.get(d).is_some_and(|s| s.count >= self.info_length))
+            .map(|d| map.get(d).is_some_and(|s| s.full_block_received))
             .collect()
     }
 
@@ -206,9 +210,11 @@ impl FilterForShards {
                 ShardStatus {
                     count: 0,
                     bitmap: 0,
+                    full_block_received: false,
                 }
             });
             entry.count = self.info_length;
+            entry.full_block_received = true;
         }
     }
 }
@@ -517,7 +523,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 payload.block_reference,
                 ShardMessage::Shard {
                     block_reference: payload.block_reference,
-                    merkle_root: payload.shard.transactions_commitment(),
+                    transactions_commitment: payload.shard.transactions_commitment(),
                     shard: payload.shard.shard().clone(),
                     shard_index,
                 },
