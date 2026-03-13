@@ -176,6 +176,28 @@ pub struct ConnectionKnowledge {
 }
 
 impl ConnectionKnowledge {
+    fn update_last_useful_round(rounds: &mut [Option<RoundNumber>], block_ref: BlockReference) {
+        let authority = block_ref.authority as usize;
+        if authority >= rounds.len() {
+            return;
+        }
+        let entry = &mut rounds[authority];
+        match entry {
+            Some(round) if block_ref.round > *round => *round = block_ref.round,
+            None => *entry = Some(block_ref.round),
+            _ => {}
+        }
+    }
+
+    fn update_last_useful_rounds(
+        rounds: &mut [Option<RoundNumber>],
+        block_refs: &[BlockReference],
+    ) {
+        for block_ref in block_refs {
+            Self::update_last_useful_round(rounds, *block_ref);
+        }
+    }
+
     fn recent_authors_bitmask(
         last_useful_rounds: &[Option<RoundNumber>],
         current_round: RoundNumber,
@@ -515,22 +537,12 @@ impl ConnectionKnowledge {
 
     /// Record that a header received from this peer was useful to us.
     pub fn mark_header_useful_from_peer(&mut self, block_ref: BlockReference) {
-        let authority = block_ref.authority as usize;
-        if authority < self.committee_size {
-            let entry = &mut self.last_useful_headers_from_peer_round[authority];
-            match entry {
-                Some(round) if block_ref.round > *round => *round = block_ref.round,
-                None => *entry = Some(block_ref.round),
-                _ => {}
-            }
-        }
+        Self::update_last_useful_round(&mut self.last_useful_headers_from_peer_round, block_ref);
     }
 
     /// Batch variant: record that multiple headers from this peer were useful.
     pub fn mark_headers_useful_from_peer(&mut self, block_refs: &[BlockReference]) {
-        for block_ref in block_refs {
-            self.mark_header_useful_from_peer(*block_ref);
-        }
+        Self::update_last_useful_rounds(&mut self.last_useful_headers_from_peer_round, block_refs);
     }
 
     /// Record that a header from this authority is currently useful to the
@@ -549,30 +561,18 @@ impl ConnectionKnowledge {
 
     /// Batch variant: record that multiple shards from this peer were useful.
     pub fn mark_shards_useful_from_peer(&mut self, block_refs: &[BlockReference]) {
-        for block_ref in block_refs {
-            self.mark_shard_useful_from_peer(*block_ref);
-        }
+        Self::update_last_useful_rounds(&mut self.last_useful_shards_from_peer_round, block_refs);
     }
 
     /// Record that a shard received from this peer was useful to us.
     pub fn mark_shard_useful_from_peer(&mut self, block_ref: BlockReference) {
-        let authority = block_ref.authority as usize;
-        if authority < self.committee_size {
-            let entry = &mut self.last_useful_shards_from_peer_round[authority];
-            match entry {
-                Some(round) if block_ref.round > *round => *round = block_ref.round,
-                None => *entry = Some(block_ref.round),
-                _ => {}
-            }
-        }
+        Self::update_last_useful_round(&mut self.last_useful_shards_from_peer_round, block_ref);
     }
 
     /// Global variant: shard-demand learned from one peer should be advertised
     /// back out to all peers that may be able to help.
     pub fn mark_shards_useful_from_peers(&mut self, block_refs: &[BlockReference]) {
-        for block_ref in block_refs {
-            self.mark_shard_useful_from_peer(*block_ref);
-        }
+        Self::update_last_useful_rounds(&mut self.last_useful_shards_from_peer_round, block_refs);
     }
 
     /// Record that a shard from this authority is currently useful to the

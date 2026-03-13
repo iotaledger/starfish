@@ -177,46 +177,8 @@ impl BlockManager {
         self.blocks_pending.len()
     }
 
-    /// Evict all pending/missing entries below the given threshold to prevent
-    /// unbounded growth from permanently-missing blocks (e.g. byzantine
-    /// validators referencing parents they never broadcast).
-    ///
-    /// When a parent entry is evicted from `block_references_waiting`, all
-    /// child blocks that depended on it are recursively removed from
-    /// `blocks_pending` (cascade removal) — otherwise they would be stuck
-    /// forever with no dependency tracking.
-    pub fn cleanup(&mut self, threshold_round: RoundNumber) {
-        let split_ref = BlockReference {
-            round: threshold_round,
-            authority: 0,
-            digest: Default::default(),
-        };
-
-        // `split_off` returns entries >= split_ref, leaving < split_ref in
-        // the original. Swap so `evicted_parents` holds the old entries.
-        let kept = self.block_references_waiting.split_off(&split_ref);
-        let evicted_parents = std::mem::replace(&mut self.block_references_waiting, kept);
-
-        // Cascade: remove children that depended on evicted parents, and
-        // recursively remove their dependents too.
-        let mut to_remove: Vec<BlockReference> = evicted_parents
-            .into_values()
-            .flat_map(|children| children.into_iter())
-            .collect();
-
-        while let Some(child_ref) = to_remove.pop() {
-            self.blocks_pending.remove(&child_ref);
-            if let Some(grandchildren) = self.block_references_waiting.remove(&child_ref) {
-                to_remove.extend(grandchildren);
-            }
-        }
-
-        // Evict remaining old pending blocks (roots with no dependents).
-        self.blocks_pending = self.blocks_pending.split_off(&split_ref);
-
-        // Clean missing sets.
-        for missing_set in &mut self.missing {
-            missing_set.retain(|r| r.round >= threshold_round);
-        }
-    }
+    /// Pending cleanup is intentionally disabled. For the current short-lived
+    /// testnet/benchmark environment we prefer retaining dependency state over
+    /// evicting unresolved chains from the block manager.
+    pub fn cleanup(&mut self, _threshold_round: RoundNumber) {}
 }

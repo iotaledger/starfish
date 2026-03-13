@@ -120,7 +120,6 @@ impl NodeParameters {
             ..Self::default()
         }
     }
-
 }
 
 impl ImportExport for NodeParameters {}
