@@ -22,7 +22,7 @@ pub fn decode_shards(
     decoder: &mut Decoder,
     committee: &Committee,
     encoder: &mut Encoder,
-    merkle_root: TransactionsCommitment,
+    transactions_commitment: TransactionsCommitment,
     shards: &[Option<Shard>],
     own_id: AuthorityIndex,
 ) -> Option<(TransactionData, ProvableShard)> {
@@ -78,7 +78,7 @@ pub fn decode_shards(
             own_id as usize,
         );
 
-    if computed_merkle_root == merkle_root {
+    if computed_merkle_root == transactions_commitment {
         let transactions =
             reconstruct_transactions_from_shards(&recovered_transactions, info_length);
         let own_shard = ProvableShard::new(

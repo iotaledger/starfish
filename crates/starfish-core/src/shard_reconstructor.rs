@@ -46,7 +46,7 @@ pub enum ShardMessage {
         shard_index: usize,
         /// Merkle root (transactions commitment) for verification after
         /// reconstruction.
-        merkle_root: TransactionsCommitment,
+        transactions_commitment: TransactionsCommitment,
     },
     /// Full block with transactions arrived — stop collecting shards.
     FullBlock(BlockReference),
@@ -54,14 +54,14 @@ pub enum ShardMessage {
 
 /// Collects shards for a single block until reconstruction threshold is met.
 struct ShardAccumulator {
-    merkle_root: TransactionsCommitment,
+    transactions_commitment: TransactionsCommitment,
     shards: Vec<Option<Shard>>,
     shard_count: usize,
 }
 
 impl ShardAccumulator {
     fn new(
-        merkle_root: TransactionsCommitment,
+        transactions_commitment: TransactionsCommitment,
         committee_size: usize,
         initial_shard: Option<(Shard, usize)>,
     ) -> Self {
@@ -72,7 +72,7 @@ impl ShardAccumulator {
             shard_count = 1;
         }
         Self {
-            merkle_root,
+            transactions_commitment,
             shards,
             shard_count,
         }
@@ -233,12 +233,12 @@ impl ShardReconstructor {
                     };
 
                     match job {
-                        Some((block_reference, merkle_root, shards)) => {
+                        Some((block_reference, transactions_commitment, shards)) => {
                             let decoded = decoder::decode_shards(
                                 &mut rs_decoder,
                                 &committee,
                                 &mut encoder,
-                                merkle_root,
+                                transactions_commitment,
                                 &shards,
                                 own_id,
                             );
@@ -334,9 +334,9 @@ impl ShardReconstructor {
                 block_reference,
                 shard,
                 shard_index,
-                merkle_root,
+                transactions_commitment,
             } => {
-                if merkle_root == TransactionsCommitment::default() {
+                if transactions_commitment == TransactionsCommitment::default() {
                     return;
                 }
                 if block_reference.round > self.highest_seen_round {
@@ -356,7 +356,7 @@ impl ShardReconstructor {
                     .shard_accumulators
                     .entry(block_reference)
                     .or_insert_with(|| {
-                        ShardAccumulator::new(merkle_root, self.committee_size, None)
+                        ShardAccumulator::new(transactions_commitment, self.committee_size, None)
                     });
                 acc.update_with_shard(shard, shard_index);
 
@@ -368,7 +368,7 @@ impl ShardReconstructor {
                     self.reconstruction_queue.insert(block_reference);
                     if self
                         .ready_tx
-                        .send((block_reference, acc.merkle_root, acc.shards))
+                        .send((block_reference, acc.transactions_commitment, acc.shards))
                         .await
                         .is_err()
                     {
@@ -583,7 +583,7 @@ mod tests {
                 block_reference: block_ref,
                 shard: shard.clone(),
                 shard_index: i,
-                merkle_root: block.merkle_root(),
+                transactions_commitment: block.merkle_root(),
             })
             .collect();
         sender.send(batch).await.unwrap();
@@ -644,7 +644,7 @@ mod tests {
                 block_reference: block_ref,
                 shard: shards[0].clone(),
                 shard_index: 0,
-                merkle_root: block.merkle_root(),
+                transactions_commitment: block.merkle_root(),
             }])
             .await
             .unwrap();
@@ -662,7 +662,7 @@ mod tests {
                 block_reference: block_ref,
                 shard: shard.clone(),
                 shard_index: i,
-                merkle_root: block.merkle_root(),
+                transactions_commitment: block.merkle_root(),
             })
             .collect();
         sender.send(remaining).await.unwrap();
