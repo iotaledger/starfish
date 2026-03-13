@@ -1443,10 +1443,15 @@ mod tests {
     ) -> (VerifiedBlock, std::sync::Arc<Committee>) {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
+        // Include references from a quorum of authorities at round-1 so that
+        // threshold clock validation passes.
+        let block_references: Vec<_> = (0..committee.quorum_threshold() as AuthorityIndex)
+            .map(|a| BlockReference::new_test(a, round - 1))
+            .collect();
         let block = VerifiedBlock::new_with_signer(
             authority,
             round,
-            vec![BlockReference::new_test(authority, round - 1)],
+            block_references,
             None,
             acknowledgments,
             0,
