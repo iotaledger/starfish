@@ -16,10 +16,6 @@ use crate::{
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
 
-/// Default number of parallel threads for BLS batch verification when
-/// auto-detection is not available.
-pub const DEFAULT_BLS_VERIFICATION_WORKERS: usize = 5;
-
 pub trait ImportExport: Serialize + DeserializeOwned {
     fn load<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
         let content = fs::read_to_string(&path)?;
@@ -61,10 +57,6 @@ pub struct NodeParameters {
     pub enable_starfish_speed_adaptive_acknowledgments: bool,
     #[serde(default = "param_defaults::default_soft_block_timeout")]
     pub soft_block_timeout: Duration,
-    /// Number of parallel threads for BLS batch verification.
-    /// 0 means auto-detect (use all available cores, capped at 16).
-    #[serde(default)]
-    pub bls_workers: usize,
 }
 
 pub mod node_defaults {
@@ -117,7 +109,6 @@ impl Default for NodeParameters {
             enable_starfish_speed_adaptive_acknowledgments:
                 node_defaults::default_enable_starfish_speed_adaptive_acknowledgments(),
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
-            bls_workers: 0,
         }
     }
 }
@@ -130,17 +121,6 @@ impl NodeParameters {
         }
     }
 
-    /// Resolve the effective number of BLS verification workers.
-    /// 0 means auto-detect: use available CPU cores, capped at 16.
-    pub fn effective_bls_workers(&self) -> usize {
-        if self.bls_workers > 0 {
-            self.bls_workers
-        } else {
-            std::thread::available_parallelism()
-                .map(|n| n.get().min(16))
-                .unwrap_or(DEFAULT_BLS_VERIFICATION_WORKERS)
-        }
-    }
 }
 
 impl ImportExport for NodeParameters {}

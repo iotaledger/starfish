@@ -15,7 +15,6 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     bls_batch_verifier::{BlsBatchVerifier, BlsVerificationTask},
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    config::DEFAULT_BLS_VERIFICATION_WORKERS,
     crypto::{self, BlsSignatureBytes, bls_aggregate, bls_aggregate_public_keys},
     dag_state::DagState,
     data::Data,
@@ -54,7 +53,7 @@ pub enum CertificateEvent {
 }
 
 /// Number of parallel threads used for BLS batch verification.
-pub const BLS_VERIFICATION_WORKERS: usize = DEFAULT_BLS_VERIFICATION_WORKERS;
+pub const BLS_VERIFICATION_WORKERS: usize = 5;
 
 pub struct BlsCertificateAggregator {
     committee: Arc<Committee>,
@@ -84,10 +83,6 @@ pub struct BlsCertificateAggregator {
 impl BlsCertificateAggregator {
     pub fn new(committee: Arc<Committee>) -> Self {
         Self::with_workers(committee, BLS_VERIFICATION_WORKERS)
-    }
-
-    pub fn set_num_workers(&mut self, num_workers: usize) {
-        self.num_workers = num_workers.max(1);
     }
 
     pub fn with_workers(committee: Arc<Committee>, num_workers: usize) -> Self {
