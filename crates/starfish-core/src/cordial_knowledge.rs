@@ -58,6 +58,10 @@ pub enum CordialKnowledgeMessage {
         shards: u128,
         round: RoundNumber,
     },
+    /// A batch of newly useful shard authors was observed locally. Fan this
+    /// demand out to all peers so they can proactively push shards for these
+    /// authors to us.
+    UsefulShardsFromPeers(Vec<BlockReference>),
     /// Evict entries below these per-authority rounds.
     EvictBelow(Vec<RoundNumber>),
 }
@@ -563,6 +567,14 @@ impl ConnectionKnowledge {
         }
     }
 
+    /// Global variant: shard-demand learned from one peer should be advertised
+    /// back out to all peers that may be able to help.
+    pub fn mark_shards_useful_from_peers(&mut self, block_refs: &[BlockReference]) {
+        for block_ref in block_refs {
+            self.mark_shard_useful_from_peer(*block_ref);
+        }
+    }
+
     /// Record that a shard from this authority is currently useful to the
     /// peer, based on an explicit request they sent us.
     pub fn mark_shard_useful_to_peer(&mut self, block_ref: BlockReference) {
@@ -722,6 +734,11 @@ impl CordialKnowledge {
                         self.connection_knowledges[idx]
                             .write()
                             .update_useful_authors_to_peer(headers, shards, round);
+                    }
+                }
+                CordialKnowledgeMessage::UsefulShardsFromPeers(block_refs) => {
+                    for ck in &self.connection_knowledges {
+                        ck.write().mark_shards_useful_from_peers(&block_refs);
                     }
                 }
                 CordialKnowledgeMessage::EvictBelow(rounds) => {
@@ -1061,6 +1078,44 @@ mod tests {
             let ck = ck.read();
             assert_eq!(ck.last_useful_headers_to_peer_round[0], Some(10));
             assert_eq!(ck.last_useful_shards_to_peer_round[2], Some(10));
+        }
+
+        drop(handle);
+        actor_task.await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_actor_propagates_useful_shards_from_peers_to_all_connections() {
+        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let actor_task = tokio::spawn(actor.run());
+
+        handle.send(CordialKnowledgeMessage::UsefulShardsFromPeers(vec![
+            block_ref(0, 10),
+            block_ref(2, 12),
+            block_ref(0, 8),
+        ]));
+
+        tokio::task::yield_now().await;
+
+        for peer in 0..4 {
+            let ck = handle.connection_knowledge(peer).unwrap();
+            let ck = ck.read();
+            assert_eq!(ck.last_useful_shards_from_peer_round[0], Some(10));
+            assert_eq!(ck.last_useful_shards_from_peer_round[2], Some(12));
+        }
+
+        handle.send(CordialKnowledgeMessage::UsefulShardsFromPeers(vec![
+            block_ref(0, 7),
+            block_ref(2, 11),
+        ]));
+
+        tokio::task::yield_now().await;
+
+        for peer in 0..4 {
+            let ck = handle.connection_knowledge(peer).unwrap();
+            let ck = ck.read();
+            assert_eq!(ck.last_useful_shards_from_peer_round[0], Some(10));
+            assert_eq!(ck.last_useful_shards_from_peer_round[2], Some(12));
         }
 
         drop(handle);

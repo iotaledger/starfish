@@ -532,9 +532,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // --- batch CK update (one write lock) ---
+        let useful_shard_refs: Vec<_> = verified.iter().map(|(r, _, _)| *r).collect();
         if let Some(ck) = connection_knowledge.as_ref() {
-            let refs: Vec<_> = verified.iter().map(|(r, _, _)| *r).collect();
-            ck.write().mark_shards_useful_from_peer(&refs);
+            ck.write().mark_shards_useful_from_peer(&useful_shard_refs);
+        }
+        if !useful_shard_refs.is_empty() {
+            self.inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
+                    useful_shard_refs.clone(),
+                ));
         }
 
         // --- batch filter update (one write lock) ---
@@ -638,6 +645,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     headers: header_refs,
                     shards: Vec::new(),
                 });
+            let useful_shard_refs: Vec<_> = new_data_blocks
+                .iter()
+                .filter(|block| !block.has_empty_payload())
+                .map(|block| *block.reference())
+                .collect();
+            if !useful_shard_refs.is_empty() {
+                self.inner
+                    .cordial_knowledge
+                    .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
+                        useful_shard_refs,
+                    ));
+            }
             let (missing_parents, processed_additional_refs) =
                 self.inner.syncer.add_headers(new_data_blocks).await;
             if !missing_parents.is_empty() {

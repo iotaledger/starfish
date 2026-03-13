@@ -11,7 +11,7 @@
 //! while leader partial signatures are pre-signed as soon as the corresponding
 //! leader block is received.
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use ahash::AHashSet;
 use tokio::{
@@ -57,6 +57,66 @@ impl BlsServiceHandle {
     pub fn send(&self, msg: BlsServiceMessage) {
         let _ = self.sender.send(msg);
     }
+}
+
+// Keep the BLS worker responsive under load by scheduling bounded batches in
+// priority order instead of draining the entire unbounded queue at once.
+const MAX_SCHEDULED_BLOCKS: usize = 256;
+const MAX_SCHEDULED_DAC_SIGS: usize = 2048;
+const MAX_SCHEDULED_ROUND_SIGS: usize = 1024;
+const MAX_SCHEDULED_LEADER_SIGS: usize = 512;
+const MAX_PRESIGN_ROUNDS: usize = 256;
+
+#[derive(Default)]
+struct PendingBlsWork {
+    blocks: VecDeque<Data<VerifiedBlock>>,
+    presign_rounds: VecDeque<RoundNumber>,
+    dac_sigs: VecDeque<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    round_sigs: VecDeque<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+    leader_sigs: VecDeque<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+}
+
+impl PendingBlsWork {
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+            && self.presign_rounds.is_empty()
+            && self.dac_sigs.is_empty()
+            && self.round_sigs.is_empty()
+            && self.leader_sigs.is_empty()
+    }
+
+    fn take_next_batch(&mut self) -> ScheduledBlsBatch {
+        ScheduledBlsBatch {
+            blocks: take_up_to(&mut self.blocks, MAX_SCHEDULED_BLOCKS),
+            presign_rounds: take_up_to(&mut self.presign_rounds, MAX_PRESIGN_ROUNDS),
+            dac_sigs: take_up_to(&mut self.dac_sigs, MAX_SCHEDULED_DAC_SIGS),
+            round_sigs: take_up_to(&mut self.round_sigs, MAX_SCHEDULED_ROUND_SIGS),
+            leader_sigs: take_up_to(&mut self.leader_sigs, MAX_SCHEDULED_LEADER_SIGS),
+        }
+    }
+}
+
+struct ScheduledBlsBatch {
+    blocks: Vec<Data<VerifiedBlock>>,
+    presign_rounds: Vec<RoundNumber>,
+    dac_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    round_sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
+    leader_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+}
+
+impl ScheduledBlsBatch {
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+            && self.presign_rounds.is_empty()
+            && self.dac_sigs.is_empty()
+            && self.round_sigs.is_empty()
+            && self.leader_sigs.is_empty()
+    }
+}
+
+fn take_up_to<T>(queue: &mut VecDeque<T>, limit: usize) -> Vec<T> {
+    let count = queue.len().min(limit);
+    queue.drain(..count).collect()
 }
 
 /// Start the BLS verification service as an async task.
@@ -110,39 +170,17 @@ async fn run_bls_service(
     partial_sig_broadcast: Option<mpsc::UnboundedSender<PartialSig>>,
 ) {
     let mut aggregator = Some(aggregator);
+    let mut pending = PendingBlsWork::default();
     let mut presigned_rounds: AHashSet<RoundNumber> = AHashSet::new();
     let mut presigned_leader_rounds: AHashSet<RoundNumber> = AHashSet::new();
-    while let Some(msg) = receiver.recv().await {
-        let _timer = metrics.bls_service_util.utilization_timer();
-
-        // Collect all queued messages before processing, so blocks from
-        // multiple ProcessBlocks messages are verified in a single batch.
-        let mut all_blocks = Vec::new();
-        let mut presign_rounds = Vec::new();
-        let mut dac_sigs = Vec::new();
-        let mut round_sigs = Vec::new();
-        let mut leader_sigs = Vec::new();
-        collect_message(
-            msg,
-            &mut all_blocks,
-            &mut presign_rounds,
-            &mut dac_sigs,
-            &mut round_sigs,
-            &mut leader_sigs,
-            aggregator
-                .as_mut()
-                .expect("BLS aggregator should always be available"),
-            &mut presigned_rounds,
-            &mut presigned_leader_rounds,
-        );
-        while let Ok(msg) = receiver.try_recv() {
-            collect_message(
+    loop {
+        if pending.is_empty() {
+            let Some(msg) = receiver.recv().await else {
+                break;
+            };
+            enqueue_message(
                 msg,
-                &mut all_blocks,
-                &mut presign_rounds,
-                &mut dac_sigs,
-                &mut round_sigs,
-                &mut leader_sigs,
+                &mut pending,
                 aggregator
                     .as_mut()
                     .expect("BLS aggregator should always be available"),
@@ -151,126 +189,146 @@ async fn run_bls_service(
             );
         }
 
-        let num_blocks = all_blocks.len();
-        let num_dac_sigs = dac_sigs.len();
-        let has_work = num_blocks > 0
-            || !presign_rounds.is_empty()
-            || num_dac_sigs > 0
-            || !round_sigs.is_empty()
-            || !leader_sigs.is_empty();
+        let _timer = metrics.bls_service_util.utilization_timer();
 
-        let events = if !has_work {
-            Vec::new()
-        } else {
-            // Offload CPU-heavy verification to the blocking pool. Inside,
-            // verify_batch_parallel fans out across BLS_VERIFICATION_WORKERS
-            // threads via std::thread::scope.
-            let mut worker_aggregator = aggregator
-                .take()
-                .expect("BLS aggregator should always be available");
-            let metrics_clone = metrics.clone();
-            let bls_signer_clone = bls_signer.clone();
-            let committee_clone = committee.clone();
-            let broadcast_clone = partial_sig_broadcast.clone();
-            let mut presigned_rounds_clone =
-                std::mem::replace(&mut presigned_rounds, AHashSet::new());
-            let mut presigned_clone =
-                std::mem::replace(&mut presigned_leader_rounds, AHashSet::new());
-            let (worker_aggregator, events, returned_rounds, returned_presigned) =
-                tokio::task::spawn_blocking(move || {
-                    let mut broadcast_sigs = Vec::new();
-                    let mut local_round_sigs = Vec::new();
-                    let mut local_leader_sigs = Vec::new();
+        while let Ok(msg) = receiver.try_recv() {
+            enqueue_message(
+                msg,
+                &mut pending,
+                aggregator
+                    .as_mut()
+                    .expect("BLS aggregator should always be available"),
+                &mut presigned_rounds,
+                &mut presigned_leader_rounds,
+            );
+        }
 
-                    // Single unified verification pass across all task types.
-                    let (mut events, batch_failures) = worker_aggregator.process_all(
-                        &all_blocks,
-                        dac_sigs,
-                        round_sigs,
-                        leader_sigs,
-                    );
+        let batch = pending.take_next_batch();
+        if batch.is_empty() {
+            continue;
+        }
+
+        let num_blocks = batch.blocks.len();
+        let num_dac_sigs = batch.dac_sigs.len();
+
+        // Offload CPU-heavy verification to the blocking pool. Higher-priority
+        // categories go first so block-carried cert information can suppress
+        // redundant lower-priority standalone work in the same service tick.
+        let mut worker_aggregator = aggregator
+            .take()
+            .expect("BLS aggregator should always be available");
+        let metrics_clone = metrics.clone();
+        let bls_signer_clone = bls_signer.clone();
+        let committee_clone = committee.clone();
+        let broadcast_clone = partial_sig_broadcast.clone();
+        let mut presigned_rounds_clone = std::mem::replace(&mut presigned_rounds, AHashSet::new());
+        let mut presigned_clone = std::mem::replace(&mut presigned_leader_rounds, AHashSet::new());
+        let (worker_aggregator, events, returned_rounds, returned_presigned) =
+            tokio::task::spawn_blocking(move || {
+                let mut events = Vec::new();
+                let mut broadcast_sigs = Vec::new();
+                let mut local_round_sigs = Vec::new();
+                let mut local_leader_sigs = Vec::new();
+
+                if !batch.blocks.is_empty() {
+                    let (new_events, batch_failures) = worker_aggregator.add_blocks(&batch.blocks);
                     if batch_failures > 0 {
                         metrics_clone
                             .bls_batch_verification_failures_total
                             .inc_by(batch_failures);
                     }
+                    events.extend(new_events);
+                }
 
-                    if let Some(ref bs) = bls_signer_clone {
-                        for round in presign_rounds {
-                            if round == 0 || !presigned_rounds_clone.insert(round) {
-                                continue;
-                            }
-                            let sig = bs.sign_digest(&crypto::bls_round_message(round));
-                            events.push(CertificateEvent::PrecomputedRoundSig(round, sig));
-                            local_round_sigs.push((round, own_authority, sig));
+                if !batch.dac_sigs.is_empty() {
+                    events.extend(worker_aggregator.add_standalone_dac_sigs_batch(batch.dac_sigs));
+                }
+
+                if !batch.round_sigs.is_empty() {
+                    events.extend(
+                        worker_aggregator.add_standalone_round_sigs_batch(batch.round_sigs),
+                    );
+                }
+
+                if !batch.leader_sigs.is_empty() {
+                    events.extend(
+                        worker_aggregator.add_standalone_leader_sigs_batch(batch.leader_sigs),
+                    );
+                }
+
+                if let Some(ref bs) = bls_signer_clone {
+                    for round in batch.presign_rounds {
+                        if round == 0 || !presigned_rounds_clone.insert(round) {
+                            continue;
+                        }
+                        let sig = bs.sign_digest(&crypto::bls_round_message(round));
+                        events.push(CertificateEvent::PrecomputedRoundSig(round, sig));
+                        local_round_sigs.push((round, own_authority, sig));
+                        broadcast_sigs.push(PartialSig {
+                            kind: PartialSigKind::Round(round),
+                            signer: own_authority,
+                            signature: sig,
+                        });
+                        metrics_clone
+                            .bls_presign_total
+                            .with_label_values(&["round"])
+                            .inc();
+                    }
+
+                    for block in &batch.blocks {
+                        let round = block.round();
+                        if round > 0
+                            && block.authority() == committee_clone.elect_leader(round)
+                            && !presigned_clone.contains(&round)
+                        {
+                            presigned_clone.insert(round);
+                            let leader_ref = *block.reference();
+                            let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
+                            events.push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
+                            local_leader_sigs.push((leader_ref, own_authority, sig));
                             broadcast_sigs.push(PartialSig {
-                                kind: PartialSigKind::Round(round),
+                                kind: PartialSigKind::Leader(leader_ref),
                                 signer: own_authority,
                                 signature: sig,
                             });
                             metrics_clone
                                 .bls_presign_total
-                                .with_label_values(&["round"])
+                                .with_label_values(&["leader"])
                                 .inc();
                         }
-
-                        for block in &all_blocks {
-                            let round = block.round();
-                            if round > 0
-                                && block.authority() == committee_clone.elect_leader(round)
-                                && !presigned_clone.contains(&round)
-                            {
-                                presigned_clone.insert(round);
-                                let leader_ref = *block.reference();
-                                let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
-                                events
-                                    .push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
-                                local_leader_sigs.push((leader_ref, own_authority, sig));
-                                broadcast_sigs.push(PartialSig {
-                                    kind: PartialSigKind::Leader(leader_ref),
-                                    signer: own_authority,
-                                    signature: sig,
-                                });
-                                metrics_clone
-                                    .bls_presign_total
-                                    .with_label_values(&["leader"])
-                                    .inc();
-                            }
-                        }
                     }
+                }
 
-                    if !local_round_sigs.is_empty() {
-                        events.extend(
-                            worker_aggregator.add_standalone_round_sigs_batch(local_round_sigs),
-                        );
+                if !local_round_sigs.is_empty() {
+                    events.extend(
+                        worker_aggregator.add_standalone_round_sigs_batch(local_round_sigs),
+                    );
+                }
+
+                if !local_leader_sigs.is_empty() {
+                    events.extend(
+                        worker_aggregator.add_standalone_leader_sigs_batch(local_leader_sigs),
+                    );
+                }
+
+                if let Some(ref tx) = broadcast_clone {
+                    for sig in broadcast_sigs {
+                        let _ = tx.send(sig);
                     }
+                }
 
-                    if !local_leader_sigs.is_empty() {
-                        events.extend(
-                            worker_aggregator.add_standalone_leader_sigs_batch(local_leader_sigs),
-                        );
-                    }
-
-                    if let Some(ref tx) = broadcast_clone {
-                        for sig in broadcast_sigs {
-                            let _ = tx.send(sig);
-                        }
-                    }
-
-                    (
-                        worker_aggregator,
-                        events,
-                        presigned_rounds_clone,
-                        presigned_clone,
-                    )
-                })
-                .await
-                .expect("BLS blocking task should not panic");
-            aggregator = Some(worker_aggregator);
-            presigned_rounds = returned_rounds;
-            presigned_leader_rounds = returned_presigned;
-            events
-        };
+                (
+                    worker_aggregator,
+                    events,
+                    presigned_rounds_clone,
+                    presigned_clone,
+                )
+            })
+            .await
+            .expect("BLS blocking task should not panic");
+        aggregator = Some(worker_aggregator);
+        presigned_rounds = returned_rounds;
+        presigned_leader_rounds = returned_presigned;
 
         if num_blocks > 0 {
             metrics.bls_blocks_processed_total.inc_by(num_blocks as u64);
@@ -375,29 +433,31 @@ async fn run_round_presign_signal_task(
 /// Classify a message into accumulated block or partial-sig vectors.
 /// Cleanup messages are applied immediately since they are cheap.
 #[allow(clippy::too_many_arguments)]
-fn collect_message(
+fn enqueue_message(
     msg: BlsServiceMessage,
-    blocks: &mut Vec<Data<VerifiedBlock>>,
-    presign_rounds: &mut Vec<RoundNumber>,
-    dac_sigs: &mut Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
-    round_sigs: &mut Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
-    leader_sigs: &mut Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    pending: &mut PendingBlsWork,
     aggregator: &mut BlsCertificateAggregator,
     presigned_rounds: &mut AHashSet<RoundNumber>,
     presigned_leader_rounds: &mut AHashSet<RoundNumber>,
 ) {
     match msg {
-        BlsServiceMessage::ProcessBlocks(b) => blocks.extend(b),
-        BlsServiceMessage::PresignRound(round) => presign_rounds.push(round),
+        BlsServiceMessage::ProcessBlocks(b) => pending.blocks.extend(b),
+        BlsServiceMessage::PresignRound(round) => pending.presign_rounds.push_back(round),
         BlsServiceMessage::PartialSig(sig) => match sig.kind {
             PartialSigKind::Dac(block_ref) => {
-                dac_sigs.push((block_ref, sig.signer, sig.signature));
+                pending
+                    .dac_sigs
+                    .push_back((block_ref, sig.signer, sig.signature));
             }
             PartialSigKind::Round(round) => {
-                round_sigs.push((round, sig.signer, sig.signature));
+                pending
+                    .round_sigs
+                    .push_back((round, sig.signer, sig.signature));
             }
             PartialSigKind::Leader(leader_ref) => {
-                leader_sigs.push((leader_ref, sig.signer, sig.signature));
+                pending
+                    .leader_sigs
+                    .push_back((leader_ref, sig.signer, sig.signature));
             }
         },
         BlsServiceMessage::Cleanup(round) => {
@@ -405,5 +465,47 @@ fn collect_message(
             presigned_rounds.retain(|&r| r >= round);
             presigned_leader_rounds.retain(|&r| r >= round);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::VerifiedBlock;
+
+    #[test]
+    fn scheduler_keeps_lower_priority_work_moving() {
+        let mut pending = PendingBlsWork::default();
+        let block = VerifiedBlock::new_genesis(0);
+        for _ in 0..=MAX_SCHEDULED_BLOCKS {
+            pending.blocks.push_back(block.clone());
+        }
+        pending.dac_sigs.push_back((
+            BlockReference::new_test(0, 1),
+            0,
+            BlsSignatureBytes::default(),
+        ));
+        pending
+            .round_sigs
+            .push_back((1, 0, BlsSignatureBytes::default()));
+        pending.leader_sigs.push_back((
+            BlockReference::new_test(1, 1),
+            0,
+            BlsSignatureBytes::default(),
+        ));
+        pending.presign_rounds.push_back(7);
+
+        let batch = pending.take_next_batch();
+        assert_eq!(batch.blocks.len(), MAX_SCHEDULED_BLOCKS);
+        assert_eq!(batch.dac_sigs.len(), 1);
+        assert_eq!(batch.round_sigs.len(), 1);
+        assert_eq!(batch.leader_sigs.len(), 1);
+        assert_eq!(batch.presign_rounds, vec![7]);
+
+        assert_eq!(pending.blocks.len(), 1);
+        assert!(pending.dac_sigs.is_empty());
+        assert!(pending.round_sigs.is_empty());
+        assert!(pending.leader_sigs.is_empty());
+        assert!(pending.presign_rounds.is_empty());
     }
 }
