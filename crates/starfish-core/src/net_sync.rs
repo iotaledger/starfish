@@ -523,6 +523,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .filter_for_shards
                 .needed(&payload.block_reference.digest, shard_index)
             {
+                self.metrics.filtered_shards_total.inc();
                 continue;
             }
 

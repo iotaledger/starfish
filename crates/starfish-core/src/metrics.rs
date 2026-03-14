@@ -43,6 +43,7 @@ pub struct Metrics {
     pub sequenced_transactions_bytes: IntCounter,
 
     pub filtered_blocks_total: IntCounter,
+    pub filtered_shards_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
     pub reconstructed_blocks_total: IntCounter,
     pub shard_reconstruction_jobs_total: IntCounter,
@@ -314,6 +315,12 @@ impl Metrics {
             filtered_blocks_total: register_int_counter_with_registry!(
                 "filtered_blocks_total",
                 "Total number of filtered blocks per authority",
+                registry,
+            )
+            .unwrap(),
+            filtered_shards_total: register_int_counter_with_registry!(
+                "filtered_shards_total",
+                "Total number of filtered standalone shards",
                 registry,
             )
             .unwrap(),
