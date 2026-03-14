@@ -48,6 +48,8 @@ pub struct NodeParameters {
     pub adversarial_latency: bool,
     #[serde(default = "node_defaults::default_compress_network")]
     pub compress_network: bool,
+    #[serde(default = "node_defaults::default_bls_verification_workers")]
+    pub bls_verification_workers: usize,
     #[serde(default)]
     pub dissemination_mode: DisseminationMode,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
@@ -91,6 +93,10 @@ pub mod node_defaults {
         false
     }
 
+    pub fn default_bls_verification_workers() -> usize {
+        5
+    }
+
     pub fn default_causal_push_shard_round_lag() -> RoundNumber {
         0
     }
@@ -111,6 +117,7 @@ impl Default for NodeParameters {
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
             adversarial_latency: node_defaults::default_adversarial_latency(),
             compress_network: node_defaults::default_compress_network(),
+            bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_starfish_speed_adaptive_acknowledgments:

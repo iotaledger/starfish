@@ -144,6 +144,7 @@ pub struct Metrics {
     pub bls_presign_total: IntCounterVec,
     pub bls_presign_hit_total: IntCounter,
     pub bls_presign_miss_total: IntCounter,
+    pub bls_dac_sigs_deferred_total: IntCounter,
 
     // DataSource provenance counters
     pub accepted_blocks_by_source: IntCounterVec,
@@ -542,6 +543,12 @@ impl Metrics {
             bls_presign_miss_total: register_int_counter_with_registry!(
                 "bls_presign_miss_total",
                 "Pre-computed BLS sig not available at block creation",
+                registry,
+            )
+            .unwrap(),
+            bls_dac_sigs_deferred_total: register_int_counter_with_registry!(
+                "bls_dac_sigs_deferred_total",
+                "Ticks where DAC sigs were deferred due to consensus backlog",
                 registry,
             )
             .unwrap(),

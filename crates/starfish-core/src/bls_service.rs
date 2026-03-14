@@ -7,6 +7,10 @@
 //! batch verification and aggregation via [`BlsCertificateAggregator`], and
 //! sends accumulated [`CertificateEvent`]s to the Core thread.
 //!
+//! Verification is split into two phases per service tick so that
+//! consensus-critical round/leader events reach the Core thread without
+//! waiting for the slower DAC verification to complete.
+//!
 //! Standalone round partial signatures are pre-computed before block creation,
 //! while leader partial signatures are pre-signed as soon as the corresponding
 //! leader block is received.
@@ -20,6 +24,7 @@ use tokio::{
 };
 
 use crate::{
+    bls_batch_verifier::BlsBatchVerifier,
     bls_certificate_aggregator::{BlsCertificateAggregator, CertificateEvent},
     committee::Committee,
     crypto::{self, BlsSignatureBytes, BlsSigner},
@@ -67,6 +72,10 @@ const MAX_SCHEDULED_ROUND_SIGS: usize = 1024;
 const MAX_SCHEDULED_LEADER_SIGS: usize = 512;
 const MAX_PRESIGN_ROUNDS: usize = 256;
 
+/// Maximum consecutive ticks where DAC sigs may be deferred before a forced
+/// batch to prevent starvation.
+const MAX_DAC_CONSECUTIVE_SKIPS: usize = 5;
+
 #[derive(Default)]
 struct PendingBlsWork {
     blocks: VecDeque<Data<VerifiedBlock>>,
@@ -74,6 +83,7 @@ struct PendingBlsWork {
     dac_sigs: VecDeque<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
     round_sigs: VecDeque<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
     leader_sigs: VecDeque<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    dac_consecutive_skips: usize,
 }
 
 impl PendingBlsWork {
@@ -86,12 +96,33 @@ impl PendingBlsWork {
     }
 
     fn take_next_batch(&mut self) -> ScheduledBlsBatch {
+        // Under consensus backlog, defer DAC sigs so round/leader work gets
+        // exclusive CPU time. A starvation guard forces DAC processing after
+        // MAX_DAC_CONSECUTIVE_SKIPS ticks.
+        let backlogged = self.blocks.len() > MAX_SCHEDULED_BLOCKS / 2
+            || self.round_sigs.len() > MAX_SCHEDULED_ROUND_SIGS / 2;
+
+        let (dac_sigs, dac_deferred) = if backlogged
+            && !self.dac_sigs.is_empty()
+            && self.dac_consecutive_skips < MAX_DAC_CONSECUTIVE_SKIPS
+        {
+            self.dac_consecutive_skips += 1;
+            (Vec::new(), true)
+        } else {
+            self.dac_consecutive_skips = 0;
+            (
+                take_up_to(&mut self.dac_sigs, MAX_SCHEDULED_DAC_SIGS),
+                false,
+            )
+        };
+
         ScheduledBlsBatch {
             blocks: take_up_to(&mut self.blocks, MAX_SCHEDULED_BLOCKS),
             presign_rounds: take_up_to(&mut self.presign_rounds, MAX_PRESIGN_ROUNDS),
-            dac_sigs: take_up_to(&mut self.dac_sigs, MAX_SCHEDULED_DAC_SIGS),
+            dac_sigs,
             round_sigs: take_up_to(&mut self.round_sigs, MAX_SCHEDULED_ROUND_SIGS),
             leader_sigs: take_up_to(&mut self.leader_sigs, MAX_SCHEDULED_LEADER_SIGS),
+            dac_deferred,
         }
     }
 }
@@ -102,6 +133,7 @@ struct ScheduledBlsBatch {
     dac_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
     round_sigs: Vec<(RoundNumber, AuthorityIndex, BlsSignatureBytes)>,
     leader_sigs: Vec<(BlockReference, AuthorityIndex, BlsSignatureBytes)>,
+    dac_deferred: bool,
 }
 
 impl ScheduledBlsBatch {
@@ -158,6 +190,37 @@ pub fn start_bls_service(
     }
 }
 
+/// Count completed certificate events and update Prometheus counters.
+fn count_cert_events(events: &[CertificateEvent], metrics: &Metrics) {
+    for event in events {
+        match event {
+            CertificateEvent::Round(..) => {
+                metrics
+                    .bls_certificates_total
+                    .with_label_values(&["round"])
+                    .inc();
+            }
+            CertificateEvent::Leader(..) => {
+                metrics
+                    .bls_certificates_total
+                    .with_label_values(&["leader"])
+                    .inc();
+            }
+            CertificateEvent::Dac(..) => {
+                metrics
+                    .bls_certificates_total
+                    .with_label_values(&["dac"])
+                    .inc();
+            }
+            CertificateEvent::DacRejected(..) => {
+                metrics.bls_dac_rejections_total.inc();
+            }
+            CertificateEvent::PrecomputedRoundSig(..)
+            | CertificateEvent::PrecomputedLeaderSig(..) => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_bls_service(
     aggregator: BlsCertificateAggregator,
@@ -211,124 +274,174 @@ async fn run_bls_service(
         let num_blocks = batch.blocks.len();
         let num_dac_sigs = batch.dac_sigs.len();
 
-        // Offload CPU-heavy verification to the blocking pool. Higher-priority
-        // categories go first so block-carried cert information can suppress
-        // redundant lower-priority standalone work in the same service tick.
-        let mut worker_aggregator = aggregator
+        // Check whether blocks carry embedded DAC acknowledgments before the
+        // batch is moved into the first spawn_blocking.
+        let has_embedded_dac = batch.blocks.iter().any(|b| {
+            b.header()
+                .acknowledgment_bls_signatures()
+                .iter()
+                .any(|cert| !cert.is_empty())
+        });
+
+        if batch.dac_deferred {
+            metrics.bls_dac_sigs_deferred_total.inc();
+        }
+
+        // ── PHASE 1: Consensus-critical (round + leader) ────────────
+        //
+        // Merges block partials, embedded round/leader aggregates, and
+        // standalone round/leader sigs into ONE verify_batch_parallel
+        // call. Self-signed presign sigs bypass verification entirely.
+        let mut worker_agg = aggregator
             .take()
             .expect("BLS aggregator should always be available");
-        let metrics_clone = metrics.clone();
-        let bls_signer_clone = bls_signer.clone();
-        let committee_clone = committee.clone();
-        let broadcast_clone = partial_sig_broadcast.clone();
-        let mut presigned_rounds_clone = std::mem::replace(&mut presigned_rounds, AHashSet::new());
-        let mut presigned_clone = std::mem::replace(&mut presigned_leader_rounds, AHashSet::new());
-        let (worker_aggregator, events, returned_rounds, returned_presigned) =
-            tokio::task::spawn_blocking(move || {
-                let mut events = Vec::new();
-                let mut broadcast_sigs = Vec::new();
-                let mut local_round_sigs = Vec::new();
-                let mut local_leader_sigs = Vec::new();
+        let metrics_c = metrics.clone();
+        let bls_signer_c = bls_signer.clone();
+        let committee_c = committee.clone();
+        let broadcast_c = partial_sig_broadcast.clone();
+        let mut presigned_rounds_c = std::mem::replace(&mut presigned_rounds, AHashSet::new());
+        let mut presigned_leader_c =
+            std::mem::replace(&mut presigned_leader_rounds, AHashSet::new());
 
-                if !batch.blocks.is_empty() {
-                    let (new_events, batch_failures) = worker_aggregator.add_blocks(&batch.blocks);
-                    if batch_failures > 0 {
-                        metrics_clone
-                            .bls_batch_verification_failures_total
-                            .inc_by(batch_failures);
+        let (
+            worker_agg,
+            consensus_events,
+            blocks_for_dac,
+            dac_sigs_for_dac,
+            returned_rounds,
+            returned_presigned,
+            batch_failures,
+        ) = tokio::task::spawn_blocking(move || {
+            let (tasks, origins) = worker_agg.collect_consensus_tasks(
+                &batch.blocks,
+                batch.round_sigs,
+                batch.leader_sigs,
+            );
+
+            let invalid =
+                match BlsBatchVerifier::verify_batch_parallel(&tasks, worker_agg.num_workers()) {
+                    Ok(()) => AHashSet::new(),
+                    Err(bad) => bad.into_iter().collect(),
+                };
+            let batch_failures = invalid.len() as u64;
+
+            let mut events = worker_agg.dispatch_verified(origins, &invalid);
+
+            // Presign round/leader sigs and add them directly — skip
+            // verification for our own signatures.
+            let mut broadcast_sigs = Vec::new();
+            if let Some(ref bs) = bls_signer_c {
+                for round in batch.presign_rounds {
+                    if round == 0 || !presigned_rounds_c.insert(round) {
+                        continue;
                     }
-                    events.extend(new_events);
+                    let sig = bs.sign_digest(&crypto::bls_round_message(round));
+                    events.push(CertificateEvent::PrecomputedRoundSig(round, sig));
+                    if let Some(e) = worker_agg.add_round_partial(round, own_authority, sig) {
+                        events.push(e);
+                    }
+                    broadcast_sigs.push(PartialSig {
+                        kind: PartialSigKind::Round(round),
+                        signer: own_authority,
+                        signature: sig,
+                    });
+                    metrics_c
+                        .bls_presign_total
+                        .with_label_values(&["round"])
+                        .inc();
                 }
 
-                if !batch.dac_sigs.is_empty() {
-                    events.extend(worker_aggregator.add_standalone_dac_sigs_batch(batch.dac_sigs));
-                }
-
-                if !batch.round_sigs.is_empty() {
-                    events.extend(
-                        worker_aggregator.add_standalone_round_sigs_batch(batch.round_sigs),
-                    );
-                }
-
-                if !batch.leader_sigs.is_empty() {
-                    events.extend(
-                        worker_aggregator.add_standalone_leader_sigs_batch(batch.leader_sigs),
-                    );
-                }
-
-                if let Some(ref bs) = bls_signer_clone {
-                    for round in batch.presign_rounds {
-                        if round == 0 || !presigned_rounds_clone.insert(round) {
-                            continue;
+                for block in &batch.blocks {
+                    let round = block.round();
+                    if round > 0
+                        && block.authority() == committee_c.elect_leader(round)
+                        && !presigned_leader_c.contains(&round)
+                    {
+                        presigned_leader_c.insert(round);
+                        let leader_ref = *block.reference();
+                        let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
+                        events.push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
+                        if let Some(e) =
+                            worker_agg.add_leader_partial(leader_ref, own_authority, sig)
+                        {
+                            events.push(e);
                         }
-                        let sig = bs.sign_digest(&crypto::bls_round_message(round));
-                        events.push(CertificateEvent::PrecomputedRoundSig(round, sig));
-                        local_round_sigs.push((round, own_authority, sig));
                         broadcast_sigs.push(PartialSig {
-                            kind: PartialSigKind::Round(round),
+                            kind: PartialSigKind::Leader(leader_ref),
                             signer: own_authority,
                             signature: sig,
                         });
-                        metrics_clone
+                        metrics_c
                             .bls_presign_total
-                            .with_label_values(&["round"])
+                            .with_label_values(&["leader"])
                             .inc();
                     }
-
-                    for block in &batch.blocks {
-                        let round = block.round();
-                        if round > 0
-                            && block.authority() == committee_clone.elect_leader(round)
-                            && !presigned_clone.contains(&round)
-                        {
-                            presigned_clone.insert(round);
-                            let leader_ref = *block.reference();
-                            let sig = bs.sign_digest(&crypto::bls_leader_message(&leader_ref));
-                            events.push(CertificateEvent::PrecomputedLeaderSig(leader_ref, sig));
-                            local_leader_sigs.push((leader_ref, own_authority, sig));
-                            broadcast_sigs.push(PartialSig {
-                                kind: PartialSigKind::Leader(leader_ref),
-                                signer: own_authority,
-                                signature: sig,
-                            });
-                            metrics_clone
-                                .bls_presign_total
-                                .with_label_values(&["leader"])
-                                .inc();
-                        }
-                    }
                 }
+            }
 
-                if !local_round_sigs.is_empty() {
-                    events.extend(
-                        worker_aggregator.add_standalone_round_sigs_batch(local_round_sigs),
-                    );
+            if let Some(ref tx) = broadcast_c {
+                for sig in broadcast_sigs {
+                    let _ = tx.send(sig);
                 }
+            }
 
-                if !local_leader_sigs.is_empty() {
-                    events.extend(
-                        worker_aggregator.add_standalone_leader_sigs_batch(local_leader_sigs),
-                    );
-                }
+            (
+                worker_agg,
+                events,
+                batch.blocks,
+                batch.dac_sigs,
+                presigned_rounds_c,
+                presigned_leader_c,
+                batch_failures,
+            )
+        })
+        .await
+        .expect("BLS consensus blocking task should not panic");
 
-                if let Some(ref tx) = broadcast_clone {
-                    for sig in broadcast_sigs {
-                        let _ = tx.send(sig);
-                    }
-                }
-
-                (
-                    worker_aggregator,
-                    events,
-                    presigned_rounds_clone,
-                    presigned_clone,
-                )
-            })
-            .await
-            .expect("BLS blocking task should not panic");
-        aggregator = Some(worker_aggregator);
+        aggregator = Some(worker_agg);
         presigned_rounds = returned_rounds;
         presigned_leader_rounds = returned_presigned;
+
+        if batch_failures > 0 {
+            metrics
+                .bls_batch_verification_failures_total
+                .inc_by(batch_failures);
+        }
+
+        // Dispatch consensus events IMMEDIATELY — round/leader certs reach
+        // the core thread before DAC verification even starts.
+        count_cert_events(&consensus_events, &metrics);
+        if !consensus_events.is_empty() {
+            let _ = event_tx.send(consensus_events);
+        }
+
+        // ── PHASE 2: DAC (deferrable under backlog) ──────────────────
+        let has_dac_work = !dac_sigs_for_dac.is_empty() || has_embedded_dac;
+        if has_dac_work {
+            let mut worker_agg = aggregator
+                .take()
+                .expect("BLS aggregator should always be available");
+            let (worker_agg, dac_events) = tokio::task::spawn_blocking(move || {
+                let (tasks, origins) =
+                    worker_agg.collect_dac_tasks(&blocks_for_dac, dac_sigs_for_dac);
+                let invalid =
+                    match BlsBatchVerifier::verify_batch_parallel(&tasks, worker_agg.num_workers())
+                    {
+                        Ok(()) => AHashSet::new(),
+                        Err(bad) => bad.into_iter().collect(),
+                    };
+                let events = worker_agg.dispatch_verified(origins, &invalid);
+                (worker_agg, events)
+            })
+            .await
+            .expect("BLS DAC blocking task should not panic");
+
+            aggregator = Some(worker_agg);
+            count_cert_events(&dac_events, &metrics);
+            if !dac_events.is_empty() {
+                let _ = event_tx.send(dac_events);
+            }
+        }
 
         if num_blocks > 0 {
             metrics.bls_blocks_processed_total.inc_by(num_blocks as u64);
@@ -337,40 +450,6 @@ async fn run_bls_service(
             metrics
                 .bls_standalone_dac_sigs_total
                 .inc_by(num_dac_sigs as u64);
-        }
-
-        // Count completed certificates by type.
-        for event in &events {
-            match event {
-                CertificateEvent::Round(..) => {
-                    metrics
-                        .bls_certificates_total
-                        .with_label_values(&["round"])
-                        .inc();
-                }
-                CertificateEvent::Leader(..) => {
-                    metrics
-                        .bls_certificates_total
-                        .with_label_values(&["leader"])
-                        .inc();
-                }
-                CertificateEvent::Dac(..) => {
-                    metrics
-                        .bls_certificates_total
-                        .with_label_values(&["dac"])
-                        .inc();
-                }
-                CertificateEvent::DacRejected(..) => {
-                    metrics.bls_dac_rejections_total.inc();
-                }
-                CertificateEvent::PrecomputedRoundSig(..)
-                | CertificateEvent::PrecomputedLeaderSig(..) => {}
-            }
-        }
-
-        // Send accumulated events to the Core thread.
-        if !events.is_empty() {
-            let _ = event_tx.send(events);
         }
     }
 }
@@ -497,15 +576,86 @@ mod tests {
 
         let batch = pending.take_next_batch();
         assert_eq!(batch.blocks.len(), MAX_SCHEDULED_BLOCKS);
-        assert_eq!(batch.dac_sigs.len(), 1);
+        // DAC sigs are deferred under consensus backlog — this is
+        // intentional to prioritise round/leader cert delivery.
+        assert!(batch.dac_deferred);
+        assert!(batch.dac_sigs.is_empty());
+        // Round and leader sigs still move even under backlog.
         assert_eq!(batch.round_sigs.len(), 1);
         assert_eq!(batch.leader_sigs.len(), 1);
         assert_eq!(batch.presign_rounds, vec![7]);
 
         assert_eq!(pending.blocks.len(), 1);
-        assert!(pending.dac_sigs.is_empty());
+        assert_eq!(pending.dac_sigs.len(), 1);
         assert!(pending.round_sigs.is_empty());
         assert!(pending.leader_sigs.is_empty());
         assert!(pending.presign_rounds.is_empty());
+    }
+
+    /// Without backlog, DAC sigs are taken normally.
+    #[test]
+    fn scheduler_takes_dac_without_backlog() {
+        let mut pending = PendingBlsWork::default();
+        let block = VerifiedBlock::new_genesis(0);
+        // Stay below the backlog threshold.
+        for _ in 0..MAX_SCHEDULED_BLOCKS / 4 {
+            pending.blocks.push_back(block.clone());
+        }
+        pending.dac_sigs.push_back((
+            BlockReference::new_test(0, 1),
+            0,
+            BlsSignatureBytes::default(),
+        ));
+
+        let batch = pending.take_next_batch();
+        assert!(!batch.dac_deferred);
+        assert_eq!(batch.dac_sigs.len(), 1);
+        assert!(pending.dac_sigs.is_empty());
+    }
+
+    #[test]
+    fn dac_deferred_under_consensus_backlog() {
+        let mut pending = PendingBlsWork::default();
+        let block = VerifiedBlock::new_genesis(0);
+        // Fill blocks above the backlog threshold (MAX_SCHEDULED_BLOCKS / 2).
+        for _ in 0..MAX_SCHEDULED_BLOCKS {
+            pending.blocks.push_back(block.clone());
+        }
+        pending.dac_sigs.push_back((
+            BlockReference::new_test(0, 1),
+            0,
+            BlsSignatureBytes::default(),
+        ));
+        pending
+            .round_sigs
+            .push_back((1, 0, BlsSignatureBytes::default()));
+
+        let batch = pending.take_next_batch();
+        // DAC sigs should be deferred.
+        assert!(batch.dac_deferred);
+        assert!(batch.dac_sigs.is_empty());
+        assert_eq!(pending.dac_sigs.len(), 1);
+
+        // After MAX_DAC_CONSECUTIVE_SKIPS, starvation guard forces DAC batch.
+        for _ in 0..MAX_DAC_CONSECUTIVE_SKIPS {
+            // Refill blocks to stay backlogged.
+            for _ in 0..MAX_SCHEDULED_BLOCKS {
+                pending.blocks.push_back(block.clone());
+            }
+            let batch = pending.take_next_batch();
+            if pending.dac_consecutive_skips == 0 {
+                // Starvation guard fired on this tick.
+                assert!(!batch.dac_deferred);
+                assert_eq!(batch.dac_sigs.len(), 1);
+                return;
+            }
+        }
+        // If we get here, the guard should fire on the next tick.
+        for _ in 0..MAX_SCHEDULED_BLOCKS {
+            pending.blocks.push_back(block.clone());
+        }
+        let batch = pending.take_next_batch();
+        assert!(!batch.dac_deferred);
+        assert_eq!(batch.dac_sigs.len(), 1);
     }
 }

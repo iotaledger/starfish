@@ -168,6 +168,10 @@ pub enum Operation {
         /// Enable lz4 network compression.
         #[clap(long, action, default_value_t = false, global = true)]
         compress_network: bool,
+
+        /// Number of parallel threads for BLS batch verification (default: 5).
+        #[clap(long, value_name = "INT", global = true)]
+        bls_workers: Option<usize>,
     },
     /// One-click adaptive latency-throughput sweep. This command ensures the
     /// required testbed capacity, then benchmarks each protocol until the
@@ -269,6 +273,10 @@ pub enum Operation {
         /// Enable lz4 network compression.
         #[clap(long, action, default_value_t = false, global = true)]
         compress_network: bool,
+
+        /// Number of parallel threads for BLS batch verification (default: 5).
+        #[clap(long, value_name = "INT", global = true)]
+        bls_workers: Option<usize>,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -421,6 +429,7 @@ fn load_benchmark_configs(
     transaction_mode: &Option<String>,
     dissemination_mode: &Option<String>,
     compress_network: bool,
+    bls_workers: Option<usize>,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
@@ -428,6 +437,9 @@ fn load_benchmark_configs(
     };
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.compress_network = compress_network;
+    if let Some(workers) = bls_workers {
+        node_parameters.bls_verification_workers = workers;
+    }
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }
@@ -694,6 +706,7 @@ async fn run<C: ServerProviderClient>(
             transaction_mode,
             dissemination_mode,
             compress_network,
+            bls_workers,
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
@@ -708,6 +721,7 @@ async fn run<C: ServerProviderClient>(
                 &transaction_mode,
                 &dissemination_mode,
                 compress_network,
+                bls_workers,
             )?;
 
             let protocols = if protocols.is_empty() {
@@ -824,6 +838,7 @@ async fn run<C: ServerProviderClient>(
             transaction_mode,
             dissemination_mode,
             compress_network,
+            bls_workers,
         } => {
             let mut settings = settings;
             maybe_auto_detect_prebuilt_binary(&mut settings);
@@ -836,6 +851,7 @@ async fn run<C: ServerProviderClient>(
                 &transaction_mode,
                 &dissemination_mode,
                 compress_network,
+                bls_workers,
             )?;
 
             let protocols = if protocols.is_empty() {

@@ -108,6 +108,9 @@ enum Operation {
         /// Enable lz4 network compression.
         #[clap(long, default_value_t = false)]
         compress_network: bool,
+        /// Number of parallel threads for BLS batch verification (default: 5).
+        #[clap(long, value_name = "INT")]
+        bls_workers: Option<usize>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -188,6 +191,7 @@ async fn main() -> Result<()> {
             transaction_mode,
             dissemination_mode,
             compress_network,
+            bls_workers,
         } => {
             dryrun(
                 authority,
@@ -204,6 +208,7 @@ async fn main() -> Result<()> {
                 transaction_mode,
                 dissemination_mode,
                 compress_network,
+                bls_workers,
             )
             .await?
         }
@@ -532,6 +537,7 @@ async fn dryrun(
     transaction_mode: Option<String>,
     dissemination_mode: Option<String>,
     compress_network: bool,
+    bls_workers: Option<usize>,
 ) -> Result<()> {
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
@@ -571,6 +577,9 @@ async fn dryrun(
     }
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.compress_network = compress_network;
+    if let Some(workers) = bls_workers {
+        node_parameters.bls_verification_workers = workers;
+    }
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }

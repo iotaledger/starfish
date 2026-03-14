@@ -147,6 +147,10 @@ impl Validator {
             recovered,
             partial_sig_tx,
         );
+        let bls_cert_aggregator = bls_cert_aggregator.map(|mut agg| {
+            agg.set_num_workers(public_config.parameters.bls_verification_workers);
+            agg
+        });
         tracing::info!("Core");
 
         let network = Network::load(
