@@ -156,7 +156,7 @@ pub enum Operation {
 
         /// Transaction payload mode. Overrides the value from the
         /// parameters file. Available options: all_zero | random
-        #[clap(long, value_name = "STRING", global = true)]
+        #[clap(long, value_name = "STRING", default_value = "random", global = true)]
         transaction_mode: Option<String>,
 
         /// Dissemination mode override. Overrides the value from the
@@ -164,6 +164,10 @@ pub enum Operation {
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING", global = true)]
         dissemination_mode: Option<String>,
+
+        /// Enable lz4 network compression.
+        #[clap(long, action, default_value_t = false, global = true)]
+        compress_network: bool,
     },
     /// One-click adaptive latency-throughput sweep. This command ensures the
     /// required testbed capacity, then benchmarks each protocol until the
@@ -253,7 +257,7 @@ pub enum Operation {
 
         /// Transaction payload mode. Overrides the value from the
         /// parameters file. Available options: all_zero | random
-        #[clap(long, value_name = "STRING", global = true)]
+        #[clap(long, value_name = "STRING", default_value = "random", global = true)]
         transaction_mode: Option<String>,
 
         /// Dissemination mode override. Overrides the value from the
@@ -261,6 +265,10 @@ pub enum Operation {
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING", global = true)]
         dissemination_mode: Option<String>,
+
+        /// Enable lz4 network compression.
+        #[clap(long, action, default_value_t = false, global = true)]
+        compress_network: bool,
     },
     /// Print a summary of the specified measurements collection.
     Summarize {
@@ -412,12 +420,14 @@ fn load_benchmark_configs(
     storage_backend: &Option<String>,
     transaction_mode: &Option<String>,
     dissemination_mode: &Option<String>,
+    compress_network: bool,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
         None => NodeParameters::default_with_latency(mimic_extra_latency),
     };
     node_parameters.adversarial_latency = adversarial_latency;
+    node_parameters.compress_network = compress_network;
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }
@@ -683,6 +693,7 @@ async fn run<C: ServerProviderClient>(
             storage_backend,
             transaction_mode,
             dissemination_mode,
+            compress_network,
         } => {
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
@@ -696,6 +707,7 @@ async fn run<C: ServerProviderClient>(
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
+                compress_network,
             )?;
 
             let protocols = if protocols.is_empty() {
@@ -811,6 +823,7 @@ async fn run<C: ServerProviderClient>(
             storage_backend,
             transaction_mode,
             dissemination_mode,
+            compress_network,
         } => {
             let mut settings = settings;
             maybe_auto_detect_prebuilt_binary(&mut settings);
@@ -822,6 +835,7 @@ async fn run<C: ServerProviderClient>(
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
+                compress_network,
             )?;
 
             let protocols = if protocols.is_empty() {

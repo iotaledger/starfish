@@ -120,6 +120,7 @@ pub struct Metrics {
 
     // tracking total bytes sent and received
     pub bytes_sent_total: IntCounter,
+    pub bytes_uncompressed_sent_total: IntCounter,
     pub bytes_received_total: IntCounter,
 
     // per-request-type network message counters
@@ -440,6 +441,12 @@ impl Metrics {
             bytes_sent_total: register_int_counter_with_registry!(
                 "bytes_sent_total",
                 "Total number of bytes sent",
+                registry,
+            )
+            .unwrap(),
+            bytes_uncompressed_sent_total: register_int_counter_with_registry!(
+                "bytes_uncompressed_sent_total",
+                "Total pre-compression bytes sent (for compression ratio)",
                 registry,
             )
             .unwrap(),

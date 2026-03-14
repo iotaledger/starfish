@@ -99,12 +99,15 @@ enum Operation {
         #[clap(long, value_name = "STRING")]
         storage_backend: Option<String>,
         /// Transaction payload mode: all_zero | random
-        #[clap(long, value_name = "STRING")]
+        #[clap(long, value_name = "STRING", default_value = "random")]
         transaction_mode: Option<String>,
         /// Dissemination mode override:
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING")]
         dissemination_mode: Option<String>,
+        /// Enable lz4 network compression.
+        #[clap(long, default_value_t = false)]
+        compress_network: bool,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -184,6 +187,7 @@ async fn main() -> Result<()> {
             storage_backend,
             transaction_mode,
             dissemination_mode,
+            compress_network,
         } => {
             dryrun(
                 authority,
@@ -199,6 +203,7 @@ async fn main() -> Result<()> {
                 storage_backend,
                 transaction_mode,
                 dissemination_mode,
+                compress_network,
             )
             .await?
         }
@@ -526,10 +531,9 @@ async fn dryrun(
     storage_backend: Option<String>,
     transaction_mode: Option<String>,
     dissemination_mode: Option<String>,
+    compress_network: bool,
 ) -> Result<()> {
-    tracing::warn!(
-        "Starting node {authority} in dryrun mode (committee size: {committee_size})"
-    );
+    tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
         Some(IpAddr::V4(v4)) => (0..committee_size)
             .map(|i| {
@@ -566,6 +570,7 @@ async fn dryrun(
         node_parameters.uniform_latency_ms = Some(latency);
     }
     node_parameters.adversarial_latency = adversarial_latency;
+    node_parameters.compress_network = compress_network;
     if let Some(ref mode) = dissemination_mode {
         node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
     }

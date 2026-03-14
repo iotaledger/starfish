@@ -255,6 +255,7 @@ impl Network {
                     metrics: metrics.clone(),
                     active_immediately: id < our_id,
                     extra_connection_latency: latency_table[id][our_id],
+                    compress_network: node_parameters.compress_network,
                 }
                 .run(receiver),
             );
@@ -327,6 +328,7 @@ struct Worker {
     metrics: Arc<Metrics>,
     active_immediately: bool,
     extra_connection_latency: f64,
+    compress_network: bool,
 }
 
 struct WorkerConnection {
@@ -334,6 +336,7 @@ struct WorkerConnection {
     receiver: mpsc::Receiver<NetworkMessage>,
     metrics: Arc<Metrics>,
     peer_id: usize,
+    compress_network: bool,
 }
 
 impl Worker {
@@ -424,6 +427,7 @@ impl Worker {
             receiver,
             metrics,
             peer_id,
+            compress_network,
         } = connection;
         tracing::debug!("Connected to {}", peer_id);
         let (reader, writer) = stream.into_split();
@@ -444,9 +448,12 @@ impl Worker {
             latency_sender,
             metrics.clone(),
             extra_connection_latency,
+            compress_network,
         )
         .boxed();
-        let read_fut = Self::handle_read_stream(reader, sender, pong_sender, metrics).boxed();
+        let read_fut =
+            Self::handle_read_stream(reader, sender, pong_sender, metrics, compress_network)
+                .boxed();
         let (r, _, _) = select_all([write_fut, read_fut]).await;
         tracing::debug!("Disconnected from {}", peer_id);
         r
@@ -459,6 +466,7 @@ impl Worker {
         latency_sender: HistogramSender<Duration>,
         metrics: Arc<Metrics>,
         connection_latency: f64,
+        compress_network: bool,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
         let writer = Arc::new(Mutex::new(writer));
@@ -551,18 +559,23 @@ impl Worker {
                 let request_type = message.request_type();
 
                 // Spawn an inner task and collect its handle
+                let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
                 let handle = tokio::spawn(async move {
                     let serialized = bincode::serialize(&message).expect("Serialization failed");
+                    let wire_bytes = if compress_network {
+                        bytes_uncompressed_sent_total.inc_by(serialized.len() as u64);
+                        lz4_flex::compress_prepend_size(&serialized)
+                    } else {
+                        serialized
+                    };
                     tokio::time::sleep(latency).await;
 
                     match async {
                         let mut writer_guard = writer.lock().await;
-                        // Write the length
-                        writer_guard.write_u32(serialized.len() as u32).await?;
+                        writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        // u32 and serialized data
-                        bytes_sent_total_clone.inc_by(serialized.len() as u64 + 4);
-                        writer_guard.write_all(&serialized).await
+                        bytes_sent_total_clone.inc_by(wire_bytes.len() as u64 + 4);
+                        writer_guard.write_all(&wire_bytes).await
                     }
                     .await
                     {
@@ -599,6 +612,7 @@ impl Worker {
         sender: mpsc::Sender<NetworkMessage>,
         pong_sender: mpsc::Sender<i64>,
         metrics: Arc<Metrics>,
+        compress_network: bool,
     ) -> io::Result<()> {
         // stdlib has a special fast implementation for generating n-size byte vectors,
         // see impl SpecFromElem for u8
@@ -628,7 +642,18 @@ impl Worker {
             let read = stream.read_exact(buf).await?;
             assert_eq!(read, buf.len());
             bytes_received_total.inc_by(read as u64);
-            match bincode::deserialize::<NetworkMessage>(buf).ok() {
+            let deserialize_result = if compress_network {
+                match lz4_flex::decompress_size_prepended(buf) {
+                    Ok(decompressed) => bincode::deserialize::<NetworkMessage>(&decompressed).ok(),
+                    Err(e) => {
+                        tracing::warn!("lz4 decompression failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                bincode::deserialize::<NetworkMessage>(buf).ok()
+            };
+            match deserialize_result {
                 Some(message) => {
                     let request_type = message.request_type();
                     if sender.send(message).await.is_err() {
@@ -664,6 +689,7 @@ impl Worker {
             receiver: network_out_receiver,
             metrics: self.metrics.clone(),
             peer_id: self.peer_id,
+            compress_network: self.compress_network,
         })
     }
 }

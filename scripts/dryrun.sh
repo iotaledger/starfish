@@ -20,18 +20,28 @@ TEST_TIME=${TEST_TIME:-3000}
 # UNIFORM_LATENCY_MS=100
 # Storage backend: rocksdb (default) | tidehunter
 STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
-# Transaction payload mode: all_zero (default) | random
-TRANSACTION_MODE=${TRANSACTION_MODE:-all_zero}
+# Transaction payload mode: all_zero | random (default)
+TRANSACTION_MODE=${TRANSACTION_MODE:-random}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
 DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
+# Enable lz4 network compression.
+# Auto-enabled for random transaction mode.
+# Set COMPRESS_NETWORK=1 or =0 to override.
+if [ -z "${COMPRESS_NETWORK+x}" ]; then
+    if [ "$TRANSACTION_MODE" = "random" ]; then
+        COMPRESS_NETWORK=1
+    else
+        COMPRESS_NETWORK=0
+    fi
+fi
 # Set to 1 to overlay 10s latency on the f farthest peers
 #ADVERSARIAL_LATENCY=1
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
-CLEAN_MONITORING=${CLEAN_MONITORING:-0}
+CLEAN_MONITORING=${CLEAN_MONITORING:-1}
 # Host ports for monitoring (offset from orchestrator's 9090/3000)
 PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
 GRAFANA_PORT=${GRAFANA_PORT:-3001}
@@ -331,6 +341,9 @@ EOH
             PARAM_FLAGS+=" --dissemination-mode"
             PARAM_FLAGS+=" $DISSEMINATION_MODE"
         fi
+        if [ "${COMPRESS_NETWORK:-0}" = 1 ]; then
+            PARAM_FLAGS+=" --compress-network"
+        fi
 
         cat <<EOV
 
@@ -371,6 +384,7 @@ printf "  %-18s ${YELLOW}%s${RESET}\n" \
     "Target TPS:" "$DESIRED_TPS ($TPS_PER_NODE/node)" \
     "Storage:" "$STORAGE_BACKEND" \
     "Tx mode:" "$TRANSACTION_MODE" \
+    "Compression:" "$([ "$COMPRESS_NETWORK" = 1 ] && echo enabled || echo disabled)" \
     "Byzantine:" "$NUM_BYZANTINE_NODES" \
     "Test duration:" "${TEST_TIME}s"
 if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
