@@ -402,7 +402,7 @@ where
                 );
                 self.sender
                     .send(NetworkMessage::Batch(BlockBatch {
-                        source: DataSource::HeaderRequest,
+                        source: DataSource::BlockHeaderRequest,
                         full_blocks: Vec::new(),
                         headers,
                         shards,
@@ -433,7 +433,7 @@ where
                 );
                 self.sender
                     .send(NetworkMessage::Batch(BlockBatch::full_only(
-                        DataSource::HeaderRequest,
+                        DataSource::BlockHeaderRequest,
                         blocks,
                     )))
                     .await

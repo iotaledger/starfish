@@ -49,8 +49,11 @@ pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>
 pub enum DataSource {
     /// Regular block-bundle streaming (proactive push/dissemination).
     BlockBundleStreaming,
+    /// Header-only portion of a block-bundle stream (causal-history headers
+    /// pushed alongside full blocks). Receiver-internal — never on the wire.
+    BlockBundleStreamingHeader,
     /// Response to MissingParentsRequest (header/full-block sync).
-    HeaderRequest,
+    BlockHeaderRequest,
     /// Response to MissingTxDataRequest (shard/tx-data sync).
     TransactionDataRequest,
     /// Transactions reconstructed from erasure-coded shards.
@@ -65,7 +68,8 @@ impl DataSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BlockBundleStreaming => "block_bundle_streaming",
-            Self::HeaderRequest => "header_request",
+            Self::BlockBundleStreamingHeader => "block_bundle_streaming_header",
+            Self::BlockHeaderRequest => "block_header_request",
             Self::TransactionDataRequest => "transaction_data_request",
             Self::ShardReconstructor => "shard_reconstructor",
             Self::OwnBlock => "own_block",
@@ -652,14 +656,17 @@ impl DagState {
         let authority_index_end = self.committee_size as AuthorityIndex;
         self.insert_block_bounds(block, authority_index_start, authority_index_end);
         let label = source.as_str();
+        self.metrics
+            .accepted_headers_by_source
+            .with_label_values(&[label])
+            .inc();
         if has_tx {
             self.metrics
                 .accepted_blocks_by_source
                 .with_label_values(&[label])
                 .inc();
-        } else {
             self.metrics
-                .accepted_headers_by_source
+                .accepted_transactions_by_source
                 .with_label_values(&[label])
                 .inc();
         }
@@ -674,28 +681,24 @@ impl DagState {
         let authority_index_start = 0;
         let authority_index_end = self.committee_size as AuthorityIndex;
 
-        // Record per-source metrics.
+        // Record per-source metrics (additive: every block counts as a header;
+        // full blocks also count as block + tx_data).
         let label = source.as_str();
-        let mut full_count = 0u64;
-        let mut header_count = 0u64;
-        for block in &blocks {
-            if block.has_transaction_data() {
-                full_count += 1;
-            } else {
-                header_count += 1;
-            }
-        }
+        let total = blocks.len() as u64;
+        let full_count = blocks.iter().filter(|b| b.has_transaction_data()).count() as u64;
+        self.metrics
+            .accepted_headers_by_source
+            .with_label_values(&[label])
+            .inc_by(total);
         if full_count > 0 {
             self.metrics
                 .accepted_blocks_by_source
                 .with_label_values(&[label])
                 .inc_by(full_count);
-        }
-        if header_count > 0 {
             self.metrics
-                .accepted_headers_by_source
+                .accepted_transactions_by_source
                 .with_label_values(&[label])
-                .inc_by(header_count);
+                .inc_by(full_count);
         }
 
         // Phase 1: persist all blocks to the store batch (no DAG lock needed).

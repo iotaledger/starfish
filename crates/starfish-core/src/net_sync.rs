@@ -486,7 +486,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
-            self.process_block_headers(blocks_without_transactions, source)
+            let header_source = match source {
+                DataSource::BlockBundleStreaming => DataSource::BlockBundleStreamingHeader,
+                other => other,
+            };
+            self.process_block_headers(blocks_without_transactions, header_source)
                 .await;
         }
 
@@ -1060,7 +1064,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
         // Create CordialKnowledge actor for per-peer header/shard tracking
         let (cordial_knowledge_handle, cordial_knowledge_actor) =
-            CordialKnowledgeHandle::new(committee.len());
+            CordialKnowledgeHandle::new(committee.len(), metrics.clone());
         let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
 
         let inner = Arc::new(NetworkSyncerInner {
