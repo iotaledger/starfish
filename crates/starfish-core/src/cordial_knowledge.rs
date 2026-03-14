@@ -14,6 +14,7 @@ use ahash::AHashSet;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
+use crate::metrics::Metrics;
 use crate::types::{AuthorityIndex, BlockReference, RoundNumber};
 
 /// Maximum round gap beyond which a peer's data is no longer considered useful.
@@ -637,6 +638,18 @@ impl ConnectionKnowledge {
             Self::recent_authors_bitmask(&self.last_useful_shards_to_peer_round, current_round),
         )
     }
+
+    pub fn peer(&self) -> AuthorityIndex {
+        self.peer
+    }
+
+    pub fn known_headers_len(&self) -> usize {
+        self.known_headers.len()
+    }
+
+    pub fn known_shards_len(&self) -> usize {
+        self.known_shards.len()
+    }
 }
 
 #[cfg(test)]
@@ -689,6 +702,7 @@ pub struct CordialKnowledge {
     connection_knowledges: Vec<Arc<RwLock<ConnectionKnowledge>>>,
     /// Receives events from DagState / core / shard reconstructor.
     receiver: mpsc::Receiver<CordialKnowledgeMessage>,
+    metrics: Arc<Metrics>,
 }
 
 impl CordialKnowledge {
@@ -748,6 +762,46 @@ impl CordialKnowledge {
                     }
                 }
             }
+            self.report_metrics();
+        }
+    }
+
+    fn report_metrics(&self) {
+        let shared = self.shared.read();
+        self.metrics
+            .ck_known_headers
+            .set(shared.known_headers.len() as i64);
+        self.metrics
+            .ck_known_shards
+            .set(shared.known_shards.len() as i64);
+
+        let pending_h: usize = shared
+            .header_index
+            .iter()
+            .flat_map(|m| m.values())
+            .map(|v| v.len())
+            .sum();
+        let pending_s: usize = shared
+            .shard_index
+            .iter()
+            .flat_map(|m| m.values())
+            .map(|v| v.len())
+            .sum();
+        self.metrics.ck_pending_headers.set(pending_h as i64);
+        self.metrics.ck_pending_shards.set(pending_s as i64);
+        drop(shared);
+
+        for ck in &self.connection_knowledges {
+            let ck = ck.read();
+            let peer = ck.peer().to_string();
+            self.metrics
+                .ck_peer_known_headers
+                .with_label_values(&[&peer])
+                .set(ck.known_headers_len() as i64);
+            self.metrics
+                .ck_peer_known_shards
+                .with_label_values(&[&peer])
+                .set(ck.known_shards_len() as i64);
         }
     }
 }
@@ -768,7 +822,7 @@ impl CordialKnowledgeHandle {
     /// Create the actor and its handle. Returns `(handle, actor)`.
     ///
     /// The caller should spawn `actor.run()` on a tokio runtime.
-    pub fn new(committee_size: usize) -> (Self, CordialKnowledge) {
+    pub fn new(committee_size: usize, metrics: Arc<Metrics>) -> (Self, CordialKnowledge) {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let shared = Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size)));
 
@@ -792,6 +846,7 @@ impl CordialKnowledgeHandle {
             shared,
             connection_knowledges,
             receiver,
+            metrics,
         };
 
         (handle, actor)
@@ -825,7 +880,15 @@ impl CordialKnowledgeHandle {
 
 #[cfg(test)]
 mod tests {
+    use prometheus::Registry;
+
     use super::*;
+
+    fn test_metrics() -> Arc<Metrics> {
+        let registry = Registry::new();
+        let (metrics, _) = Metrics::new(&registry, None, None, None);
+        metrics
+    }
 
     fn block_ref(authority: AuthorityIndex, round: RoundNumber) -> BlockReference {
         BlockReference {
@@ -1059,7 +1122,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_useful_authors_updates_to_peer() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         // Peer 1 tells us authorities 0 and 2 are useful at round 10
@@ -1086,7 +1149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_useful_shards_from_peers_to_all_connections() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         handle.send(CordialKnowledgeMessage::UsefulShardsFromPeers(vec![
@@ -1124,7 +1187,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_new_header() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         let r = block_ref(2, 5);
@@ -1147,7 +1210,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_dag_parts_batch() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4);
+        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         let header = block_ref(2, 5);
