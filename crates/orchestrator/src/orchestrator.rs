@@ -676,7 +676,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         )
                         .await;
                     if stdio.is_empty() {
-                        display::warn("All metrics scrapes failed for this interval; continuing benchmark");
+                        display::warn(
+                            "All metrics scrapes failed for this \
+                             interval; continuing benchmark",
+                        );
                     }
 
                     for (instance, (stdout, _stderr)) in &stdio {

@@ -502,7 +502,9 @@ impl ServerProviderClient for AwsClient {
                             let left = batch_size / 2;
                             let right = batch_size - left;
                             eprintln!(
-                                "Spot request for {batch_size} instance(s) in {region} failed, splitting into {left} and {right}: {error}"
+                                "Spot request for {batch_size} instance(s) in \
+                                 {region} failed, splitting into {left} and \
+                                 {right}: {error}"
                             );
                             pending_spot_batches.push(right);
                             pending_spot_batches.push(left);
@@ -511,7 +513,9 @@ impl ServerProviderClient for AwsClient {
 
                         if Self::should_retry_smaller_spot_batch_for_mixed(&error_message) {
                             eprintln!(
-                                "Spot request failed for the last instance in {region}, reserving it for on-demand fallback: {error}"
+                                "Spot request failed for the last instance in \
+                                 {region}, reserving it for on-demand \
+                                 fallback: {error}"
                             );
                             on_demand_quantity += batch_size;
                             continue;
@@ -522,7 +526,9 @@ impl ServerProviderClient for AwsClient {
                             self.rollback_instances(client, &instances).await
                         {
                             return Err(CloudProviderError::RequestError(format!(
-                                "{original_error}; rollback of {} partially created instance(s) failed: {rollback_error}",
+                                "{original_error}; rollback of {} \
+                                     partially created instance(s) \
+                                     failed: {rollback_error}",
                                 instances.len()
                             )));
                         }
@@ -538,7 +544,8 @@ impl ServerProviderClient for AwsClient {
                     ))
                 })?;
                 eprintln!(
-                    "Retrying {on_demand_quantity} instance(s) in {region} as on-demand after spot halving"
+                    "Retrying {on_demand_quantity} instance(s) in {region} \
+                     as on-demand after spot halving"
                 );
                 let response = match build_request(on_demand_count, false).send().await {
                     Ok(response) => response,
@@ -548,7 +555,9 @@ impl ServerProviderClient for AwsClient {
                             self.rollback_instances(client, &instances).await
                         {
                             return Err(CloudProviderError::RequestError(format!(
-                                "{original_error}; rollback of {} partially created instance(s) failed: {rollback_error}",
+                                "{original_error}; rollback of {} \
+                                     partially created instance(s) \
+                                     failed: {rollback_error}",
                                 instances.len()
                             )));
                         }
