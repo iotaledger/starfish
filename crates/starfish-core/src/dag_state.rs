@@ -128,7 +128,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => DisseminationMode::PushUseful,
+            | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
         }
     }
 

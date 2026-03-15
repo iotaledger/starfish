@@ -334,6 +334,15 @@ pub enum TransactionMode {
     Random,
 }
 
+impl std::fmt::Display for TransactionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AllZero => write!(f, "all-zero"),
+            Self::Random => write!(f, "random"),
+        }
+    }
+}
+
 /// Which storage backend to use for the DAG.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -341,6 +350,15 @@ pub enum StorageBackend {
     #[default]
     Rocksdb,
     Tidehunter,
+}
+
+impl std::fmt::Display for StorageBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rocksdb => write!(f, "rocksdb"),
+            Self::Tidehunter => write!(f, "tidehunter"),
+        }
+    }
 }
 
 /// Unified experiment parameters — loaded from `parameters.yaml`.

@@ -943,8 +943,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let mut i = 1;
         for parameters in set_of_parameters {
             display::header(format!("Starting benchmark {i}"));
-            display::config("Node Parameters", &parameters.node_parameters);
-            display::config("Benchmark Parameters", &parameters);
+            display::config("Protocol", &parameters.consensus_protocol);
+            display::config("Load", format!("{} tx/s", parameters.load));
             display::newline();
 
             let Some(aggregator) = self.run_benchmark_once(&parameters).await? else {
@@ -983,8 +983,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 let parameters =
                     base_parameters.with_load_and_consensus(current_load, protocol.clone());
                 display::header(format!("Sweep {} point {}", protocol, point_index));
-                display::config("Node Parameters", &parameters.node_parameters);
-                display::config("Benchmark Parameters", &parameters);
+                display::config("Protocol", &parameters.consensus_protocol);
+                display::config("Load", format!("{} tx/s", parameters.load));
                 display::newline();
 
                 let Some(aggregator) = self.run_benchmark_once(&parameters).await? else {

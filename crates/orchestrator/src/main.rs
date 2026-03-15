@@ -88,10 +88,6 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// The Byzantine strategy to deploy on byzantine nodes.
-        #[clap(long, action, default_value_t = false, global = true)]
-        mimic_extra_latency: bool,
-
         /// Overlay 10s latency on the f farthest peers (circular distance).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
@@ -132,17 +128,6 @@ pub enum Operation {
         /// benchmark sequence.
         #[clap(long, action, default_value_t = false, global = true)]
         destroy_testbed_after: bool,
-
-        /// Flag indicating whether nodes should advertise
-        /// their internal or public IP address for inter-node
-        /// communication. When running the simulation in
-        /// multiple regions, nodes need to use their public
-        /// IPs to correctly communicate, however when a
-        /// simulation is running in a single VPC, they should
-        /// use their internal IPs to avoid paying for data
-        /// sent between the nodes.
-        #[clap(long, action, default_value_t = false, global = true)]
-        use_internal_ip_addresses: bool,
 
         /// Flag indicating whether nodes use log traces or not, this is useful
         /// for debugging
@@ -188,10 +173,6 @@ pub enum Operation {
         /// The Byzantine strategy to deploy on byzantine nodes.
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
-
-        /// Whether to add synthetic network latency to node defaults.
-        #[clap(long, action, default_value_t = false, global = true)]
-        mimic_extra_latency: bool,
 
         /// Overlay 10s latency on the f farthest peers (circular distance).
         #[clap(long, action, default_value_t = false, global = true)]
@@ -244,11 +225,6 @@ pub enum Operation {
         /// Automatically destroy the testbed after a successful sweep.
         #[clap(long, action, default_value_t = false, global = true)]
         destroy_testbed_after: bool,
-
-        /// Flag indicating whether nodes should advertise
-        /// their internal or public IP address for inter-node communication.
-        #[clap(long, action, default_value_t = false, global = true)]
-        use_internal_ip_addresses: bool,
 
         /// Flag indicating whether nodes use log traces or not.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -480,6 +456,13 @@ fn parse_dissemination_mode(mode: &str) -> eyre::Result<DisseminationMode> {
     }
 }
 
+/// Returns `true` when the settings file lists at most one region,
+/// indicating a single-VPC deployment where internal IPs and synthetic
+/// latency should be used.
+fn single_region(settings: &Settings) -> bool {
+    settings.regions.len() <= 1
+}
+
 async fn maybe_destroy_after_result<C: ServerProviderClient>(
     testbed: &mut Testbed<C>,
     destroy_testbed_after: bool,
@@ -695,9 +678,7 @@ async fn run<C: ServerProviderClient>(
             consensus: consensus_protocol,
             protocols,
             destroy_testbed_after,
-            mimic_extra_latency,
             adversarial_latency,
-            use_internal_ip_addresses,
             loads,
             skip_testbed_update,
             skip_testbed_configuration,
@@ -711,6 +692,12 @@ async fn run<C: ServerProviderClient>(
             // Auto-detect binary from a previous `build` command.
             let mut settings = settings;
             maybe_auto_detect_prebuilt_binary(&mut settings);
+
+            // Derive network mode from region topology.
+            let is_single_region = single_region(&settings);
+            let mimic_extra_latency = is_single_region;
+            let use_internal_ip_addresses = is_single_region;
+
             let required_instances = required_benchmark_instances(&settings, committee);
 
             let (node_parameters, client_parameters) = load_benchmark_configs(
@@ -729,6 +716,39 @@ async fn run<C: ServerProviderClient>(
             } else {
                 protocols
             };
+
+            display::newline();
+            display::header("Benchmark configuration");
+            display::config(
+                "Network mode",
+                if is_single_region {
+                    "single-region (internal IPs, mimic latency)"
+                } else {
+                    "multi-region (public IPs, real latency)"
+                },
+            );
+            display::config("Committee", committee);
+            display::config("Consensus", protocols.join(", "));
+            display::config(
+                "Load (tx/s)",
+                loads
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            display::config(
+                "Byzantine nodes",
+                format!("{byzantine_nodes} ({byzantine_strategy})"),
+            );
+            display::config("Dissemination mode", node_parameters.dissemination_mode);
+            display::config("Storage backend", &client_parameters.storage_backend);
+            display::config("Transaction mode", &client_parameters.transaction_mode);
+            display::config("Compress network", node_parameters.compress_network);
+            display::config("BLS workers", node_parameters.bls_verification_workers);
+            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config("Enable tracing", enable_tracing);
+            display::newline();
 
             let base_parameters = BenchmarkParameters::new(
                 settings.clone(),
@@ -828,9 +848,7 @@ async fn run<C: ServerProviderClient>(
             sweep_fine_multiplier,
             sweep_max_points,
             destroy_testbed_after,
-            mimic_extra_latency,
             adversarial_latency,
-            use_internal_ip_addresses,
             skip_testbed_update,
             skip_testbed_configuration,
             enable_tracing,
@@ -842,6 +860,12 @@ async fn run<C: ServerProviderClient>(
         } => {
             let mut settings = settings;
             maybe_auto_detect_prebuilt_binary(&mut settings);
+
+            // Derive network mode from region topology.
+            let is_single_region = single_region(&settings);
+            let mimic_extra_latency = is_single_region;
+            let use_internal_ip_addresses = is_single_region;
+
             let required_instances = required_benchmark_instances(&settings, committee);
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
@@ -859,6 +883,38 @@ async fn run<C: ServerProviderClient>(
             } else {
                 protocols
             };
+
+            display::newline();
+            display::header("Benchmark sweep configuration");
+            display::config(
+                "Network mode",
+                if is_single_region {
+                    "single-region (internal IPs, mimic latency)"
+                } else {
+                    "multi-region (public IPs, real latency)"
+                },
+            );
+            display::config("Committee", committee);
+            display::config("Consensus", protocols.join(", "));
+            display::config(
+                "Sweep",
+                format!(
+                    "initial {sweep_initial_load} tx/s, goal {sweep_latency_goal_ms} ms, \
+                     max {sweep_max_points} points"
+                ),
+            );
+            display::config(
+                "Byzantine nodes",
+                format!("{byzantine_nodes} ({byzantine_strategy})"),
+            );
+            display::config("Dissemination mode", node_parameters.dissemination_mode);
+            display::config("Storage backend", &client_parameters.storage_backend);
+            display::config("Transaction mode", &client_parameters.transaction_mode);
+            display::config("Compress network", node_parameters.compress_network);
+            display::config("BLS workers", node_parameters.bls_verification_workers);
+            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config("Enable tracing", enable_tracing);
+            display::newline();
 
             let base_parameters = BenchmarkParameters::new(
                 settings.clone(),
