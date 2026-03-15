@@ -371,19 +371,7 @@ impl MeasurementsCollection {
     }
 
     fn total_bandwidth_samples(&self) -> Vec<f64> {
-        let sent = self.aggregate_bandwidth("bytes_sent_total");
-        let received = self.aggregate_bandwidth("bytes_received_total");
-        if sent.is_empty() {
-            return received;
-        }
-        if received.is_empty() {
-            return sent;
-        }
-
-        sent.into_iter()
-            .zip(received)
-            .map(|(sent, received)| sent + received)
-            .collect()
+        self.aggregate_bandwidth("bytes_sent_total")
     }
 
     fn cpu_samples(&self) -> Vec<f64> {
@@ -734,8 +722,8 @@ process_cpu_seconds_total 320
         assert_eq!(summary.cpu_cores.p50, 1.6);
         assert_eq!(summary.tps, 200.0);
         assert_eq!(summary.bps, 5.0);
-        assert_eq!(summary.bandwidth_per_round_bytes.p50, 20_000.0);
-        let expected_efficiency = 100_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
+        assert_eq!(summary.bandwidth_per_round_bytes.p50, 6_000.0);
+        let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
     }
 
