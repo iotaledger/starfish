@@ -215,18 +215,6 @@ impl ProtocolCommands for StarfishProtocol {
             })
             .collect()
     }
-
-    fn client_command<I>(
-        &self,
-        _instances: I,
-        _parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        // TODO: Isolate clients from the node (#9).
-        vec![]
-    }
 }
 
 impl ProtocolMetrics for StarfishProtocol {
@@ -260,18 +248,6 @@ impl ProtocolMetrics for StarfishProtocol {
             .map(|x| format!("{x}{}", starfish_core::prometheus::METRICS_ROUTE));
 
         instances.into_iter().zip(metrics_paths).collect()
-    }
-
-    fn clients_metrics_path<I>(
-        &self,
-        instances: I,
-        parameters: &BenchmarkParameters,
-    ) -> Vec<(Instance, String)>
-    where
-        I: IntoIterator<Item = Instance>,
-    {
-        // NOTE: Hack to avoid clients metrics.
-        self.nodes_metrics_path(instances, parameters)
     }
 }
 

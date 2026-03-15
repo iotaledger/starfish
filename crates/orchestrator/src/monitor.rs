@@ -20,7 +20,6 @@ use crate::{
 
 pub struct Monitor {
     instance: Instance,
-    clients: Vec<Instance>,
     nodes: Vec<Instance>,
     ssh_manager: SshConnectionManager,
     working_dir: PathBuf,
@@ -31,7 +30,6 @@ impl Monitor {
     /// Create a new monitor.
     pub fn new(
         instance: Instance,
-        clients: Vec<Instance>,
         nodes: Vec<Instance>,
         ssh_manager: SshConnectionManager,
         working_dir: PathBuf,
@@ -39,7 +37,6 @@ impl Monitor {
     ) -> Self {
         Self {
             instance,
-            clients,
             nodes,
             ssh_manager,
             working_dir,
@@ -81,12 +78,8 @@ impl Monitor {
             scrape_parameters.use_internal_ip_address = false;
         }
 
-        let config = Prometheus::configuration(
-            self.nodes.clone(),
-            self.clients.clone(),
-            protocol_commands,
-            &scrape_parameters,
-        );
+        let config =
+            Prometheus::configuration(self.nodes.clone(), protocol_commands, &scrape_parameters);
         let remote_config: PathBuf = "prometheus.yml".into();
         let remote_config_path = self.working_dir.join(&remote_config);
 
@@ -151,9 +144,13 @@ impl Monitor {
         Ok(())
     }
 
-    /// The public address of the grafana instance.
+    /// Deep link to the consensus dashboard in kiosk mode.
     pub fn grafana_address(&self) -> String {
-        format!("http://{}:{}", self.instance.main_ip, Grafana::DEFAULT_PORT)
+        let base = format!("http://{}:{}", self.instance.main_ip, Grafana::DEFAULT_PORT);
+        format!(
+            "{base}/d/{}/consensus?from=now-5m&to=now&refresh=5s&kiosk",
+            Grafana::DASHBOARD_UID
+        )
     }
 }
 
@@ -175,17 +172,11 @@ impl Prometheus {
     }
 
     /// Generate the prometheus configuration.
-    pub fn configuration<I, P>(
-        nodes: I,
-        _clients: I,
-        protocol: &P,
-        parameters: &BenchmarkParameters,
-    ) -> String
+    pub fn configuration<I, P>(nodes: I, protocol: &P, parameters: &BenchmarkParameters) -> String
     where
         I: IntoIterator<Item = Instance>,
         P: ProtocolMetrics,
     {
-        // Generate the prometheus configuration.
         let mut config = vec![Self::global_configuration()];
 
         let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
@@ -194,14 +185,6 @@ impl Prometheus {
             let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
             config.push(scrape_config);
         }
-
-        // NOTE: Hack to avoid clients metrics.
-        // let clients_metrics_path = protocol.clients_metrics_path(clients,
-        // parameters); for (i, (_, client_metrics_path)) in
-        // clients_metrics_path.into_iter().enumerate() {     let id =
-        // format!("client-{i}");     let scrape_config =
-        // Self::scrape_configuration(&id, &client_metrics_path);     config.
-        // push(scrape_config); }
 
         config.join("\n")
     }
@@ -268,6 +251,8 @@ impl Grafana {
 
     /// The default grafana port.
     pub const DEFAULT_PORT: u16 = 3100;
+    /// The UID of the provisioned consensus dashboard.
+    pub const DASHBOARD_UID: &'static str = "bdd54ee7-84de-4018-8bb7-92af2defc041";
 
     /// The commands to install grafana.
     pub fn install_commands() -> Vec<&'static str> {

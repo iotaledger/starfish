@@ -150,9 +150,11 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", global = true)]
         dissemination_mode: Option<String>,
 
-        /// Enable lz4 network compression.
-        #[clap(long, action, default_value_t = false, global = true)]
-        compress_network: bool,
+        /// Enable lz4 network compression. Auto-enabled for random
+        /// transaction mode unless explicitly set to false via
+        /// --no-compress-network.
+        #[clap(long, global = true)]
+        compress_network: Option<bool>,
 
         /// Number of parallel threads for BLS batch verification (default: 5).
         #[clap(long, value_name = "INT", global = true)]
@@ -246,9 +248,11 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", global = true)]
         dissemination_mode: Option<String>,
 
-        /// Enable lz4 network compression.
-        #[clap(long, action, default_value_t = false, global = true)]
-        compress_network: bool,
+        /// Enable lz4 network compression. Auto-enabled for random
+        /// transaction mode unless explicitly set to false via
+        /// --no-compress-network.
+        #[clap(long, global = true)]
+        compress_network: Option<bool>,
 
         /// Number of parallel threads for BLS batch verification (default: 5).
         #[clap(long, value_name = "INT", global = true)]
@@ -394,7 +398,7 @@ fn maybe_auto_detect_prebuilt_binary(settings: &mut Settings) {
 
 fn required_benchmark_instances(settings: &Settings, committee: usize) -> usize {
     let cloud_monitoring = usize::from(settings.monitoring && !settings.is_external_monitoring());
-    committee + settings.dedicated_clients + cloud_monitoring
+    committee + cloud_monitoring
 }
 
 fn load_benchmark_configs(
@@ -404,7 +408,7 @@ fn load_benchmark_configs(
     storage_backend: &Option<String>,
     transaction_mode: &Option<String>,
     dissemination_mode: &Option<String>,
-    compress_network: bool,
+    compress_network: Option<bool>,
     bls_workers: Option<usize>,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
@@ -412,7 +416,6 @@ fn load_benchmark_configs(
         None => NodeParameters::default_with_latency(mimic_extra_latency),
     };
     node_parameters.adversarial_latency = adversarial_latency;
-    node_parameters.compress_network = compress_network;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -439,6 +442,12 @@ fn load_benchmark_configs(
             other => eyre::bail!("Unknown transaction mode '{other}'. Use 'all_zero' or 'random'."),
         };
     }
+
+    // Auto-enable compression for random transactions unless explicitly
+    // overridden, mirroring the dryrun.sh convention.
+    node_parameters.compress_network = compress_network.unwrap_or(
+        client_parameters.transaction_mode == starfish_core::config::TransactionMode::Random,
+    );
 
     Ok((node_parameters, client_parameters))
 }
@@ -719,6 +728,13 @@ async fn run<C: ServerProviderClient>(
 
             display::newline();
             display::header("Benchmark configuration");
+            display::config("Regions", settings.regions.join(", "));
+            display::config("Instance specs", &settings.specs);
+            let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
+            display::config(
+                "Instances",
+                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+            );
             display::config(
                 "Network mode",
                 if is_single_region {
@@ -727,7 +743,6 @@ async fn run<C: ServerProviderClient>(
                     "multi-region (public IPs, real latency)"
                 },
             );
-            display::config("Committee", committee);
             display::config("Consensus", protocols.join(", "));
             display::config(
                 "Load (tx/s)",
@@ -886,6 +901,13 @@ async fn run<C: ServerProviderClient>(
 
             display::newline();
             display::header("Benchmark sweep configuration");
+            display::config("Regions", settings.regions.join(", "));
+            display::config("Instance specs", &settings.specs);
+            let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
+            display::config(
+                "Instances",
+                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+            );
             display::config(
                 "Network mode",
                 if is_single_region {
@@ -894,7 +916,6 @@ async fn run<C: ServerProviderClient>(
                     "multi-region (public IPs, real latency)"
                 },
             );
-            display::config("Committee", committee);
             display::config("Consensus", protocols.join(", "));
             display::config(
                 "Sweep",

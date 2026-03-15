@@ -88,16 +88,11 @@ impl<P> Orchestrator<P> {
         self
     }
 
-    /// Returns the instances of the testbed on which to run the benchmarks.
-    ///
-    /// This function returns two vectors of instances; the first contains the
-    /// instances on which to run the load generators and the second
-    /// contains the instances on which to run the nodes. Additionally
-    /// returns an optional monitoring instance.
+    /// Returns the node and monitoring instances for the benchmark.
     pub fn select_instances(
         &self,
         parameters: &BenchmarkParameters,
-    ) -> TestbedResult<(Vec<Instance>, Vec<Instance>, Option<Instance>)> {
+    ) -> TestbedResult<(Vec<Instance>, Option<Instance>)> {
         // Ensure there are enough active instances.
         let mut available_instances: Vec<_> =
             self.instances.iter().filter(|x| x.is_active()).collect();
@@ -105,9 +100,7 @@ impl<P> Orchestrator<P> {
         // An external monitoring server does not consume a cloud instance.
         let needs_cloud_monitoring =
             self.settings.monitoring && !self.settings.is_external_monitoring();
-        let minimum_instances = parameters.nodes
-            + self.settings.dedicated_clients
-            + if needs_cloud_monitoring { 1 } else { 0 };
+        let minimum_instances = parameters.nodes + if needs_cloud_monitoring { 1 } else { 0 };
         ensure!(
             available_instances.len() >= minimum_instances,
             TestbedError::InsufficientCapacity(minimum_instances - available_instances.len())
@@ -136,19 +129,6 @@ impl<P> Orchestrator<P> {
                 None
             };
 
-        // Select the instances to host exclusively load generators.
-        let mut client_instances = Vec::new();
-        for region in self.settings.regions.iter().cycle() {
-            if client_instances.len() == self.settings.dedicated_clients {
-                break;
-            }
-            if let Some(regional_instances) = instances_by_regions.get_mut(region) {
-                if let Some(instance) = regional_instances.pop_front() {
-                    client_instances.push(instance.clone());
-                }
-            }
-        }
-
         // Select the instances to host the nodes.
         let mut nodes_instances = Vec::new();
         for region in self.settings.regions.iter().cycle() {
@@ -162,13 +142,7 @@ impl<P> Orchestrator<P> {
             }
         }
 
-        // Spawn a load generate collocated with each node if there are no instances
-        // dedicated to excursively run load generators.
-        if client_instances.is_empty() {
-            client_instances.clone_from(&nodes_instances);
-        }
-
-        Ok((client_instances, nodes_instances, monitoring_instance))
+        Ok((nodes_instances, monitoring_instance))
     }
 }
 
@@ -406,19 +380,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Configure the instances with the appropriate configuration files.
     pub async fn configure(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        display::config("Configuring instances", "");
+        let (nodes, _) = self.select_instances(parameters)?;
+        display::action(format!("Configuring {} nodes", nodes.len()));
 
-        // Select instances to configure.
-        let (clients, nodes, _) = self.select_instances(parameters)?;
-        for (i, node) in nodes.iter().enumerate() {
-            display::config(format!("  - node {i}"), node.ssh_address());
-        }
-        for (i, client) in clients.iter().enumerate() {
-            display::config(format!("  - client {i}"), client.ssh_address());
-        }
-
-        // Generate the genesis configuration file and the keystore allowing access to
-        // gas objects.
         let command = self
             .protocol_commands
             .genesis_command(nodes.iter(), parameters)
@@ -430,18 +394,15 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .run_background(id.into())
             .with_log_file(format!("~/{id}.log").into())
             .with_execute_from_path(repo_name.into());
-        let mut instances = nodes;
-        if parameters.settings.dedicated_clients != 0 {
-            instances.extend(clients);
-        };
 
         self.ssh_manager
-            .execute(instances.clone(), command, context)
+            .execute(nodes.clone(), command, context)
             .await?;
         self.ssh_manager
-            .wait_for_command(instances, id, CommandStatus::Terminated)
+            .wait_for_command(nodes, id, CommandStatus::Terminated)
             .await?;
 
+        display::done();
         Ok(())
     }
 
@@ -493,14 +454,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     /// Reload prometheus and grafana.
     pub async fn start_monitoring(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        let (clients, nodes, instance) = self.select_instances(parameters)?;
+        let (nodes, instance) = self.select_instances(parameters)?;
         if let Some(instance) = instance {
             display::action("Configuring monitoring instance");
 
             let ssh_manager = self.monitoring_ssh_manager();
             let monitor = Monitor::new(
                 instance,
-                clients,
                 nodes,
                 ssh_manager,
                 self.settings.monitoring_working_dir(),
@@ -577,54 +537,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn run_nodes(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         display::action("\nDeploying validators");
 
-        // Select the instances to run.
-        let (_, nodes, _) = self.select_instances(parameters)?;
-
-        // Boot one node per instance.
+        let (nodes, _) = self.select_instances(parameters)?;
         self.boot_nodes(nodes, parameters).await?;
 
         display::done();
         Ok(())
     }
 
-    /// Deploy the load generators.
-    pub async fn run_clients(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        if parameters.load == 0 {
-            display::action("Skipping load generators deployment (load = 0)");
-            display::done();
-            return Ok(());
-        }
-
-        display::action("Setting up load generators");
-
-        // Select the instances to run.
-        let (clients, _, _) = self.select_instances(parameters)?;
-
-        // Deploy the load generators.
-        let targets = self
-            .protocol_commands
-            .client_command(clients.clone(), parameters);
-
-        let repo = self.settings.repository_name();
-        let context = CommandContext::new()
-            .run_background("client".into())
-            .with_log_file("~/client.log".into())
-            .with_execute_from_path(repo.into());
-        self.ssh_manager
-            .execute_per_instance(targets, context)
-            .await?;
-
-        // Wait until all load generators are reachable.
-        let commands = self
-            .protocol_commands
-            .clients_metrics_command(clients, parameters);
-        self.ssh_manager.wait_for_success(commands).await;
-
-        display::done();
-        Ok(())
-    }
-
-    /// Collect metrics from the load generators.
+    /// Collect metrics from the nodes.
     pub async fn run(
         &mut self,
         parameters: &BenchmarkParameters,
@@ -634,19 +554,17 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             self.settings.benchmark_duration.as_secs()
         ));
 
-        // Select the instances to run.
-        let (clients, nodes, _) = self.select_instances(parameters)?;
+        let (nodes, _) = self.select_instances(parameters)?;
         let mut killed_nodes: Vec<Instance> = Vec::new();
 
-        // Regularly scrape the client metrics.
-        let client_indices: HashMap<_, _> = clients
+        let node_indices: HashMap<_, _> = nodes
             .iter()
             .enumerate()
-            .map(|(i, client)| (client.id.clone(), i))
+            .map(|(i, node)| (node.id.clone(), i))
             .collect();
         let metrics_commands = self
             .protocol_commands
-            .clients_metrics_command(clients.clone(), parameters);
+            .nodes_metrics_command(nodes.clone(), parameters);
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let mut metrics_interval = time::interval(self.settings.scrape_interval);
@@ -683,7 +601,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     }
 
                     for (instance, (stdout, _stderr)) in &stdio {
-                        let Some(i) = client_indices.get(&instance.id).copied() else {
+                        let Some(i) = node_indices.get(&instance.id).copied() else {
                             continue;
                         };
                         for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
@@ -727,11 +645,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(aggregator)
     }
 
-    /// Download the log files from the nodes and clients.
+    /// Download the log files from the nodes.
     async fn download_logs_from_instances(
         &mut self,
         parameters: &BenchmarkParameters,
-        clients: &[Instance],
         nodes: &[Instance],
     ) -> TestbedResult<LogsAnalyzer> {
         // Create a log sub-directory for this run.
@@ -749,52 +666,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // reliably.
         let mut log_parsers = Vec::new();
         let ssh_manager = self.log_download_ssh_manager();
-
-        // Download the clients log files.
-        display::action("Downloading clients logs");
-        for (i, instance) in clients.iter().enumerate() {
-            display::status(format!("{}/{}", i + 1, clients.len()));
-
-            match self
-                .download_compressed_log(&ssh_manager, instance, "client.log")
-                .await
-            {
-                Err(e) => {
-                    display::error(format!(
-                        "Failed to download client logs from {} - {}",
-                        instance.main_ip, e
-                    ));
-                    self.mark_instances_inactive(std::slice::from_ref(instance));
-                }
-                Ok(compressed_log) => {
-                    let client_log_file = [path.clone(), format!("client-{i}.log.gz").into()]
-                        .iter()
-                        .collect::<PathBuf>();
-                    fs::write(&client_log_file, &compressed_log).map_err(|error| {
-                        TestbedError::LogProcessingError(format!(
-                            "failed to write {}: {error}",
-                            client_log_file.display()
-                        ))
-                    })?;
-
-                    let client_log_content = match self.decompress_log(
-                        &compressed_log,
-                        &format!("client log from {}", instance.main_ip),
-                    ) {
-                        Ok(content) => content,
-                        Err(error) => {
-                            display::error(error.to_string());
-                            continue;
-                        }
-                    };
-
-                    let mut log_parser = LogsAnalyzer::default();
-                    log_parser.set_client_errors(&client_log_content);
-                    log_parsers.push(log_parser)
-                }
-            }
-        }
-        display::done();
 
         display::action("Downloading nodes logs");
         for (i, instance) in nodes.iter().enumerate() {
@@ -881,7 +752,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     ) -> TestbedResult<Option<MeasurementsCollection>> {
         // Cleanup the testbed (in case the previous run was not completed).
         self.cleanup(true).await?;
-        let (selected_clients, selected_nodes, _) = self.select_instances(parameters)?;
+        let (selected_nodes, _) = self.select_instances(parameters)?;
         // Start the instance monitoring tools.
         self.start_monitoring(parameters).await?;
 
@@ -897,19 +768,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             return Ok(None);
         }
 
-        // Deploy the load generators.
-        self.run_clients(parameters).await?;
-
         // Wait for the benchmark to terminate. Then save the results.
         let aggregator = self.run(parameters).await?;
 
-        // Kill the nodes and clients (without deleting the log files).
+        // Kill the nodes (without deleting the log files).
         self.cleanup(false).await?;
 
         // Download the log files.
         if self.settings.log_processing {
             let error_counter = self
-                .download_logs_from_instances(parameters, &selected_clients, &selected_nodes)
+                .download_logs_from_instances(parameters, &selected_nodes)
                 .await?;
             error_counter.print_summary();
         }

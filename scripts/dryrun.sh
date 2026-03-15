@@ -41,7 +41,7 @@ DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
-CLEAN_MONITORING=${CLEAN_MONITORING:-1}
+CLEAN_MONITORING=${CLEAN_MONITORING:-0}
 # Host ports for monitoring (offset from orchestrator's 9090/3000)
 PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
 GRAFANA_PORT=${GRAFANA_PORT:-3001}
@@ -125,10 +125,10 @@ trap cleanup_interrupt INT
 if [ -f "$COMPOSE_FILE" ]; then
     if [ "$REMOVE_VOLUMES" = 1 ]; then
         docker compose -f "$COMPOSE_FILE" down -v \
-            2>/dev/null || true
+            --remove-orphans 2>/dev/null || true
     else
         docker compose -f "$COMPOSE_FILE" down \
-            2>/dev/null || true
+            --remove-orphans 2>/dev/null || true
     fi
 fi
 
@@ -143,8 +143,8 @@ fi
 docker volume create prometheus_data >/dev/null 2>&1 || true
 docker volume create grafana_data >/dev/null 2>&1 || true
 rm -f "$DATA_DIR"/*.log \
-    "$DATA_DIR"/docker-compose.yml \
-    "$DATA_DIR"/prometheus.yaml
+    "$DATA_DIR"/docker-compose.yml
+rm -rf "$DATA_DIR"/prometheus.yaml
 mkdir -p "$DATA_DIR"
 
 #----------------------------------------------------------------------
@@ -411,7 +411,7 @@ docker compose -f "$COMPOSE_FILE" up -d || {
 #----------------------------------------------------------------------
 DASH_ID="bdd54ee7-84de-4018-8bb7-92af2defc041"
 DASH_PATH="d/$DASH_ID/consensus"
-DASH_QUERY="from=now-5m&to=now&refresh=5s"
+DASH_QUERY="from=now-5m&to=now&refresh=5s&kiosk"
 DASHBOARD_URL="http://localhost:${GRAFANA_PORT}/${DASH_PATH}?${DASH_QUERY}"
 echo -e \
     "${CYAN}Grafana dashboard:" \
