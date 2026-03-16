@@ -176,7 +176,7 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
             certified_refs,
             sender,
         ))
-            .await;
+        .await;
         receiver.await.expect("core thread is not expected to stop");
     }
 

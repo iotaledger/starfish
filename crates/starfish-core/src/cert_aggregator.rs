@@ -111,6 +111,12 @@ impl CertificationAggregator {
             events.push(CertEvent::SendVote(message.block_ref));
         }
 
+        // Ready trigger from echoes: ceil((N + F - 1) / 2) echoes
+        if !state.ready_sent && state.echo_stake >= self.committee.optimistic_ready_threshold() {
+            state.ready_sent = true;
+            events.push(CertEvent::SendReady(message.block_ref));
+        }
+
         events
     }
 
@@ -133,9 +139,7 @@ impl CertificationAggregator {
         let mut events = Vec::new();
 
         // Ready trigger from votes: ceil((N + F - 1) / 2) votes
-        if !state.ready_sent
-            && state.vote_stake >= self.committee.optimistic_ready_threshold()
-        {
+        if !state.ready_sent && state.vote_stake >= self.committee.optimistic_ready_threshold() {
             state.ready_sent = true;
             events.push(CertEvent::SendReady(message.block_ref));
         }
@@ -273,7 +277,8 @@ mod tests {
     }
 
     #[test]
-    fn echoes_do_not_trigger_ready_directly() {
+    fn ready_trigger_from_echoes() {
+        // N=4, F=1. ready_threshold = ceil((4+1-1)/2) = 2
         let committee = make_committee(4);
         let mut agg = CertificationAggregator::new(committee);
         let block = BlockReference::new_test(0, 1);
@@ -282,7 +287,7 @@ mod tests {
         assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
 
         let events = agg.add_message(&echo(block, 1));
-        assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
+        assert!(events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
     }
 
     #[test]

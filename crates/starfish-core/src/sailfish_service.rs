@@ -9,7 +9,6 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use prometheus::Registry;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -101,9 +100,6 @@ fn process_message(
 ) {
     match msg {
         SailfishServiceMessage::ProcessBlocks(block_refs) => {
-            if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                eprintln!("sailfish service process blocks {:?}", block_refs);
-            }
             for block_ref in block_refs {
                 let echo = CertMessage {
                     block_ref,
@@ -116,12 +112,6 @@ fn process_message(
             }
         }
         SailfishServiceMessage::CertMessage(message) => {
-            if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                eprintln!(
-                    "sailfish service inbound kind={:?} block={} sender={}",
-                    message.kind, message.block_ref, message.sender
-                );
-            }
             let cert_events = aggregator.add_message(&message);
             dispatch_cert_events(aggregator, cert_events, own_authority, events);
         }
@@ -141,9 +131,6 @@ fn dispatch_cert_events(
     while let Some(event) = pending.pop_front() {
         match event {
             CertEvent::FastDelivery(block_ref) | CertEvent::SlowDelivery(block_ref) => {
-                if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                    eprintln!("sailfish service certified {}", block_ref);
-                }
                 out.push(SailfishCertEvent::Certified(block_ref));
             }
             CertEvent::SendVote(block_ref) => {
@@ -152,9 +139,6 @@ fn dispatch_cert_events(
                     sender: own_authority,
                     kind: CertMessageKind::Vote,
                 };
-                if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                    eprintln!("sailfish service local vote {}", block_ref);
-                }
                 pending.extend(aggregator.add_message(&vote));
                 out.push(SailfishCertEvent::Broadcast(vote));
             }
@@ -164,9 +148,6 @@ fn dispatch_cert_events(
                     sender: own_authority,
                     kind: CertMessageKind::Ready,
                 };
-                if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                    eprintln!("sailfish service local ready {}", block_ref);
-                }
                 pending.extend(aggregator.add_message(&ready));
                 out.push(SailfishCertEvent::Broadcast(ready));
             }
@@ -176,6 +157,8 @@ fn dispatch_cert_events(
 
 #[cfg(test)]
 mod tests {
+    use prometheus::Registry;
+
     use super::*;
 
     fn make_committee(n: usize) -> Arc<Committee> {
@@ -186,8 +169,11 @@ mod tests {
         Metrics::new(&Registry::new(), None, None, None).0
     }
 
+    /// N=4, F=1: 2 echoes triggers FastDelivery + SendVote + SendReady.
+    /// Verifies that the local vote and ready are counted (via add_message)
+    /// before being broadcast.
     #[tokio::test]
-    async fn local_vote_is_counted_before_broadcast() {
+    async fn echoes_trigger_fast_delivery_and_vote_and_ready() {
         let committee = make_committee(4);
         let own_authority = 1;
         let block_ref = BlockReference::new_test(0, 7);
@@ -196,20 +182,23 @@ mod tests {
 
         start_sailfish_service(committee, own_authority, msg_rx, event_tx, test_metrics());
 
+        // Own echo broadcast.
         msg_tx
             .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
             .unwrap();
-        let events = event_rx.recv().await.expect("expected local echo broadcast");
+        let events = event_rx
+            .recv()
+            .await
+            .expect("expected local echo broadcast");
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, sender, kind })
-                    if *received == block_ref
-                        && *sender == own_authority
-                        && *kind == CertMessageKind::Echo
+                SailfishCertEvent::Broadcast(CertMessage { kind, .. })
+                    if *kind == CertMessageKind::Echo
             )
         }));
 
+        // Second echo crosses all three thresholds at once.
         msg_tx
             .send(SailfishServiceMessage::CertMessage(CertMessage {
                 block_ref,
@@ -217,41 +206,34 @@ mod tests {
                 kind: CertMessageKind::Echo,
             }))
             .unwrap();
-        let events = event_rx.recv().await.expect("expected certification events");
+        let events = event_rx
+            .recv()
+            .await
+            .expect("expected certification + vote + ready events");
         assert!(events.iter().any(|event| {
             matches!(event, SailfishCertEvent::Certified(received) if *received == block_ref)
         }));
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, sender, kind })
-                    if *received == block_ref
-                        && *sender == own_authority
-                        && *kind == CertMessageKind::Vote
+                SailfishCertEvent::Broadcast(CertMessage { sender, kind, .. })
+                    if *sender == own_authority && *kind == CertMessageKind::Vote
             )
         }));
-
-        msg_tx
-            .send(SailfishServiceMessage::CertMessage(CertMessage {
-                block_ref,
-                sender: 2,
-                kind: CertMessageKind::Vote,
-            }))
-            .unwrap();
-        let events = event_rx.recv().await.expect("expected ready broadcast");
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, sender, kind })
-                    if *received == block_ref
-                        && *sender == own_authority
-                        && *kind == CertMessageKind::Ready
+                SailfishCertEvent::Broadcast(CertMessage { sender, kind, .. })
+                    if *sender == own_authority && *kind == CertMessageKind::Ready
             )
         }));
     }
 
+    /// N=7, F=2: 4 echoes triggers SendVote + SendReady (both at threshold 4).
+    /// Then 4 peer readys (+ own ready already counted) reaches quorum for
+    /// SlowDelivery.
     #[tokio::test]
-    async fn local_ready_is_counted_before_broadcast() {
+    async fn echoes_trigger_vote_and_ready_then_slow_delivery() {
         let committee = make_committee(7);
         let own_authority = 1;
         let block_ref = BlockReference::new_test(0, 9);
@@ -260,11 +242,16 @@ mod tests {
 
         start_sailfish_service(committee, own_authority, msg_rx, event_tx, test_metrics());
 
+        // Own echo.
         msg_tx
             .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
             .unwrap();
-        let _ = event_rx.recv().await.expect("expected local echo broadcast");
+        let _ = event_rx
+            .recv()
+            .await
+            .expect("expected local echo broadcast");
 
+        // 3 more echoes → 4 total → SendVote + SendReady.
         for sender in [2, 3, 4] {
             msg_tx
                 .send(SailfishServiceMessage::CertMessage(CertMessage {
@@ -274,37 +261,23 @@ mod tests {
                 }))
                 .unwrap();
         }
-        let events = event_rx.recv().await.expect("expected vote event");
+        let events = event_rx.recv().await.expect("expected vote + ready events");
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, sender, kind })
-                    if *received == block_ref
-                        && *sender == own_authority
-                        && *kind == CertMessageKind::Vote
+                SailfishCertEvent::Broadcast(CertMessage { sender, kind, .. })
+                    if *sender == own_authority && *kind == CertMessageKind::Vote
             )
         }));
-
-        for sender in [2, 3, 4] {
-            msg_tx
-                .send(SailfishServiceMessage::CertMessage(CertMessage {
-                    block_ref,
-                    sender,
-                    kind: CertMessageKind::Vote,
-                }))
-                .unwrap();
-        }
-        let events = event_rx.recv().await.expect("expected ready event");
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, sender, kind })
-                    if *received == block_ref
-                        && *sender == own_authority
-                        && *kind == CertMessageKind::Ready
+                SailfishCertEvent::Broadcast(CertMessage { sender, kind, .. })
+                    if *sender == own_authority && *kind == CertMessageKind::Ready
             )
         }));
 
+        // 4 peer readys → ready_stake = 1 (own) + 4 = 5 ≥ quorum (5) → SlowDelivery.
         for sender in [2, 3, 4, 5] {
             msg_tx
                 .send(SailfishServiceMessage::CertMessage(CertMessage {

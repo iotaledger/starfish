@@ -182,13 +182,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// DagState on the core thread. Retries block creation and sequencing
     /// when any certificate is new.
     pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
-        if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-            eprintln!(
-                "sailfish cert apply count={} refs={:?}",
-                certified_refs.len(),
-                certified_refs
-            );
-        }
         if self
             .core
             .dag_state()

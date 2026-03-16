@@ -252,20 +252,8 @@ impl UniversalCommitter {
         let mut committed_leaders: Vec<_> = leader_blocks
             .into_iter()
             .filter(|leader_block| {
-                let leader_certified = self.dag_state.has_vertex_certificate(leader_block.reference());
-                let support_stake =
-                    self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
-                if std::env::var_os("SAILFISH_DEBUG_COMMIT").is_some() {
-                    eprintln!(
-                        "sailfish round={} leader={} certified={} support_stake={} quorum={}",
-                        leader_round,
-                        leader_block.reference(),
-                        leader_certified,
-                        support_stake,
-                        self.committee.quorum_threshold()
-                    );
-                }
-                leader_certified
+                self.dag_state
+                    .has_vertex_certificate(leader_block.reference())
             })
             .filter(|leader_block| {
                 self.supporting_stake_for_sailfish(leader_block.reference(), support_round)
@@ -291,7 +279,11 @@ impl UniversalCommitter {
         let supporting_blocks = self.dag_state.get_blocks_by_round_cached(support_round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in supporting_blocks.iter() {
-            if block.block_references().iter().any(|reference| reference == leader_ref) {
+            if block
+                .block_references()
+                .iter()
+                .any(|reference| reference == leader_ref)
+            {
                 aggregator.add(block.authority(), &self.committee);
             }
         }

@@ -2940,12 +2940,7 @@ mod tests {
     fn batch_vertex_certification_marks_only_explicit_vertices() {
         let dag_state = open_test_dag_state_for("sailfish-pp", 0);
         let parent_ref = BlockReference::new_test(1, 1);
-        let child = make_full_block(
-            2,
-            2,
-            vec![parent_ref],
-            ConsensusProtocol::SailfishPlusPlus,
-        );
+        let child = make_full_block(2, 2, vec![parent_ref], ConsensusProtocol::SailfishPlusPlus);
         let child_ref = *child.reference();
 
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
