@@ -36,6 +36,9 @@ use crate::{
     metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
+    sailfish_service::{
+        SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
+    },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
@@ -260,6 +263,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     own_id: AuthorityIndex,
     sender: mpsc::Sender<NetworkMessage>,
     bls_service: Option<BlsServiceHandle>,
+    sailfish_service: Option<SailfishServiceHandle>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H, C> {
@@ -271,6 +275,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         filter_for_blocks: Arc<FilterForBlocks>,
         filter_for_shards: Arc<FilterForShards>,
         bls_service: Option<BlsServiceHandle>,
+        sailfish_service: Option<SailfishServiceHandle>,
     ) -> Self {
         let consensus_protocol = inner.dag_state.consensus_protocol;
         let committee_size = inner.dag_state.committee_size;
@@ -316,6 +321,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             own_id,
             sender: connection.sender.clone(),
             bls_service,
+            sailfish_service,
         }
     }
 
@@ -372,10 +378,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
             }
-            // SailfishPlusPlus optimistic RBC messages — handler TBD.
-            NetworkMessage::CertEcho(_)
-            | NetworkMessage::CertVote(_)
-            | NetworkMessage::CertReady(_) => {}
+            NetworkMessage::CertMessage(message) => {
+                if message.sender != self.peer_id {
+                    return true; // reject: sender must match peer
+                }
+                if let Some(ref sf) = self.sailfish_service {
+                    sf.send(SailfishServiceMessage::CertMessage(message));
+                }
+            }
         }
         true
     }
@@ -662,6 +672,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ref bls) = self.bls_service {
                 bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()));
             }
+            // Send block references to Sailfish service for RBC certification.
+            if let Some(ref sf) = self.sailfish_service {
+                let block_refs: Vec<_> = new_data_blocks.iter().map(|b| *b.reference()).collect();
+                sf.send(SailfishServiceMessage::ProcessBlocks(block_refs));
+            }
             // Notify CordialKnowledge about all new headers in one batch.
             let header_refs = new_data_blocks
                 .iter()
@@ -811,6 +826,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 bls.send(BlsServiceMessage::ProcessBlocks(
                     verified_data_blocks.clone(),
                 ));
+            }
+            // Send block references to Sailfish service for RBC certification.
+            if let Some(ref sf) = self.sailfish_service {
+                let block_refs: Vec<_> = verified_data_blocks
+                    .iter()
+                    .map(|b| *b.reference())
+                    .collect();
+                sf.send(SailfishServiceMessage::ProcessBlocks(block_refs));
             }
             // Notify CordialKnowledge about all new headers and shards in one batch.
             let header_refs: Vec<_> = verified_data_blocks
@@ -971,6 +994,7 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     partial_sig_routing_task: Option<JoinHandle<()>>,
     bls_event_task: Option<JoinHandle<()>>,
     bls_broadcast_task: Option<JoinHandle<()>>,
+    sf_event_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -1029,6 +1053,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         } else {
             (None, None)
         };
+        // Create Sailfish service channel for SailfishPlusPlus protocol.
+        let is_sailfish_pp = dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus;
+        let (sf_msg_tx, sf_msg_rx) = if is_sailfish_pp {
+            let (tx, rx) = mpsc::unbounded_channel::<SailfishServiceMessage>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let mut syncer = Syncer::new(
             core,
             NetworkSyncSignals {
@@ -1038,6 +1070,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             commit_observer,
             metrics.clone(),
             bls_msg_tx.clone(),
+            sf_msg_tx.clone(),
         );
         syncer.force_new_block(0);
         let syncer = CoreThreadDispatcher::start(syncer);
@@ -1210,6 +1243,61 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             (None, None)
         };
 
+        // Start Sailfish++ RBC certification service.
+        let (sf_service, sf_event_task) =
+            if let (Some(sf_tx), Some(sf_rx)) = (sf_msg_tx, sf_msg_rx) {
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<SailfishCertEvent>>();
+                start_sailfish_service(
+                    inner.committee.clone(),
+                    own_authority,
+                    sf_rx,
+                    event_tx,
+                    metrics.clone(),
+                );
+                let sf_handle = SailfishServiceHandle::new(sf_tx);
+                // Event bridge: certification events -> core thread + network broadcast
+                let event_inner = inner.clone();
+                let event_task = handle.spawn(async move {
+                    while let Some(events) = event_rx.recv().await {
+                        let certified_refs: Vec<_> = events
+                            .iter()
+                            .filter_map(|event| match event {
+                                SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
+                                SailfishCertEvent::Broadcast(_) => None,
+                            })
+                            .collect();
+                        if !certified_refs.is_empty() {
+                            event_inner
+                                .syncer
+                                .apply_sailfish_certificates(certified_refs)
+                                .await;
+                        }
+                        // Broadcast Vote/Ready messages
+                        {
+                            let senders: Vec<_> =
+                                event_inner.peer_senders.read().values().cloned().collect();
+                            for event in &events {
+                                match event {
+                                    SailfishCertEvent::Broadcast(message) => {
+                                        for sender in &senders {
+                                            send_network_message_reliably(
+                                                sender,
+                                                NetworkMessage::CertMessage(message.clone()),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    SailfishCertEvent::Certified(_) => {}
+                                }
+                            }
+                        }
+                    }
+                });
+                (Some(sf_handle), Some(event_task))
+            } else {
+                (None, None)
+            };
+
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(
             network,
@@ -1218,6 +1306,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_fetcher,
             metrics.clone(),
             bls_service.clone(),
+            sf_service.clone(),
         ));
         Self {
             inner,
@@ -1227,6 +1316,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             partial_sig_routing_task,
             bls_event_task,
             bls_broadcast_task,
+            sf_event_task,
             cordial_knowledge_task,
         }
     }
@@ -1259,6 +1349,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_broadcast.abort();
             bls_broadcast.await.ok();
         }
+        // Abort Sailfish event bridge task.
+        if let Some(sf_task) = self.sf_event_task {
+            sf_task.abort();
+            sf_task.await.ok();
+        }
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
@@ -1275,6 +1370,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         block_fetcher: Arc<BlockFetcher>,
         metrics: Arc<Metrics>,
         bls_service: Option<BlsServiceHandle>,
+        sf_service: Option<SailfishServiceHandle>,
     ) {
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
@@ -1287,7 +1383,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             };
 
         let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
-        let cleanup_task = handle.spawn(Self::cleanup_task(inner.clone(), bls_service.clone()));
+        let cleanup_task = handle.spawn(Self::cleanup_task(
+            inner.clone(),
+            bls_service.clone(),
+            sf_service.clone(),
+        ));
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
@@ -1310,6 +1410,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 filter_for_blocks.clone(),
                 filter_for_shards.clone(),
                 bls_service.clone(),
+                sf_service.clone(),
             ));
             connections.insert(peer_id, task);
         }
@@ -1337,6 +1438,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         filter_for_blocks: Arc<FilterForBlocks>,
         filter_for_shards: Arc<FilterForShards>,
         bls_service: Option<BlsServiceHandle>,
+        sf_service: Option<SailfishServiceHandle>,
     ) -> Option<()> {
         let gc_round = inner.dag_state.gc_round();
         connection
@@ -1353,6 +1455,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             filter_for_blocks,
             filter_for_shards,
             bls_service,
+            sf_service,
         );
         handler.start().await;
 
@@ -1498,6 +1601,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     async fn cleanup_task(
         inner: Arc<NetworkSyncerInner<H, C>>,
         bls_service: Option<BlsServiceHandle>,
+        sf_service: Option<SailfishServiceHandle>,
     ) -> Option<()> {
         let cleanup_interval = Duration::from_secs(10);
         loop {
@@ -1510,6 +1614,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     // Notify BLS service to clean up old aggregator state.
                     if let Some(ref bls) = bls_service {
                         bls.send(BlsServiceMessage::Cleanup(gc_round));
+                    }
+
+                    // Notify Sailfish service to clean up old aggregator state.
+                    if let Some(ref sf) = sf_service {
+                        sf.send(SailfishServiceMessage::Cleanup(gc_round));
                     }
 
                     // Evict stale entries from CordialKnowledge

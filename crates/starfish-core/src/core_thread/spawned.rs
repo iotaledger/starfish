@@ -65,6 +65,8 @@ enum CoreThreadCommand {
     PeerSubscribed(AuthorityIndex, oneshot::Sender<()>),
     /// Apply BLS certificate events from the BLS verification service.
     ApplyCertificateEvents(Vec<CertificateEvent>, oneshot::Sender<()>),
+    /// Apply Sailfish RBC-certified vertices on the core thread.
+    ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
 }
 
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
@@ -165,6 +167,17 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         };
         self.send(status).await;
         receiver.await.expect("core thread is not expected to stop")
+    }
+
+    /// Apply Sailfish RBC-certified vertices on the core thread.
+    pub async fn apply_sailfish_certificates(&self, certified_refs: Vec<BlockReference>) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplySailfishCertificates(
+            certified_refs,
+            sender,
+        ))
+            .await;
+        receiver.await.expect("core thread is not expected to stop");
     }
 
     /// Apply BLS certificate events from the BLS verification service.
@@ -316,6 +329,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["apply_certificate_events"])
                         .inc();
                     self.syncer.apply_certificate_events(events);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::ApplySailfishCertificates(certified_refs, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_sailfish_certificates"])
+                        .inc();
+                    self.syncer.apply_sailfish_certificates(certified_refs);
                     sender.send(()).ok();
                 }
             }

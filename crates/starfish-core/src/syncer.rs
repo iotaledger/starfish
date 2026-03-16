@@ -18,6 +18,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
+    sailfish_service::SailfishServiceMessage,
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
         ReconstructedTransactionData, RoundNumber, Stake, VerifiedBlock,
@@ -61,6 +62,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     subscriber_stake: Stake,
     pub(crate) metrics: Arc<Metrics>,
     bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
+    sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -91,6 +93,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         commit_observer: C,
         metrics: Arc<Metrics>,
         bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
+        sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
     ) -> Self {
         let committee_size = core.committee().len();
         let own_stake = core
@@ -109,6 +112,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             subscriber_stake: own_stake,
             metrics,
             bls_tx,
+            sailfish_tx,
         }
     }
 
@@ -172,6 +176,28 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.core.add_transaction_data(items, source);
         self.maybe_update_proposal_wait();
         self.try_new_block(BlockCreationReason::TransactionData);
+    }
+
+    /// Called after Sailfish RBC certification events have been applied to
+    /// DagState on the core thread. Retries block creation and sequencing
+    /// when any certificate is new.
+    pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
+        if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
+            eprintln!(
+                "sailfish cert apply count={} refs={:?}",
+                certified_refs.len(),
+                certified_refs
+            );
+        }
+        if self
+            .core
+            .dag_state()
+            .mark_vertices_certified(&certified_refs)
+        {
+            self.maybe_update_proposal_wait();
+            self.try_new_block(BlockCreationReason::CertificateEvent);
+            self.try_new_commit();
+        }
     }
 
     /// Apply BLS certificate events from the BLS verification service.
@@ -260,6 +286,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.proposal_wait_round = None;
             // Send own block and DAC partial sig to BLS service.
             self.send_bls_message(BlsServiceMessage::ProcessBlocks(vec![block.clone()]));
+            // Send own block reference to Sailfish certification service.
+            self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(vec![
+                *block.reference(),
+            ]));
             if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block) {
                 self.send_bls_message(BlsServiceMessage::PartialSig(PartialSig {
                     kind: PartialSigKind::Dac(block_ref),
@@ -276,6 +306,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     fn send_bls_message(&self, message: BlsServiceMessage) {
         if let Some(ref sender) = self.bls_tx {
+            let _ = sender.send(message);
+        }
+    }
+
+    fn send_sailfish_message(&self, message: SailfishServiceMessage) {
+        if let Some(ref sender) = self.sailfish_tx {
             let _ = sender.send(message);
         }
     }

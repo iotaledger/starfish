@@ -166,6 +166,11 @@ impl BaseCommitter {
             })
             .collect();
 
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+            certified_leader_blocks
+                .retain(|l| self.dag_state.has_vertex_certificate(l.reference()));
+        }
+
         // There can be at most one certified leader, otherwise
         // it means the BFT assumption is broken.
         if certified_leader_blocks.len() > 1 {
@@ -424,6 +429,9 @@ impl BaseCommitter {
                 if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
                     // StarfishBls: require BLS leader certificate instead of DAG-edge quorum.
                     self.dag_state.has_leader_certificate(l.reference())
+                } else if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+                    self.dag_state.has_vertex_certificate(l.reference())
+                        && self.enough_leader_support(certifying_round, l, voter_info)
                 } else {
                     self.enough_leader_support(certifying_round, l, voter_info)
                 }

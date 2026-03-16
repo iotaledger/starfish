@@ -176,22 +176,18 @@ pub struct PartialSig {
 // Authentication relies on the underlying authenticated TCP channels.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CertEcho {
-    pub block_ref: BlockReference,
-    pub sender: AuthorityIndex,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CertMessageKind {
+    Echo,
+    Vote,
+    Ready,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CertVote {
+pub struct CertMessage {
     pub block_ref: BlockReference,
     pub sender: AuthorityIndex,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CertReady {
-    pub block_ref: BlockReference,
-    pub sender: AuthorityIndex,
+    pub kind: CertMessageKind,
 }
 
 // ---------------------------------------------------------------------------
