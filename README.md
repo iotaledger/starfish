@@ -19,15 +19,18 @@ Three versions of Starfish are available in this repository:
 
 - **`starfish-speed`**: Strong-vote optimistic variant
   - Uses strong votes for optimistic transaction sequencing
-  - Lower latency when validators have same acknowledgments as a leader. Matches
+  - Lower latency when validators have same acknowledgments as a leader
 
 - **`starfish-bls`**: BLS-optimized variant
   - Uses BLS aggregate signatures to reduce communication complexity for header metadata
   - Embeds compact aggregate certificates (round, leader, data availability) in block headers
   - Async BLS verification service offloads signature processing from the critical path
 
-The repository also supports other partially synchronous uncertified DAG-based consensus protocols:
+The repository also supports other partially synchronous DAG-based consensus protocols:
 
+- **`sailfish++`**: Implementation based on [SFSailfish](https://eprint.iacr.org/2025/535) ("Optimistic, Signature-Free Reliable Broadcast and Its Applications", CCS'25).
+A certified DAG protocol using signature-free optimistic reliable broadcast (RBC) for vertex certification.
+Achieves 2-round optimistic commit latency with authentication derived from TCP channels rather than cryptographic signatures.
 - **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).
 Validators use a bandwidth efficient pull-based block dissemination strategy:
 they push their own blocks and request the peers about missing ancestors only.
@@ -36,6 +39,17 @@ Validators use a push-based block dissemination strategy,
 pushing all unknown history of blocks to their peers.
 Due to the push strategy, Cordial Miners can tolerate Byzantine attacks,
 but it is overall a less scalable solution.
+
+### Protocol Comparison
+
+| Feature | Starfish | Starfish-Speed | Starfish-BLS | Sailfish++ | Mysticeti | Cordial Miners |
+|---|---|---|---|---|---|---|
+| DAG type | Uncertified | Uncertified | Uncertified | Certified (RBC) | Uncertified | Uncertified |
+| Commit latency (rounds) | 3 | 3 (opt: 2) | 3 | 2 | 3 | 3 |
+| Transaction encoding | Reed-Solomon | Reed-Solomon | Reed-Solomon | Full blocks | Full blocks | Full blocks |
+| Dissemination default | Push-causal | Push-causal | Push-causal | Pull | Pull | Push-causal |
+| Certification mechanism | None | None | BLS aggregate sigs | Signature-free RBC | None | None |
+| Acknowledgment references | Yes | Yes | Yes (DAC) | No | No | No |
 
 ## Key Features of Starfish
 
@@ -182,7 +196,7 @@ NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-speed \
 |---|---|---|
 | `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
 | `DESIRED_TPS` | 1000 | Target transactions per second |
-| `CONSENSUS` | starfish-speed | Protocol: `starfish`, `starfish-speed`, `starfish-bls`, `cordial-miners`, `mysticeti` |
+| `CONSENSUS` | starfish-speed | Protocol: `starfish`, `starfish-speed`, `starfish-bls`, `sailfish-pp`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
 | `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
 | `TEST_TIME` | 3000 | Duration in seconds |

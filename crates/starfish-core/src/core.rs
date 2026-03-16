@@ -663,7 +663,9 @@ impl<H: BlockHandler> Core<H> {
                 info_length,
                 parity_length,
             )),
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => None,
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::SailfishPlusPlus => None,
         }
     }
 

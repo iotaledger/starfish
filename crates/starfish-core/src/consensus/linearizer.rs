@@ -257,7 +257,9 @@ impl Linearizer {
                 ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
                     self.collect_subdag_starfish(dag_state, leader_block, false)
                 }
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::SailfishPlusPlus => {
                     self.collect_subdag_mysticeti(dag_state, leader_block)
                 }
             };

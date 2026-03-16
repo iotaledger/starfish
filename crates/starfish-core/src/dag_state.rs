@@ -99,6 +99,7 @@ pub enum ConsensusProtocol {
     Starfish,
     StarfishSpeed,
     StarfishBls,
+    SailfishPlusPlus,
 }
 
 impl ConsensusProtocol {
@@ -109,6 +110,7 @@ impl ConsensusProtocol {
             "starfish" => ConsensusProtocol::Starfish,
             "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
             "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
+            "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -122,9 +124,15 @@ impl ConsensusProtocol {
         )
     }
 
+    pub fn is_sailfish_pp(self) -> bool {
+        matches!(self, ConsensusProtocol::SailfishPlusPlus)
+    }
+
     pub fn default_dissemination_mode(self) -> DisseminationMode {
         match self {
-            ConsensusProtocol::Mysticeti => DisseminationMode::Pull,
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::SailfishPlusPlus => {
+                DisseminationMode::Pull
+            }
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
@@ -525,6 +533,9 @@ impl DagState {
             ConsensusProtocol::StarfishBls => tracing::info!("Starting Starfish-BLS protocol"),
             ConsensusProtocol::StarfishSpeed => tracing::info!("Starting Starfish-Speed protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
+            ConsensusProtocol::SailfishPlusPlus => {
+                tracing::info!("Starting Sailfish++ protocol")
+            }
         }
         let dag_state = Self {
             store: store.clone(),
@@ -2770,7 +2781,9 @@ mod tests {
         };
         let empty_transactions = Vec::new();
         let merkle_root = match consensus_protocol {
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::SailfishPlusPlus => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
