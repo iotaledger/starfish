@@ -8,11 +8,11 @@ use ahash::{AHashMap, AHashSet};
 
 use super::{CommitMetastate, LeaderStatus, VoterInfo, WAVE_LENGTH, base_committer::BaseCommitter};
 use crate::{
-    committee::Committee,
+    committee::{Committee, QuorumThreshold, StakeAggregator},
     consensus::base_committer::BaseCommitterOptions,
     dag_state::{ConsensusProtocol, DagState},
     metrics::{Metrics, UtilizationTimerVecExt},
-    types::{AuthorityIndex, BlockReference, RoundNumber, format_authority_round},
+    types::{AuthorityIndex, BlockReference, RoundNumber, Stake, format_authority_round},
 };
 
 /// A universal committer uses a collection of committers to commit a sequence
@@ -40,6 +40,10 @@ impl UniversalCommitter {
     /// list of ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+            return self.try_commit_sailfish(last_decided);
+        }
+
         let highest_known_round = self.dag_state.highest_round();
         let last_decided_round = last_decided.round();
         let last_decided_round_authority = (last_decided.round(), last_decided.authority);
@@ -176,6 +180,124 @@ impl UniversalCommitter {
             .collect()
     }
 
+    fn try_commit_sailfish(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+        let highest_known_round = self.dag_state.highest_round();
+        let last_decided_round = last_decided.round();
+        let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
+        let mut committed = Vec::new();
+        let mut newly_committed = AHashSet::new();
+
+        for round in last_decided_round + 1..=highest_possible_leader_to_decide_round {
+            let leader = self.committee.elect_leader(round);
+            let Some(anchor) = self.try_direct_commit_block_sailfish(leader, round) else {
+                continue;
+            };
+
+            let mut chain = vec![anchor.clone()];
+            let mut current = anchor;
+            for prev_round in (last_decided_round + 1..current.round()).rev() {
+                let prev_leader = self.committee.elect_leader(prev_round);
+                let mut linked_leaders: Vec<_> = self
+                    .dag_state
+                    .get_blocks_at_authority_round(prev_leader, prev_round)
+                    .into_iter()
+                    .filter(|block| self.dag_state.has_vertex_certificate(block.reference()))
+                    .filter(|block| self.dag_state.linked(&current, block))
+                    .collect();
+
+                if linked_leaders.len() > 1 {
+                    panic!(
+                        "[Sailfish] More than one linked leader for {}",
+                        format_authority_round(prev_leader, prev_round)
+                    );
+                }
+
+                if let Some(prev) = linked_leaders.pop() {
+                    current = prev.clone();
+                    chain.push(prev);
+                }
+            }
+
+            chain.reverse();
+            for leader_block in chain {
+                let key = (leader_block.authority(), leader_block.round());
+                if !newly_committed.insert(key) {
+                    continue;
+                }
+                let direct_decide = leader_block.round() == round;
+                let status = LeaderStatus::Commit(leader_block, None);
+                self.decided.insert(key, status.clone());
+                if self.metrics_emitted.insert(key) {
+                    tracing::debug!("Decided {status}");
+                    self.update_metrics(&status, direct_decide);
+                }
+                committed.push(status);
+            }
+        }
+
+        committed.sort();
+        committed
+    }
+
+    fn try_direct_commit_block_sailfish(
+        &self,
+        leader: AuthorityIndex,
+        leader_round: RoundNumber,
+    ) -> Option<crate::data::Data<crate::types::VerifiedBlock>> {
+        let support_round = leader_round + 1;
+        let leader_blocks = self
+            .dag_state
+            .get_blocks_at_authority_round(leader, leader_round);
+
+        let mut committed_leaders: Vec<_> = leader_blocks
+            .into_iter()
+            .filter(|leader_block| {
+                let leader_certified = self.dag_state.has_vertex_certificate(leader_block.reference());
+                let support_stake =
+                    self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
+                if std::env::var_os("SAILFISH_DEBUG_COMMIT").is_some() {
+                    eprintln!(
+                        "sailfish round={} leader={} certified={} support_stake={} quorum={}",
+                        leader_round,
+                        leader_block.reference(),
+                        leader_certified,
+                        support_stake,
+                        self.committee.quorum_threshold()
+                    );
+                }
+                leader_certified
+            })
+            .filter(|leader_block| {
+                self.supporting_stake_for_sailfish(leader_block.reference(), support_round)
+                    >= self.committee.quorum_threshold()
+            })
+            .collect();
+
+        if committed_leaders.len() > 1 {
+            panic!(
+                "[Sailfish] More than one certified block for {}",
+                format_authority_round(leader, leader_round)
+            )
+        }
+
+        committed_leaders.pop()
+    }
+
+    fn supporting_stake_for_sailfish(
+        &self,
+        leader_ref: &BlockReference,
+        support_round: RoundNumber,
+    ) -> Stake {
+        let supporting_blocks = self.dag_state.get_blocks_by_round_cached(support_round);
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for block in supporting_blocks.iter() {
+            if block.block_references().iter().any(|reference| reference == leader_ref) {
+                aggregator.add(block.authority(), &self.committee);
+            }
+        }
+        aggregator.get_stake()
+    }
+
     /// Return list of leaders for the round. Syncer may give those leaders some
     /// extra time. To preserve (theoretical) liveness, we should wait
     /// `Delta` time for at least the first leader.
@@ -236,13 +358,19 @@ impl UniversalCommitterBuilder {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls
-            | ConsensusProtocol::SailfishPlusPlus => Self {
+            | ConsensusProtocol::StarfishBls => Self {
                 committee,
                 dag_state,
                 metrics,
                 wave_length: WAVE_LENGTH,
                 pipeline: true,
+            },
+            ConsensusProtocol::SailfishPlusPlus => Self {
+                committee,
+                dag_state,
+                metrics,
+                wave_length: WAVE_LENGTH,
+                pipeline: false,
             },
             ConsensusProtocol::CordialMiners => Self {
                 committee,

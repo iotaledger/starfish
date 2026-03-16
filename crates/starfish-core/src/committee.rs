@@ -73,9 +73,9 @@ impl Committee {
         // ready: ceil((N + F - 1) / 2)
         let n = total_stake;
         let f_stake = validity_threshold;
-        let optimistic_fast_threshold = (n + 2 * f_stake - 2 + 1) / 2;
-        let optimistic_vote_threshold = (n + 1) / 2;
-        let optimistic_ready_threshold = (n + f_stake - 1 + 1) / 2;
+        let optimistic_fast_threshold = (n + 2 * f_stake - 2).div_ceil(2);
+        let optimistic_vote_threshold = n.div_ceil(2);
+        let optimistic_ready_threshold = (n + f_stake - 1).div_ceil(2);
 
         Arc::new(Committee {
             authorities,
