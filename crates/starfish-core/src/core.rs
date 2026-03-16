@@ -484,13 +484,6 @@ impl<H: BlockHandler> Core<H> {
             && clock_round > 1
             && !self.dag_state.certified_parent_quorum(clock_round - 1)
         {
-            if std::env::var_os("SAILFISH_DEBUG_FLOW").is_some() {
-                eprintln!(
-                    "sailfish blocked new block round={} missing certified quorum at prev_round={}",
-                    clock_round,
-                    clock_round - 1
-                );
-            }
             return None;
         }
 
@@ -606,15 +599,6 @@ impl<H: BlockHandler> Core<H> {
                 )
             );
             tracing::debug!("Created block {:?}", block_data);
-            if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
-                && std::env::var_os("SAILFISH_DEBUG_FLOW").is_some()
-            {
-                eprintln!(
-                    "sailfish created block round={} refs={:?}",
-                    block_data.round(),
-                    block_data.block_references()
-                );
-            }
             if first_block.is_none() {
                 first_block = Some(block_data.clone());
             }
@@ -670,9 +654,7 @@ impl<H: BlockHandler> Core<H> {
 
         // SailfishPlusPlus: filter parents to only include certified blocks.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
-            block_references.retain(|r| {
-                r.round == 0 || self.dag_state.has_vertex_certificate(r)
-            });
+            block_references.retain(|r| r.round == 0 || self.dag_state.has_vertex_certificate(r));
         }
 
         (transactions, block_references)

@@ -1244,59 +1244,59 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
 
         // Start Sailfish++ RBC certification service.
-        let (sf_service, sf_event_task) =
-            if let (Some(sf_tx), Some(sf_rx)) = (sf_msg_tx, sf_msg_rx) {
-                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<SailfishCertEvent>>();
-                start_sailfish_service(
-                    inner.committee.clone(),
-                    own_authority,
-                    sf_rx,
-                    event_tx,
-                    metrics.clone(),
-                );
-                let sf_handle = SailfishServiceHandle::new(sf_tx);
-                // Event bridge: certification events -> core thread + network broadcast
-                let event_inner = inner.clone();
-                let event_task = handle.spawn(async move {
-                    while let Some(events) = event_rx.recv().await {
-                        let certified_refs: Vec<_> = events
-                            .iter()
-                            .filter_map(|event| match event {
-                                SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
-                                SailfishCertEvent::Broadcast(_) => None,
-                            })
-                            .collect();
-                        if !certified_refs.is_empty() {
-                            event_inner
-                                .syncer
-                                .apply_sailfish_certificates(certified_refs)
-                                .await;
-                        }
-                        // Broadcast Vote/Ready messages
-                        {
-                            let senders: Vec<_> =
-                                event_inner.peer_senders.read().values().cloned().collect();
-                            for event in &events {
-                                match event {
-                                    SailfishCertEvent::Broadcast(message) => {
-                                        for sender in &senders {
-                                            send_network_message_reliably(
-                                                sender,
-                                                NetworkMessage::CertMessage(message.clone()),
-                                            )
-                                            .await;
-                                        }
+        let (sf_service, sf_event_task) = if let (Some(sf_tx), Some(sf_rx)) = (sf_msg_tx, sf_msg_rx)
+        {
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<SailfishCertEvent>>();
+            start_sailfish_service(
+                inner.committee.clone(),
+                own_authority,
+                sf_rx,
+                event_tx,
+                metrics.clone(),
+            );
+            let sf_handle = SailfishServiceHandle::new(sf_tx);
+            // Event bridge: certification events -> core thread + network broadcast
+            let event_inner = inner.clone();
+            let event_task = handle.spawn(async move {
+                while let Some(events) = event_rx.recv().await {
+                    let certified_refs: Vec<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
+                            SailfishCertEvent::Broadcast(_) => None,
+                        })
+                        .collect();
+                    if !certified_refs.is_empty() {
+                        event_inner
+                            .syncer
+                            .apply_sailfish_certificates(certified_refs)
+                            .await;
+                    }
+                    // Broadcast Vote/Ready messages
+                    {
+                        let senders: Vec<_> =
+                            event_inner.peer_senders.read().values().cloned().collect();
+                        for event in &events {
+                            match event {
+                                SailfishCertEvent::Broadcast(message) => {
+                                    for sender in &senders {
+                                        send_network_message_reliably(
+                                            sender,
+                                            NetworkMessage::CertMessage(message.clone()),
+                                        )
+                                        .await;
                                     }
-                                    SailfishCertEvent::Certified(_) => {}
                                 }
+                                SailfishCertEvent::Certified(_) => {}
                             }
                         }
                     }
-                });
-                (Some(sf_handle), Some(event_task))
-            } else {
-                (None, None)
-            };
+                }
+            });
+            (Some(sf_handle), Some(event_task))
+        } else {
+            (None, None)
+        };
 
         let block_fetcher = Arc::new(BlockFetcher::start());
         let main_task = handle.spawn(Self::run(

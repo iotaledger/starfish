@@ -92,7 +92,7 @@ impl Linearizer {
     /// Collect the sub-dag from a specific anchor excluding any duplicates or
     /// blocks that have already been committed (within previous sub-dags).
     /// Uses BFS with per-level batch fetching to minimize lock acquisitions.
-    fn collect_subdag_mysticeti(
+    fn collect_subdag_ancestors(
         &mut self,
         dag_state: &DagState,
         leader_block: Data<VerifiedBlock>,
@@ -136,7 +136,7 @@ impl Linearizer {
     /// votes per ack_ref, commit when quorum is reached.
     /// When `direct_ack` is true (StarfishBls): only self-acks count — the DAC
     /// certificate provides the availability guarantee directly.
-    fn collect_subdag_starfish(
+    fn collect_subdag_acknowledgments(
         &mut self,
         dag_state: &DagState,
         leader_block: Data<VerifiedBlock>,
@@ -252,15 +252,15 @@ impl Linearizer {
                 .then(|| self.collect_strong_vote_holders(dag_state, leader_block.round() + 1));
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::StarfishBls => {
-                    self.collect_subdag_starfish(dag_state, leader_block, true)
+                    self.collect_subdag_acknowledgments(dag_state, leader_block, true)
                 }
                 ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
-                    self.collect_subdag_starfish(dag_state, leader_block, false)
+                    self.collect_subdag_acknowledgments(dag_state, leader_block, false)
                 }
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus => {
-                    self.collect_subdag_mysticeti(dag_state, leader_block)
+                    self.collect_subdag_ancestors(dag_state, leader_block)
                 }
             };
 
