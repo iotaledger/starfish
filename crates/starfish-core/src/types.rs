@@ -172,6 +172,29 @@ pub struct PartialSig {
 }
 
 // ---------------------------------------------------------------------------
+// Signature-free RBC messages (SailfishPlusPlus).
+// Authentication relies on the underlying authenticated TCP channels.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CertEcho {
+    pub block_ref: BlockReference,
+    pub sender: AuthorityIndex,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CertVote {
+    pub block_ref: BlockReference,
+    pub sender: AuthorityIndex,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CertReady {
+    pub block_ref: BlockReference,
+    pub sender: AuthorityIndex,
+}
+
+// ---------------------------------------------------------------------------
 // BlockHeader — signed, content-addressed block identity.
 // Contains exactly the fields that feed into BlockDigest::new() and
 // sign_block().
@@ -717,7 +740,9 @@ impl VerifiedBlock {
                     TransactionsCommitment::default()
                 }
             }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::SailfishPlusPlus => {
                 TransactionsCommitment::new_from_transactions(&transactions)
             }
         };
@@ -993,7 +1018,9 @@ impl VerifiedBlock {
                 // Header-only blocks: shard sidecars are verified and carried
                 // externally via `process_standalone_shards`.
             }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::SailfishPlusPlus => {
                 let empty_transactions = Vec::new();
                 let empty_transactions_commitment =
                     TransactionsCommitment::new_from_transactions(&empty_transactions);
@@ -1179,7 +1206,9 @@ impl VerifiedBlock {
                     "Only StarfishBls blocks may carry BLS fields"
                 );
             }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::SailfishPlusPlus => {
                 ensure!(
                     acknowledgments.is_empty(),
                     "{consensus_protocol:?} blocks must not carry acknowledgments"

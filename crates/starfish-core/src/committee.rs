@@ -21,6 +21,11 @@ pub struct Committee {
     validity_threshold: Stake, // The minimum stake required for validity
     quorum_threshold: Stake,   // The minimum stake required for quorum
     info_length: usize,        // info length used for encoding
+    // Optimistic RBC thresholds (SailfishPlusPlus).
+    // Precomputed from total_stake and validity_threshold.
+    optimistic_fast_threshold: Stake,
+    optimistic_vote_threshold: Stake,
+    optimistic_ready_threshold: Stake,
 }
 
 impl Committee {
@@ -62,11 +67,24 @@ impl Committee {
             _ => f + 2,
         };
 
+        // Optimistic RBC thresholds (N = total_stake, F = validity_threshold).
+        // fast:  ceil((N + 2F - 2) / 2)   ≈ 5N/6
+        // vote:  ceil(N / 2)
+        // ready: ceil((N + F - 1) / 2)
+        let n = total_stake;
+        let f_stake = validity_threshold;
+        let optimistic_fast_threshold = (n + 2 * f_stake - 2 + 1) / 2;
+        let optimistic_vote_threshold = (n + 1) / 2;
+        let optimistic_ready_threshold = (n + f_stake - 1 + 1) / 2;
+
         Arc::new(Committee {
             authorities,
             validity_threshold,
             quorum_threshold,
             info_length,
+            optimistic_fast_threshold,
+            optimistic_vote_threshold,
+            optimistic_ready_threshold,
         })
     }
 
@@ -82,6 +100,21 @@ impl Committee {
 
     pub fn quorum_threshold(&self) -> Stake {
         self.quorum_threshold + 1
+    }
+
+    /// Optimistic fast delivery threshold: ceil((N + 2F - 2) / 2).
+    pub fn optimistic_fast_threshold(&self) -> Stake {
+        self.optimistic_fast_threshold
+    }
+
+    /// Optimistic vote threshold: ceil(N / 2).
+    pub fn optimistic_vote_threshold(&self) -> Stake {
+        self.optimistic_vote_threshold
+    }
+
+    /// Optimistic ready threshold: ceil((N + F - 1) / 2).
+    pub fn optimistic_ready_threshold(&self) -> Stake {
+        self.optimistic_ready_threshold
     }
 
     pub fn get_public_key(&self, authority: AuthorityIndex) -> Option<&PublicKey> {

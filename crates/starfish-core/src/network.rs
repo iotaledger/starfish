@@ -30,7 +30,8 @@ use crate::{
     runtime::JoinHandle,
     stat::HistogramSender,
     types::{
-        AuthorityIndex, BlockReference, PartialSig, ProvableShard, RoundNumber, VerifiedBlock,
+        AuthorityIndex, BlockReference, CertEcho, CertReady, CertVote, PartialSig, ProvableShard,
+        RoundNumber, VerifiedBlock,
     },
 };
 
@@ -155,6 +156,12 @@ pub enum NetworkMessage {
     /// Standalone partial BLS signature (DAC, round pre-sign, or leader
     /// pre-sign).
     PartialSig(PartialSig),
+    /// SailfishPlusPlus: Optimistic RBC Echo message
+    CertEcho(CertEcho),
+    /// SailfishPlusPlus: Optimistic RBC Vote message
+    CertVote(CertVote),
+    /// SailfishPlusPlus: Optimistic RBC Ready message
+    CertReady(CertReady),
 }
 
 impl NetworkMessage {
@@ -165,6 +172,9 @@ impl NetworkMessage {
             Self::MissingParentsRequest(_) => "missing_parents",
             Self::MissingTxDataRequest(_) => "missing_tx_data",
             Self::PartialSig(..) => "partial_sig",
+            Self::CertEcho(_) => "cert_echo",
+            Self::CertVote(_) => "cert_vote",
+            Self::CertReady(_) => "cert_ready",
         }
     }
 }

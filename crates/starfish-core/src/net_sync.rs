@@ -372,6 +372,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
             }
+            // SailfishPlusPlus optimistic RBC messages — handler TBD.
+            NetworkMessage::CertEcho(_)
+            | NetworkMessage::CertVote(_)
+            | NetworkMessage::CertReady(_) => {}
         }
         true
     }
@@ -461,7 +465,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             match self.consensus_protocol {
                 // In full-block protocols, an empty payload is still a complete
                 // block and must follow the normal add_blocks path.
-                ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+                ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::SailfishPlusPlus => {
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
@@ -865,6 +871,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SailfishPlusPlus
         ) {
             self.metrics
                 .block_sync_requests_received

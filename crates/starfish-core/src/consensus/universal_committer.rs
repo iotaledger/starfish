@@ -236,7 +236,8 @@ impl UniversalCommitterBuilder {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => Self {
+            | ConsensusProtocol::StarfishBls
+            | ConsensusProtocol::SailfishPlusPlus => Self {
                 committee,
                 dag_state,
                 metrics,
