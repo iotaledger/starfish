@@ -513,7 +513,7 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::get_pending_transactions",
             self.get_pending_transactions(clock_round)
         );
-        let (mut transactions, block_references) = timed!(
+        let (mut transactions, block_references, failed_refs) = timed!(
             self.metrics,
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions, clock_round)
@@ -521,11 +521,15 @@ impl<H: BlockHandler> Core<H> {
 
         // SailfishPlusPlus: if the certified-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
-        // Requeue transactions and wait for more certifications.
+        // Requeue both transactions and include refs so the next attempt sees
+        // them again.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
             && clock_round > 1
             && block_references.is_empty()
         {
+            for r in failed_refs {
+                self.pending.push(MetaTransaction::Include(r));
+            }
             self.requeue_transactions(std::mem::take(&mut transactions));
             return None;
         }
@@ -650,7 +654,11 @@ impl<H: BlockHandler> Core<H> {
         &self,
         pending: Vec<MetaTransaction>,
         block_round: RoundNumber,
-    ) -> (Vec<BaseTransaction>, Vec<BlockReference>) {
+    ) -> (
+        Vec<BaseTransaction>,
+        Vec<BlockReference>,
+        Vec<BlockReference>,
+    ) {
         let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
         for meta_transaction in pending {
@@ -661,6 +669,7 @@ impl<H: BlockHandler> Core<H> {
                 MetaTransaction::Include(include) => pending_refs.push(include),
             }
         }
+        let raw_refs = pending_refs.clone();
         let mut block_references =
             self.compress_pending_block_references(&pending_refs, block_round);
 
@@ -669,15 +678,26 @@ impl<H: BlockHandler> Core<H> {
             block_references.retain(|r| r.round == 0 || self.dag_state.has_vertex_certificate(r));
         }
 
-        // SailfishPlusPlus: verify the filtered parent set still has quorum
-        // stake at round-1. If certification hasn't caught up, we must wait
-        // rather than create an invalid block.
+        // SailfishPlusPlus: verify the filtered parent set, together with the
+        // creator's own previous block (always included by build_block), still
+        // has quorum stake at round-1.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
             && block_round > 1
         {
             let prev_round = block_round - 1;
             let mut prev_round_stake: u64 = 0;
             let mut seen = 0u128;
+            // Count own_previous: build_block always prepends the author's
+            // previous block, which is at prev_round after a successful round.
+            let own_prev_stake = self.committee.get_stake(self.authority).unwrap_or(0);
+            if self
+                .last_own_block
+                .first()
+                .is_some_and(|ob| ob.block.round() == prev_round)
+            {
+                seen |= 1u128 << self.authority;
+                prev_round_stake += own_prev_stake;
+            }
             for r in &block_references {
                 if r.round == prev_round {
                     let mask = 1u128 << r.authority;
@@ -688,11 +708,11 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
             if !self.committee.is_quorum(prev_round_stake) {
-                return (transactions, vec![]);
+                return (transactions, vec![], raw_refs);
             }
         }
 
-        (transactions, block_references)
+        (transactions, block_references, vec![])
     }
 
     fn prepare_encoded_transactions(
