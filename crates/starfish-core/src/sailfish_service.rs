@@ -193,12 +193,28 @@ async fn run_sailfish_service(
 // Service state (all aggregators)
 // ---------------------------------------------------------------------------
 
+/// Result of checking an inbound RBC message against known canonical blocks.
+enum RbcAcceptance {
+    /// Block is known and the message references the canonical digest.
+    Canonical,
+    /// Block is known but the message references a different digest.
+    Conflicting,
+    /// No block is registered for this (round, authority) slot yet.
+    Unknown,
+}
+
 struct ServiceState {
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
     signer: Signer,
     metrics: Arc<Metrics>,
     rbc: CertificationAggregator,
+    canonical_blocks: AHashMap<(RoundNumber, AuthorityIndex), BlockReference>,
+    /// RBC messages that arrived before the corresponding block was seen.
+    /// Keyed by (round, authority) slot. Drained when the block is registered.
+    pending_rbc: AHashMap<(RoundNumber, AuthorityIndex), Vec<CertMessage>>,
+    /// Maximum number of buffered messages per slot (bound against spam).
+    pending_rbc_cap: usize,
     timeouts: AHashMap<RoundNumber, SignedQuorumAggregator>,
     no_votes: AHashMap<(RoundNumber, AuthorityIndex), SignedQuorumAggregator>,
 }
@@ -210,12 +226,17 @@ impl ServiceState {
         signer: Signer,
         metrics: Arc<Metrics>,
     ) -> Self {
+        // At most 3 message types (Echo, Vote, Ready) per authority.
+        let pending_rbc_cap = 3 * committee.len();
         Self {
             rbc: CertificationAggregator::new(committee.clone()),
             committee,
             own_authority,
             signer,
             metrics,
+            canonical_blocks: AHashMap::new(),
+            pending_rbc: AHashMap::new(),
+            pending_rbc_cap,
             timeouts: AHashMap::new(),
             no_votes: AHashMap::new(),
         }
@@ -229,6 +250,9 @@ impl ServiceState {
         match msg {
             SailfishServiceMessage::ProcessBlocks(block_refs) => {
                 for block_ref in block_refs {
+                    if !self.register_canonical_block(block_ref, events) {
+                        continue;
+                    }
                     let echo = CertMessage {
                         block_ref,
                         sender: self.own_authority,
@@ -240,8 +264,16 @@ impl ServiceState {
                 }
             }
             SailfishServiceMessage::CertMessage(message) => {
-                let cert_events = self.rbc.add_message(&message);
-                self.dispatch_cert_events(cert_events, events);
+                match self.accept_rbc_message(&message) {
+                    RbcAcceptance::Canonical => {
+                        let cert_events = self.rbc.add_message(&message);
+                        self.dispatch_cert_events(cert_events, events);
+                    }
+                    RbcAcceptance::Unknown => {
+                        self.buffer_rbc_message(message);
+                    }
+                    RbcAcceptance::Conflicting => {}
+                }
             }
             SailfishServiceMessage::TimeoutMsg(msg) => {
                 self.add_timeout_msg(msg, events);
@@ -257,10 +289,82 @@ impl ServiceState {
             }
             SailfishServiceMessage::Cleanup(round) => {
                 self.rbc.cleanup_below_round(round);
+                self.canonical_blocks.retain(|&(r, _), _| r >= round);
+                self.pending_rbc.retain(|&(r, _), _| r >= round);
                 self.timeouts.retain(|&r, _| r >= round);
                 self.no_votes.retain(|&(r, _), _| r >= round);
             }
         }
+    }
+
+    fn register_canonical_block(
+        &mut self,
+        block_ref: BlockReference,
+        events: &mut Vec<SailfishCertEvent>,
+    ) -> bool {
+        let slot = (block_ref.round, block_ref.authority);
+        match self.canonical_blocks.get(&slot).copied() {
+            None => {
+                self.canonical_blocks.insert(slot, block_ref);
+                // Drain any early RBC messages buffered for this slot.
+                if let Some(buffered) = self.pending_rbc.remove(&slot) {
+                    for msg in buffered {
+                        if msg.block_ref == block_ref {
+                            let cert_events = self.rbc.add_message(&msg);
+                            self.dispatch_cert_events(cert_events, events);
+                        }
+                    }
+                }
+                true
+            }
+            Some(canonical) => {
+                if canonical != block_ref {
+                    tracing::warn!(
+                        "Ignoring conflicting Sailfish block {:?}; \
+                         canonical for ({}, {}) is {:?}",
+                        block_ref,
+                        block_ref.authority,
+                        block_ref.round,
+                        canonical,
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    fn accept_rbc_message(&self, message: &CertMessage) -> RbcAcceptance {
+        let slot = (message.block_ref.round, message.block_ref.authority);
+        match self.canonical_blocks.get(&slot) {
+            Some(canonical) if *canonical == message.block_ref => RbcAcceptance::Canonical,
+            Some(canonical) => {
+                tracing::debug!(
+                    "Ignoring RBC {:?} for conflicting block {:?}; \
+                     canonical is {:?}",
+                    message.kind,
+                    message.block_ref,
+                    canonical,
+                );
+                RbcAcceptance::Conflicting
+            }
+            None => RbcAcceptance::Unknown,
+        }
+    }
+
+    /// Buffer an RBC message for a block we haven't seen yet.
+    fn buffer_rbc_message(&mut self, message: CertMessage) {
+        let slot = (message.block_ref.round, message.block_ref.authority);
+        let buf = self.pending_rbc.entry(slot).or_default();
+        if buf.len() >= self.pending_rbc_cap {
+            tracing::warn!(
+                "Dropping RBC {:?} for slot ({}, {}): buffer full",
+                message.kind,
+                slot.0,
+                slot.1,
+            );
+            return;
+        }
+        buf.push(message);
     }
 
     // -- RBC event dispatch --------------------------------------------------
@@ -417,7 +521,10 @@ impl ServiceState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use prometheus::Registry;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::crypto;
@@ -435,6 +542,22 @@ mod tests {
 
     fn test_metrics() -> Arc<Metrics> {
         Metrics::new(&Registry::new(), None, None, None).0
+    }
+
+    fn conflicting_ref(block_ref: BlockReference) -> BlockReference {
+        BlockReference {
+            digest: crate::crypto::BlockDigest::new_without_transactions(
+                block_ref.authority,
+                block_ref.round,
+                &[],
+                &[],
+                1,
+                &crate::crypto::SignatureBytes::default(),
+                crate::crypto::TransactionsCommitment::default(),
+                None,
+            ),
+            ..block_ref
+        }
     }
 
     /// N=4, F=1: 2 echoes triggers FastDelivery + SendVote + SendReady.
@@ -619,6 +742,295 @@ mod tests {
                     && cert.signatures.len() == 3
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn only_first_block_for_author_round_gets_local_echo() {
+        let committee = make_committee(4);
+        let own_authority = 1;
+        let block_ref = BlockReference::new_test(0, 7);
+        let conflicting = conflicting_ref(block_ref);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let events = event_rx.recv().await.expect("expected local echo");
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage { block_ref: received, kind, .. })
+                    if *received == block_ref && *kind == CertMessageKind::Echo
+            )
+        }));
+
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![conflicting]))
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "conflicting block for same (author, round) must not trigger another echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_rbc_messages_are_ignored_for_same_author_round() {
+        let committee = make_committee(4);
+        let own_authority = 1;
+        let block_ref = BlockReference::new_test(0, 7);
+        let conflicting = conflicting_ref(block_ref);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let _ = event_rx.recv().await.expect("expected local echo");
+
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref: conflicting,
+                sender: 2,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "conflicting RBC message must be ignored"
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref,
+                sender: 2,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        let events = event_rx
+            .recv()
+            .await
+            .expect("expected canonical block to keep progressing");
+        assert!(events.iter().any(|event| {
+            matches!(event, SailfishCertEvent::Certified(received) if *received == block_ref)
+        }));
+    }
+
+    /// Early RBC messages for unknown blocks are buffered and produce no
+    /// immediate events. Once the block arrives via ProcessBlocks, the
+    /// buffered echo is drained and counted alongside the local echo.
+    /// N=4, F=1: 2 echoes (buffered peer + own) reach fast-path quorum.
+    #[tokio::test]
+    async fn unknown_rbc_message_is_buffered_until_block_arrives() {
+        let committee = make_committee(4);
+        let own_authority = 1;
+        let block_ref = BlockReference::new_test(0, 7);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        // Peer echo arrives before we know the block — must not produce events.
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref,
+                sender: 2,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "RBC messages for unknown blocks must not produce events immediately"
+        );
+
+        // Block arrives: the local echo + drained buffered echo reach quorum.
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let events = event_rx.recv().await.expect("expected events");
+        // Local echo is broadcast.
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage {
+                    block_ref: received,
+                    kind,
+                    ..
+                }) if *received == block_ref && *kind == CertMessageKind::Echo
+            )
+        }));
+        // Buffered peer echo + own echo = 2 echoes → fast-path certification.
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SailfishCertEvent::Certified(r) if *r == block_ref)),
+            "buffered echo should contribute to certification after block arrives"
+        );
+    }
+
+    /// N=7, F=2: Send echo + ready from two peers before the block arrives,
+    /// then ProcessBlocks. The drained buffer should produce the local echo
+    /// broadcast, the buffered echoes feeding into the aggregator, and the
+    /// buffered readys feeding into the aggregator — all in one event batch.
+    #[tokio::test]
+    async fn buffered_rbc_messages_drain_on_block_arrival() {
+        let committee = make_committee(7);
+        let own_authority = 1;
+        let block_ref = BlockReference::new_test(0, 9);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        // Buffer echoes from 3 peers before the block is known.
+        for sender in [2, 3, 4] {
+            msg_tx
+                .send(SailfishServiceMessage::CertMessage(CertMessage {
+                    block_ref,
+                    sender,
+                    kind: CertMessageKind::Echo,
+                }))
+                .unwrap();
+        }
+        // No events yet.
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+        );
+
+        // Block arrives: local echo + 3 buffered echoes = 4 echoes → quorum.
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let events = event_rx.recv().await.expect("expected events");
+
+        // Local echo is broadcast.
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage {
+                    block_ref: received,
+                    kind,
+                    ..
+                }) if *received == block_ref && *kind == CertMessageKind::Echo
+            )
+        }));
+        // SendVote triggered (own vote broadcast).
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage {
+                    sender,
+                    kind,
+                    ..
+                }) if *sender == own_authority && *kind == CertMessageKind::Vote
+            )
+        }));
+        // SendReady triggered (own ready broadcast).
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage {
+                    sender,
+                    kind,
+                    ..
+                }) if *sender == own_authority && *kind == CertMessageKind::Ready
+            )
+        }));
+    }
+
+    /// Buffered messages for a conflicting digest are discarded when the
+    /// canonical block arrives.
+    #[tokio::test]
+    async fn buffered_conflicting_messages_discarded_on_block_arrival() {
+        let committee = make_committee(4);
+        let own_authority = 1;
+        let block_ref = BlockReference::new_test(0, 7);
+        let conflicting = conflicting_ref(block_ref);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        // Buffer an echo for the conflicting digest.
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref: conflicting,
+                sender: 2,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+        );
+
+        // Canonical block arrives — conflicting buffered echo is dropped.
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let events = event_rx.recv().await.expect("expected local echo");
+        // Only local echo broadcast, no certification (would need 2 echoes).
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage { kind, .. })
+                    if *kind == CertMessageKind::Echo
+            )
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SailfishCertEvent::Certified(_))),
+            "conflicting buffered echo must not count toward certification"
+        );
     }
 
     /// N=4, F=1: quorum_threshold = 3. Three no-vote messages form a NVC.
