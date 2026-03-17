@@ -1,41 +1,80 @@
 // Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-//! Async Sailfish++ RBC certification service.
+//! Async Sailfish++ certification and control service.
 //!
 //! Receives blocks and signature-free RBC phase messages, runs the
-//! [`CertificationAggregator`], and emits certification events back to the
-//! syncer thread.
+//! [`CertificationAggregator`], aggregates timeout and no-vote messages,
+//! and emits certification/control events back to the syncer thread.
 
 use std::{collections::VecDeque, sync::Arc};
 
+use ahash::AHashMap;
 use tokio::sync::mpsc;
 
 use crate::{
     cert_aggregator::{CertEvent, CertificationAggregator},
     committee::Committee,
+    crypto::SignatureBytes,
     metrics::Metrics,
-    types::{AuthorityIndex, BlockReference, CertMessage, CertMessageKind, RoundNumber},
+    types::{
+        AuthorityIndex, BlockReference, CertMessage, CertMessageKind, RoundNumber,
+        SailfishNoVoteCert, SailfishNoVoteMsg, SailfishTimeoutCert, SailfishTimeoutMsg, Stake,
+    },
 };
 
+// ---------------------------------------------------------------------------
+// Messages into the service
+// ---------------------------------------------------------------------------
+
 /// Messages sent to the Sailfish service.
+#[allow(dead_code)]
 pub enum SailfishServiceMessage {
     /// New blocks arrived — generate self-echoes.
     ProcessBlocks(Vec<BlockReference>),
     /// Incoming RBC message from a peer.
     CertMessage(CertMessage),
+    /// Incoming signed timeout message from a peer.
+    TimeoutMsg(SailfishTimeoutMsg),
+    /// Incoming signed no-vote message from a peer.
+    NoVoteMsg(SailfishNoVoteMsg),
+    /// Local timeout expired for a round — sign and broadcast own timeout.
+    LocalTimeout(RoundNumber),
+    /// Local no-vote: we advanced past round `round` without voting for
+    /// `leader`. Sign and send to the next-round leader.
+    LocalNoVote {
+        round: RoundNumber,
+        leader: AuthorityIndex,
+    },
     /// Cleanup aggregator state below round.
     Cleanup(RoundNumber),
 }
 
+// ---------------------------------------------------------------------------
+// Events out of the service
+// ---------------------------------------------------------------------------
+
 /// Events sent back to the syncer/core thread.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SailfishCertEvent {
     /// Block certified (fast or slow path).
     Certified(BlockReference),
     /// Broadcast an RBC phase message to all peers.
     Broadcast(CertMessage),
+    /// Broadcast a signed timeout message to all peers.
+    BroadcastTimeout(SailfishTimeoutMsg),
+    /// Send a signed no-vote message to the next-round leader.
+    SendNoVote(SailfishNoVoteMsg),
+    /// Timeout certificate formed for a round.
+    TimeoutReady(SailfishTimeoutCert),
+    /// No-vote certificate formed for (round, leader).
+    NoVoteReady(SailfishNoVoteCert),
 }
+
+// ---------------------------------------------------------------------------
+// Handle
+// ---------------------------------------------------------------------------
 
 /// Handle for sending messages to the Sailfish service.
 #[derive(Clone)]
@@ -52,6 +91,59 @@ impl SailfishServiceHandle {
         let _ = self.sender.send(msg);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Signed quorum aggregator — shared by timeout and no-vote paths
+// ---------------------------------------------------------------------------
+
+/// Accumulates signed messages from distinct authorities until a quorum
+/// (2f+1 stake) is reached. Used for both timeout and no-vote certificates.
+struct SignedQuorumAggregator {
+    stake: Stake,
+    seen: u128,
+    signatures: Vec<(AuthorityIndex, SignatureBytes)>,
+    formed: bool,
+}
+
+impl SignedQuorumAggregator {
+    fn new() -> Self {
+        Self {
+            stake: 0,
+            seen: 0,
+            signatures: Vec::new(),
+            formed: false,
+        }
+    }
+
+    /// Try to add a signed message. Returns `true` when quorum is reached
+    /// for the first time.
+    fn add(
+        &mut self,
+        sender: AuthorityIndex,
+        signature: SignatureBytes,
+        committee: &Committee,
+    ) -> bool {
+        if self.formed {
+            return false;
+        }
+        let mask = 1u128 << sender;
+        if self.seen & mask != 0 {
+            return false;
+        }
+        self.seen |= mask;
+        self.stake += committee.get_stake(sender).unwrap_or(0);
+        self.signatures.push((sender, signature));
+        if self.stake >= committee.quorum_threshold() {
+            self.formed = true;
+            return true;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service lifetime
+// ---------------------------------------------------------------------------
 
 /// Start the Sailfish RBC certification service as a tokio task.
 pub fn start_sailfish_service(
@@ -75,15 +167,15 @@ async fn run_sailfish_service(
     mut receiver: mpsc::UnboundedReceiver<SailfishServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<SailfishCertEvent>>,
 ) {
-    let mut aggregator = CertificationAggregator::new(committee);
+    let mut state = ServiceState::new(committee, own_authority);
 
     while let Some(msg) = receiver.recv().await {
         let mut all_events = Vec::new();
 
-        process_message(msg, &mut aggregator, own_authority, &mut all_events);
+        state.process_message(msg, &mut all_events);
 
         while let Ok(msg) = receiver.try_recv() {
-            process_message(msg, &mut aggregator, own_authority, &mut all_events);
+            state.process_message(msg, &mut all_events);
         }
 
         if !all_events.is_empty() {
@@ -92,74 +184,170 @@ async fn run_sailfish_service(
     }
 }
 
-fn process_message(
-    msg: SailfishServiceMessage,
-    aggregator: &mut CertificationAggregator,
+// ---------------------------------------------------------------------------
+// Service state (all aggregators)
+// ---------------------------------------------------------------------------
+
+struct ServiceState {
+    committee: Arc<Committee>,
     own_authority: AuthorityIndex,
-    events: &mut Vec<SailfishCertEvent>,
-) {
-    match msg {
-        SailfishServiceMessage::ProcessBlocks(block_refs) => {
-            for block_ref in block_refs {
-                let echo = CertMessage {
-                    block_ref,
-                    sender: own_authority,
-                    kind: CertMessageKind::Echo,
-                };
-                let cert_events = aggregator.add_message(&echo);
-                dispatch_cert_events(aggregator, cert_events, own_authority, events);
-                events.push(SailfishCertEvent::Broadcast(echo));
+    rbc: CertificationAggregator,
+    timeouts: AHashMap<RoundNumber, SignedQuorumAggregator>,
+    no_votes: AHashMap<(RoundNumber, AuthorityIndex), SignedQuorumAggregator>,
+}
+
+impl ServiceState {
+    fn new(committee: Arc<Committee>, own_authority: AuthorityIndex) -> Self {
+        Self {
+            rbc: CertificationAggregator::new(committee.clone()),
+            committee,
+            own_authority,
+            timeouts: AHashMap::new(),
+            no_votes: AHashMap::new(),
+        }
+    }
+
+    fn process_message(
+        &mut self,
+        msg: SailfishServiceMessage,
+        events: &mut Vec<SailfishCertEvent>,
+    ) {
+        match msg {
+            SailfishServiceMessage::ProcessBlocks(block_refs) => {
+                for block_ref in block_refs {
+                    let echo = CertMessage {
+                        block_ref,
+                        sender: self.own_authority,
+                        kind: CertMessageKind::Echo,
+                    };
+                    let cert_events = self.rbc.add_message(&echo);
+                    self.dispatch_cert_events(cert_events, events);
+                    events.push(SailfishCertEvent::Broadcast(echo));
+                }
+            }
+            SailfishServiceMessage::CertMessage(message) => {
+                let cert_events = self.rbc.add_message(&message);
+                self.dispatch_cert_events(cert_events, events);
+            }
+            SailfishServiceMessage::TimeoutMsg(msg) => {
+                self.add_timeout_msg(msg, events);
+            }
+            SailfishServiceMessage::NoVoteMsg(msg) => {
+                self.add_novote_msg(msg, events);
+            }
+            SailfishServiceMessage::LocalTimeout(round) => {
+                self.handle_local_timeout(round, events);
+            }
+            SailfishServiceMessage::LocalNoVote { round, leader } => {
+                self.handle_local_novote(round, leader, events);
+            }
+            SailfishServiceMessage::Cleanup(round) => {
+                self.rbc.cleanup_below_round(round);
+                self.timeouts.retain(|&r, _| r >= round);
+                self.no_votes.retain(|&(r, _), _| r >= round);
             }
         }
-        SailfishServiceMessage::CertMessage(message) => {
-            let cert_events = aggregator.add_message(&message);
-            dispatch_cert_events(aggregator, cert_events, own_authority, events);
+    }
+
+    // -- RBC event dispatch --------------------------------------------------
+
+    fn dispatch_cert_events(
+        &mut self,
+        cert_events: Vec<CertEvent>,
+        out: &mut Vec<SailfishCertEvent>,
+    ) {
+        let mut pending = VecDeque::from(cert_events);
+        while let Some(event) = pending.pop_front() {
+            match event {
+                CertEvent::FastDelivery(block_ref) | CertEvent::SlowDelivery(block_ref) => {
+                    out.push(SailfishCertEvent::Certified(block_ref));
+                }
+                CertEvent::SendVote(block_ref) => {
+                    let vote = CertMessage {
+                        block_ref,
+                        sender: self.own_authority,
+                        kind: CertMessageKind::Vote,
+                    };
+                    pending.extend(self.rbc.add_message(&vote));
+                    out.push(SailfishCertEvent::Broadcast(vote));
+                }
+                CertEvent::SendReady(block_ref) => {
+                    let ready = CertMessage {
+                        block_ref,
+                        sender: self.own_authority,
+                        kind: CertMessageKind::Ready,
+                    };
+                    pending.extend(self.rbc.add_message(&ready));
+                    out.push(SailfishCertEvent::Broadcast(ready));
+                }
+            }
         }
-        SailfishServiceMessage::Cleanup(round) => {
-            aggregator.cleanup_below_round(round);
+    }
+
+    // -- Timeout aggregation -------------------------------------------------
+
+    fn handle_local_timeout(&mut self, round: RoundNumber, events: &mut Vec<SailfishCertEvent>) {
+        // The caller (net_sync) is responsible for signing the message before
+        // sending it here. This method just creates a pre-signed local timeout.
+        // Actually, we sign here so the service can be the single signing point.
+        // Net_sync will pass a Signer handle if needed, but for now the
+        // LocalTimeout variant expects the caller to have already called
+        // send_sailfish_message with a pre-signed message.
+        //
+        // For now, LocalTimeout just tells us we should have sent the timeout
+        // already — the actual signing happens in net_sync.rs.
+        let _ = (round, events);
+    }
+
+    fn add_timeout_msg(&mut self, msg: SailfishTimeoutMsg, events: &mut Vec<SailfishCertEvent>) {
+        let agg = self
+            .timeouts
+            .entry(msg.round)
+            .or_insert_with(SignedQuorumAggregator::new);
+        if agg.add(msg.sender, msg.signature, &self.committee) {
+            events.push(SailfishCertEvent::TimeoutReady(SailfishTimeoutCert {
+                round: msg.round,
+                signatures: agg.signatures.clone(),
+            }));
+        }
+    }
+
+    // -- No-vote aggregation -------------------------------------------------
+
+    fn handle_local_novote(
+        &mut self,
+        round: RoundNumber,
+        leader: AuthorityIndex,
+        events: &mut Vec<SailfishCertEvent>,
+    ) {
+        let _ = (round, leader, events);
+    }
+
+    fn add_novote_msg(&mut self, msg: SailfishNoVoteMsg, events: &mut Vec<SailfishCertEvent>) {
+        let agg = self
+            .no_votes
+            .entry((msg.round, msg.leader))
+            .or_insert_with(SignedQuorumAggregator::new);
+        if agg.add(msg.sender, msg.signature, &self.committee) {
+            events.push(SailfishCertEvent::NoVoteReady(SailfishNoVoteCert {
+                round: msg.round,
+                leader: msg.leader,
+                signatures: agg.signatures.clone(),
+            }));
         }
     }
 }
 
-fn dispatch_cert_events(
-    aggregator: &mut CertificationAggregator,
-    cert_events: Vec<CertEvent>,
-    own_authority: AuthorityIndex,
-    out: &mut Vec<SailfishCertEvent>,
-) {
-    let mut pending = VecDeque::from(cert_events);
-    while let Some(event) = pending.pop_front() {
-        match event {
-            CertEvent::FastDelivery(block_ref) | CertEvent::SlowDelivery(block_ref) => {
-                out.push(SailfishCertEvent::Certified(block_ref));
-            }
-            CertEvent::SendVote(block_ref) => {
-                let vote = CertMessage {
-                    block_ref,
-                    sender: own_authority,
-                    kind: CertMessageKind::Vote,
-                };
-                pending.extend(aggregator.add_message(&vote));
-                out.push(SailfishCertEvent::Broadcast(vote));
-            }
-            CertEvent::SendReady(block_ref) => {
-                let ready = CertMessage {
-                    block_ref,
-                    sender: own_authority,
-                    kind: CertMessageKind::Ready,
-                };
-                pending.extend(aggregator.add_message(&ready));
-                out.push(SailfishCertEvent::Broadcast(ready));
-            }
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use prometheus::Registry;
 
     use super::*;
+    use crate::crypto;
 
     fn make_committee(n: usize) -> Arc<Committee> {
         Committee::new_test(vec![1; n])
@@ -294,5 +482,154 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, SailfishCertEvent::Certified(received) if *received == block_ref)
         }));
+    }
+
+    /// N=4, F=1: quorum_threshold = 3. Three timeout messages form a TC.
+    #[tokio::test]
+    async fn timeout_cert_formation() {
+        let committee = make_committee(4);
+        let own_authority = 0;
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee.clone(),
+            own_authority,
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        let round = 5;
+        let signers = crate::crypto::Signer::new_for_test(4);
+        let digest = crypto::sailfish_timeout_digest(round);
+
+        // Send 3 timeout messages (quorum = 3 for N=4)
+        for sender in 0..3u8 {
+            let sig = signers[sender as usize].sign_digest(&digest);
+            msg_tx
+                .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
+                    round,
+                    sender,
+                    signature: sig,
+                }))
+                .unwrap();
+        }
+
+        let events = event_rx.recv().await.expect("expected timeout cert");
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::TimeoutReady(cert) if cert.round == round
+                    && cert.signatures.len() == 3
+            )
+        }));
+    }
+
+    /// N=4, F=1: quorum_threshold = 3. Three no-vote messages form a NVC.
+    #[tokio::test]
+    async fn novote_cert_formation() {
+        let committee = make_committee(4);
+        let own_authority = 0;
+        let leader = 2;
+        let round = 7;
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee.clone(),
+            own_authority,
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        let signers = crate::crypto::Signer::new_for_test(4);
+        let digest = crypto::sailfish_novote_digest(round, leader);
+
+        for sender in 0..3u8 {
+            let sig = signers[sender as usize].sign_digest(&digest);
+            msg_tx
+                .send(SailfishServiceMessage::NoVoteMsg(SailfishNoVoteMsg {
+                    round,
+                    leader,
+                    sender,
+                    signature: sig,
+                }))
+                .unwrap();
+        }
+
+        let events = event_rx.recv().await.expect("expected novote cert");
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::NoVoteReady(cert) if cert.round == round
+                    && cert.leader == leader
+                    && cert.signatures.len() == 3
+            )
+        }));
+    }
+
+    /// Duplicate timeout messages from the same sender are ignored.
+    /// Sends sender=0 twice, then senders 1 and 2. With dedup, the cert
+    /// should form from exactly 3 unique signers (0, 1, 2), not 4.
+    #[tokio::test]
+    async fn duplicate_timeout_ignored() {
+        let committee = make_committee(4);
+        let own_authority = 0;
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee.clone(),
+            own_authority,
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        let round = 3;
+        let signers = crate::crypto::Signer::new_for_test(4);
+        let digest = crypto::sailfish_timeout_digest(round);
+        let sig = signers[0].sign_digest(&digest);
+
+        // Send same timeout twice from sender 0 (duplicate)
+        msg_tx
+            .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
+                round,
+                sender: 0,
+                signature: sig,
+            }))
+            .unwrap();
+        msg_tx
+            .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
+                round,
+                sender: 0,
+                signature: sig,
+            }))
+            .unwrap();
+        // Two more unique senders to reach quorum (3)
+        msg_tx
+            .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
+                round,
+                sender: 1,
+                signature: signers[1].sign_digest(&digest),
+            }))
+            .unwrap();
+        msg_tx
+            .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
+                round,
+                sender: 2,
+                signature: signers[2].sign_digest(&digest),
+            }))
+            .unwrap();
+
+        let events = event_rx.recv().await.expect("expected timeout cert");
+        let cert = events.iter().find_map(|e| match e {
+            SailfishCertEvent::TimeoutReady(cert) => Some(cert),
+            _ => None,
+        });
+        // Cert formed with exactly 3 unique signers (the duplicate was ignored)
+        assert_eq!(cert.unwrap().signatures.len(), 3);
     }
 }

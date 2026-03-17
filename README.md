@@ -28,7 +28,7 @@ Three versions of Starfish are available in this repository:
 
 The repository also supports other partially synchronous DAG-based consensus protocols:
 
-- **`sailfish++`**: Implementation based on [SFSailfish](https://eprint.iacr.org/2025/535) ("Optimistic, Signature-Free Reliable Broadcast and Its Applications", CCS'25).
+- **`sailfish++`**: Implementation based on [SFSailfish](https://arxiv.org/abs/2505.02761) ("Optimistic, Signature-Free Reliable Broadcast and Its Applications", CCS'25).
 A certified DAG protocol using signature-free optimistic reliable broadcast (RBC) for vertex certification.
 Achieves 2-round optimistic commit latency with authentication derived from TCP channels rather than cryptographic signatures.
 - **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).

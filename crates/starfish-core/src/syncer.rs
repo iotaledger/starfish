@@ -21,7 +21,8 @@ use crate::{
     sailfish_service::SailfishServiceMessage,
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
-        ReconstructedTransactionData, RoundNumber, Stake, VerifiedBlock,
+        ReconstructedTransactionData, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
+        VerifiedBlock,
     },
 };
 
@@ -191,6 +192,23 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
+    }
+
+    /// Store a Sailfish++ timeout certificate in DagState and retry block
+    /// creation (a TC may unblock block creation for the next round).
+    pub fn apply_timeout_cert(&mut self, cert: SailfishTimeoutCert) {
+        self.core.dag_state().add_timeout_cert(cert);
+        self.maybe_update_proposal_wait();
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+    }
+
+    /// Store a Sailfish++ no-vote certificate in DagState and retry block
+    /// creation + commit (an NVC may enable direct skip).
+    pub fn apply_novote_cert(&mut self, cert: SailfishNoVoteCert) {
+        self.core.dag_state().add_novote_cert(cert);
+        self.maybe_update_proposal_wait();
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+        self.try_new_commit();
     }
 
     /// Apply BLS certificate events from the BLS verification service.

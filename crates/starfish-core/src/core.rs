@@ -34,7 +34,7 @@ use crate::{
     types::{
         AuthorityIndex, BaseTransaction, BlockReference, BlsAggregateCertificate, Encoder,
         PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData, RoundNumber,
-        Shard, VerifiedBlock,
+        SailfishFields, Shard, VerifiedBlock,
     },
 };
 
@@ -518,6 +518,16 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions, clock_round)
         );
+
+        // SailfishPlusPlus: gate block creation on control-plane certs when
+        // we lack a parent link to the previous leader.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+            && !self.sailfish_control_ready(clock_round, &block_references)
+        {
+            self.requeue_transactions(std::mem::take(&mut transactions));
+            return None;
+        }
+
         let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
         if starfish_speed_excluded_authors & (1u128 << self.authority) != 0 {
             self.requeue_transactions(std::mem::take(&mut transactions));
@@ -837,6 +847,16 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
+        // SailfishPlusPlus: compute control-plane fields (TC / NVC).
+        let sailfish_fields = if self.dag_state.consensus_protocol
+            == ConsensusProtocol::SailfishPlusPlus
+            && clock_round > 1
+        {
+            self.compute_sailfish_fields(clock_round, &block_references)
+        } else {
+            None
+        };
+
         let mut block = VerifiedBlock::new_with_signer(
             self.authority,
             clock_round,
@@ -856,6 +876,7 @@ impl<H: BlockHandler> Core<H> {
             certified_leader,
             precomputed_round_sig,
             precomputed_leader_sig,
+            sailfish_fields,
         );
 
         self.metrics
@@ -867,6 +888,82 @@ impl<H: BlockHandler> Core<H> {
 
         block.preserialize();
         Data::new(block)
+    }
+
+    /// Compute SailfishPlusPlus control fields for a new block at
+    /// `clock_round`.
+    ///
+    /// Returns `Some(fields)` with the control certs to embed, or `None` if no
+    /// control fields are needed (block has a path to the previous leader).
+    ///
+    /// The caller must ensure that when this returns `None` the block actually
+    /// has a parent link to the previous leader.  The gating logic that blocks
+    /// block creation when certs are missing lives in `try_new_block`.
+    fn compute_sailfish_fields(
+        &self,
+        clock_round: RoundNumber,
+        block_references: &[BlockReference],
+    ) -> Option<SailfishFields> {
+        let prev_round = clock_round - 1;
+        let prev_leader = self.committee.elect_leader(prev_round);
+
+        // If we have a direct parent to the previous leader, no control
+        // certs are needed.
+        let has_path_to_prev_leader = block_references
+            .iter()
+            .any(|r| r.round == prev_round && r.authority == prev_leader);
+
+        if has_path_to_prev_leader {
+            return None;
+        }
+
+        // We lack a path — collect the control certs.
+        let timeout_cert = self.dag_state.get_timeout_cert(prev_round);
+        let is_leader = self.committee.elect_leader(clock_round) == self.authority;
+        let no_vote_cert = if is_leader {
+            self.dag_state.get_novote_cert(prev_round, prev_leader)
+        } else {
+            None
+        };
+
+        Some(SailfishFields {
+            timeout_cert,
+            no_vote_cert,
+        })
+    }
+
+    /// Check whether Sailfish++ control-plane prerequisites are met for
+    /// creating a block in `clock_round`. Returns true if block creation can
+    /// proceed.
+    fn sailfish_control_ready(
+        &self,
+        clock_round: RoundNumber,
+        block_references: &[BlockReference],
+    ) -> bool {
+        if clock_round <= 1 {
+            return true;
+        }
+        let prev_round = clock_round - 1;
+        let prev_leader = self.committee.elect_leader(prev_round);
+
+        let has_path = block_references
+            .iter()
+            .any(|r| r.round == prev_round && r.authority == prev_leader);
+        if has_path {
+            return true;
+        }
+
+        // Must have a TC for the previous round.
+        if !self.dag_state.has_timeout_cert(prev_round) {
+            return false;
+        }
+        // Leader must additionally have a NVC.
+        if self.committee.elect_leader(clock_round) == self.authority
+            && !self.dag_state.has_novote_cert(prev_round, prev_leader)
+        {
+            return false;
+        }
+        true
     }
 
     fn prepare_last_blocks(&mut self) {

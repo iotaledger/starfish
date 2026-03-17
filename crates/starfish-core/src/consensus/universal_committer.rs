@@ -186,17 +186,57 @@ impl UniversalCommitter {
         let highest_possible_leader_to_decide_round = highest_known_round.saturating_sub(1);
         let mut committed = Vec::new();
         let mut newly_committed = AHashSet::new();
+        let mut skipped = AHashSet::new();
 
         for round in last_decided_round + 1..=highest_possible_leader_to_decide_round {
             let leader = self.committee.elect_leader(round);
+
+            // Direct skip: if a no-vote certificate exists for this slot,
+            // the leader provably cannot be committed.
+            if self.dag_state.has_novote_cert(round, leader) {
+                skipped.insert((leader, round));
+                let key = (leader, round);
+                if !self.decided.contains_key(&key) {
+                    let status = LeaderStatus::Skip(leader, round);
+                    self.decided.insert(key, status.clone());
+                    if self.metrics_emitted.insert(key) {
+                        tracing::debug!("Decided {status}");
+                        self.update_metrics(&status, true);
+                    }
+                    committed.push(status);
+                }
+                continue;
+            }
+
             let Some(anchor) = self.try_direct_commit_block_sailfish(leader, round) else {
                 continue;
             };
 
+            // Backward walk: resolve older slots between last_decided and
+            // this anchor. If anchor has a causal path to a certified leader
+            // at slot s, commit it. If an NVC exists for slot s, skip it.
             let mut chain = vec![anchor.clone()];
             let mut current = anchor;
             for prev_round in (last_decided_round + 1..current.round()).rev() {
                 let prev_leader = self.committee.elect_leader(prev_round);
+                let prev_key = (prev_leader, prev_round);
+                if newly_committed.contains(&prev_key) || skipped.contains(&prev_key) {
+                    continue;
+                }
+
+                // Check for NVC-based skip.
+                if self.dag_state.has_novote_cert(prev_round, prev_leader) {
+                    skipped.insert(prev_key);
+                    let status = LeaderStatus::Skip(prev_leader, prev_round);
+                    self.decided.insert(prev_key, status.clone());
+                    if self.metrics_emitted.insert(prev_key) {
+                        tracing::debug!("Decided {status}");
+                        self.update_metrics(&status, false);
+                    }
+                    committed.push(status);
+                    continue;
+                }
+
                 let mut linked_leaders: Vec<_> = self
                     .dag_state
                     .get_blocks_at_authority_round(prev_leader, prev_round)

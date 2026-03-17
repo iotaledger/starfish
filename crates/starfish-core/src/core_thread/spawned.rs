@@ -16,7 +16,7 @@ use crate::{
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockReference, ProvableShard, ReconstructedTransactionData, RoundNumber,
-        VerifiedBlock,
+        SailfishNoVoteCert, SailfishTimeoutCert, VerifiedBlock,
     },
 };
 
@@ -67,6 +67,10 @@ enum CoreThreadCommand {
     ApplyCertificateEvents(Vec<CertificateEvent>, oneshot::Sender<()>),
     /// Apply Sailfish RBC-certified vertices on the core thread.
     ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
+    /// Store a Sailfish++ timeout certificate in DagState.
+    ApplyTimeoutCert(SailfishTimeoutCert, oneshot::Sender<()>),
+    /// Store a Sailfish++ no-vote certificate in DagState.
+    ApplyNoVoteCert(SailfishNoVoteCert, oneshot::Sender<()>),
 }
 
 impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 'static>
@@ -177,6 +181,22 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
             sender,
         ))
         .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    /// Store a Sailfish++ timeout certificate on the core thread.
+    pub async fn apply_timeout_cert(&self, cert: SailfishTimeoutCert) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplyTimeoutCert(cert, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    /// Store a Sailfish++ no-vote certificate on the core thread.
+    pub async fn apply_novote_cert(&self, cert: SailfishNoVoteCert) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplyNoVoteCert(cert, sender))
+            .await;
         receiver.await.expect("core thread is not expected to stop");
     }
 
@@ -337,6 +357,22 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["apply_sailfish_certificates"])
                         .inc();
                     self.syncer.apply_sailfish_certificates(certified_refs);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::ApplyTimeoutCert(cert, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_timeout_cert"])
+                        .inc();
+                    self.syncer.apply_timeout_cert(cert);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::ApplyNoVoteCert(cert, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_novote_cert"])
+                        .inc();
+                    self.syncer.apply_novote_cert(cert);
                     sender.send(()).ok();
                 }
             }

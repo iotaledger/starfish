@@ -191,6 +191,63 @@ pub struct CertMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Sailfish++ control-plane messages (signed with Ed25519).
+// Timeout certificates enable liveness when a leader is silent.
+// No-vote certificates let honest leaders prove they didn't see the
+// previous leader, enabling direct skip in the commit rule.
+// ---------------------------------------------------------------------------
+
+/// Signed timeout message: "I haven't seen a certified leader for round
+/// `round`."
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SailfishTimeoutMsg {
+    pub round: RoundNumber,
+    pub sender: AuthorityIndex,
+    pub signature: SignatureBytes,
+}
+
+/// Aggregated timeout certificate: ≥ 2f+1 signed timeout messages for a round.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SailfishTimeoutCert {
+    pub round: RoundNumber,
+    pub signatures: Vec<(AuthorityIndex, SignatureBytes)>,
+}
+
+/// Signed no-vote message: "I am advancing past round `round` without voting
+/// for leader `leader`." Sent to the next-round leader so it can build a
+/// no-vote certificate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SailfishNoVoteMsg {
+    pub round: RoundNumber,
+    pub leader: AuthorityIndex,
+    pub sender: AuthorityIndex,
+    pub signature: SignatureBytes,
+}
+
+/// Aggregated no-vote certificate: ≥ 2f+1 signed no-vote messages for a
+/// (round, leader) slot. Embedded in the leader's block to prove it may skip
+/// the previous leader.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SailfishNoVoteCert {
+    pub round: RoundNumber,
+    pub leader: AuthorityIndex,
+    pub signatures: Vec<(AuthorityIndex, SignatureBytes)>,
+}
+
+/// Protocol-specific fields embedded in SailfishPlusPlus block headers.
+/// Part of the signed block hash.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SailfishFields {
+    /// Timeout certificate for the previous round, if this block advances
+    /// without a path to the previous-round leader.
+    pub timeout_cert: Option<SailfishTimeoutCert>,
+    /// No-vote certificate for the previous round's leader slot, included
+    /// only by the current round's elected leader when it lacks a path to
+    /// the previous-round leader.
+    pub no_vote_cert: Option<SailfishNoVoteCert>,
+}
+
+// ---------------------------------------------------------------------------
 // BlockHeader — signed, content-addressed block identity.
 // Contains exactly the fields that feed into BlockDigest::new() and
 // sign_block().
@@ -222,6 +279,9 @@ pub struct BlockHeader {
     pub(crate) strong_vote: Option<u128>,
     /// BLS certificate fields (StarfishBls only). None for all other protocols.
     pub(crate) bls: Option<Box<BlsFields>>,
+    /// Sailfish++ control certificates (timeout/no-vote). None for all other
+    /// protocols.
+    pub(crate) sailfish: Option<Box<SailfishFields>>,
 
     // -- Cache (not serialized) -----------------------------------------------
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
@@ -352,6 +412,22 @@ impl BlockHeader {
             .as_ref()
             .map(|b| b.acknowledgment_signatures.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn sailfish(&self) -> Option<&SailfishFields> {
+        self.sailfish.as_deref()
+    }
+
+    pub fn sailfish_timeout_cert(&self) -> Option<&SailfishTimeoutCert> {
+        self.sailfish
+            .as_ref()
+            .and_then(|sf| sf.timeout_cert.as_ref())
+    }
+
+    pub fn sailfish_no_vote_cert(&self) -> Option<&SailfishNoVoteCert> {
+        self.sailfish
+            .as_ref()
+            .and_then(|sf| sf.no_vote_cert.as_ref())
     }
 
     pub fn preserialize(&mut self) {
@@ -616,6 +692,7 @@ impl VerifiedBlock {
         merkle_root: TransactionsCommitment,
         strong_vote: Option<u128>,
         bls: Option<BlsFields>,
+        sailfish: Option<SailfishFields>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
@@ -649,6 +726,7 @@ impl VerifiedBlock {
             },
             strong_vote,
             bls: bls.map(Box::new),
+            sailfish: sailfish.map(Box::new),
             serialized: None,
         };
 
@@ -691,6 +769,7 @@ impl VerifiedBlock {
             },
             strong_vote: None,
             bls: None,
+            sailfish: None,
             serialized: None,
         };
         let mut block = Self {
@@ -701,6 +780,7 @@ impl VerifiedBlock {
         Data::new(block)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_signer(
         authority: AuthorityIndex,
@@ -721,6 +801,7 @@ impl VerifiedBlock {
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
         precomputed_round_sig: Option<BlsSignatureBytes>,
         precomputed_leader_sig: Option<BlsSignatureBytes>,
+        sailfish: Option<SailfishFields>,
     ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
@@ -801,6 +882,7 @@ impl VerifiedBlock {
             transactions_commitment,
             strong_vote,
             bls,
+            sailfish,
         )
     }
 
@@ -880,6 +962,18 @@ impl VerifiedBlock {
 
     pub fn is_strong_blame(&self) -> bool {
         self.header.is_strong_blame()
+    }
+
+    pub fn sailfish(&self) -> Option<&SailfishFields> {
+        self.header.sailfish()
+    }
+
+    pub fn sailfish_timeout_cert(&self) -> Option<&SailfishTimeoutCert> {
+        self.header.sailfish_timeout_cert()
+    }
+
+    pub fn sailfish_no_vote_cert(&self) -> Option<&SailfishNoVoteCert> {
+        self.header.sailfish_no_vote_cert()
     }
 
     // --- Payload accessors ---
@@ -1202,9 +1296,7 @@ impl VerifiedBlock {
                     "Only StarfishBls blocks may carry BLS fields"
                 );
             }
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 ensure!(
                     acknowledgments.is_empty(),
                     "{consensus_protocol:?} blocks must not carry acknowledgments"
@@ -1218,10 +1310,107 @@ impl VerifiedBlock {
                     "Only StarfishBls blocks may carry BLS fields"
                 );
             }
+            ConsensusProtocol::SailfishPlusPlus => {
+                ensure!(
+                    acknowledgments.is_empty(),
+                    "SailfishPlusPlus blocks must not carry acknowledgments"
+                );
+                ensure!(
+                    threshold_clock_valid_block_header(&self.header, committee),
+                    "Threshold clock is not valid"
+                );
+                ensure!(
+                    self.header.bls().is_none(),
+                    "Only StarfishBls blocks may carry BLS fields"
+                );
+                // Validate Sailfish++ control fields.
+                if let Some(sf) = self.header.sailfish() {
+                    self.verify_sailfish_fields(sf, committee)?;
+                }
+            }
         }
         Ok(())
     }
+
+    /// Validate Sailfish++ timeout and no-vote certificates embedded in
+    /// the block header.
+    fn verify_sailfish_fields(
+        &self,
+        sf: &SailfishFields,
+        committee: &Committee,
+    ) -> eyre::Result<()> {
+        let round = self.round();
+        ensure!(round > 1, "SailfishFields not expected in round 0 or 1");
+        let prev_round = round - 1;
+
+        if let Some(tc) = &sf.timeout_cert {
+            ensure!(
+                tc.round == prev_round,
+                "Timeout cert round {} does not match expected {}",
+                tc.round,
+                prev_round
+            );
+            let digest = crypto::sailfish_timeout_digest(tc.round);
+            verify_signed_quorum(&tc.signatures, &digest, committee, "timeout")?;
+        }
+
+        if let Some(nvc) = &sf.no_vote_cert {
+            ensure!(
+                nvc.round == prev_round,
+                "NoVote cert round {} does not match expected {}",
+                nvc.round,
+                prev_round
+            );
+            ensure!(
+                nvc.leader == committee.elect_leader(prev_round),
+                "NoVote cert leader {} does not match elected leader",
+                nvc.leader
+            );
+            let digest = crypto::sailfish_novote_digest(nvc.round, nvc.leader);
+            verify_signed_quorum(&nvc.signatures, &digest, committee, "novote")?;
+        }
+
+        Ok(())
+    }
 }
+
+/// Verify that a vector of (authority, Ed25519 signature) pairs forms a valid
+/// quorum over the given digest. Checks signer uniqueness, quorum stake, and
+/// every signature.
+fn verify_signed_quorum(
+    signatures: &[(AuthorityIndex, SignatureBytes)],
+    digest: &[u8; 32],
+    committee: &Committee,
+    label: &str,
+) -> eyre::Result<()> {
+    let mut seen = 0u128;
+    let mut stake: Stake = 0;
+    for &(signer, ref sig) in signatures {
+        let mask = 1u128 << signer;
+        ensure!(
+            seen & mask == 0,
+            "Duplicate signer {} in {} cert",
+            signer,
+            label
+        );
+        seen |= mask;
+        let pk = committee
+            .get_public_key(signer)
+            .ok_or_else(|| eyre::eyre!("Unknown signer {} in {} cert", signer, label))?;
+        pk.verify_digest_signature(digest, sig)
+            .map_err(|e| eyre::eyre!("Bad {} sig from {}: {}", label, signer, e))?;
+        stake += committee.get_stake(signer).unwrap_or(0);
+    }
+    ensure!(
+        stake >= committee.quorum_threshold(),
+        "{} cert stake {} < quorum {}",
+        label,
+        stake,
+        committee.quorum_threshold()
+    );
+    Ok(())
+}
+
 #[derive(
     Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
 )]
@@ -1457,6 +1646,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         (block, committee)
     }
@@ -1492,6 +1682,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         (block, committee)
     }
@@ -1511,6 +1702,7 @@ mod tests {
             SignatureBytes::default(),
             vec![],
             TransactionsCommitment::default(),
+            None,
             None,
             None,
         );
@@ -1551,6 +1743,7 @@ mod tests {
             },
             strong_vote: None,
             bls: None,
+            sailfish: None,
             serialized: None,
         };
 
@@ -1591,6 +1784,7 @@ mod tests {
             transactions,
             Some(encoded_transactions),
             ConsensusProtocol::StarfishBls,
+            None,
             None,
             None,
             None,
@@ -1719,6 +1913,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -1787,6 +1982,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -1845,6 +2041,7 @@ mod tests {
             transactions,
             Some(encoded_transactions),
             ConsensusProtocol::StarfishBls,
+            None,
             None,
             None,
             None,
