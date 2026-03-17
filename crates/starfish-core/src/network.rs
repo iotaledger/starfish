@@ -31,7 +31,7 @@ use crate::{
     stat::HistogramSender,
     types::{
         AuthorityIndex, BlockReference, CertMessage, CertMessageKind, PartialSig, ProvableShard,
-        RoundNumber, VerifiedBlock,
+        RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, VerifiedBlock,
     },
 };
 
@@ -158,6 +158,10 @@ pub enum NetworkMessage {
     PartialSig(PartialSig),
     /// SailfishPlusPlus: Optimistic RBC message with phase metadata.
     CertMessage(CertMessage),
+    /// SailfishPlusPlus: Signed timeout message for round advancement.
+    SailfishTimeout(SailfishTimeoutMsg),
+    /// SailfishPlusPlus: Signed no-vote message for leader skip proof.
+    SailfishNoVote(SailfishNoVoteMsg),
 }
 
 impl NetworkMessage {
@@ -173,6 +177,8 @@ impl NetworkMessage {
                 CertMessageKind::Vote => "cert_vote",
                 CertMessageKind::Ready => "cert_ready",
             },
+            Self::SailfishTimeout(_) => "sailfish_timeout",
+            Self::SailfishNoVote(_) => "sailfish_no_vote",
         }
     }
 }

@@ -115,6 +115,7 @@ mod tests {
             },
             strong_vote: None,
             bls: None,
+            sailfish: None,
             serialized: None,
         }
     }

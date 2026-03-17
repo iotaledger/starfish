@@ -386,6 +386,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     sf.send(SailfishServiceMessage::CertMessage(message));
                 }
             }
+            NetworkMessage::SailfishTimeout(msg) => {
+                if msg.sender != self.peer_id {
+                    return true;
+                }
+                if let Some(ref sf) = self.sailfish_service {
+                    sf.send(SailfishServiceMessage::TimeoutMsg(msg));
+                }
+            }
+            NetworkMessage::SailfishNoVote(msg) => {
+                if msg.sender != self.peer_id {
+                    return true;
+                }
+                if let Some(ref sf) = self.sailfish_service {
+                    sf.send(SailfishServiceMessage::NoVoteMsg(msg));
+                }
+            }
         }
         true
     }
@@ -1263,7 +1279,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         .iter()
                         .filter_map(|event| match event {
                             SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
-                            SailfishCertEvent::Broadcast(_) => None,
+                            _ => None,
                         })
                         .collect();
                     if !certified_refs.is_empty() {
@@ -1272,7 +1288,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             .apply_sailfish_certificates(certified_refs)
                             .await;
                     }
-                    // Broadcast Vote/Ready messages
+                    // Apply timeout/novote certs to dag state
+                    for event in &events {
+                        match event {
+                            SailfishCertEvent::TimeoutReady(cert) => {
+                                event_inner.syncer.apply_timeout_cert(cert.clone()).await;
+                            }
+                            SailfishCertEvent::NoVoteReady(cert) => {
+                                event_inner.syncer.apply_novote_cert(cert.clone()).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Broadcast Vote/Ready/Timeout/NoVote messages
                     {
                         let senders: Vec<_> =
                             event_inner.peer_senders.read().values().cloned().collect();
@@ -1287,7 +1315,29 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         .await;
                                     }
                                 }
-                                SailfishCertEvent::Certified(_) => {}
+                                SailfishCertEvent::BroadcastTimeout(msg) => {
+                                    for sender in &senders {
+                                        send_network_message_reliably(
+                                            sender,
+                                            NetworkMessage::SailfishTimeout(msg.clone()),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                SailfishCertEvent::SendNoVote(msg) => {
+                                    // No-vote messages are sent only to the
+                                    // next-round leader. For now broadcast.
+                                    for sender in &senders {
+                                        send_network_message_reliably(
+                                            sender,
+                                            NetworkMessage::SailfishNoVote(msg.clone()),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                SailfishCertEvent::Certified(_)
+                                | SailfishCertEvent::TimeoutReady(_)
+                                | SailfishCertEvent::NoVoteReady(_) => {}
                             }
                         }
                     }
@@ -1706,6 +1756,7 @@ mod tests {
             SignatureBytes::default(),
             Vec::<BaseTransaction>::new(),
             TransactionsCommitment::default(),
+            None,
             None,
             None,
         ));

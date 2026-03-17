@@ -32,7 +32,8 @@ use crate::{
     threshold_clock::ThresholdClockAggregator,
     types::{
         AuthorityIndex, BlockDigest, BlockReference, BlsAggregateCertificate, ProvableShard,
-        RoundNumber, Stake, TransactionData, VerifiedBlock,
+        RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake, TransactionData,
+        VerifiedBlock,
     },
 };
 
@@ -310,6 +311,10 @@ struct DagStateInner {
     /// Per-authority RBC vertex certificates (SailfishPlusPlus).
     /// Stored as BTreeSet<BlockReference> per authority for split_off cleanup.
     vertex_certificates: Vec<BTreeSet<BlockReference>>,
+    /// Sailfish++ timeout certificates, indexed by round.
+    sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
+    /// Sailfish++ no-vote certificates, indexed by (round, leader).
+    sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
 }
 
 impl DagState {
@@ -377,6 +382,8 @@ impl DagState {
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
             vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            sailfish_timeout_certs: BTreeMap::new(),
+            sailfish_novote_certs: BTreeMap::new(),
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -987,6 +994,62 @@ impl DagState {
             }
         }
         self.committee.is_quorum(stake)
+    }
+
+    /// Store a Sailfish++ timeout certificate for a round.
+    pub fn add_timeout_cert(&self, cert: SailfishTimeoutCert) {
+        let mut inner = self.dag_state_inner.write();
+        inner
+            .sailfish_timeout_certs
+            .entry(cert.round)
+            .or_insert(cert);
+    }
+
+    /// Retrieve a stored timeout certificate for a round.
+    pub fn get_timeout_cert(&self, round: RoundNumber) -> Option<SailfishTimeoutCert> {
+        self.dag_state_inner
+            .read()
+            .sailfish_timeout_certs
+            .get(&round)
+            .cloned()
+    }
+
+    /// Check whether a timeout certificate exists for a round.
+    pub fn has_timeout_cert(&self, round: RoundNumber) -> bool {
+        self.dag_state_inner
+            .read()
+            .sailfish_timeout_certs
+            .contains_key(&round)
+    }
+
+    /// Store a Sailfish++ no-vote certificate for a (round, leader) slot.
+    pub fn add_novote_cert(&self, cert: SailfishNoVoteCert) {
+        let mut inner = self.dag_state_inner.write();
+        inner
+            .sailfish_novote_certs
+            .entry((cert.round, cert.leader))
+            .or_insert(cert);
+    }
+
+    /// Retrieve a stored no-vote certificate for (round, leader).
+    pub fn get_novote_cert(
+        &self,
+        round: RoundNumber,
+        leader: AuthorityIndex,
+    ) -> Option<SailfishNoVoteCert> {
+        self.dag_state_inner
+            .read()
+            .sailfish_novote_certs
+            .get(&(round, leader))
+            .cloned()
+    }
+
+    /// Check whether a no-vote certificate exists for a (round, leader) slot.
+    pub fn has_novote_cert(&self, round: RoundNumber, leader: AuthorityIndex) -> bool {
+        self.dag_state_inner
+            .read()
+            .sailfish_novote_certs
+            .contains_key(&(round, leader))
     }
 
     pub fn dac_certificate_state(
@@ -2155,6 +2218,9 @@ impl DagStateInner {
             };
             self.vertex_certificates[auth] = self.vertex_certificates[auth].split_off(&split_ref);
         }
+        // Prune Sailfish++ timeout and no-vote certificates.
+        self.sailfish_timeout_certs = self.sailfish_timeout_certs.split_off(&min_evicted);
+        self.sailfish_novote_certs = self.sailfish_novote_certs.split_off(&(min_evicted, 0));
     }
 
     pub fn add_block(
@@ -2830,6 +2896,7 @@ mod tests {
             TransactionsCommitment::default(),
             Some(strong_vote_mask),
             None,
+            None,
         );
         block.preserialize();
         Data::new(block)
@@ -2867,6 +2934,7 @@ mod tests {
             merkle_root,
             None,
             None,
+            None,
         );
         block.preserialize();
         Data::new(block)
@@ -2898,6 +2966,7 @@ mod tests {
             SignatureBytes::default(),
             empty_transactions,
             merkle_root,
+            None,
             None,
             None,
         );

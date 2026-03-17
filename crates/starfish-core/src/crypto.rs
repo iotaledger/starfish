@@ -52,6 +52,25 @@ pub fn bls_dac_message(ack_ref: &BlockReference) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Build the 32-byte digest for a Sailfish++ timeout message.
+/// Domain separation: `b"sf_timeout" || round`.
+pub fn sailfish_timeout_digest(round: RoundNumber) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"sf_timeout");
+    round.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
+/// Build the 32-byte digest for a Sailfish++ no-vote message.
+/// Domain separation: `b"sf_novote" || round || leader`.
+pub fn sailfish_novote_digest(round: RoundNumber, leader: AuthorityIndex) -> [u8; 32] {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(b"sf_novote");
+    round.crypto_hash(&mut hasher);
+    leader.crypto_hash(&mut hasher);
+    hasher.finalize().into()
+}
+
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 
@@ -399,6 +418,17 @@ impl PublicKey {
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, ed25519_consensus::Error> {
         ed25519_consensus::VerificationKey::try_from(*bytes).map(Self)
     }
+
+    /// Verify an Ed25519 signature over a 32-byte digest. Used for
+    /// Sailfish++ timeout and no-vote message verification.
+    pub fn verify_digest_signature(
+        &self,
+        digest: &[u8; 32],
+        signature: &SignatureBytes,
+    ) -> Result<(), ed25519_consensus::Error> {
+        let sig = ed25519_consensus::Signature::from(signature.0);
+        self.0.verify(&sig, digest.as_ref())
+    }
 }
 
 impl Signer {
@@ -431,6 +461,13 @@ impl Signer {
             strong_vote,
         );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
+        let signature = self.0.sign(digest.as_ref());
+        SignatureBytes(signature.to_bytes())
+    }
+
+    /// Sign a pre-computed 32-byte digest. Used for Sailfish++ control
+    /// messages (timeout, no-vote) that don't fit the block-signing schema.
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> SignatureBytes {
         let signature = self.0.sign(digest.as_ref());
         SignatureBytes(signature.to_bytes())
     }
@@ -519,6 +556,12 @@ impl<'de> Deserialize<'de> for PublicKey {
 impl Default for SignatureBytes {
     fn default() -> Self {
         Self([0u8; 64])
+    }
+}
+
+impl fmt::Debug for SignatureBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Sig({})", &hex::encode(&self.0[..4]))
     }
 }
 

@@ -170,6 +170,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         (block, encoded)
     }
