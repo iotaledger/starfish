@@ -3284,12 +3284,12 @@ mod tests {
         );
         assert_eq!(
             ConsensusProtocol::Starfish.default_dissemination_mode(),
-            DisseminationMode::PushUseful
+            DisseminationMode::PushCausal
         );
         assert_eq!(
             ConsensusProtocol::StarfishBls
                 .resolve_dissemination_mode(DisseminationMode::ProtocolDefault),
-            DisseminationMode::PushUseful
+            DisseminationMode::PushCausal
         );
         assert_eq!(
             ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushUseful),

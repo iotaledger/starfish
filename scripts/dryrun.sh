@@ -8,7 +8,7 @@ NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
 #          sailfish-pp, cordial-miners, mysticeti
-CONSENSUS=${CONSENSUS:-starfish-speed}
+CONSENSUS=${CONSENSUS:-sailfish-pp}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -24,7 +24,7 @@ STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
 TRANSACTION_MODE=${TRANSACTION_MODE:-random}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
+#DISSEMINATION_MODE=${DISSEMINATION_MODE:-}
 # Enable lz4 network compression.
 # Auto-enabled for random transaction mode.
 # Set COMPRESS_NETWORK=1 or =0 to override.
