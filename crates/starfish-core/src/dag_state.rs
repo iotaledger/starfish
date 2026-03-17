@@ -2372,7 +2372,9 @@ impl DagStateInner {
         let auth = r.authority as usize;
         let is_empty_full_block = matches!(
             self.consensus_protocol,
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners
+            ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::CordialMiners
+                | ConsensusProtocol::SailfishPlusPlus
         ) && block.transactions().is_none()
             && block.merkle_root() == TransactionsCommitment::new_from_transactions(&Vec::new());
         if block.has_empty_payload() || is_empty_full_block {
