@@ -380,8 +380,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::CertMessage(message) => {
                 if message.sender != self.peer_id {
-                    return true; // reject: sender must match peer
+                    tracing::debug!(
+                        "Rejected CertMessage: sender {} != peer {}",
+                        message.sender,
+                        self.peer_id,
+                    );
+                    return true;
                 }
+                tracing::debug!(
+                    "Received {:?} from peer {} for {:?}",
+                    message.kind,
+                    message.sender,
+                    message.block_ref,
+                );
                 if let Some(ref sf) = self.sailfish_service {
                     sf.send(SailfishServiceMessage::CertMessage(message));
                 }
@@ -1297,6 +1308,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let event_inner = inner.clone();
             let event_task = handle.spawn(async move {
                 while let Some(events) = event_rx.recv().await {
+                    tracing::debug!("Sailfish event bridge: {} events", events.len(),);
                     let certified_refs: Vec<_> = events
                         .iter()
                         .filter_map(|event| match event {
@@ -1305,6 +1317,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         })
                         .collect();
                     if !certified_refs.is_empty() {
+                        tracing::info!(
+                            "Applying {} Sailfish certificates: {:?}",
+                            certified_refs.len(),
+                            certified_refs,
+                        );
                         event_inner
                             .syncer
                             .apply_sailfish_certificates(certified_refs)
@@ -1326,6 +1343,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     {
                         let senders: Vec<_> =
                             event_inner.peer_senders.read().values().cloned().collect();
+                        tracing::debug!(
+                            "Sailfish broadcast: {} peers, {} events",
+                            senders.len(),
+                            events.len(),
+                        );
                         for event in &events {
                             match event {
                                 SailfishCertEvent::Broadcast(message) => {
