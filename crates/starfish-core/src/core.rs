@@ -513,7 +513,7 @@ impl<H: BlockHandler> Core<H> {
             "Core::new_block::get_pending_transactions",
             self.get_pending_transactions(clock_round)
         );
-        let (mut transactions, block_references, failed_refs) = timed!(
+        let (mut transactions, block_references, raw_refs) = timed!(
             self.metrics,
             "Core::new_block::collect_transactions_and_references",
             self.collect_transactions_and_references(pending_transactions, clock_round)
@@ -527,7 +527,21 @@ impl<H: BlockHandler> Core<H> {
             && clock_round > 1
             && block_references.is_empty()
         {
-            for r in failed_refs {
+            for r in raw_refs {
+                self.pending.push(MetaTransaction::Include(r));
+            }
+            self.requeue_transactions(std::mem::take(&mut transactions));
+            return None;
+        }
+
+        // SailfishPlusPlus: if the previous-round leader is not referenced,
+        // the timeout-control rule must be satisfied before we construct the
+        // block. Requeue both transactions and include refs so the next retry
+        // sees the full frontier again.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+            && !self.sailfish_control_ready(clock_round, &block_references)
+        {
+            for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
             }
             self.requeue_transactions(std::mem::take(&mut transactions));
@@ -712,7 +726,7 @@ impl<H: BlockHandler> Core<H> {
             }
         }
 
-        (transactions, block_references, vec![])
+        (transactions, block_references, raw_refs)
     }
 
     fn prepare_encoded_transactions(
@@ -980,7 +994,6 @@ impl<H: BlockHandler> Core<H> {
     /// Check whether Sailfish++ control-plane prerequisites are met for
     /// creating a block in `clock_round`. Returns true if block creation can
     /// proceed.
-    #[allow(dead_code)]
     fn sailfish_control_ready(
         &self,
         clock_round: RoundNumber,
@@ -992,7 +1005,9 @@ impl<H: BlockHandler> Core<H> {
         let prev_round = clock_round - 1;
         let prev_leader = self.committee.elect_leader(prev_round);
 
-        let has_path = block_references
+        let has_path = self.last_own_block.first().is_some_and(|own_block| {
+            own_block.block.round() == prev_round && own_block.block.authority() == prev_leader
+        }) || block_references
             .iter()
             .any(|r| r.round == prev_round && r.authority == prev_leader);
         if has_path {
