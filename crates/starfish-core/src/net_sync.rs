@@ -508,22 +508,30 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
 
-        // Header-only blocks go into the without-transactions path
-        blocks_without_transactions.extend(headers);
-
-        // First process blocks without transactions (causal history shards/headers)
+        // Header-only blocks are only valid for Starfish erasure-coding
+        // variants. SailfishPlusPlus and Mysticeti require full blocks;
+        // reject any headers a peer may have sent.
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
         ) {
+            blocks_without_transactions.extend(headers);
             let header_source = match source {
                 DataSource::BlockBundleStreaming => DataSource::BlockBundleStreamingHeader,
                 other => other,
             };
             self.process_block_headers(blocks_without_transactions, header_source)
                 .await;
+        } else if !headers.is_empty() {
+            tracing::warn!(
+                "Rejecting {} header-only blocks from peer {} \
+                 (not supported by {:?})",
+                headers.len(),
+                self.peer_id,
+                self.consensus_protocol,
+            );
         }
 
         // Process standalone shards — route directly to shard reconstructor

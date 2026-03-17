@@ -519,14 +519,18 @@ impl<H: BlockHandler> Core<H> {
             self.collect_transactions_and_references(pending_transactions, clock_round)
         );
 
-        // SailfishPlusPlus: gate block creation on control-plane certs when
-        // we lack a parent link to the previous leader.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
-            && !self.sailfish_control_ready(clock_round, &block_references)
-        {
-            self.requeue_transactions(std::mem::take(&mut transactions));
-            return None;
-        }
+        // NOTE: sailfish_control_ready() is intentionally NOT gated here yet.
+        // The timeout mechanism that produces TCs is not fully wired, so
+        // enforcing the TC requirement would deadlock block creation whenever
+        // the previous-round leader is not among our certified parents.
+        // Once the timeout trigger in net_sync.rs is complete, re-enable:
+        //
+        //   if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+        //       && !self.sailfish_control_ready(clock_round, &block_references)
+        //   {
+        //       self.requeue_transactions(std::mem::take(&mut transactions));
+        //       return None;
+        //   }
 
         let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
         if starfish_speed_excluded_authors & (1u128 << self.authority) != 0 {
@@ -935,6 +939,7 @@ impl<H: BlockHandler> Core<H> {
     /// Check whether Sailfish++ control-plane prerequisites are met for
     /// creating a block in `clock_round`. Returns true if block creation can
     /// proceed.
+    #[allow(dead_code)]
     fn sailfish_control_ready(
         &self,
         clock_round: RoundNumber,
