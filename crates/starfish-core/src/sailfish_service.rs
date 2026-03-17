@@ -152,7 +152,7 @@ pub fn start_sailfish_service(
     signer: Signer,
     receiver: mpsc::UnboundedReceiver<SailfishServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<SailfishCertEvent>>,
-    _metrics: Arc<Metrics>,
+    metrics: Arc<Metrics>,
 ) {
     tokio::spawn(run_sailfish_service(
         committee,
@@ -160,6 +160,7 @@ pub fn start_sailfish_service(
         signer,
         receiver,
         event_tx,
+        metrics,
     ));
 }
 
@@ -169,8 +170,9 @@ async fn run_sailfish_service(
     signer: Signer,
     mut receiver: mpsc::UnboundedReceiver<SailfishServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<SailfishCertEvent>>,
+    metrics: Arc<Metrics>,
 ) {
-    let mut state = ServiceState::new(committee, own_authority, signer);
+    let mut state = ServiceState::new(committee, own_authority, signer, metrics);
 
     while let Some(msg) = receiver.recv().await {
         let mut all_events = Vec::new();
@@ -195,18 +197,25 @@ struct ServiceState {
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
     signer: Signer,
+    metrics: Arc<Metrics>,
     rbc: CertificationAggregator,
     timeouts: AHashMap<RoundNumber, SignedQuorumAggregator>,
     no_votes: AHashMap<(RoundNumber, AuthorityIndex), SignedQuorumAggregator>,
 }
 
 impl ServiceState {
-    fn new(committee: Arc<Committee>, own_authority: AuthorityIndex, signer: Signer) -> Self {
+    fn new(
+        committee: Arc<Committee>,
+        own_authority: AuthorityIndex,
+        signer: Signer,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             rbc: CertificationAggregator::new(committee.clone()),
             committee,
             own_authority,
             signer,
+            metrics,
             timeouts: AHashMap::new(),
             no_votes: AHashMap::new(),
         }
@@ -264,7 +273,12 @@ impl ServiceState {
         let mut pending = VecDeque::from(cert_events);
         while let Some(event) = pending.pop_front() {
             match event {
-                CertEvent::FastDelivery(block_ref) | CertEvent::SlowDelivery(block_ref) => {
+                CertEvent::FastDelivery(block_ref) => {
+                    self.metrics.sailfish_rbc_fast_total.inc();
+                    out.push(SailfishCertEvent::Certified(block_ref));
+                }
+                CertEvent::SlowDelivery(block_ref) => {
+                    self.metrics.sailfish_rbc_slow_total.inc();
                     out.push(SailfishCertEvent::Certified(block_ref));
                 }
                 CertEvent::SendVote(block_ref) => {
