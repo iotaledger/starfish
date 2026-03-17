@@ -1323,7 +1323,10 @@ impl VerifiedBlock {
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
                 );
-                // Validate Sailfish++ control fields.
+                // Validate Sailfish++ control fields if present.
+                // TC/NVC presence is not yet enforced as mandatory because the
+                // local timeout/no-vote origination is still being wired. Once
+                // the full control plane is live, add "must carry" checks here.
                 if let Some(sf) = self.header.sailfish() {
                     self.verify_sailfish_fields(sf, committee)?;
                 }

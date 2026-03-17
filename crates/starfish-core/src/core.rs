@@ -519,18 +519,16 @@ impl<H: BlockHandler> Core<H> {
             self.collect_transactions_and_references(pending_transactions, clock_round)
         );
 
-        // NOTE: sailfish_control_ready() is intentionally NOT gated here yet.
-        // The timeout mechanism that produces TCs is not fully wired, so
-        // enforcing the TC requirement would deadlock block creation whenever
-        // the previous-round leader is not among our certified parents.
-        // Once the timeout trigger in net_sync.rs is complete, re-enable:
-        //
-        //   if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
-        //       && !self.sailfish_control_ready(clock_round, &block_references)
-        //   {
-        //       self.requeue_transactions(std::mem::take(&mut transactions));
-        //       return None;
-        //   }
+        // SailfishPlusPlus: if the certified-parent filter reduced the parent
+        // set below threshold-clock quorum, we cannot build a valid block yet.
+        // Requeue transactions and wait for more certifications.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+            && clock_round > 1
+            && block_references.is_empty()
+        {
+            self.requeue_transactions(std::mem::take(&mut transactions));
+            return None;
+        }
 
         let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
         if starfish_speed_excluded_authors & (1u128 << self.authority) != 0 {
@@ -669,6 +667,29 @@ impl<H: BlockHandler> Core<H> {
         // SailfishPlusPlus: filter parents to only include certified blocks.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
             block_references.retain(|r| r.round == 0 || self.dag_state.has_vertex_certificate(r));
+        }
+
+        // SailfishPlusPlus: verify the filtered parent set still has quorum
+        // stake at round-1. If certification hasn't caught up, we must wait
+        // rather than create an invalid block.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+            && block_round > 1
+        {
+            let prev_round = block_round - 1;
+            let mut prev_round_stake: u64 = 0;
+            let mut seen = 0u128;
+            for r in &block_references {
+                if r.round == prev_round {
+                    let mask = 1u128 << r.authority;
+                    if seen & mask == 0 {
+                        seen |= mask;
+                        prev_round_stake += self.committee.get_stake(r.authority).unwrap_or(0);
+                    }
+                }
+            }
+            if !self.committee.is_quorum(prev_round_stake) {
+                return (transactions, vec![]);
+            }
         }
 
         (transactions, block_references)
@@ -1006,6 +1027,20 @@ impl<H: BlockHandler> Core<H> {
         pending_refs: &[BlockReference],
         block_round: RoundNumber,
     ) -> Vec<BlockReference> {
+        // SailfishPlusPlus: keep all previous-round references unconditionally
+        // so that certified-parent filtering doesn't drop below quorum.
+        // Only older-round references go through normal compression.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+            let prev_round = block_round.saturating_sub(1);
+            let mut seen = AHashSet::new();
+            return pending_refs
+                .iter()
+                .copied()
+                .filter(|r| {
+                    r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
+                })
+                .collect();
+        }
         if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
             if self.committee.elect_leader(block_round) != self.authority {
                 return Vec::new();

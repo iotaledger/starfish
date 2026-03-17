@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::{
     cert_aggregator::{CertEvent, CertificationAggregator},
     committee::Committee,
-    crypto::SignatureBytes,
+    crypto::{self, SignatureBytes, Signer},
     metrics::Metrics,
     types::{
         AuthorityIndex, BlockReference, CertMessage, CertMessageKind, RoundNumber,
@@ -149,6 +149,7 @@ impl SignedQuorumAggregator {
 pub fn start_sailfish_service(
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
+    signer: Signer,
     receiver: mpsc::UnboundedReceiver<SailfishServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<SailfishCertEvent>>,
     _metrics: Arc<Metrics>,
@@ -156,6 +157,7 @@ pub fn start_sailfish_service(
     tokio::spawn(run_sailfish_service(
         committee,
         own_authority,
+        signer,
         receiver,
         event_tx,
     ));
@@ -164,10 +166,11 @@ pub fn start_sailfish_service(
 async fn run_sailfish_service(
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
+    signer: Signer,
     mut receiver: mpsc::UnboundedReceiver<SailfishServiceMessage>,
     event_tx: mpsc::UnboundedSender<Vec<SailfishCertEvent>>,
 ) {
-    let mut state = ServiceState::new(committee, own_authority);
+    let mut state = ServiceState::new(committee, own_authority, signer);
 
     while let Some(msg) = receiver.recv().await {
         let mut all_events = Vec::new();
@@ -191,17 +194,19 @@ async fn run_sailfish_service(
 struct ServiceState {
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
+    signer: Signer,
     rbc: CertificationAggregator,
     timeouts: AHashMap<RoundNumber, SignedQuorumAggregator>,
     no_votes: AHashMap<(RoundNumber, AuthorityIndex), SignedQuorumAggregator>,
 }
 
 impl ServiceState {
-    fn new(committee: Arc<Committee>, own_authority: AuthorityIndex) -> Self {
+    fn new(committee: Arc<Committee>, own_authority: AuthorityIndex, signer: Signer) -> Self {
         Self {
             rbc: CertificationAggregator::new(committee.clone()),
             committee,
             own_authority,
+            signer,
             timeouts: AHashMap::new(),
             no_votes: AHashMap::new(),
         }
@@ -286,20 +291,44 @@ impl ServiceState {
 
     // -- Timeout aggregation -------------------------------------------------
 
+    /// Sign a local timeout, count it, and emit a broadcast event.
     fn handle_local_timeout(&mut self, round: RoundNumber, events: &mut Vec<SailfishCertEvent>) {
-        // The caller (net_sync) is responsible for signing the message before
-        // sending it here. This method just creates a pre-signed local timeout.
-        // Actually, we sign here so the service can be the single signing point.
-        // Net_sync will pass a Signer handle if needed, but for now the
-        // LocalTimeout variant expects the caller to have already called
-        // send_sailfish_message with a pre-signed message.
-        //
-        // For now, LocalTimeout just tells us we should have sent the timeout
-        // already — the actual signing happens in net_sync.rs.
-        let _ = (round, events);
+        let digest = crypto::sailfish_timeout_digest(round);
+        let signature = self.signer.sign_digest(&digest);
+        let msg = SailfishTimeoutMsg {
+            round,
+            sender: self.own_authority,
+            signature,
+        };
+        // Count own message in the aggregator first (may form cert immediately).
+        self.add_verified_timeout(msg.clone(), events);
+        events.push(SailfishCertEvent::BroadcastTimeout(msg));
     }
 
     fn add_timeout_msg(&mut self, msg: SailfishTimeoutMsg, events: &mut Vec<SailfishCertEvent>) {
+        // Verify signature before aggregation.
+        let digest = crypto::sailfish_timeout_digest(msg.round);
+        let pk = match self.committee.get_public_key(msg.sender) {
+            Some(pk) => pk,
+            None => return,
+        };
+        if pk.verify_digest_signature(&digest, &msg.signature).is_err() {
+            tracing::warn!(
+                "Rejected invalid timeout sig from {} for round {}",
+                msg.sender,
+                msg.round,
+            );
+            return;
+        }
+        self.add_verified_timeout(msg, events);
+    }
+
+    /// Add a pre-verified timeout message to the aggregator.
+    fn add_verified_timeout(
+        &mut self,
+        msg: SailfishTimeoutMsg,
+        events: &mut Vec<SailfishCertEvent>,
+    ) {
         let agg = self
             .timeouts
             .entry(msg.round)
@@ -314,16 +343,46 @@ impl ServiceState {
 
     // -- No-vote aggregation -------------------------------------------------
 
+    /// Sign a local no-vote, count it, and emit a send event.
     fn handle_local_novote(
         &mut self,
         round: RoundNumber,
         leader: AuthorityIndex,
         events: &mut Vec<SailfishCertEvent>,
     ) {
-        let _ = (round, leader, events);
+        let digest = crypto::sailfish_novote_digest(round, leader);
+        let signature = self.signer.sign_digest(&digest);
+        let msg = SailfishNoVoteMsg {
+            round,
+            leader,
+            sender: self.own_authority,
+            signature,
+        };
+        self.add_verified_novote(msg.clone(), events);
+        events.push(SailfishCertEvent::SendNoVote(msg));
     }
 
     fn add_novote_msg(&mut self, msg: SailfishNoVoteMsg, events: &mut Vec<SailfishCertEvent>) {
+        // Verify signature before aggregation.
+        let digest = crypto::sailfish_novote_digest(msg.round, msg.leader);
+        let pk = match self.committee.get_public_key(msg.sender) {
+            Some(pk) => pk,
+            None => return,
+        };
+        if pk.verify_digest_signature(&digest, &msg.signature).is_err() {
+            tracing::warn!(
+                "Rejected invalid novote sig from {} for round {}, leader {}",
+                msg.sender,
+                msg.round,
+                msg.leader,
+            );
+            return;
+        }
+        self.add_verified_novote(msg, events);
+    }
+
+    /// Add a pre-verified no-vote message to the aggregator.
+    fn add_verified_novote(&mut self, msg: SailfishNoVoteMsg, events: &mut Vec<SailfishCertEvent>) {
         let agg = self
             .no_votes
             .entry((msg.round, msg.leader))
@@ -353,6 +412,13 @@ mod tests {
         Committee::new_test(vec![1; n])
     }
 
+    fn test_signer(authority: AuthorityIndex) -> Signer {
+        Signer::new_for_test(authority as usize + 1)
+            .into_iter()
+            .nth(authority as usize)
+            .unwrap()
+    }
+
     fn test_metrics() -> Arc<Metrics> {
         Metrics::new(&Registry::new(), None, None, None).0
     }
@@ -368,7 +434,14 @@ mod tests {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        start_sailfish_service(committee, own_authority, msg_rx, event_tx, test_metrics());
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
 
         // Own echo broadcast.
         msg_tx
@@ -428,7 +501,14 @@ mod tests {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        start_sailfish_service(committee, own_authority, msg_rx, event_tx, test_metrics());
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
 
         // Own echo.
         msg_tx
@@ -495,6 +575,7 @@ mod tests {
         start_sailfish_service(
             committee.clone(),
             own_authority,
+            test_signer(own_authority),
             msg_rx,
             event_tx,
             test_metrics(),
@@ -539,6 +620,7 @@ mod tests {
         start_sailfish_service(
             committee.clone(),
             own_authority,
+            test_signer(own_authority),
             msg_rx,
             event_tx,
             test_metrics(),
@@ -583,6 +665,7 @@ mod tests {
         start_sailfish_service(
             committee.clone(),
             own_authority,
+            test_signer(own_authority),
             msg_rx,
             event_tx,
             test_metrics(),

@@ -14,7 +14,7 @@ use crate::{
     bls_service::BlsServiceMessage,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
-    dag_state::{DagState, DataSource},
+    dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
@@ -301,6 +301,25 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(vec![
                 *block.reference(),
             ]));
+            // SailfishPlusPlus: if we created a block without referencing the
+            // previous-round leader, send a LocalNoVote so the service can
+            // sign and aggregate a no-vote certificate.
+            if self.core.dag_state().consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+                let block_round = block.round();
+                if block_round > 1 {
+                    let prev_leader = self.core.committee().elect_leader(block_round - 1);
+                    let has_prev_leader = block
+                        .block_references()
+                        .iter()
+                        .any(|r| r.round == block_round - 1 && r.authority == prev_leader);
+                    if !has_prev_leader {
+                        self.send_sailfish_message(SailfishServiceMessage::LocalNoVote {
+                            round: block_round - 1,
+                            leader: prev_leader,
+                        });
+                    }
+                }
+            }
             if let Some((block_ref, auth, sig)) = self.core.generate_own_dac_partial_sig(block) {
                 self.send_bls_message(BlsServiceMessage::PartialSig(PartialSig {
                     kind: PartialSigKind::Dac(block_ref),

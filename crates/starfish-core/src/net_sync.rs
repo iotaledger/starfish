@@ -1044,6 +1044,9 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
     pub leader_timeout: Duration,
     pub soft_block_timeout: Duration,
+    /// Sailfish++ service handle for sending control messages
+    /// (timeout/no-vote). None for non-SailfishPlusPlus protocols.
+    pub sailfish_handle: Option<SailfishServiceHandle>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -1079,12 +1082,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
         // Create Sailfish service channel for SailfishPlusPlus protocol.
         let is_sailfish_pp = dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus;
+        let sailfish_signer = if is_sailfish_pp {
+            Some(core.get_signer().clone())
+        } else {
+            None
+        };
         let (sf_msg_tx, sf_msg_rx) = if is_sailfish_pp {
             let (tx, rx) = mpsc::unbounded_channel::<SailfishServiceMessage>();
             (Some(tx), Some(rx))
         } else {
             (None, None)
         };
+        let sf_handle_for_inner = sf_msg_tx
+            .as_ref()
+            .map(|tx| SailfishServiceHandle::new(tx.clone()));
         let mut syncer = Syncer::new(
             core,
             NetworkSyncSignals {
@@ -1147,6 +1158,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             peer_senders: parking_lot::RwLock::new(AHashMap::new()),
             leader_timeout: node_parameters.leader_timeout,
             soft_block_timeout: node_parameters.soft_block_timeout,
+            sailfish_handle: sf_handle_for_inner,
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
@@ -1268,12 +1280,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         };
 
         // Start Sailfish++ RBC certification service.
-        let (sf_service, sf_event_task) = if let (Some(sf_tx), Some(sf_rx)) = (sf_msg_tx, sf_msg_rx)
+        let (sf_service, sf_event_task) = if let (Some(sf_tx), Some(sf_rx), Some(sf_signer)) =
+            (sf_msg_tx, sf_msg_rx, sailfish_signer)
         {
             let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Vec<SailfishCertEvent>>();
             start_sailfish_service(
                 inner.committee.clone(),
                 own_authority,
+                sf_signer,
                 sf_rx,
                 event_tx,
                 metrics.clone(),
@@ -1333,11 +1347,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     }
                                 }
                                 SailfishCertEvent::SendNoVote(msg) => {
-                                    // No-vote messages are sent only to the
-                                    // next-round leader. For now broadcast.
-                                    for sender in &senders {
+                                    // Route no-vote only to the next-round leader.
+                                    let next_leader =
+                                        event_inner.committee.elect_leader(msg.round + 1);
+                                    let leader_tx =
+                                        event_inner.peer_senders.read().get(&next_leader).cloned();
+                                    if let Some(sender) = leader_tx {
                                         send_network_message_reliably(
-                                            sender,
+                                            &sender,
                                             NetworkMessage::SailfishNoVote(msg.clone()),
                                         )
                                         .await;
@@ -1582,6 +1599,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             select! {
                 _sleep = sleep(leader_timeout) => {
                     tracing::debug!("Timeout in round {round}");
+                    // SailfishPlusPlus: send LocalTimeout so the service can
+                    // sign and aggregate a timeout certificate for the round
+                    // we're stuck on (the leader at `round` hasn't been
+                    // certified in time).
+                    if let Some(ref sf) = inner.sailfish_handle {
+                        if round > 0 {
+                            sf.send(SailfishServiceMessage::LocalTimeout(round));
+                        }
+                    }
                     inner.syncer.force_new_block(round).await;
                 }
                 _notified = notified => {
