@@ -1323,11 +1323,40 @@ impl VerifiedBlock {
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
                 );
-                // Validate Sailfish++ control fields if present.
-                // TC/NVC presence is not yet enforced as mandatory because the
-                // local timeout/no-vote origination is still being wired. Once
-                // the full control plane is live, add "must carry" checks here.
-                if let Some(sf) = self.header.sailfish() {
+                if round > 1 {
+                    let prev_round = round - 1;
+                    let prev_leader = committee.elect_leader(prev_round);
+                    let has_prev_leader_parent = self
+                        .header
+                        .block_references
+                        .iter()
+                        .any(|r| r.round == prev_round && r.authority == prev_leader);
+
+                    if has_prev_leader_parent {
+                        if let Some(sf) = self.header.sailfish() {
+                            self.verify_sailfish_fields(sf, committee)?;
+                        }
+                    } else {
+                        let sf = self.header.sailfish().ok_or_else(|| {
+                            eyre::eyre!(
+                                "SailfishPlusPlus block missing timeout cert because previous-round leader {prev_leader} is not referenced"
+                            )
+                        })?;
+                        ensure!(
+                            sf.timeout_cert.is_some(),
+                            "SailfishPlusPlus block missing timeout cert because previous-round leader {} is not referenced",
+                            prev_leader
+                        );
+                        if self.authority() == committee.elect_leader(round) {
+                            ensure!(
+                                sf.no_vote_cert.is_some(),
+                                "SailfishPlusPlus leader block missing no-vote cert because previous-round leader {} is not referenced",
+                                prev_leader
+                            );
+                        }
+                        self.verify_sailfish_fields(sf, committee)?;
+                    }
+                } else if let Some(sf) = self.header.sailfish() {
                     self.verify_sailfish_fields(sf, committee)?;
                 }
             }
@@ -1690,6 +1719,75 @@ mod tests {
         (block, committee)
     }
 
+    fn make_sailfish_timeout_cert(
+        round: RoundNumber,
+        signers: &[Signer],
+        committee: &Committee,
+    ) -> SailfishTimeoutCert {
+        let digest = crypto::sailfish_timeout_digest(round);
+        let signatures = (0..committee.quorum_threshold() as AuthorityIndex)
+            .map(|authority| (authority, signers[authority as usize].sign_digest(&digest)))
+            .collect();
+        SailfishTimeoutCert { round, signatures }
+    }
+
+    fn make_sailfish_no_vote_cert(
+        round: RoundNumber,
+        leader: AuthorityIndex,
+        signers: &[Signer],
+        committee: &Committee,
+    ) -> SailfishNoVoteCert {
+        let digest = crypto::sailfish_novote_digest(round, leader);
+        let signatures = (0..committee.quorum_threshold() as AuthorityIndex)
+            .map(|authority| (authority, signers[authority as usize].sign_digest(&digest)))
+            .collect();
+        SailfishNoVoteCert {
+            round,
+            leader,
+            signatures,
+        }
+    }
+
+    fn make_sailfish_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        include_prev_leader: bool,
+        sailfish: Option<SailfishFields>,
+    ) -> (VerifiedBlock, std::sync::Arc<Committee>) {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let prev_round = round - 1;
+        let prev_leader = committee.elect_leader(prev_round);
+        let block_references = committee
+            .authorities()
+            .filter(|candidate| include_prev_leader || *candidate != prev_leader)
+            .take(committee.quorum_threshold() as usize)
+            .map(|candidate| BlockReference::new_test(candidate, prev_round))
+            .collect();
+        let block = VerifiedBlock::new_with_signer(
+            authority,
+            round,
+            block_references,
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::SailfishPlusPlus,
+            None,
+            None,
+            None,
+            None,
+            None,
+            sailfish,
+        );
+        (block, committee)
+    }
+
     #[test]
     fn compresses_acknowledgments_against_shared_suffix() {
         let a = BlockReference::new_test(0, 1);
@@ -2012,6 +2110,106 @@ mod tests {
                 1,
                 &mut encoder,
                 ConsensusProtocol::CordialMiners,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rejects_sailfish_block_without_timeout_cert_when_previous_leader_is_missing() {
+        let committee = Committee::new_for_benchmarks(4);
+        let non_leader = committee
+            .authorities()
+            .find(|authority| *authority != committee.elect_leader(3))
+            .unwrap();
+        let (mut block, committee) = make_sailfish_block(non_leader, 3, false, None);
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let err = block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::SailfishPlusPlus,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("missing timeout cert"));
+    }
+
+    #[test]
+    fn rejects_sailfish_leader_block_without_no_vote_cert_when_previous_leader_is_missing() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let leader = committee.elect_leader(3);
+        let timeout_cert = make_sailfish_timeout_cert(2, &signers, committee.as_ref());
+        let sailfish = SailfishFields {
+            timeout_cert: Some(timeout_cert),
+            no_vote_cert: None,
+        };
+        let (mut block, committee) = make_sailfish_block(leader, 3, false, Some(sailfish));
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let err = block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::SailfishPlusPlus,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("missing no-vote cert"));
+    }
+
+    #[test]
+    fn verifies_sailfish_block_with_previous_leader_parent_and_no_control_fields() {
+        let committee = Committee::new_for_benchmarks(4);
+        let non_leader = committee
+            .authorities()
+            .find(|authority| *authority != committee.elect_leader(3))
+            .unwrap();
+        let (mut block, committee) = make_sailfish_block(non_leader, 3, true, None);
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::SailfishPlusPlus,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn verifies_sailfish_leader_block_with_timeout_and_no_vote_certs_when_previous_leader_is_missing()
+     {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let leader = committee.elect_leader(3);
+        let prev_leader = committee.elect_leader(2);
+        let sailfish = SailfishFields {
+            timeout_cert: Some(make_sailfish_timeout_cert(2, &signers, committee.as_ref())),
+            no_vote_cert: Some(make_sailfish_no_vote_cert(
+                2,
+                prev_leader,
+                &signers,
+                committee.as_ref(),
+            )),
+        };
+        let (mut block, committee) = make_sailfish_block(leader, 3, false, Some(sailfish));
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::SailfishPlusPlus,
             )
             .unwrap();
     }
