@@ -41,6 +41,8 @@ pub struct Metrics {
     pub proposal_wait_time_total_us: IntCounter,
     pub sequenced_transactions_total: IntCounter,
     pub sequenced_transactions_bytes: IntCounter,
+    pub sailfish_rbc_fast_total: IntCounter,
+    pub sailfish_rbc_slow_total: IntCounter,
 
     pub filtered_blocks_total: IntCounter,
     pub filtered_shards_total: IntCounter,
@@ -580,6 +582,18 @@ impl Metrics {
             sequenced_transactions_bytes: register_int_counter_with_registry!(
                 "sequenced_transactions_bytes",
                 "Total bytes of sequenced transactions",
+                registry,
+            )
+            .unwrap(),
+            sailfish_rbc_fast_total: register_int_counter_with_registry!(
+                "sailfish_rbc_fast_total",
+                "Sailfish++ RBC certifications via fast path (echo quorum)",
+                registry,
+            )
+            .unwrap(),
+            sailfish_rbc_slow_total: register_int_counter_with_registry!(
+                "sailfish_rbc_slow_total",
+                "Sailfish++ RBC certifications via slow path (ready quorum)",
                 registry,
             )
             .unwrap(),
