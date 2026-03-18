@@ -1613,11 +1613,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let leader_timeout = inner.leader_timeout;
         loop {
             let notified = inner.threshold_clock_notify.notified();
-            let round = inner
-                .dag_state
-                .last_own_block_ref()
-                .map(|b| b.round())
-                .unwrap_or_default();
+            let round = if inner.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+            {
+                inner.dag_state.proposal_round().saturating_sub(1)
+            } else {
+                inner
+                    .dag_state
+                    .last_own_block_ref()
+                    .map(|b| b.round())
+                    .unwrap_or_default()
+            };
             select! {
                 _sleep = sleep(leader_timeout) => {
                     tracing::debug!("Timeout in round {round}");
