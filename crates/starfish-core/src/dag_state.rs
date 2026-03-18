@@ -469,54 +469,73 @@ impl DagState {
                 block_count,
             );
         } else {
-            // Fallback: full replay from round 0 (pre-migration data or fresh start).
+            // Fallback: full replay from storage scan (pre-migration data or
+            // fresh start without persisted commits).
             let mut recovered_commit_leaders = AHashSet::new();
-            let mut current_round = 0;
-            loop {
-                let blocks = store
-                    .get_blocks_by_round(current_round)
-                    .expect("Failed to read blocks from storage");
+            let blocks = store
+                .scan_blocks_from_round(0)
+                .expect("Failed to scan blocks from storage");
 
-                if blocks.is_empty() {
-                    break;
+            for block in blocks {
+                let block_ref = *block.reference();
+
+                // Recover shard sidecars into the shard index.
+                if let Some(shard) = store
+                    .get_shard_data(&block_ref)
+                    .expect("Failed to read shard data from storage")
+                {
+                    let auth = block_ref.authority as usize;
+                    inner.shard_index[auth]
+                        .entry(block_ref.round)
+                        .or_default()
+                        .insert(block_ref.digest, shard);
                 }
 
-                for block in blocks {
-                    let block_ref = *block.reference();
-
-                    // Recover shard sidecars into the shard index.
-                    if let Some(shard) = store
-                        .get_shard_data(&block_ref)
-                        .expect("Failed to read shard data from storage")
+                inner.threshold_clock.add_block(block_ref, &committee);
+                builder.block(block_ref.round, block.clone());
+                block_count += 1;
+                inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
+                if recovered_commit_leaders.insert(block_ref) {
+                    if let Some(commit_data) = store
+                        .get_commit(&block_ref)
+                        .expect("Failed to read commit data from storage")
                     {
-                        let auth = block_ref.authority as usize;
-                        inner.shard_index[auth]
-                            .entry(block_ref.round)
-                            .or_default()
-                            .insert(block_ref.digest, shard);
-                    }
-
-                    inner.threshold_clock.add_block(block_ref, &committee);
-                    builder.block(current_round, block.clone());
-                    block_count += 1;
-                    inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
-                    if recovered_commit_leaders.insert(block_ref) {
-                        if let Some(commit_data) = store
-                            .get_commit(&block_ref)
-                            .expect("Failed to read commit data from storage")
-                        {
-                            // Rebuild last_committed_rounds from committed blocks.
-                            for r in &commit_data.sub_dag {
-                                let auth = r.authority as usize;
-                                inner.last_committed_rounds[auth] =
-                                    inner.last_committed_rounds[auth].max(r.round);
-                            }
-                            builder.commit(commit_data);
+                        // Rebuild last_committed_rounds from committed blocks.
+                        for r in &commit_data.sub_dag {
+                            let auth = r.authority as usize;
+                            inner.last_committed_rounds[auth] =
+                                inner.last_committed_rounds[auth].max(r.round);
                         }
+                        builder.commit(commit_data);
                     }
                 }
+            }
+        }
 
-                current_round += 1;
+        // Recover persisted active Sailfish++ certifications. Only the active,
+        // ancestor-closed frontier is persisted; preliminary waiting state is
+        // intentionally not recovered.
+        if consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+            let certified_from_round = if use_windowed {
+                inner.evicted_rounds.iter().copied().min().unwrap_or(0)
+            } else {
+                0
+            };
+            let certified_refs = store
+                .scan_sailfish_certified_refs_from_round(certified_from_round)
+                .expect("Failed to read Sailfish certified refs from storage");
+            for block_ref in certified_refs {
+                let auth = block_ref.authority as usize;
+                if block_ref.round <= inner.evicted_rounds[auth] {
+                    continue;
+                }
+                if inner.index[auth]
+                    .get(&block_ref.round)
+                    .and_then(|blocks| blocks.get(&block_ref.digest))
+                    .is_some()
+                {
+                    inner.vertex_certificates[auth].insert(block_ref);
+                }
             }
         }
 
@@ -1008,12 +1027,21 @@ impl DagState {
         if block_refs.is_empty() {
             return false;
         }
-        let mut inner = self.dag_state_inner.write();
-        let mut activated = Vec::new();
-        for &block_ref in block_refs {
-            inner.note_vertex_certified(block_ref, &mut activated);
+        let activated = {
+            let mut inner = self.dag_state_inner.write();
+            let mut activated = Vec::new();
+            for &block_ref in block_refs {
+                inner.note_vertex_certified(block_ref, &mut activated);
+            }
+            activated
+        };
+        if activated.is_empty() {
+            return false;
         }
-        !activated.is_empty()
+        self.store
+            .store_sailfish_certified_refs(&activated)
+            .expect("Failed to persist Sailfish certified refs");
+        true
     }
 
     /// Mark a vertex as RBC-certified (SailfishPlusPlus).
@@ -3016,6 +3044,28 @@ mod tests {
         open_test_dag_state_for_with_feature(consensus, authority, false)
     }
 
+    fn open_test_dag_state_at_path(
+        consensus: &str,
+        authority: AuthorityIndex,
+        path: &std::path::Path,
+    ) -> DagState {
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some(consensus), None);
+        DagState::open(
+            authority,
+            path,
+            metrics,
+            committee,
+            "honest".to_string(),
+            consensus.to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        )
+        .dag_state
+    }
+
     fn open_test_dag_state_for_with_feature(
         consensus: &str,
         authority: AuthorityIndex,
@@ -3228,6 +3278,35 @@ mod tests {
 
         assert!(dag_state.has_vertex_certificate(&parent_ref));
         assert!(dag_state.has_vertex_certificate(&child_ref));
+    }
+
+    #[test]
+    fn sailfish_active_certifications_recover_after_reopen() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let dag_state = open_test_dag_state_at_path("sailfish-pp", 0, &path);
+        let parent = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
+        let parent_ref = *parent.reference();
+        let child = make_full_block(2, 2, vec![parent_ref], ConsensusProtocol::SailfishPlusPlus);
+        let child_ref = *child.reference();
+
+        dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
+        dag_state.mark_vertices_certified(&[parent_ref, child_ref]);
+
+        assert!(dag_state.has_vertex_certificate(&parent_ref));
+        assert!(dag_state.has_vertex_certificate(&child_ref));
+        drop(dag_state);
+
+        let reopened = open_test_dag_state_at_path("sailfish-pp", 0, &path);
+        assert!(reopened.has_vertex_certificate(&parent_ref));
+        assert!(reopened.has_vertex_certificate(&child_ref));
     }
 
     #[test]

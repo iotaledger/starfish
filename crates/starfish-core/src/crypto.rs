@@ -252,6 +252,12 @@ impl BlockDigest {
     }
 }
 
+impl From<[u8; BLOCK_DIGEST_SIZE]> for BlockDigest {
+    fn from(value: [u8; BLOCK_DIGEST_SIZE]) -> Self {
+        Self(value)
+    }
+}
+
 pub trait AsBytes {
     // This is pretty much same as AsRef<[u8]>
     //
