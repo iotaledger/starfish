@@ -67,4 +67,14 @@ pub trait Store: Send + Sync + 'static {
         &self,
         from_round: RoundNumber,
     ) -> io::Result<Vec<Data<VerifiedBlock>>>;
+
+    /// Persist a batch of active Sailfish++ certified block references.
+    fn store_sailfish_certified_refs(&self, refs: &[BlockReference]) -> io::Result<()>;
+
+    /// Return all persisted active Sailfish++ certified block references from
+    /// `from_round` onward (inclusive).
+    fn scan_sailfish_certified_refs_from_round(
+        &self,
+        from_round: RoundNumber,
+    ) -> io::Result<Vec<BlockReference>>;
 }
