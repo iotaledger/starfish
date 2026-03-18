@@ -126,7 +126,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
-        let previous_threshold_round = self.core.dag_state().threshold_clock_round();
+        let previous_threshold_round = self.core.dag_state().proposal_round();
         // todo: when block is updated we might return false here and it can make
         // committing longer
         let (
@@ -155,7 +155,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         headers: Vec<Data<VerifiedBlock>>,
         source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let previous_threshold_round = self.core.dag_state().threshold_clock_round();
+        let previous_threshold_round = self.core.dag_state().proposal_round();
         let (success, missing_parents, processed_refs, _processed_blocks) =
             self.core.add_headers(headers, source);
         self.maybe_update_proposal_wait();
@@ -183,12 +183,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// DagState on the core thread. Retries block creation and sequencing
     /// when any certificate is new.
     pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
+        let previous_threshold_round = self.core.dag_state().proposal_round();
         if self
             .core
             .dag_state()
             .mark_vertices_certified(&certified_refs)
         {
             self.maybe_update_proposal_wait();
+            self.maybe_signal_threshold_round_advance(previous_threshold_round);
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
@@ -347,7 +349,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn maybe_update_proposal_wait(&mut self) {
-        let threshold_round = self.core.dag_state().threshold_clock_round();
+        let threshold_round = self.core.dag_state().proposal_round();
         if threshold_round <= self.core.last_proposed() {
             return;
         }
@@ -370,7 +372,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
-        let current_threshold_round = self.core.dag_state().threshold_clock_round();
+        let current_threshold_round = self.core.dag_state().proposal_round();
         if current_threshold_round > previous_threshold_round {
             self.signals
                 .threshold_clock_round_advanced(current_threshold_round);

@@ -573,6 +573,44 @@ impl DagState {
         self.dag_state_inner.read().threshold_clock.get_round()
     }
 
+    /// Return the protocol round that may be used for proposing a new block.
+    ///
+    /// For SailfishPlusPlus, entering round `r` requires both raw threshold
+    /// clock progress to `r` and quorum stake of RBC-certified vertices in
+    /// round `r - 1`. Other protocols use the raw threshold clock directly.
+    pub fn proposal_round(&self) -> RoundNumber {
+        if self.consensus_protocol != ConsensusProtocol::SailfishPlusPlus {
+            return self.threshold_clock_round();
+        }
+
+        let inner = self.dag_state_inner.read();
+        let threshold_round = inner.threshold_clock.get_round();
+        if threshold_round <= 1 {
+            return threshold_round;
+        }
+
+        for round in (2..=threshold_round).rev() {
+            let prev_round = round - 1;
+            let mut stake: Stake = 0;
+            for auth in 0..inner.committee_size {
+                if inner.vertex_certificates[auth]
+                    .iter()
+                    .any(|reference| reference.round == prev_round)
+                {
+                    stake += self
+                        .committee
+                        .get_stake(auth as AuthorityIndex)
+                        .unwrap_or(0);
+                }
+            }
+            if self.committee.is_quorum(stake) {
+                return round;
+            }
+        }
+
+        1
+    }
+
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
         let inner = self.dag_state_inner.read();
         let mut result: Vec<_> = inner
@@ -3034,6 +3072,87 @@ mod tests {
 
         assert!(dag_state.certified_parent_quorum(4));
         assert!(!dag_state.certified_parent_quorum(5));
+    }
+
+    #[test]
+    fn sailfish_proposal_round_waits_for_certified_previous_round() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let round_1 = vec![
+            make_full_block(
+                0,
+                1,
+                vec![BlockReference::new_test(0, 0)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                1,
+                1,
+                vec![BlockReference::new_test(1, 0)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                2,
+                1,
+                vec![BlockReference::new_test(2, 0)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+        ];
+        let round_2 = vec![
+            make_full_block(
+                0,
+                2,
+                vec![BlockReference::new_test(0, 1)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                1,
+                2,
+                vec![BlockReference::new_test(1, 1)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                2,
+                2,
+                vec![BlockReference::new_test(2, 1)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+        ];
+        let round_3 = vec![
+            make_full_block(
+                0,
+                3,
+                vec![BlockReference::new_test(0, 2)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                1,
+                3,
+                vec![BlockReference::new_test(1, 2)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+            make_full_block(
+                2,
+                3,
+                vec![BlockReference::new_test(2, 2)],
+                ConsensusProtocol::SailfishPlusPlus,
+            ),
+        ];
+
+        let round_1_refs: Vec<_> = round_1.iter().map(|block| *block.reference()).collect();
+        let round_2_refs: Vec<_> = round_2.iter().map(|block| *block.reference()).collect();
+
+        dag_state.insert_general_blocks(round_1, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_blocks(round_2, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_blocks(round_3, DataSource::BlockBundleStreaming);
+
+        assert_eq!(dag_state.threshold_clock_round(), 4);
+        assert_eq!(dag_state.proposal_round(), 1);
+
+        dag_state.mark_vertices_certified(&round_1_refs);
+        assert_eq!(dag_state.proposal_round(), 2);
+
+        dag_state.mark_vertices_certified(&round_2_refs);
+        assert_eq!(dag_state.proposal_round(), 3);
     }
 
     #[test]

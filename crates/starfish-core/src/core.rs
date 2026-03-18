@@ -142,7 +142,7 @@ impl<H: BlockHandler> Core<H> {
 
             let pending_start_round = recovered_last_own_round
                 .unwrap_or_default()
-                .max(dag_state.threshold_clock_round().saturating_sub(1));
+                .max(dag_state.proposal_round().saturating_sub(1));
             for block in &unprocessed_blocks {
                 if block.round() >= pending_start_round {
                     pending.push(MetaTransaction::Include(*block.reference()));
@@ -469,7 +469,7 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer("Core::new_block::try_new_block");
 
         // Check if we're ready for a new block
-        let clock_round = self.dag_state.threshold_clock_round();
+        let clock_round = self.dag_state.proposal_round();
         tracing::debug!(
             "Attempt to construct block in round {}. Current pending: {:?}",
             clock_round,
@@ -1243,7 +1243,7 @@ impl<H: BlockHandler> Core<H> {
         connected_authorities: &AHashSet<AuthorityIndex>,
         relaxed: bool,
     ) -> bool {
-        let quorum_round = self.dag_state.threshold_clock_round();
+        let quorum_round = self.dag_state.proposal_round();
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
 
         if quorum_round < self.last_commit_leader.round().max(1) {
