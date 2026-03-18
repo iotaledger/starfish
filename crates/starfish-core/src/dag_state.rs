@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::tidehunter_store::TideHunterStore;
 use crate::{
     bls_certificate_aggregator::CertificateEvent,
-    committee::{Committee, QuorumThreshold, StakeAggregator},
+    committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
     crypto::{BlsSignatureBytes, TransactionsCommitment},
@@ -321,6 +321,10 @@ struct DagStateInner {
     /// Reverse dependency index: parent -> children that are waiting for that
     /// parent to become active-certified.
     pending_vertex_certificate_children: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
+    /// Supporters from the next round that directly reference a given block.
+    /// Once this reaches f+1 distinct authorities, we can infer that some
+    /// honest node had the referenced block in its active-certified view.
+    inferred_vertex_support: Vec<BTreeMap<BlockReference, StakeAggregator<ValidityThreshold>>>,
     /// Sailfish++ timeout certificates, indexed by round.
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
@@ -395,6 +399,7 @@ impl DagState {
             pending_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_vertex_certificate_counts: BTreeMap::new(),
             pending_vertex_certificate_children: BTreeMap::new(),
+            inferred_vertex_support: (0..n).map(|_| BTreeMap::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
         };
@@ -452,7 +457,15 @@ impl DagState {
                 inner.threshold_clock.add_block(block_ref, &committee);
                 builder.block(block_ref.round, block.clone());
                 block_count += 1;
-                inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
+                let mut activated = Vec::new();
+                inner.add_block(
+                    block,
+                    0,
+                    committee.len() as AuthorityIndex,
+                    &mut bfs_buf,
+                    &committee,
+                    &mut activated,
+                );
 
                 if let Some(commit_data) = store
                     .get_commit(&block_ref)
@@ -494,7 +507,15 @@ impl DagState {
                 inner.threshold_clock.add_block(block_ref, &committee);
                 builder.block(block_ref.round, block.clone());
                 block_count += 1;
-                inner.add_block(block, 0, committee.len() as AuthorityIndex, &mut bfs_buf);
+                let mut activated = Vec::new();
+                inner.add_block(
+                    block,
+                    0,
+                    committee.len() as AuthorityIndex,
+                    &mut bfs_buf,
+                    &committee,
+                    &mut activated,
+                );
                 if recovered_commit_leaders.insert(block_ref) {
                     if let Some(commit_data) = store
                         .get_commit(&block_ref)
@@ -565,7 +586,15 @@ impl DagState {
                 inner
                     .threshold_clock
                     .add_block(*block.reference(), &committee);
-                inner.add_block(block.clone(), 0, committee_len, &mut bfs_buf);
+                let mut activated = Vec::new();
+                inner.add_block(
+                    block.clone(),
+                    0,
+                    committee_len,
+                    &mut bfs_buf,
+                    &committee,
+                    &mut activated,
+                );
             }
         }
 
@@ -722,7 +751,7 @@ impl DagState {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_block_count.inc();
 
-        let (highest_round, lowest_round) = {
+        let (highest_round, lowest_round, activated) = {
             let mut inner = self.dag_state_inner.write();
             // Keep threshold clock mutation co-located with DAG insertion so
             // runtime block acceptance and recovery use the same path.
@@ -730,14 +759,22 @@ impl DagState {
                 .threshold_clock
                 .add_block(*block.reference(), &self.committee);
             let mut bfs_buf = Vec::new();
+            let mut activated = Vec::new();
             inner.add_block(
                 block,
                 authority_index_start,
                 authority_index_end,
                 &mut bfs_buf,
+                &self.committee,
+                &mut activated,
             );
-            (inner.highest_round, inner.global_lowest_round())
+            (inner.highest_round, inner.global_lowest_round(), activated)
         };
+        if !activated.is_empty() {
+            self.store
+                .store_sailfish_certified_refs(&activated)
+                .expect("Failed to store inferred Sailfish certifications");
+        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -816,9 +853,10 @@ impl DagState {
         }
 
         // Phase 2: single write lock for all DAG mutations.
-        let (highest_round, lowest_round) = {
+        let (highest_round, lowest_round, activated) = {
             let mut inner = self.dag_state_inner.write();
             let mut bfs_buf = Vec::new();
+            let mut activated = Vec::new();
             for block in blocks {
                 inner
                     .threshold_clock
@@ -828,10 +866,17 @@ impl DagState {
                     authority_index_start,
                     authority_index_end,
                     &mut bfs_buf,
+                    &self.committee,
+                    &mut activated,
                 );
             }
-            (inner.highest_round, inner.global_lowest_round())
+            (inner.highest_round, inner.global_lowest_round(), activated)
         };
+        if !activated.is_empty() {
+            self.store
+                .store_sailfish_certified_refs(&activated)
+                .expect("Failed to store inferred Sailfish certifications");
+        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -2299,6 +2344,8 @@ impl DagStateInner {
             self.vertex_certificates[auth] = self.vertex_certificates[auth].split_off(&split_ref);
             self.pending_vertex_certificates[auth] =
                 self.pending_vertex_certificates[auth].split_off(&split_ref);
+            self.inferred_vertex_support[auth] =
+                self.inferred_vertex_support[auth].split_off(&split_ref);
         }
         self.pending_vertex_certificate_counts
             .retain(|block_ref, _| {
@@ -2375,6 +2422,7 @@ impl DagStateInner {
 
         self.pending_vertex_certificates[auth].remove(&block_ref);
         self.pending_vertex_certificate_counts.remove(&block_ref);
+        self.inferred_vertex_support[auth].remove(&block_ref);
 
         let block = self
             .get_storage_block(block_ref)
@@ -2418,6 +2466,8 @@ impl DagStateInner {
         authority_index_start: AuthorityIndex,
         authority_index_end: AuthorityIndex,
         bfs_buffer: &mut Vec<BlockReference>,
+        committee: &Committee,
+        activated: &mut Vec<BlockReference>,
     ) {
         let reference = block.reference();
         let auth = reference.authority as usize;
@@ -2433,6 +2483,78 @@ impl DagStateInner {
         self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
         self.update_starfish_speed_leader_hints(&block);
+        self.update_inferred_sailfish_support(&block, committee, activated);
+    }
+
+    fn update_inferred_sailfish_support(
+        &mut self,
+        block: &VerifiedBlock,
+        committee: &Committee,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        if self.consensus_protocol != ConsensusProtocol::SailfishPlusPlus || block.round() <= 1 {
+            return;
+        }
+
+        let supporter = block.authority();
+        let mut infer_roots = Vec::new();
+        for parent in block.block_references() {
+            if parent.round == 0 || parent.round + 1 != block.round() {
+                continue;
+            }
+            let reached = self
+                .inferred_vertex_support[parent.authority as usize]
+                .entry(*parent)
+                .or_default()
+                .add(supporter, committee);
+            if reached {
+                infer_roots.push(*parent);
+            }
+        }
+
+        for root in infer_roots {
+            self.infer_vertex_certificate_closure(root, activated);
+        }
+    }
+
+    fn infer_vertex_certificate_closure(
+        &mut self,
+        root: BlockReference,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        if root.round == 0 || self.vertex_certificates[root.authority as usize].contains(&root) {
+            return;
+        }
+
+        let mut to_activate = BTreeSet::new();
+        let mut stack = vec![root];
+
+        while let Some(block_ref) = stack.pop() {
+            if block_ref.round == 0
+                || self.vertex_certificates[block_ref.authority as usize].contains(&block_ref)
+            {
+                continue;
+            }
+            if !to_activate.insert(block_ref) {
+                continue;
+            }
+
+            let Some(block) = self.get_storage_block(block_ref) else {
+                return;
+            };
+
+            for parent in block.block_references() {
+                if parent.round > 0
+                    && !self.vertex_certificates[parent.authority as usize].contains(parent)
+                {
+                    stack.push(*parent);
+                }
+            }
+        }
+
+        for block_ref in to_activate {
+            self.activate_vertex_certificate(block_ref, activated);
+        }
     }
 
     fn update_starfish_speed_leader_hints(&mut self, block: &VerifiedBlock) {
@@ -3278,6 +3400,36 @@ mod tests {
 
         assert!(dag_state.has_vertex_certificate(&parent_ref));
         assert!(dag_state.has_vertex_certificate(&child_ref));
+    }
+
+    #[test]
+    fn sailfish_f_plus_1_support_infers_certified_closure() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let ancestor = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
+        let ancestor_ref = *ancestor.reference();
+        let target = make_full_block(1, 2, vec![ancestor_ref], ConsensusProtocol::SailfishPlusPlus);
+        let target_ref = *target.reference();
+        let supporter_a =
+            make_full_block(0, 3, vec![target_ref], ConsensusProtocol::SailfishPlusPlus);
+        let supporter_b =
+            make_full_block(2, 3, vec![target_ref], ConsensusProtocol::SailfishPlusPlus);
+
+        dag_state.insert_general_block(ancestor, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(target, DataSource::BlockBundleStreaming);
+        assert!(!dag_state.has_vertex_certificate(&ancestor_ref));
+        assert!(!dag_state.has_vertex_certificate(&target_ref));
+
+        dag_state.insert_general_block(supporter_a, DataSource::BlockBundleStreaming);
+        assert!(!dag_state.has_vertex_certificate(&target_ref));
+
+        dag_state.insert_general_block(supporter_b, DataSource::BlockBundleStreaming);
+        assert!(dag_state.has_vertex_certificate(&target_ref));
+        assert!(dag_state.has_vertex_certificate(&ancestor_ref));
     }
 
     #[test]
