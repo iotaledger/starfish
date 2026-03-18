@@ -134,8 +134,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             pending_blocks_with_transactions,
             missing_parents,
             used_additional_blocks,
-            _processed_blocks,
+            processed_blocks,
         ) = self.core.add_blocks(blocks, source);
+        if !processed_blocks.is_empty() {
+            let block_refs: Vec<_> = processed_blocks.iter().map(|b| *b.reference()).collect();
+            self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
+        }
         self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
@@ -156,8 +160,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
         let previous_threshold_round = self.core.dag_state().proposal_round();
-        let (success, missing_parents, processed_refs, _processed_blocks) =
+        let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers, source);
+        if !processed_blocks.is_empty() {
+            let block_refs: Vec<_> = processed_blocks.iter().map(|b| *b.reference()).collect();
+            self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
+        }
         self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
         if success {
