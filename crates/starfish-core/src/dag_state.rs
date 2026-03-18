@@ -308,9 +308,19 @@ struct DagStateInner {
     consensus_protocol: ConsensusProtocol,
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
     precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
-    /// Per-authority RBC vertex certificates (SailfishPlusPlus).
-    /// Stored as BTreeSet<BlockReference> per authority for split_off cleanup.
+    /// Per-authority active RBC vertex certificates (SailfishPlusPlus).
+    /// A vertex is active only once its direct parents are also active-certified
+    /// (or genesis), making the usable certified DAG ancestor-closed.
     vertex_certificates: Vec<BTreeSet<BlockReference>>,
+    /// Preliminary SailfishPlusPlus local certifications that are waiting for
+    /// one or more direct parents to become active-certified.
+    pending_vertex_certificates: Vec<BTreeSet<BlockReference>>,
+    /// For each waiting vertex, the number of direct non-genesis parents that
+    /// are still missing active certification.
+    pending_vertex_certificate_counts: BTreeMap<BlockReference, usize>,
+    /// Reverse dependency index: parent -> children that are waiting for that
+    /// parent to become active-certified.
+    pending_vertex_certificate_children: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
     /// Sailfish++ timeout certificates, indexed by round.
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
@@ -382,6 +392,9 @@ impl DagState {
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
             vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            pending_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
+            pending_vertex_certificate_counts: BTreeMap::new(),
+            pending_vertex_certificate_children: BTreeMap::new(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
         };
@@ -989,18 +1002,18 @@ impl DagState {
     }
 
     /// Mark a batch of vertices as RBC-certified (SailfishPlusPlus).
-    /// Only the explicitly provided references are certified; parent
-    /// certificates must come from their own RBC evidence.
+    /// A newly RBC-delivered vertex becomes usable certified state only after
+    /// all of its direct parents are also usable certified (or genesis).
     pub fn mark_vertices_certified(&self, block_refs: &[BlockReference]) -> bool {
         if block_refs.is_empty() {
             return false;
         }
         let mut inner = self.dag_state_inner.write();
-        let mut changed = false;
+        let mut activated = Vec::new();
         for &block_ref in block_refs {
-            changed |= inner.vertex_certificates[block_ref.authority as usize].insert(block_ref);
+            inner.note_vertex_certified(block_ref, &mut activated);
         }
-        changed
+        !activated.is_empty()
     }
 
     /// Mark a vertex as RBC-certified (SailfishPlusPlus).
@@ -1008,7 +1021,8 @@ impl DagState {
         self.mark_vertices_certified(&[block_ref])
     }
 
-    /// Check whether a vertex has been RBC-certified (SailfishPlusPlus).
+    /// Check whether a vertex is active-certified and therefore usable as part
+    /// of the certified SailfishPlusPlus DAG.
     pub fn has_vertex_certificate(&self, block_ref: &BlockReference) -> bool {
         self.dag_state_inner.read().vertex_certificates[block_ref.authority as usize]
             .contains(block_ref)
@@ -2255,10 +2269,119 @@ impl DagStateInner {
                 digest: BlockDigest::default(),
             };
             self.vertex_certificates[auth] = self.vertex_certificates[auth].split_off(&split_ref);
+            self.pending_vertex_certificates[auth] =
+                self.pending_vertex_certificates[auth].split_off(&split_ref);
         }
+        self.pending_vertex_certificate_counts
+            .retain(|block_ref, _| {
+                block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
+            });
+        self.pending_vertex_certificate_children
+            .retain(|parent, children| {
+                if parent.round < self.evicted_rounds[parent.authority as usize] {
+                    return false;
+                }
+                children
+                    .retain(|child| child.round >= self.evicted_rounds[child.authority as usize]);
+                !children.is_empty()
+            });
         // Prune Sailfish++ timeout and no-vote certificates.
         self.sailfish_timeout_certs = self.sailfish_timeout_certs.split_off(&min_evicted);
         self.sailfish_novote_certs = self.sailfish_novote_certs.split_off(&(min_evicted, 0));
+    }
+
+    fn note_vertex_certified(
+        &mut self,
+        block_ref: BlockReference,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        let auth = block_ref.authority as usize;
+        if self.vertex_certificates[auth].contains(&block_ref)
+            || self.pending_vertex_certificates[auth].contains(&block_ref)
+        {
+            return;
+        }
+
+        let missing_parents = self.missing_active_certificate_parents(block_ref);
+        if missing_parents.is_empty() {
+            self.activate_vertex_certificate(block_ref, activated);
+            return;
+        }
+
+        self.pending_vertex_certificates[auth].insert(block_ref);
+        self.pending_vertex_certificate_counts
+            .insert(block_ref, missing_parents.len());
+        for parent in missing_parents {
+            self.pending_vertex_certificate_children
+                .entry(parent)
+                .or_default()
+                .insert(block_ref);
+        }
+    }
+
+    fn missing_active_certificate_parents(&self, block_ref: BlockReference) -> Vec<BlockReference> {
+        let block = self
+            .get_storage_block(block_ref)
+            .unwrap_or_else(|| panic!("Certified block {block_ref} should exist in DagState"));
+        let mut missing = Vec::new();
+        for parent in block.block_references() {
+            if parent.round == 0 {
+                continue;
+            }
+            if !self.vertex_certificates[parent.authority as usize].contains(parent) {
+                missing.push(*parent);
+            }
+        }
+        missing
+    }
+
+    fn activate_vertex_certificate(
+        &mut self,
+        block_ref: BlockReference,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        let auth = block_ref.authority as usize;
+        if !self.vertex_certificates[auth].insert(block_ref) {
+            return;
+        }
+
+        self.pending_vertex_certificates[auth].remove(&block_ref);
+        self.pending_vertex_certificate_counts.remove(&block_ref);
+
+        let block = self
+            .get_storage_block(block_ref)
+            .unwrap_or_else(|| panic!("Certified block {block_ref} should exist in DagState"));
+        for parent in block.block_references() {
+            if let Some(children) = self.pending_vertex_certificate_children.get_mut(parent) {
+                children.remove(&block_ref);
+                if children.is_empty() {
+                    self.pending_vertex_certificate_children.remove(parent);
+                }
+            }
+        }
+
+        activated.push(block_ref);
+
+        let waiting_children = self
+            .pending_vertex_certificate_children
+            .remove(&block_ref)
+            .unwrap_or_default();
+        for child in waiting_children {
+            let should_activate = match self.pending_vertex_certificate_counts.get_mut(&child) {
+                Some(remaining) if *remaining > 1 => {
+                    *remaining -= 1;
+                    false
+                }
+                Some(_) => {
+                    self.pending_vertex_certificate_counts.remove(&child);
+                    true
+                }
+                None => false,
+            };
+            if should_activate {
+                self.activate_vertex_certificate(child, activated);
+            }
+        }
     }
 
     pub fn add_block(
@@ -3046,17 +3169,29 @@ mod tests {
     }
 
     #[test]
-    fn batch_vertex_certification_marks_only_explicit_vertices() {
+    fn batch_vertex_certification_waits_for_parent_closure() {
         let dag_state = open_test_dag_state_for("sailfish-pp", 0);
-        let parent_ref = BlockReference::new_test(1, 1);
+        let parent = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
+        let parent_ref = *parent.reference();
         let child = make_full_block(2, 2, vec![parent_ref], ConsensusProtocol::SailfishPlusPlus);
         let child_ref = *child.reference();
 
+        dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
         dag_state.mark_vertices_certified(&[child_ref]);
 
-        assert!(dag_state.has_vertex_certificate(&child_ref));
+        assert!(!dag_state.has_vertex_certificate(&child_ref));
         assert!(!dag_state.has_vertex_certificate(&parent_ref));
+
+        dag_state.mark_vertices_certified(&[parent_ref]);
+
+        assert!(dag_state.has_vertex_certificate(&parent_ref));
+        assert!(dag_state.has_vertex_certificate(&child_ref));
     }
 
     #[test]
@@ -3072,6 +3207,27 @@ mod tests {
 
         assert!(dag_state.certified_parent_quorum(4));
         assert!(!dag_state.certified_parent_quorum(5));
+    }
+
+    #[test]
+    fn batch_vertex_certification_activates_parent_and_child_from_same_batch() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let parent = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
+        let parent_ref = *parent.reference();
+        let child = make_full_block(2, 2, vec![parent_ref], ConsensusProtocol::SailfishPlusPlus);
+        let child_ref = *child.reference();
+
+        dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
+        dag_state.mark_vertices_certified(&[child_ref, parent_ref]);
+
+        assert!(dag_state.has_vertex_certificate(&parent_ref));
+        assert!(dag_state.has_vertex_certificate(&child_ref));
     }
 
     #[test]
@@ -3097,49 +3253,48 @@ mod tests {
                 ConsensusProtocol::SailfishPlusPlus,
             ),
         ];
+        let round_1_refs: Vec<_> = round_1.iter().map(|block| *block.reference()).collect();
         let round_2 = vec![
             make_full_block(
                 0,
                 2,
-                vec![BlockReference::new_test(0, 1)],
+                vec![round_1_refs[0]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
             make_full_block(
                 1,
                 2,
-                vec![BlockReference::new_test(1, 1)],
+                vec![round_1_refs[1]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
             make_full_block(
                 2,
                 2,
-                vec![BlockReference::new_test(2, 1)],
+                vec![round_1_refs[2]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
         ];
+        let round_2_refs: Vec<_> = round_2.iter().map(|block| *block.reference()).collect();
         let round_3 = vec![
             make_full_block(
                 0,
                 3,
-                vec![BlockReference::new_test(0, 2)],
+                vec![round_2_refs[0]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
             make_full_block(
                 1,
                 3,
-                vec![BlockReference::new_test(1, 2)],
+                vec![round_2_refs[1]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
             make_full_block(
                 2,
                 3,
-                vec![BlockReference::new_test(2, 2)],
+                vec![round_2_refs[2]],
                 ConsensusProtocol::SailfishPlusPlus,
             ),
         ];
-
-        let round_1_refs: Vec<_> = round_1.iter().map(|block| *block.reference()).collect();
-        let round_2_refs: Vec<_> = round_2.iter().map(|block| *block.reference()).collect();
 
         dag_state.insert_general_blocks(round_1, DataSource::BlockBundleStreaming);
         dag_state.insert_general_blocks(round_2, DataSource::BlockBundleStreaming);

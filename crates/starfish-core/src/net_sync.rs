@@ -707,11 +707,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if let Some(ref bls) = self.bls_service {
                 bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()));
             }
-            // Send block references to Sailfish service for RBC certification.
-            if let Some(ref sf) = self.sailfish_service {
-                let block_refs: Vec<_> = new_data_blocks.iter().map(|b| *b.reference()).collect();
-                sf.send(SailfishServiceMessage::ProcessBlocks(block_refs));
-            }
             // Notify CordialKnowledge about all new headers in one batch.
             let header_refs = new_data_blocks
                 .iter()
@@ -861,14 +856,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 bls.send(BlsServiceMessage::ProcessBlocks(
                     verified_data_blocks.clone(),
                 ));
-            }
-            // Send block references to Sailfish service for RBC certification.
-            if let Some(ref sf) = self.sailfish_service {
-                let block_refs: Vec<_> = verified_data_blocks
-                    .iter()
-                    .map(|b| *b.reference())
-                    .collect();
-                sf.send(SailfishServiceMessage::ProcessBlocks(block_refs));
             }
             // Notify CordialKnowledge about all new headers and shards in one batch.
             let header_refs: Vec<_> = verified_data_blocks
