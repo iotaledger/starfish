@@ -296,8 +296,13 @@ impl UniversalCommitter {
                     .has_vertex_certificate(leader_block.reference())
             })
             .filter(|leader_block| {
-                self.supporting_stake_for_sailfish(leader_block.reference(), support_round)
-                    >= self.committee.quorum_threshold()
+                let support = self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
+                let delivered_support = self.delivered_supporting_stake_for_sailfish(
+                    leader_block.reference(),
+                    support_round,
+                );
+                support >= self.committee.quorum_threshold()
+                    || delivered_support >= self.committee.validity_threshold()
             })
             .collect();
 
@@ -319,6 +324,28 @@ impl UniversalCommitter {
         let supporting_blocks = self.dag_state.get_blocks_by_round_cached(support_round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in supporting_blocks.iter() {
+            if block
+                .block_references()
+                .iter()
+                .any(|reference| reference == leader_ref)
+            {
+                aggregator.add(block.authority(), &self.committee);
+            }
+        }
+        aggregator.get_stake()
+    }
+
+    fn delivered_supporting_stake_for_sailfish(
+        &self,
+        leader_ref: &BlockReference,
+        support_round: RoundNumber,
+    ) -> Stake {
+        let supporting_blocks = self.dag_state.get_blocks_by_round_cached(support_round);
+        let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
+        for block in supporting_blocks.iter() {
+            if !self.dag_state.has_vertex_certificate(block.reference()) {
+                continue;
+            }
             if block
                 .block_references()
                 .iter()
@@ -436,5 +463,103 @@ impl UniversalCommitterBuilder {
             voters_cache: AHashMap::new(),
             metrics_emitted: AHashSet::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    use crate::{
+        config::StorageBackend,
+        crypto::{SignatureBytes, TransactionsCommitment},
+        dag_state::DataSource,
+        data::Data,
+    };
+    use prometheus::Registry;
+
+    fn open_test_dag_state_for(consensus: &str, authority: AuthorityIndex) -> DagState {
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some(consensus), None);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        DagState::open(
+            authority,
+            path,
+            metrics,
+            committee,
+            "honest".to_string(),
+            consensus.to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        )
+        .dag_state
+    }
+
+    fn make_full_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+    ) -> Data<crate::types::VerifiedBlock> {
+        let empty_transactions = Vec::new();
+        let merkle_root = TransactionsCommitment::new_from_transactions(&empty_transactions);
+        let mut block = crate::types::VerifiedBlock::new(
+            authority,
+            round,
+            parents,
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions,
+            merkle_root,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    #[test]
+    fn sailfish_direct_commit_accepts_f_plus_1_delivered_supporters() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some("sailfish-pp"), None);
+
+        let leader = make_full_block(1, 1, vec![BlockReference::new_test(1, 0)]);
+        let leader_ref = *leader.reference();
+        let supporter_a = make_full_block(0, 2, vec![leader_ref]);
+        let supporter_b = make_full_block(2, 2, vec![leader_ref]);
+
+        dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(supporter_a.clone(), DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(supporter_b.clone(), DataSource::BlockBundleStreaming);
+
+        dag_state.mark_vertices_certified(&[
+            leader_ref,
+            *supporter_a.reference(),
+            *supporter_b.reference(),
+        ]);
+
+        let mut committer =
+            UniversalCommitterBuilder::new(committee, dag_state, metrics).build();
+
+        let decided = committer.try_commit(BlockReference::new_test(0, 0));
+        assert!(
+            decided.iter().any(|status| {
+                matches!(
+                    status,
+                    LeaderStatus::Commit(block, None)
+                        if block.authority() == 1 && block.round() == 1
+                )
+            }),
+            "expected round-1 leader to commit with f+1 certified supporters in round 2"
+        );
     }
 }
