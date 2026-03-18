@@ -1147,6 +1147,7 @@ impl<H: BlockHandler> Core<H> {
         };
         self.last_own_block[block_id] = own_block.clone();
         self.dag_state.insert_own_block(own_block.clone());
+        self.flush_pending_sailfish_certified_refs();
     }
 
     /// Generate an own DAC partial signature for a block we just created.
@@ -1280,6 +1281,7 @@ impl<H: BlockHandler> Core<H> {
             .store_commits_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
+        self.flush_pending_sailfish_certified_refs();
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
@@ -1299,6 +1301,14 @@ impl<H: BlockHandler> Core<H> {
     pub fn dag_state(&self) -> &DagState {
         &self.dag_state
     }
+
+    fn flush_pending_sailfish_certified_refs(&self) {
+        if self.dag_state.consensus_protocol != ConsensusProtocol::SailfishPlusPlus {
+            return;
+        }
+        self.dag_state.flush_pending_sailfish_certified_refs();
+    }
+
     pub fn store(&self) -> Arc<dyn Store> {
         self.store.clone()
     }

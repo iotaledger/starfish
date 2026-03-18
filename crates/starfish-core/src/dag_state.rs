@@ -321,6 +321,9 @@ struct DagStateInner {
     /// Reverse dependency index: parent -> children that are waiting for that
     /// parent to become active-certified.
     pending_vertex_certificate_children: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
+    /// Active Sailfish certifications waiting to be persisted on the next
+    /// storage flush boundary.
+    pending_persisted_vertex_certificates: Vec<BTreeSet<BlockReference>>,
     /// Supporters from the next round that directly reference a given block.
     /// Once this reaches f+1 distinct authorities, we can infer that some
     /// honest node had the referenced block in its active-certified view.
@@ -399,6 +402,7 @@ impl DagState {
             pending_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_vertex_certificate_counts: BTreeMap::new(),
             pending_vertex_certificate_children: BTreeMap::new(),
+            pending_persisted_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
             inferred_vertex_support: (0..n).map(|_| BTreeMap::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
@@ -751,7 +755,7 @@ impl DagState {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_block_count.inc();
 
-        let (highest_round, lowest_round, activated) = {
+        let (highest_round, lowest_round, _activated) = {
             let mut inner = self.dag_state_inner.write();
             // Keep threshold clock mutation co-located with DAG insertion so
             // runtime block acceptance and recovery use the same path.
@@ -770,11 +774,6 @@ impl DagState {
             );
             (inner.highest_round, inner.global_lowest_round(), activated)
         };
-        if !activated.is_empty() {
-            self.store
-                .store_sailfish_certified_refs(&activated)
-                .expect("Failed to store inferred Sailfish certifications");
-        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -853,7 +852,7 @@ impl DagState {
         }
 
         // Phase 2: single write lock for all DAG mutations.
-        let (highest_round, lowest_round, activated) = {
+        let (highest_round, lowest_round, _activated) = {
             let mut inner = self.dag_state_inner.write();
             let mut bfs_buf = Vec::new();
             let mut activated = Vec::new();
@@ -872,11 +871,6 @@ impl DagState {
             }
             (inner.highest_round, inner.global_lowest_round(), activated)
         };
-        if !activated.is_empty() {
-            self.store
-                .store_sailfish_certified_refs(&activated)
-                .expect("Failed to store inferred Sailfish certifications");
-        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -1080,18 +1074,36 @@ impl DagState {
             }
             activated
         };
-        if activated.is_empty() {
-            return false;
-        }
-        self.store
-            .store_sailfish_certified_refs(&activated)
-            .expect("Failed to persist Sailfish certified refs");
-        true
+        !activated.is_empty()
     }
 
     /// Mark a vertex as RBC-certified (SailfishPlusPlus).
     pub fn mark_vertex_certified(&self, block_ref: BlockReference) -> bool {
         self.mark_vertices_certified(&[block_ref])
+    }
+
+    /// Drain active Sailfish certifications that still need to be persisted at
+    /// the next storage flush boundary.
+    pub fn take_pending_sailfish_certified_refs(&self) -> Vec<BlockReference> {
+        let mut inner = self.dag_state_inner.write();
+        let mut refs = Vec::new();
+        for pending in &mut inner.pending_persisted_vertex_certificates {
+            refs.extend(std::mem::take(pending));
+        }
+        refs
+    }
+
+    /// Persist active Sailfish certifications accumulated since the last flush
+    /// boundary.
+    pub fn flush_pending_sailfish_certified_refs(&self) -> bool {
+        let refs = self.take_pending_sailfish_certified_refs();
+        if refs.is_empty() {
+            return false;
+        }
+        self.store
+            .store_sailfish_certified_refs(&refs)
+            .expect("Failed to persist Sailfish certified refs");
+        true
     }
 
     /// Check whether a vertex is active-certified and therefore usable as part
@@ -2344,6 +2356,8 @@ impl DagStateInner {
             self.vertex_certificates[auth] = self.vertex_certificates[auth].split_off(&split_ref);
             self.pending_vertex_certificates[auth] =
                 self.pending_vertex_certificates[auth].split_off(&split_ref);
+            self.pending_persisted_vertex_certificates[auth] =
+                self.pending_persisted_vertex_certificates[auth].split_off(&split_ref);
             self.inferred_vertex_support[auth] =
                 self.inferred_vertex_support[auth].split_off(&split_ref);
         }
@@ -2437,6 +2451,7 @@ impl DagStateInner {
         }
 
         activated.push(block_ref);
+        self.pending_persisted_vertex_certificates[auth].insert(block_ref);
 
         let waiting_children = self
             .pending_vertex_certificate_children
@@ -3403,6 +3418,28 @@ mod tests {
     }
 
     #[test]
+    fn sailfish_pending_certified_refs_are_buffered_until_flushed() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let parent = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
+        let parent_ref = *parent.reference();
+        let child = make_full_block(2, 2, vec![parent_ref], ConsensusProtocol::SailfishPlusPlus);
+        let child_ref = *child.reference();
+
+        dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
+        dag_state.mark_vertices_certified(&[child_ref, parent_ref]);
+
+        let pending = dag_state.take_pending_sailfish_certified_refs();
+        assert_eq!(pending, vec![parent_ref, child_ref]);
+        assert!(dag_state.take_pending_sailfish_certified_refs().is_empty());
+    }
+
+    #[test]
     fn sailfish_f_plus_1_support_infers_certified_closure() {
         let dag_state = open_test_dag_state_for("sailfish-pp", 0);
         let ancestor = make_full_block(
@@ -3451,6 +3488,7 @@ mod tests {
         dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
         dag_state.mark_vertices_certified(&[parent_ref, child_ref]);
+        dag_state.flush_pending_sailfish_certified_refs();
 
         assert!(dag_state.has_vertex_certificate(&parent_ref));
         assert!(dag_state.has_vertex_certificate(&child_ref));
