@@ -627,6 +627,81 @@ mod tests {
         }));
     }
 
+    /// For a locally-authored block, the service still broadcasts the local
+    /// echo, but the broadcaster's echo must not count toward optimistic Echo
+    /// or Vote thresholds.
+    #[tokio::test]
+    async fn local_author_echo_is_broadcast_but_not_counted() {
+        let committee = make_committee(4);
+        let own_authority = 0;
+        let block_ref = BlockReference::new_test(0, 7);
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        start_sailfish_service(
+            committee,
+            own_authority,
+            test_signer(own_authority),
+            msg_rx,
+            event_tx,
+            test_metrics(),
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::ProcessBlocks(vec![block_ref]))
+            .unwrap();
+        let events = event_rx
+            .recv()
+            .await
+            .expect("expected local echo broadcast");
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SailfishCertEvent::Broadcast(CertMessage {
+                    sender,
+                    block_ref: received,
+                    kind,
+                }) if *sender == own_authority
+                    && *received == block_ref
+                    && *kind == CertMessageKind::Echo
+            )
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SailfishCertEvent::Certified(_)))
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref,
+                sender: 1,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "author echo + one peer echo must not reach optimistic thresholds"
+        );
+
+        msg_tx
+            .send(SailfishServiceMessage::CertMessage(CertMessage {
+                block_ref,
+                sender: 2,
+                kind: CertMessageKind::Echo,
+            }))
+            .unwrap();
+        let events = event_rx
+            .recv()
+            .await
+            .expect("expected certification after two non-author echoes");
+        assert!(events.iter().any(|event| {
+            matches!(event, SailfishCertEvent::Certified(received) if *received == block_ref)
+        }));
+    }
+
     /// N=7, F=2: 4 echoes triggers SendVote + SendReady (both at threshold 4).
     /// Then 4 peer readys (+ own ready already counted) reaches quorum for
     /// SlowDelivery.

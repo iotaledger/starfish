@@ -81,6 +81,11 @@ impl CertificationAggregator {
     }
 
     fn add_echo(&mut self, message: &CertMessage) -> Vec<CertEvent> {
+        // The broadcaster/author can equivocate, so the optimistic Sailfish++
+        // Echo thresholds count only non-broadcaster senders.
+        if message.sender == message.block_ref.authority {
+            return Vec::new();
+        }
         let state = self
             .rounds
             .entry(message.block_ref.round)
@@ -121,6 +126,10 @@ impl CertificationAggregator {
     }
 
     fn add_vote(&mut self, message: &CertMessage) -> Vec<CertEvent> {
+        // Votes inherit the same non-broadcaster counting rule as echoes.
+        if message.sender == message.block_ref.authority {
+            return Vec::new();
+        }
         let state = self
             .rounds
             .entry(message.block_ref.round)
@@ -235,15 +244,16 @@ mod tests {
 
         let events = agg.add_message(&echo(block, 0));
         assert!(!agg.is_certified(&block));
-        // With N=4, F=1: fast = ceil((4+2-2)/2) = 2, vote = ceil(4/2) = 2
-        // So 1 echo is not enough
+        assert!(events.is_empty());
+
+        let events = agg.add_message(&echo(block, 1));
         assert!(
             events
                 .iter()
                 .all(|e| !matches!(e, CertEvent::FastDelivery(_)))
         );
 
-        let events = agg.add_message(&echo(block, 1));
+        let events = agg.add_message(&echo(block, 2));
         assert!(
             events
                 .iter()
@@ -261,6 +271,9 @@ mod tests {
 
         agg.add_message(&echo(block, 0));
         let events = agg.add_message(&echo(block, 1));
+        assert!(!events.iter().any(|e| matches!(e, CertEvent::SendVote(_))));
+
+        let events = agg.add_message(&echo(block, 2));
         assert!(events.iter().any(|e| matches!(e, CertEvent::SendVote(_))));
     }
 
@@ -273,6 +286,9 @@ mod tests {
 
         agg.add_message(&vote(block, 0));
         let events = agg.add_message(&vote(block, 1));
+        assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
+
+        let events = agg.add_message(&vote(block, 2));
         assert!(events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
     }
 
@@ -287,6 +303,9 @@ mod tests {
         assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
 
         let events = agg.add_message(&echo(block, 1));
+        assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
+
+        let events = agg.add_message(&echo(block, 2));
         assert!(events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
     }
 
@@ -318,9 +337,38 @@ mod tests {
         let mut agg = CertificationAggregator::new(committee);
         let block = BlockReference::new_test(0, 1);
 
-        agg.add_message(&echo(block, 0));
-        let events = agg.add_message(&echo(block, 0));
+        agg.add_message(&echo(block, 1));
+        let events = agg.add_message(&echo(block, 1));
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn broadcaster_echo_does_not_count_toward_fast_delivery() {
+        let committee = make_committee(4);
+        let mut agg = CertificationAggregator::new(committee);
+        let block = BlockReference::new_test(0, 1);
+
+        agg.add_message(&echo(block, 0));
+        let events = agg.add_message(&echo(block, 1));
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, CertEvent::FastDelivery(_)))
+        );
+        assert!(!agg.is_certified(&block));
+    }
+
+    #[test]
+    fn broadcaster_vote_does_not_count_toward_ready_trigger() {
+        let committee = make_committee(4);
+        let mut agg = CertificationAggregator::new(committee);
+        let block = BlockReference::new_test(0, 1);
+
+        agg.add_message(&vote(block, 0));
+        let events = agg.add_message(&vote(block, 1));
+
+        assert!(!events.iter().any(|e| matches!(e, CertEvent::SendReady(_))));
     }
 
     #[test]
@@ -330,8 +378,8 @@ mod tests {
         let block_r1 = BlockReference::new_test(0, 1);
         let block_r5 = BlockReference::new_test(0, 5);
 
-        agg.add_message(&echo(block_r1, 0));
-        agg.add_message(&echo(block_r5, 0));
+        agg.add_message(&echo(block_r1, 1));
+        agg.add_message(&echo(block_r5, 1));
 
         agg.cleanup_below_round(3);
         assert!(!agg.rounds.contains_key(&1));
