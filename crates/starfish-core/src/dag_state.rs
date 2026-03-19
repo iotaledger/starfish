@@ -2440,6 +2440,19 @@ impl DagStateInner {
                 missing.push(*parent);
             }
         }
+        // MysticetiCompress: the unprovable_certificate target is also a
+        // causal dependency that must be ancestor-closed.
+        if self.consensus_protocol == ConsensusProtocol::MysticetiCompress {
+            if let Some(cert_ref) = block.unprovable_certificate() {
+                if cert_ref.round > 0
+                    && !self.vertex_certificates[cert_ref.authority as usize]
+                        .contains(cert_ref)
+                    && !missing.contains(cert_ref)
+                {
+                    missing.push(*cert_ref);
+                }
+            }
+        }
         missing
     }
 
@@ -2518,6 +2531,7 @@ impl DagStateInner {
         self.update_data_availability(&block);
         self.update_starfish_speed_leader_hints(&block);
         self.update_inferred_sailfish_support(&block, committee, activated);
+        self.check_compress_pre_clean(&block, committee, activated);
     }
 
     fn update_inferred_sailfish_support(
@@ -2548,6 +2562,80 @@ impl DagStateInner {
         for root in infer_roots {
             self.infer_vertex_certificate_closure(root, activated);
         }
+    }
+
+    /// MysticetiCompress pre-clean check: a block is pre-clean if it has no
+    /// `unprovable_certificate`, or its certificate is verified via the dirty
+    /// DAG. Pre-clean blocks feed into the vertex certification pipeline.
+    fn check_compress_pre_clean(
+        &mut self,
+        block: &VerifiedBlock,
+        committee: &Committee,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        if self.consensus_protocol != ConsensusProtocol::MysticetiCompress {
+            return;
+        }
+        let block_ref = *block.reference();
+        let is_pre_clean = match block.unprovable_certificate() {
+            None => true,
+            Some(leader_ref) => {
+                self.verify_unprovable_certificate_local(
+                    block_ref.round,
+                    leader_ref,
+                    committee,
+                )
+            }
+        };
+        if is_pre_clean {
+            self.note_vertex_certified(block_ref, activated);
+        }
+    }
+
+    /// Verify an unprovable certificate against the local dirty DAG.
+    /// Returns true if 2f+1 blocks at r-1 reference the leader (direct)
+    /// or f+1 blocks at r propagate the same certificate.
+    fn verify_unprovable_certificate_local(
+        &self,
+        block_round: RoundNumber,
+        leader_ref: &BlockReference,
+        committee: &Committee,
+    ) -> bool {
+        // Direct: 2f+1 at r-1 reference the leader.
+        let vote_round = block_round.saturating_sub(1);
+        let mut stake: Stake = 0;
+        for auth_dag in &self.index {
+            if let Some(round_blocks) = auth_dag.get(&vote_round) {
+                for block in round_blocks.values() {
+                    if block
+                        .block_references()
+                        .iter()
+                        .any(|r| r == leader_ref)
+                    {
+                        stake += committee
+                            .get_stake(block.authority())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+        if committee.is_quorum(stake) {
+            return true;
+        }
+        // Propagation: f+1 at round r carry the same certificate.
+        let mut prop_stake: Stake = 0;
+        for auth_dag in &self.index {
+            if let Some(round_blocks) = auth_dag.get(&block_round) {
+                for block in round_blocks.values() {
+                    if block.unprovable_certificate() == Some(leader_ref) {
+                        prop_stake += committee
+                            .get_stake(block.authority())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+        }
+        prop_stake >= committee.validity_threshold()
     }
 
     fn infer_vertex_certificate_closure(
