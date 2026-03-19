@@ -23,6 +23,7 @@ pub type Decoder = ReedSolomonDecoder;
 use std::{
     fmt,
     hash::{Hash, Hasher},
+    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not},
     sync::atomic::Ordering,
     time::Duration,
 };
@@ -273,10 +274,10 @@ pub struct BlockHeader {
     pub(crate) ack: AckFields,
 
     // -- Protocol-specific extensions -----------------------------------------
-    /// StarfishSpeed strong-vote hint mask. `Some(0)` means a strong vote;
-    /// `Some(nonzero)` means the voter is missing payload from the authorities
+    /// StarfishSpeed strong-vote hint mask. `Some(empty)` means a strong vote;
+    /// `Some(nonempty)` means the voter is missing payload from the authorities
     /// whose bits are set.
-    pub(crate) strong_vote: Option<u128>,
+    pub(crate) strong_vote: Option<AuthoritySet>,
     /// BLS certificate fields (StarfishBls only). None for all other protocols.
     pub(crate) bls: Option<Box<BlsFields>>,
     /// Sailfish++ control certificates (timeout/no-vote). None for all other
@@ -362,16 +363,16 @@ impl BlockHeader {
         self.transactions_commitment == TransactionsCommitment::default()
     }
 
-    pub fn strong_vote(&self) -> Option<u128> {
+    pub fn strong_vote(&self) -> Option<AuthoritySet> {
         self.strong_vote
     }
 
     pub fn is_strong_vote(&self) -> bool {
-        self.strong_vote == Some(0)
+        self.strong_vote == Some(AuthoritySet::default())
     }
 
     pub fn is_strong_blame(&self) -> bool {
-        self.strong_vote.is_some_and(|mask| mask != 0)
+        self.strong_vote.is_some_and(|mask| !mask.is_empty())
     }
 
     pub fn bls(&self) -> Option<&BlsFields> {
@@ -690,7 +691,7 @@ impl VerifiedBlock {
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
         merkle_root: TransactionsCommitment,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
         bls: Option<BlsFields>,
         sailfish: Option<SailfishFields>,
     ) -> Self {
@@ -796,7 +797,7 @@ impl VerifiedBlock {
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
         consensus_protocol: ConsensusProtocol,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
         precomputed_round_sig: Option<BlsSignatureBytes>,
@@ -952,7 +953,7 @@ impl VerifiedBlock {
         self.header.has_empty_payload()
     }
 
-    pub fn strong_vote(&self) -> Option<u128> {
+    pub fn strong_vote(&self) -> Option<AuthoritySet> {
         self.header.strong_vote()
     }
 
@@ -1420,17 +1421,16 @@ fn verify_signed_quorum(
     committee: &Committee,
     label: &str,
 ) -> eyre::Result<()> {
-    let mut seen = 0u128;
+    let mut seen = AuthoritySet::default();
     let mut stake: Stake = 0;
     for &(signer, ref sig) in signatures {
-        let mask = 1u128 << signer;
         ensure!(
-            seen & mask == 0,
+            !seen.contains(signer),
             "Duplicate signer {} in {} cert",
             signer,
             label
         );
-        seen |= mask;
+        seen.insert(signer);
         let pk = committee
             .get_public_key(signer)
             .ok_or_else(|| eyre::eyre!("Unknown signer {} in {} cert", signer, label))?;
@@ -1449,9 +1449,9 @@ fn verify_signed_quorum(
 }
 
 #[derive(
-    Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
+    Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
 )]
-pub struct AuthoritySet(u128); // todo - support more then 128 authorities
+pub struct AuthoritySet([u128; 2]);
 
 pub type TimestampNs = u64;
 const NANOS_IN_SEC: u64 = 1_000_000_000;
@@ -1514,39 +1514,162 @@ impl fmt::Display for BlockReference {
 }
 
 impl AuthoritySet {
+    /// Decompose an authority index into (word index, bit within word).
+    #[inline]
+    const fn pos(v: AuthorityIndex) -> (usize, u8) {
+        ((v as usize) / 128, v % 128)
+    }
+
+    /// Create a set containing a single authority.
+    #[inline]
+    pub fn singleton(v: AuthorityIndex) -> Self {
+        let (word, bit) = Self::pos(v);
+        let mut words = [0u128; 2];
+        words[word] = 1u128 << bit;
+        Self(words)
+    }
+
+    /// Insert an authority. Returns `true` if it was not already present.
     #[inline]
     pub fn insert(&mut self, v: AuthorityIndex) -> bool {
-        let bit = 1u128 << v;
-        if self.0 & bit == bit {
+        let (word, bit) = Self::pos(v);
+        let mask = 1u128 << bit;
+        if self.0[word] & mask == mask {
             return false;
         }
-        self.0 |= bit;
+        self.0[word] |= mask;
         true
     }
 
-    pub fn present(&self) -> impl Iterator<Item = AuthorityIndex> + '_ {
-        (0u8..128).filter(move |&bit| (self.0 & (1u128 << bit)) != 0)
+    /// Remove an authority. Returns `true` if it was present.
+    #[inline]
+    pub fn remove(&mut self, v: AuthorityIndex) -> bool {
+        let (word, bit) = Self::pos(v);
+        let mask = 1u128 << bit;
+        if self.0[word] & mask == 0 {
+            return false;
+        }
+        self.0[word] &= !mask;
+        true
+    }
+
+    /// Iterate over all present authorities using O(popcount) bit-scanning.
+    pub fn present(&self) -> AuthoritySetIter {
+        AuthoritySetIter {
+            words: self.0,
+            word_index: 0,
+        }
     }
 
     #[inline]
     pub fn contains(&self, v: AuthorityIndex) -> bool {
-        let bit = 1u128 << v;
-        self.0 & bit == bit
+        let (word, bit) = Self::pos(v);
+        let mask = 1u128 << bit;
+        self.0[word] & mask == mask
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.0 == 0
+        self.0[0] == 0 && self.0[1] == 0
     }
 
     #[inline]
     pub fn clear(&mut self) {
-        self.0 = 0;
+        self.0 = [0; 2];
+    }
+
+    /// Number of authorities in the set.
+    #[inline]
+    pub fn count_ones(&self) -> u32 {
+        self.0[0].count_ones() + self.0[1].count_ones()
+    }
+
+    /// Access the raw `[u128; 2]` words.
+    #[inline]
+    pub fn words(&self) -> &[u128; 2] {
+        &self.0
     }
 }
 
-pub fn format_authority_index(i: AuthorityIndex) -> char {
-    (b'A' + i) as char
+/// O(popcount) iterator over set bits in an `AuthoritySet`.
+pub struct AuthoritySetIter {
+    words: [u128; 2],
+    word_index: usize,
+}
+
+impl Iterator for AuthoritySetIter {
+    type Item = AuthorityIndex;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.word_index < 2 {
+            let w = self.words[self.word_index];
+            if w != 0 {
+                let bit = w.trailing_zeros() as u8;
+                // Clear the lowest set bit.
+                self.words[self.word_index] = w & (w - 1);
+                return Some(bit + (self.word_index as u8) * 128);
+            }
+            self.word_index += 1;
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining: u32 = self.words[self.word_index..]
+            .iter()
+            .map(|w| w.count_ones())
+            .sum();
+        (remaining as usize, Some(remaining as usize))
+    }
+}
+
+impl BitOr for AuthoritySet {
+    type Output = Self;
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self {
+        Self([self.0[0] | rhs.0[0], self.0[1] | rhs.0[1]])
+    }
+}
+
+impl BitOrAssign for AuthoritySet {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0[0] |= rhs.0[0];
+        self.0[1] |= rhs.0[1];
+    }
+}
+
+impl BitAnd for AuthoritySet {
+    type Output = Self;
+    #[inline]
+    fn bitand(self, rhs: Self) -> Self {
+        Self([self.0[0] & rhs.0[0], self.0[1] & rhs.0[1]])
+    }
+}
+
+impl BitAndAssign for AuthoritySet {
+    #[inline]
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0[0] &= rhs.0[0];
+        self.0[1] &= rhs.0[1];
+    }
+}
+
+impl Not for AuthoritySet {
+    type Output = Self;
+    #[inline]
+    fn not(self) -> Self {
+        Self([!self.0[0], !self.0[1]])
+    }
+}
+
+pub fn format_authority_index(i: AuthorityIndex) -> String {
+    if i < 26 {
+        ((b'A' + i) as char).to_string()
+    } else {
+        format!("[{i:02}]")
+    }
 }
 
 pub fn format_authority_round(i: AuthorityIndex, r: RoundNumber) -> String {
@@ -2338,6 +2461,22 @@ mod test {
     }
 
     #[test]
+    fn authority_set_high_indices() {
+        let mut a = AuthoritySet::default();
+        assert!(a.insert(128));
+        assert!(!a.insert(128));
+        assert!(a.insert(200));
+        assert!(a.insert(255));
+        assert!(!a.insert(255));
+        assert!(a.contains(128));
+        assert!(a.contains(200));
+        assert!(a.contains(255));
+        assert!(!a.contains(0));
+        assert!(!a.contains(127));
+        assert_eq!(a.count_ones(), 3);
+    }
+
+    #[test]
     fn authority_present_test() {
         let mut a = AuthoritySet::default();
         let present = vec![1, 2, 3, 4, 5, 64, 127];
@@ -2345,5 +2484,54 @@ mod test {
             a.insert(*x);
         }
         assert_eq!(present, a.present().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn authority_present_spans_both_words() {
+        let mut a = AuthoritySet::default();
+        let present = vec![0, 63, 127, 128, 200, 255];
+        for x in &present {
+            a.insert(*x);
+        }
+        assert_eq!(present, a.present().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn authority_set_singleton_and_ops() {
+        let a = AuthoritySet::singleton(5);
+        let b = AuthoritySet::singleton(130);
+        let c = a | b;
+        assert!(c.contains(5));
+        assert!(c.contains(130));
+        assert!(!c.contains(0));
+
+        let d = c & a;
+        assert!(d.contains(5));
+        assert!(!d.contains(130));
+
+        let neg = !AuthoritySet::default();
+        assert!(neg.contains(0));
+        assert!(neg.contains(127));
+        assert!(neg.contains(128));
+        assert!(neg.contains(255));
+    }
+
+    #[test]
+    fn authority_set_remove() {
+        let mut a = AuthoritySet::default();
+        a.insert(10);
+        a.insert(200);
+        assert!(a.remove(10));
+        assert!(!a.remove(10));
+        assert!(!a.contains(10));
+        assert!(a.contains(200));
+    }
+
+    #[test]
+    fn format_authority_index_handles_high_indices() {
+        assert_eq!(format_authority_index(0), "A");
+        assert_eq!(format_authority_index(25), "Z");
+        assert_eq!(format_authority_index(26), "[26]");
+        assert_eq!(format_authority_index(255), "[255]");
     }
 }

@@ -1337,6 +1337,6 @@ impl Drop for OwnedUtilizationTimer {
 
 #[derive(Tabled)]
 struct NetworkAddressTable {
-    peer: char,
+    peer: String,
     address: String,
 }

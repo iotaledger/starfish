@@ -42,8 +42,8 @@ use crate::{
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, PartialSig, PartialSigKind, ProvableShard,
-        RoundNumber, VerifiedBlock, format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, PartialSig, PartialSigKind,
+        ProvableShard, RoundNumber, VerifiedBlock, format_authority_index,
     },
 };
 
@@ -139,7 +139,7 @@ impl FilterForBlocks {
 #[derive(Clone, Copy)]
 struct ShardStatus {
     count: usize,
-    bitmap: u128,
+    bitmap: AuthoritySet,
     full_block_received: bool,
 }
 
@@ -165,7 +165,7 @@ impl FilterForShards {
             Some(status) => {
                 !status.full_block_received
                     && status.count < self.info_length
-                    && (status.bitmap & (1u128 << shard_index)) == 0
+                    && !status.bitmap.contains(shard_index as u8)
             }
             None => true,
         }
@@ -179,13 +179,13 @@ impl FilterForShards {
                 queue.push_back(digest);
                 ShardStatus {
                     count: 0,
-                    bitmap: 0,
+                    bitmap: AuthoritySet::default(),
                     full_block_received: false,
                 }
             });
-            let mask = 1u128 << shard_index;
-            if entry.bitmap & mask == 0 {
-                entry.bitmap |= mask;
+            let authority = shard_index as AuthorityIndex;
+            if !entry.bitmap.contains(authority) {
+                entry.bitmap.insert(authority);
                 entry.count += 1;
             }
         }
@@ -212,7 +212,7 @@ impl FilterForShards {
                 queue.push_back(digest);
                 ShardStatus {
                     count: 0,
-                    bitmap: 0,
+                    bitmap: AuthoritySet::default(),
                     full_block_received: false,
                 }
             });
@@ -259,7 +259,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     data_requester: DataRequester<H, C>,
     encoder: ReedSolomonEncoder,
     peer_id: AuthorityIndex,
-    peer: char,
+    peer: String,
     own_id: AuthorityIndex,
     sender: mpsc::Sender<NetworkMessage>,
     bls_service: Option<BlsServiceHandle>,
@@ -467,7 +467,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // Forward useful-authors feedback to CordialKnowledge
-        if useful_headers_authors != 0 || useful_shards_authors != 0 {
+        if !useful_headers_authors.is_empty() || !useful_shards_authors.is_empty() {
             let max_round = full_blocks
                 .iter()
                 .chain(headers.iter())
@@ -934,13 +934,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .connection_knowledge(self.peer_id)
                 {
                     let mut ck = ck.write();
-                    let mut useful_headers_mask = 0u128;
+                    let mut useful_headers_mask = AuthoritySet::default();
                     for block_ref in &block_references {
-                        useful_headers_mask |= 1u128 << block_ref.authority;
+                        useful_headers_mask.insert(block_ref.authority);
                     }
-                    if useful_headers_mask != 0 {
+                    if !useful_headers_mask.is_empty() {
                         let current_round = self.inner.dag_state.highest_round();
-                        ck.update_useful_authors_to_peer(useful_headers_mask, 0, current_round);
+                        ck.update_useful_authors_to_peer(
+                            useful_headers_mask,
+                            AuthoritySet::default(),
+                            current_round,
+                        );
                     }
                 }
             }

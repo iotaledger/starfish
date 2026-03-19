@@ -32,9 +32,9 @@ use crate::{
     state::RecoveredState,
     store::Store,
     types::{
-        AuthorityIndex, BaseTransaction, BlockReference, BlsAggregateCertificate, Encoder,
-        PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData, RoundNumber,
-        SailfishFields, Shard, VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
+        Encoder, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
+        RoundNumber, SailfishFields, Shard, VerifiedBlock,
     },
 };
 
@@ -106,7 +106,7 @@ impl<H: BlockHandler> Core<H> {
 
         // Pending references for inclusion
         let mut pending = Vec::new();
-        let committee_len = committee.len() as AuthorityIndex;
+        let committee_len = committee.len();
         let mut last_own_block = OwnBlockData {
             block: own_genesis_block.clone(),
             authority_index_start: 0,
@@ -549,7 +549,7 @@ impl<H: BlockHandler> Core<H> {
         }
 
         let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
-        if starfish_speed_excluded_authors & (1u128 << self.authority) != 0 {
+        if starfish_speed_excluded_authors.contains(self.authority) {
             self.requeue_transactions(std::mem::take(&mut transactions));
         }
         timed!(
@@ -700,7 +700,7 @@ impl<H: BlockHandler> Core<H> {
         {
             let prev_round = block_round - 1;
             let mut prev_round_stake: u64 = 0;
-            let mut seen = 0u128;
+            let mut seen = AuthoritySet::default();
             // Count own_previous: build_block always prepends the author's
             // previous block, which is at prev_round after a successful round.
             let own_prev_stake = self.committee.get_stake(self.authority).unwrap_or(0);
@@ -709,16 +709,13 @@ impl<H: BlockHandler> Core<H> {
                 .first()
                 .is_some_and(|ob| ob.block.round() == prev_round)
             {
-                seen |= 1u128 << self.authority;
+                seen.insert(self.authority);
                 prev_round_stake += own_prev_stake;
             }
             for r in &block_references {
-                if r.round == prev_round {
-                    let mask = 1u128 << r.authority;
-                    if seen & mask == 0 {
-                        seen |= mask;
-                        prev_round_stake += self.committee.get_stake(r.authority).unwrap_or(0);
-                    }
+                if r.round == prev_round && !seen.contains(r.authority) {
+                    seen.insert(r.authority);
+                    prev_round_stake += self.committee.get_stake(r.authority).unwrap_or(0);
                 }
             }
             if !self.committee.is_quorum(prev_round_stake) {
@@ -754,13 +751,13 @@ impl<H: BlockHandler> Core<H> {
     }
 
     /// For StarfishSpeed, compute the strong-vote hint mask for the current
-    /// leader. `Some(0)` means the vote is strong; `Some(nonzero)` records the
-    /// authorities whose payloads are still missing locally.
+    /// leader. `Some(empty)` means the vote is strong; `Some(nonempty)` records
+    /// the authorities whose payloads are still missing locally.
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
         block_references: &[BlockReference],
-    ) -> Option<u128> {
+    ) -> Option<AuthoritySet> {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
             return None;
         }
@@ -779,9 +776,9 @@ impl<H: BlockHandler> Core<H> {
 
         let leader_ref = leader_ref?;
 
-        let mut missing_mask = 0u128;
+        let mut missing_mask = AuthoritySet::default();
         if !self.dag_state.is_data_available(leader_ref) {
-            missing_mask |= 1u128 << leader_ref.authority;
+            missing_mask.insert(leader_ref.authority);
         }
 
         let leader_block = self
@@ -791,18 +788,18 @@ impl<H: BlockHandler> Core<H> {
 
         for ack_ref in leader_block.acknowledgments() {
             if !self.dag_state.is_data_available(&ack_ref) {
-                missing_mask |= 1u128 << ack_ref.authority;
+                missing_mask.insert(ack_ref.authority);
             }
         }
 
         Some(missing_mask)
     }
 
-    fn starfish_speed_excluded_ack_authors(&self, clock_round: RoundNumber) -> u128 {
+    fn starfish_speed_excluded_ack_authors(&self, clock_round: RoundNumber) -> AuthoritySet {
         if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed
             || self.committee.elect_leader(clock_round) != self.authority
         {
-            return 0;
+            return AuthoritySet::default();
         }
 
         self.dag_state.starfish_speed_excluded_ack_authorities()
@@ -810,16 +807,16 @@ impl<H: BlockHandler> Core<H> {
 
     fn filter_starfish_speed_leader_acknowledgments(
         &self,
-        excluded_authors: u128,
+        excluded_authors: AuthoritySet,
         acknowledgment_references: Vec<BlockReference>,
     ) -> Vec<BlockReference> {
-        if excluded_authors == 0 {
+        if excluded_authors.is_empty() {
             return acknowledgment_references;
         }
 
         let (to_include, to_requeue): (Vec<_>, Vec<_>) = acknowledgment_references
             .into_iter()
-            .partition(|ack_ref| excluded_authors & (1u128 << ack_ref.authority) == 0);
+            .partition(|ack_ref| !excluded_authors.contains(ack_ref.authority));
         if !to_requeue.is_empty() {
             self.dag_state.requeue_pending_acknowledgment(to_requeue);
         }
@@ -1142,8 +1139,8 @@ impl<H: BlockHandler> Core<H> {
 
         let own_block = OwnBlockData {
             block: block_data,
-            authority_index_start: authority_bounds[block_id] as AuthorityIndex,
-            authority_index_end: authority_bounds[block_id + 1] as AuthorityIndex,
+            authority_index_start: authority_bounds[block_id],
+            authority_index_end: authority_bounds[block_id + 1],
         };
         self.last_own_block[block_id] = own_block.clone();
         self.dag_state.insert_own_block(own_block.clone());

@@ -8,7 +8,10 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::{
     data::Data,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock, format_authority_round},
+    types::{
+        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        format_authority_round,
+    },
 };
 
 pub mod base_committer;
@@ -28,7 +31,7 @@ pub struct VoterInfo {
     pub voters: AHashSet<(BlockReference, BlockReference)>,
     /// strong-vote mask for each voter block (populated for StarfishSpeed,
     /// empty otherwise).
-    pub voter_strong_votes: AHashMap<BlockReference, Option<u128>>,
+    pub voter_strong_votes: AHashMap<BlockReference, Option<AuthoritySet>>,
 }
 
 /// Metastate for Starfish-Speed committed leader slots.

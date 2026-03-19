@@ -194,7 +194,7 @@ NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-speed \
 
 | Variable | Default | Description |
 |---|---|---|
-| `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 128) |
+| `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 256) |
 | `DESIRED_TPS` | 1000 | Target transactions per second |
 | `CONSENSUS` | starfish-speed | Protocol: `starfish`, `starfish-speed`, `starfish-bls`, `sailfish-pp`, `cordial-miners`, `mysticeti` |
 | `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |

@@ -18,7 +18,7 @@ use crate::{
     crypto::{self, SignatureBytes, Signer},
     metrics::Metrics,
     types::{
-        AuthorityIndex, BlockReference, CertMessage, CertMessageKind, RoundNumber,
+        AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, RoundNumber,
         SailfishNoVoteCert, SailfishNoVoteMsg, SailfishTimeoutCert, SailfishTimeoutMsg, Stake,
     },
 };
@@ -100,7 +100,7 @@ impl SailfishServiceHandle {
 /// (2f+1 stake) is reached. Used for both timeout and no-vote certificates.
 struct SignedQuorumAggregator {
     stake: Stake,
-    seen: u128,
+    seen: AuthoritySet,
     signatures: Vec<(AuthorityIndex, SignatureBytes)>,
     formed: bool,
 }
@@ -109,7 +109,7 @@ impl SignedQuorumAggregator {
     fn new() -> Self {
         Self {
             stake: 0,
-            seen: 0,
+            seen: AuthoritySet::default(),
             signatures: Vec::new(),
             formed: false,
         }
@@ -126,11 +126,10 @@ impl SignedQuorumAggregator {
         if self.formed {
             return false;
         }
-        let mask = 1u128 << sender;
-        if self.seen & mask != 0 {
+        if self.seen.contains(sender) {
             return false;
         }
-        self.seen |= mask;
+        self.seen.insert(sender);
         self.stake += committee.get_stake(sender).unwrap_or(0);
         self.signatures.push((sender, signature));
         if self.stake >= committee.quorum_threshold() {

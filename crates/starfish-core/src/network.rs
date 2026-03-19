@@ -30,8 +30,8 @@ use crate::{
     runtime::JoinHandle,
     stat::HistogramSender,
     types::{
-        AuthorityIndex, BlockReference, CertMessage, CertMessageKind, PartialSig, ProvableShard,
-        RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, PartialSig,
+        ProvableShard, RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, VerifiedBlock,
     },
 };
 
@@ -98,10 +98,10 @@ pub struct BlockBatch {
     pub shards: Vec<ShardPayload>,
     /// Bitmask: which authorities' headers would be useful from the receiving
     /// peer.
-    pub useful_headers_authors: u128,
+    pub useful_headers_authors: AuthoritySet,
     /// Bitmask: which authorities' shards would be useful from the receiving
     /// peer.
-    pub useful_shards_authors: u128,
+    pub useful_shards_authors: AuthoritySet,
 }
 
 impl BlockBatch {
@@ -114,8 +114,8 @@ impl BlockBatch {
             full_blocks: blocks,
             headers: Vec::new(),
             shards: Vec::new(),
-            useful_headers_authors: 0,
-            useful_shards_authors: 0,
+            useful_headers_authors: AuthoritySet::default(),
+            useful_shards_authors: AuthoritySet::default(),
         }
     }
 
@@ -127,8 +127,8 @@ impl BlockBatch {
             full_blocks: Vec::new(),
             headers: Vec::new(),
             shards,
-            useful_headers_authors: 0,
-            useful_shards_authors: 0,
+            useful_headers_authors: AuthoritySet::default(),
+            useful_shards_authors: AuthoritySet::default(),
         }
     }
 
