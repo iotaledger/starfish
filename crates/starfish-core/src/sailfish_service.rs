@@ -530,7 +530,7 @@ mod tests {
     use crate::crypto;
 
     fn make_committee(n: usize) -> Arc<Committee> {
-        Committee::new_test(vec![1; n])
+        Committee::new_for_benchmarks(n)
     }
 
     fn test_signer(authority: AuthorityIndex) -> Signer {
