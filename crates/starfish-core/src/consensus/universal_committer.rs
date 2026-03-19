@@ -296,7 +296,8 @@ impl UniversalCommitter {
                     .has_vertex_certificate(leader_block.reference())
             })
             .filter(|leader_block| {
-                let support = self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
+                let support =
+                    self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
                 let delivered_support = self.delivered_supporting_stake_for_sailfish(
                     leader_block.reference(),
                     support_round,
@@ -529,8 +530,12 @@ mod tests {
         let dag_state = open_test_dag_state_for("sailfish-pp", 0);
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
-        let (metrics, _reporter) =
-            Metrics::new(&registry, Some(committee.as_ref()), Some("sailfish-pp"), None);
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("sailfish-pp"),
+            None,
+        );
 
         let leader = make_full_block(1, 1, vec![BlockReference::new_test(1, 0)]);
         let leader_ref = *leader.reference();
@@ -547,8 +552,7 @@ mod tests {
             *supporter_b.reference(),
         ]);
 
-        let mut committer =
-            UniversalCommitterBuilder::new(committee, dag_state, metrics).build();
+        let mut committer = UniversalCommitterBuilder::new(committee, dag_state, metrics).build();
 
         let decided = committer.try_commit(BlockReference::new_test(0, 0));
         assert!(

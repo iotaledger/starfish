@@ -1339,18 +1339,23 @@ impl VerifiedBlock {
                     } else {
                         let sf = self.header.sailfish().ok_or_else(|| {
                             eyre::eyre!(
-                                "SailfishPlusPlus block missing timeout cert because previous-round leader {prev_leader} is not referenced"
+                                "SailfishPlusPlus block missing timeout cert \
+                                 because previous-round leader \
+                                 {prev_leader} is not referenced"
                             )
                         })?;
                         ensure!(
                             sf.timeout_cert.is_some(),
-                            "SailfishPlusPlus block missing timeout cert because previous-round leader {} is not referenced",
+                            "SailfishPlusPlus block missing timeout cert \
+                             because previous-round leader {} is not referenced",
                             prev_leader
                         );
                         if self.authority() == committee.elect_leader(round) {
                             ensure!(
                                 sf.no_vote_cert.is_some(),
-                                "SailfishPlusPlus leader block missing no-vote cert because previous-round leader {} is not referenced",
+                                "SailfishPlusPlus leader block missing \
+                                 no-vote cert because previous-round \
+                                 leader {} is not referenced",
                                 prev_leader
                             );
                         }
@@ -2185,8 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_sailfish_leader_block_with_timeout_and_no_vote_certs_when_previous_leader_is_missing()
-     {
+    fn verifies_sailfish_leader_with_timeout_no_vote_certs_when_prev_leader_missing() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let leader = committee.elect_leader(3);

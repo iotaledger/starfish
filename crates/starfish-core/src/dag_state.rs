@@ -309,8 +309,9 @@ struct DagStateInner {
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
     precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
     /// Per-authority active RBC vertex certificates (SailfishPlusPlus).
-    /// A vertex is active only once its direct parents are also active-certified
-    /// (or genesis), making the usable certified DAG ancestor-closed.
+    /// A vertex is active only once its direct parents are also
+    /// active-certified (or genesis), making the usable certified DAG
+    /// ancestor-closed.
     vertex_certificates: Vec<BTreeSet<BlockReference>>,
     /// Preliminary SailfishPlusPlus local certifications that are waiting for
     /// one or more direct parents to become active-certified.
@@ -2517,8 +2518,7 @@ impl DagStateInner {
             if parent.round == 0 || parent.round + 1 != block.round() {
                 continue;
             }
-            let reached = self
-                .inferred_vertex_support[parent.authority as usize]
+            let reached = self.inferred_vertex_support[parent.authority as usize]
                 .entry(*parent)
                 .or_default()
                 .add(supporter, committee);
@@ -3384,16 +3384,25 @@ mod tests {
     #[test]
     fn batch_vertex_certification_updates_quorum_view() {
         let dag_state = open_test_dag_state_for("sailfish-pp", 0);
-        let certified = vec![
-            BlockReference::new_test(0, 4),
-            BlockReference::new_test(1, 4),
-            BlockReference::new_test(2, 4),
-        ];
+        let blocks: Vec<_> = (0..3)
+            .map(|auth| {
+                make_full_block(
+                    auth,
+                    1,
+                    vec![BlockReference::new_test(auth, 0)],
+                    ConsensusProtocol::SailfishPlusPlus,
+                )
+            })
+            .collect();
+        let certified: Vec<_> = blocks.iter().map(|b| *b.reference()).collect();
+        for block in blocks {
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        }
 
         dag_state.mark_vertices_certified(&certified);
 
-        assert!(dag_state.certified_parent_quorum(4));
-        assert!(!dag_state.certified_parent_quorum(5));
+        assert!(dag_state.certified_parent_quorum(1));
+        assert!(!dag_state.certified_parent_quorum(2));
     }
 
     #[test]
@@ -3449,7 +3458,12 @@ mod tests {
             ConsensusProtocol::SailfishPlusPlus,
         );
         let ancestor_ref = *ancestor.reference();
-        let target = make_full_block(1, 2, vec![ancestor_ref], ConsensusProtocol::SailfishPlusPlus);
+        let target = make_full_block(
+            1,
+            2,
+            vec![ancestor_ref],
+            ConsensusProtocol::SailfishPlusPlus,
+        );
         let target_ref = *target.reference();
         let supporter_a =
             make_full_block(0, 3, vec![target_ref], ConsensusProtocol::SailfishPlusPlus);
