@@ -2831,7 +2831,9 @@ impl DagStateInner {
                     })
                 })
             })
-            .filter(|(r, known_by)| (*known_by & peer_bit).is_empty() && !sent.contains(r) && filter(r))
+            .filter(|(r, known_by)| {
+                (*known_by & peer_bit).is_empty() && !sent.contains(r) && filter(r)
+            })
             .map(|(r, _)| (r, r.round))
             .collect();
         candidates.sort_by_key(|(_, round)| *round);
@@ -3699,7 +3701,11 @@ mod tests {
             DataSource::BlockBundleStreaming,
         );
 
-        assert!(dag_state.starfish_speed_excluded_ack_authorities().is_empty());
+        assert!(
+            dag_state
+                .starfish_speed_excluded_ack_authorities()
+                .is_empty()
+        );
     }
 
     #[test]

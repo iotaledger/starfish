@@ -304,11 +304,7 @@ impl BaseCommitter {
                 .iter()
                 .filter(|r| {
                     voter_info.voters.contains(&(leader_ref, **r))
-                        && voter_info
-                            .voter_strong_votes
-                            .get(r)
-                            .copied()
-                            .flatten()
+                        && voter_info.voter_strong_votes.get(r).copied().flatten()
                             == Some(AuthoritySet::default())
                 })
                 .map(|r| r.authority),
