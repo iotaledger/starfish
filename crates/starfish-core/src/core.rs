@@ -746,7 +746,8 @@ impl<H: BlockHandler> Core<H> {
             )),
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => None,
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiCompress => None,
         }
     }
 

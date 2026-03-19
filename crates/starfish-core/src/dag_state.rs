@@ -101,6 +101,7 @@ pub enum ConsensusProtocol {
     StarfishSpeed,
     StarfishBls,
     SailfishPlusPlus,
+    MysticetiCompress,
 }
 
 impl ConsensusProtocol {
@@ -112,6 +113,7 @@ impl ConsensusProtocol {
             "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
             "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
             "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
+            "mysticeti-compress" => ConsensusProtocol::MysticetiCompress,
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -129,13 +131,26 @@ impl ConsensusProtocol {
         matches!(self, ConsensusProtocol::SailfishPlusPlus)
     }
 
+    pub fn is_mysticeti_compress(self) -> bool {
+        matches!(self, ConsensusProtocol::MysticetiCompress)
+    }
+
+    /// Protocols that use a dual dirty/clean DAG with vertex certification.
+    pub fn uses_dual_dag(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::SailfishPlusPlus | ConsensusProtocol::MysticetiCompress
+        )
+    }
+
     pub fn default_dissemination_mode(self) -> DisseminationMode {
         match self {
             ConsensusProtocol::Mysticeti | ConsensusProtocol::SailfishPlusPlus => {
                 DisseminationMode::Pull
             }
-            ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
-            ConsensusProtocol::Starfish
+            ConsensusProtocol::MysticetiCompress
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
         }
@@ -610,6 +625,9 @@ impl DagState {
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
             ConsensusProtocol::SailfishPlusPlus => {
                 tracing::info!("Starting Sailfish++ protocol")
+            }
+            ConsensusProtocol::MysticetiCompress => {
+                tracing::info!("Starting MysticetiCompress protocol")
             }
         }
         let dag_state = Self {
@@ -3295,7 +3313,8 @@ mod tests {
         let merkle_root = match consensus_protocol {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => {
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiCompress => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
@@ -3329,7 +3348,8 @@ mod tests {
         let merkle_root = match consensus_protocol {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => {
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiCompress => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
