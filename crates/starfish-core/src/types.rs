@@ -779,6 +779,7 @@ impl VerifiedBlock {
             strong_vote: None,
             bls: None,
             sailfish: None,
+            unprovable_certificate: None,
             serialized: None,
         };
         let mut block = Self {
