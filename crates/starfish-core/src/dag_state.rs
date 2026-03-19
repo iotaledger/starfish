@@ -145,11 +145,12 @@ impl ConsensusProtocol {
 
     pub fn default_dissemination_mode(self) -> DisseminationMode {
         match self {
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::SailfishPlusPlus => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::Bluestreak => {
                 DisseminationMode::Pull
             }
-            ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::CordialMiners
+            ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
