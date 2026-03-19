@@ -440,7 +440,13 @@ impl ConnectionKnowledge {
         limit: usize,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        self.take_from_cursors(true, limit, Some(excluded_authority), !AuthoritySet::default(), None)
+        self.take_from_cursors(
+            true,
+            limit,
+            Some(excluded_authority),
+            !AuthoritySet::default(),
+            None,
+        )
     }
 
     /// Drain the oldest unknown headers, but only for authorities currently
@@ -459,7 +465,13 @@ impl ConnectionKnowledge {
         round: RoundNumber,
         excluded_authority: AuthorityIndex,
     ) -> Vec<BlockReference> {
-        self.take_from_exact_round(true, limit, round, Some(excluded_authority), !AuthoritySet::default())
+        self.take_from_exact_round(
+            true,
+            limit,
+            round,
+            Some(excluded_authority),
+            !AuthoritySet::default(),
+        )
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block
@@ -621,7 +633,10 @@ impl ConnectionKnowledge {
     /// Build bitmasks indicating which authorities' headers/shards we'd find
     /// useful FROM this peer. Used when constructing a batch to send to this
     /// peer.
-    pub fn useful_authors_bitmasks(&self, current_round: RoundNumber) -> (AuthoritySet, AuthoritySet) {
+    pub fn useful_authors_bitmasks(
+        &self,
+        current_round: RoundNumber,
+    ) -> (AuthoritySet, AuthoritySet) {
         (
             Self::recent_authors_bitmask(&self.last_useful_headers_from_peer_round, current_round),
             Self::recent_authors_bitmask(&self.last_useful_shards_from_peer_round, current_round),
@@ -630,7 +645,10 @@ impl ConnectionKnowledge {
 
     /// Build bitmasks indicating which authorities' headers/shards are still
     /// useful TO this peer. This gates which extra parts we piggyback.
-    pub fn useful_authors_to_peer_bitmasks(&self, current_round: RoundNumber) -> (AuthoritySet, AuthoritySet) {
+    pub fn useful_authors_to_peer_bitmasks(
+        &self,
+        current_round: RoundNumber,
+    ) -> (AuthoritySet, AuthoritySet) {
         (
             Self::recent_authors_bitmask(&self.last_useful_headers_to_peer_round, current_round),
             Self::recent_authors_bitmask(&self.last_useful_shards_to_peer_round, current_round),

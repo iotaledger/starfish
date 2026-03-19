@@ -1448,9 +1448,7 @@ fn verify_signed_quorum(
     Ok(())
 }
 
-#[derive(
-    Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug,
-)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
 pub struct AuthoritySet([u128; 2]);
 
 pub type TimestampNs = u64;
