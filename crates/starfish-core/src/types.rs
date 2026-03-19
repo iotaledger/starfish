@@ -283,6 +283,9 @@ pub struct BlockHeader {
     /// Sailfish++ control certificates (timeout/no-vote). None for all other
     /// protocols.
     pub(crate) sailfish: Option<Box<SailfishFields>>,
+    /// MysticetiCompress unprovable certificate: optional reference to a
+    /// leader at round r-2 certified by 2f+1 votes at r-1.
+    pub(crate) unprovable_certificate: Option<BlockReference>,
 
     // -- Cache (not serialized) -----------------------------------------------
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
@@ -413,6 +416,10 @@ impl BlockHeader {
             .as_ref()
             .map(|b| b.acknowledgment_signatures.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn unprovable_certificate(&self) -> Option<&BlockReference> {
+        self.unprovable_certificate.as_ref()
     }
 
     pub fn sailfish(&self) -> Option<&SailfishFields> {
@@ -728,6 +735,7 @@ impl VerifiedBlock {
             strong_vote,
             bls: bls.map(Box::new),
             sailfish: sailfish.map(Box::new),
+            unprovable_certificate: None,
             serialized: None,
         };
 
@@ -964,6 +972,10 @@ impl VerifiedBlock {
 
     pub fn is_strong_blame(&self) -> bool {
         self.header.is_strong_blame()
+    }
+
+    pub fn unprovable_certificate(&self) -> Option<&BlockReference> {
+        self.header.unprovable_certificate()
     }
 
     pub fn sailfish(&self) -> Option<&SailfishFields> {
@@ -1975,6 +1987,7 @@ mod tests {
             strong_vote: None,
             bls: None,
             sailfish: None,
+            unprovable_certificate: None,
             serialized: None,
         };
 
