@@ -115,7 +115,7 @@ pub enum Operation {
 
         /// Consensus to deploy. Available options:
         /// starfish | starfish-speed | starfish-bls | mysticeti |
-        /// cordial-miners
+        /// cordial-miners | bluestreak
         #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
         consensus: String,
 

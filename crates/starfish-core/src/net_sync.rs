@@ -505,7 +505,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
-                | ConsensusProtocol::MysticetiCompress => {
+                | ConsensusProtocol::Bluestreak => {
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
@@ -1606,6 +1606,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         loop {
             let notified = inner.threshold_clock_notify.notified();
             let round = if inner.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+                || inner.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak
             {
                 inner.dag_state.proposal_round().saturating_sub(1)
             } else {

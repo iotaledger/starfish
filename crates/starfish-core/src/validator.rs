@@ -310,9 +310,15 @@ mod smoke_tests {
     #[test_case("starfish-speed", 80)]
     #[test_case("starfish-bls", 100)]
     #[test_case("sailfish++", 120)]
+    #[test_case("bluestreak", 140)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
+    }
+
+    #[tokio::test]
+    async fn validator_commit_bluestreak_basic() {
+        run_commit_test("bluestreak", 150).await;
     }
 
     async fn run_sync_test(consensus: &str, port_offset: u16) {
@@ -402,6 +408,7 @@ mod smoke_tests {
     #[test_case("starfish-speed", 180)]
     #[test_case("starfish-bls", 200)]
     #[test_case("sailfish++", 220)]
+    #[test_case("bluestreak", 260)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
@@ -465,6 +472,7 @@ mod smoke_tests {
     #[test_case("starfish-speed", 280)]
     #[test_case("starfish-bls", 300)]
     #[test_case("sailfish++", 320)]
+    #[test_case("bluestreak", 380)]
     #[tokio::test]
     async fn validator_crash_faults(consensus: &str, port_offset: u16) {
         run_crash_faults_test(consensus, port_offset).await;

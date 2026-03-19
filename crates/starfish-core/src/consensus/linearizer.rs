@@ -100,6 +100,7 @@ impl Linearizer {
         let mut to_commit = Vec::new();
         let leader_block_ref = *leader_block.reference();
         let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
+        let follow_unprovable = dag_state.consensus_protocol == ConsensusProtocol::Bluestreak;
 
         assert!(self.committed.insert(leader_block_ref));
         let mut current_level = vec![leader_block];
@@ -113,6 +114,13 @@ impl Linearizer {
                 for reference in x.block_references() {
                     if reference.round >= min_round && self.committed.insert(*reference) {
                         next_refs.push(*reference);
+                    }
+                }
+                if follow_unprovable {
+                    if let Some(cert_ref) = x.unprovable_certificate() {
+                        if cert_ref.round >= min_round && self.committed.insert(*cert_ref) {
+                            next_refs.push(*cert_ref);
+                        }
                     }
                 }
             }
@@ -260,7 +268,7 @@ impl Linearizer {
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
-                | ConsensusProtocol::MysticetiCompress => {
+                | ConsensusProtocol::Bluestreak => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
             };

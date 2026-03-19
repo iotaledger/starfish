@@ -86,7 +86,7 @@ impl BroadcasterParameters {
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::MysticetiCompress => Self {
+            | ConsensusProtocol::Bluestreak => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
                 batch_shard_size: committee_size * committee_size,
@@ -419,7 +419,7 @@ where
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => {
+            | ConsensusProtocol::Bluestreak => {
                 let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
 
                 let mut blocks = Vec::new();
@@ -824,7 +824,7 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
         ConsensusProtocol::CordialMiners
         | ConsensusProtocol::Mysticeti
         | ConsensusProtocol::SailfishPlusPlus
-        | ConsensusProtocol::MysticetiCompress => PushOtherBlocksFormat::FullBlocks,
+        | ConsensusProtocol::Bluestreak => PushOtherBlocksFormat::FullBlocks,
     }
 }
 
