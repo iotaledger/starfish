@@ -3,7 +3,7 @@
 #----------------------------------------------------------------------
 # Configuration Parameters
 #----------------------------------------------------------------------
-# Recommend < physical cores. Hard limit is 128
+# Recommend < physical cores. Hard limit is 256
 NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
@@ -39,6 +39,8 @@ fi
 #ADVERSARIAL_LATENCY=1
 DATA_DIR="scripts/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
+COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-starfish-dryrun}
+COMPOSE_NETWORK_NAME="${COMPOSE_PROJECT_NAME}_starfish-net"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
 CLEAN_MONITORING=${CLEAN_MONITORING:-0}
@@ -46,9 +48,9 @@ CLEAN_MONITORING=${CLEAN_MONITORING:-0}
 PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
 GRAFANA_PORT=${GRAFANA_PORT:-3001}
 
-# Docker network
-BASE_IP="172.28.0.10"
-SUBNET="172.28.0.0/24"
+# Docker network. If SUBNET is not set, pick a free /23 automatically.
+BASE_IP=${BASE_IP:-}
+SUBNET=${SUBNET:-}
 
 TPS_PER_NODE=$(echo "$DESIRED_TPS / $NUM_NODES" | bc)
 
@@ -60,6 +62,129 @@ GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)
 RESET=$(tput sgr0)
+
+ipv4_add() {
+    local ip="$1"
+    local offset="$2"
+    local a b c d
+    IFS=. read -r a b c d <<< "$ip"
+    local value=$(( (a << 24) + (b << 16) + (c << 8) + d + offset ))
+    if (( value < 0 || value > 4294967295 )); then
+        return 1
+    fi
+    printf "%d.%d.%d.%d" \
+        $(( (value >> 24) & 255 )) \
+        $(( (value >> 16) & 255 )) \
+        $(( (value >> 8) & 255 )) \
+        $(( value & 255 ))
+}
+
+derive_base_ip_from_subnet() {
+    local subnet_ip="${1%/*}"
+    local a b c d
+    IFS=. read -r a b c d <<< "$subnet_ip"
+    printf "%d.%d.%d.10" "$a" "$b" "$c"
+}
+
+derive_subnet_from_base_ip() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    printf "%d.%d.%d.0/23" "$a" "$b" $(( c & 254 ))
+}
+
+pick_available_subnet() {
+    local probe_network="${COMPOSE_PROJECT_NAME}-subnet-probe-$$"
+    local candidate
+    for candidate in \
+        172.28.0.0/23 \
+        172.29.0.0/23 \
+        172.30.0.0/23 \
+        172.31.0.0/23 \
+        172.31.2.0/23
+    do
+        if docker network create --driver bridge --subnet "$candidate" \
+            "$probe_network" >/dev/null 2>&1
+        then
+            docker network rm "$probe_network" >/dev/null 2>&1 || true
+            SUBNET="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -z "$SUBNET" ]; then
+    if [ -n "$BASE_IP" ]; then
+        SUBNET=$(derive_subnet_from_base_ip "$BASE_IP")
+    elif pick_available_subnet; then
+        BASE_IP=$(derive_base_ip_from_subnet "$SUBNET")
+    else
+        echo -e \
+            "${RED}Could not find a free /23 Docker subnet. Set SUBNET and BASE_IP explicitly.${RESET}"
+        exit 1
+    fi
+fi
+
+if [ -z "$BASE_IP" ]; then
+    BASE_IP=$(derive_base_ip_from_subnet "$SUBNET")
+fi
+
+NETWORK_BASE_IP="${SUBNET%/*}"
+PROMETHEUS_IP=$(ipv4_add "$NETWORK_BASE_IP" 2)
+GRAFANA_IP=$(ipv4_add "$NETWORK_BASE_IP" 3)
+NODE_EXPORTER_IP=$(ipv4_add "$NETWORK_BASE_IP" 4)
+CADVISOR_IP=$(ipv4_add "$NETWORK_BASE_IP" 5)
+
+if (( NUM_NODES < 1 || NUM_NODES > 256 )); then
+    echo -e \
+        "${RED}NUM_NODES must be between 1 and 256 (got ${NUM_NODES})${RESET}"
+    exit 1
+fi
+
+if ! LAST_NODE_IP=$(ipv4_add "$BASE_IP" $((NUM_NODES - 1))); then
+    echo -e \
+        "${RED}BASE_IP ${BASE_IP} cannot accommodate ${NUM_NODES} validators${RESET}"
+    exit 1
+fi
+
+docker_compose() {
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+force_remove_stale_nodes() {
+    local i
+    for ((i=0; i<256; i++)); do
+        docker rm -f "node-$i" >/dev/null 2>&1 || true
+    done
+}
+
+force_remove_stale_network_endpoints() {
+    local containers
+    force_remove_stale_nodes
+    containers=$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' \
+        "$COMPOSE_NETWORK_NAME" 2>/dev/null || true)
+    if [ -n "$containers" ]; then
+        echo -e \
+            "${YELLOW}Force-removing stale containers on ${COMPOSE_NETWORK_NAME}:${RESET} ${containers}"
+        for container in $containers; do
+            docker rm -f "$container" >/dev/null 2>&1 || true
+        done
+    fi
+    docker network rm "$COMPOSE_NETWORK_NAME" >/dev/null 2>&1 || true
+}
+
+compose_down() {
+    local down_args=("$@")
+    local attempt
+    for attempt in 1 2 3; do
+        if docker_compose down "${down_args[@]}" --remove-orphans; then
+            return 0
+        fi
+        force_remove_stale_network_endpoints
+        sleep 1
+    done
+    return 1
+}
 
 if (( NUM_BYZANTINE_NODES > 0 )); then
     case "$BYZANTINE_STRATEGY" in
@@ -99,16 +224,16 @@ cleanup() {
         nodes="$nodes node-$i"
     done
     # Stop all nodes at once with short timeout
-    docker compose -f "$COMPOSE_FILE" \
+    docker_compose \
         stop -t 1 $nodes 2>/dev/null || true
-    docker compose -f "$COMPOSE_FILE" \
+    docker_compose \
         rm -f $nodes 2>/dev/null || true
     echo -e \
         "${GREEN}Monitoring still running at:" \
         "${CYAN}http://localhost:${GRAFANA_PORT}${RESET}"
     echo -e \
         "${YELLOW}To stop everything:" \
-        "docker compose -f $COMPOSE_FILE down${RESET}"
+        "docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE down${RESET}"
 }
 
 cleanup_interrupt() {
@@ -123,12 +248,11 @@ trap cleanup_interrupt INT
 # Cleanup Previous Run
 #----------------------------------------------------------------------
 if [ -f "$COMPOSE_FILE" ]; then
+    force_remove_stale_nodes
     if [ "$REMOVE_VOLUMES" = 1 ]; then
-        docker compose -f "$COMPOSE_FILE" down -v \
-            --remove-orphans 2>/dev/null || true
+        compose_down -v 2>/dev/null || true
     else
-        docker compose -f "$COMPOSE_FILE" down \
-            --remove-orphans 2>/dev/null || true
+        compose_down 2>/dev/null || true
     fi
 fi
 
@@ -198,11 +322,11 @@ scrape_configs:
     static_configs:
 EOH
     for ((i=0; i<NUM_NODES; i++)); do
-        LAST_OCTET=$((${BASE_IP##*.} + i))
         METRICS_PORT=$((1500 + NUM_NODES + i))
         NODE_NAME="node-$i"
+        NODE_IP=$(ipv4_add "$BASE_IP" "$i")
         cat <<EOT
-      - targets: ['172.28.0.$LAST_OCTET:$METRICS_PORT']
+      - targets: ['$NODE_IP:$METRICS_PORT']
         labels:
           node: '$NODE_NAME'
 EOT
@@ -245,7 +369,7 @@ services:
       - prometheus_data:/prometheus
     networks:
       starfish-net:
-        ipv4_address: 172.28.0.2
+        ipv4_address: $PROMETHEUS_IP
     restart: unless-stopped
 
   grafana:
@@ -267,7 +391,7 @@ services:
       - ${GD}/grafana-dashboard.json:/var/lib/grafana/dashboards/grafana-dashboard.json:ro
     networks:
       starfish-net:
-        ipv4_address: 172.28.0.3
+        ipv4_address: $GRAFANA_IP
     restart: unless-stopped
 
   node-exporter:
@@ -284,7 +408,7 @@ services:
       - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
     networks:
       starfish-net:
-        ipv4_address: 172.28.0.4
+        ipv4_address: $NODE_EXPORTER_IP
     restart: unless-stopped
 
   cadvisor:
@@ -295,15 +419,14 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
     networks:
       starfish-net:
-        ipv4_address: 172.28.0.5
+        ipv4_address: $CADVISOR_IP
     restart: unless-stopped
 EOH
 
     # Node services
     BYZANTINE_COUNT=0
     for ((i=0; i<NUM_NODES; i++)); do
-        LAST_OCTET=$((${BASE_IP##*.} + i))
-        NODE_IP="172.28.0.$LAST_OCTET"
+        NODE_IP=$(ipv4_add "$BASE_IP" "$i")
 
         if (( i % 3 == 0 && BYZANTINE_COUNT < NUM_BYZANTINE_NODES )); then
             ((BYZANTINE_COUNT++))
@@ -401,7 +524,10 @@ if (( NUM_BYZANTINE_NODES > 0 )); then
 fi
 echo -e "${GREEN}─────────────────────────────────────${RESET}"
 
-docker compose -f "$COMPOSE_FILE" up -d || {
+force_remove_stale_nodes
+force_remove_stale_network_endpoints
+
+docker_compose up -d || {
     echo -e "${RED}Failed to start services${RESET}"
     exit 1
 }
@@ -423,7 +549,7 @@ sleep "$TEST_TIME"
 # Save logs before cleanup
 echo -e "${CYAN}Saving node logs...${RESET}"
 for ((i=0; i<NUM_NODES; i++)); do
-    docker compose -f "$COMPOSE_FILE" \
+    docker_compose \
         logs "node-$i" \
         > "$DATA_DIR/node_${i}.log" 2>&1
 done

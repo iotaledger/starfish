@@ -91,7 +91,7 @@ enum Operation {
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
-        /// Base IP for validators (IPs assigned as base_ip+0, base_ip+1, ...).
+        /// Base IP for validators (assigned by incrementing the IPv4 address).
         /// Default: 127.0.0.1
         #[clap(long, value_name = "IP")]
         base_ip: Option<IpAddr>,
@@ -542,14 +542,8 @@ async fn dryrun(
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
         Some(IpAddr::V4(v4)) => (0..committee_size)
-            .map(|i| {
-                let mut octets = v4.octets();
-                octets[3] = octets[3]
-                    .checked_add(i as u8)
-                    .expect("base-ip overflow: too many validators for last octet");
-                IpAddr::V4(Ipv4Addr::from(octets))
-            })
-            .collect(),
+            .map(|i| ipv4_add_offset(v4, i).map(IpAddr::V4))
+            .collect::<Result<_>>()?,
         Some(_) => eyre::bail!("--base-ip must be an IPv4 address"),
         None => vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size],
     };
@@ -626,6 +620,14 @@ async fn dryrun(
     Ok(())
 }
 
+fn ipv4_add_offset(base: Ipv4Addr, offset: usize) -> Result<Ipv4Addr> {
+    let offset = u32::try_from(offset).context("validator count exceeds IPv4 offset range")?;
+    let next = u32::from(base)
+        .checked_add(offset)
+        .ok_or_else(|| eyre::eyre!("base-ip overflow: too many validators for IPv4 range"))?;
+    Ok(Ipv4Addr::from(next))
+}
+
 fn parse_dissemination_mode(mode: &str) -> Result<DisseminationMode> {
     match mode {
         "protocol-default" => Ok(DisseminationMode::ProtocolDefault),
@@ -671,4 +673,26 @@ pub fn default_table_format() -> format::TableFormat {
         )
         .padding(1, 1)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::ipv4_add_offset;
+
+    #[test]
+    fn ipv4_add_offset_crosses_octet_boundary() {
+        let base = Ipv4Addr::new(172, 28, 0, 10);
+        assert_eq!(
+            ipv4_add_offset(base, 255).unwrap(),
+            Ipv4Addr::new(172, 28, 1, 9)
+        );
+    }
+
+    #[test]
+    fn ipv4_add_offset_errors_on_overflow() {
+        let base = Ipv4Addr::new(255, 255, 255, 255);
+        assert!(ipv4_add_offset(base, 1).is_err());
+    }
 }
