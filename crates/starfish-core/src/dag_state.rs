@@ -2526,7 +2526,7 @@ impl DagStateInner {
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
-        if self.consensus_protocol != ConsensusProtocol::SailfishPlusPlus || block.round() <= 1 {
+        if !self.consensus_protocol.uses_dual_dag() || block.round() <= 1 {
             return;
         }
 
