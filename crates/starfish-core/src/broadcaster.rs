@@ -30,7 +30,10 @@ use crate::{
     network::{BlockBatch, NetworkMessage, ShardPayload},
     runtime::{Handle, sleep},
     syncer::CommitObserver,
-    types::{AuthorityIndex, BlockReference, RoundNumber, VerifiedBlock, format_authority_index},
+    types::{
+        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        format_authority_index,
+    },
 };
 
 fn peer_can_serve_missing_data(
@@ -406,8 +409,8 @@ where
                         full_blocks: Vec::new(),
                         headers,
                         shards,
-                        useful_headers_authors: 0,
-                        useful_shards_authors: 0,
+                        useful_headers_authors: AuthoritySet::default(),
+                        useful_shards_authors: AuthoritySet::default(),
                     }))
                     .await
                     .ok()?;
@@ -776,8 +779,8 @@ where
 fn report_useful_authorities(
     metrics: &Metrics,
     peer: &str,
-    useful_headers: u128,
-    useful_shards: u128,
+    useful_headers: AuthoritySet,
+    useful_shards: AuthoritySet,
 ) {
     metrics
         .useful_authorities
@@ -807,8 +810,8 @@ struct PushBatchParts {
     own_blocks: Vec<Data<VerifiedBlock>>,
     other_refs: Vec<BlockReference>,
     shard_refs: Vec<BlockReference>,
-    useful_headers: u128,
-    useful_shards: u128,
+    useful_headers: AuthoritySet,
+    useful_shards: AuthoritySet,
 }
 
 fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
@@ -984,9 +987,9 @@ where
         )
     };
     // Full-block protocols do not advertise header/shard usefulness.
-    let useful_headers = 0;
-    let useful_shards = 0;
-    report_useful_authorities(metrics, &peer.to_string(), useful_headers, useful_shards);
+    let useful_headers = AuthoritySet::default();
+    let useful_shards = AuthoritySet::default();
+    report_useful_authorities(metrics, peer.as_str(), useful_headers, useful_shards);
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
@@ -1067,7 +1070,12 @@ where
                 }
             }
 
-            (other_refs, shard_refs, 0, 0)
+            (
+                other_refs,
+                shard_refs,
+                AuthoritySet::default(),
+                AuthoritySet::default(),
+            )
         }
         PushSelectionMode::Useful => {
             let ck = inner
@@ -1101,7 +1109,7 @@ where
                     if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
                         useful_shards
                     } else {
-                        0
+                        AuthoritySet::default()
                     },
                 )
             };
@@ -1150,7 +1158,7 @@ where
                 headers: Vec::new(),
                 shards: Vec::new(),
                 useful_headers_authors: plan.useful_headers,
-                useful_shards_authors: 0,
+                useful_shards_authors: AuthoritySet::default(),
             }
         }
         PushOtherBlocksFormat::HeadersAndShards => {
@@ -1192,12 +1200,13 @@ where
         &sent_to_peer,
         selection_mode,
     );
-    let peer_str = peer.to_string();
     report_useful_authorities(
         metrics,
-        &peer_str,
-        plan.as_ref().map_or(0, |p| p.useful_headers),
-        plan.as_ref().map_or(0, |p| p.useful_shards),
+        peer.as_str(),
+        plan.as_ref()
+            .map_or(AuthoritySet::default(), |p| p.useful_headers),
+        plan.as_ref()
+            .map_or(AuthoritySet::default(), |p| p.useful_shards),
     );
     let plan = plan?;
     if let Some(max_round) = plan.own_blocks.iter().map(|block| block.round()).max() {

@@ -183,7 +183,7 @@ impl BlockDigest {
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
         merkle_root: TransactionsCommitment,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -208,7 +208,7 @@ impl BlockDigest {
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -233,7 +233,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
     ) {
         authority.crypto_hash(hasher);
         round.crypto_hash(hasher);
@@ -247,7 +247,7 @@ impl BlockDigest {
         transactions_commitment.crypto_hash(hasher);
         // Conditional hashing: only hash when Some for backward compatibility.
         if let Some(mask) = strong_vote {
-            mask.crypto_hash(hasher);
+            CryptoHash::crypto_hash(&mask, hasher);
         }
     }
 }
@@ -311,6 +311,13 @@ impl CryptoHash for u64 {
 impl CryptoHash for u128 {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());
+    }
+}
+
+impl CryptoHash for AuthoritySet {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
+        state.update(&self.words()[0].to_be_bytes());
+        state.update(&self.words()[1].to_be_bytes());
     }
 }
 
@@ -453,7 +460,7 @@ impl Signer {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
-        strong_vote: Option<u128>,
+        strong_vote: Option<AuthoritySet>,
     ) -> SignatureBytes {
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(

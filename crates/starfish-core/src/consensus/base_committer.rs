@@ -9,7 +9,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
-    types::{AuthorityIndex, RoundNumber, VerifiedBlock, format_authority_round},
+    types::{AuthorityIndex, AuthoritySet, RoundNumber, VerifiedBlock, format_authority_round},
 };
 
 /// The consensus protocol operates in 'waves'. Each wave is
@@ -290,7 +290,7 @@ impl BaseCommitter {
     /// Check whether a single certifying-round block carries a StrongQC for the
     /// leader. A block carries StrongQC if its includes contain >=2f+1
     /// round-(r+1) blocks that both vote for the leader AND carry
-    /// a strong vote (`strong_vote == Some(0)`).
+    /// a strong vote (`strong_vote == Some(empty)`).
     fn carries_strong_qc(
         &self,
         certifying_block: &Data<VerifiedBlock>,
@@ -304,7 +304,12 @@ impl BaseCommitter {
                 .iter()
                 .filter(|r| {
                     voter_info.voters.contains(&(leader_ref, **r))
-                        && voter_info.voter_strong_votes.get(r).copied().flatten() == Some(0)
+                        && voter_info
+                            .voter_strong_votes
+                            .get(r)
+                            .copied()
+                            .flatten()
+                            == Some(AuthoritySet::default())
                 })
                 .map(|r| r.authority),
         )

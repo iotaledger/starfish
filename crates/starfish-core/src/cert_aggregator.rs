@@ -12,7 +12,7 @@ use ahash::AHashMap;
 
 use crate::{
     committee::Committee,
-    types::{BlockReference, CertMessage, CertMessageKind, RoundNumber, Stake},
+    types::{AuthoritySet, BlockReference, CertMessage, CertMessageKind, RoundNumber, Stake},
 };
 
 /// Events emitted by the aggregator when thresholds are crossed.
@@ -31,13 +31,13 @@ pub enum CertEvent {
 /// Per-block RBC aggregation state.
 struct BlockCertState {
     echo_stake: Stake,
-    echo_seen: u128,
+    echo_seen: AuthoritySet,
     vote_sent: bool,
     fast_delivered: bool,
     vote_stake: Stake,
-    vote_seen: u128,
+    vote_seen: AuthoritySet,
     ready_stake: Stake,
-    ready_seen: u128,
+    ready_seen: AuthoritySet,
     ready_sent: bool,
     certified: bool,
 }
@@ -46,13 +46,13 @@ impl BlockCertState {
     fn new() -> Self {
         Self {
             echo_stake: 0,
-            echo_seen: 0,
+            echo_seen: AuthoritySet::default(),
             vote_sent: false,
             fast_delivered: false,
             vote_stake: 0,
-            vote_seen: 0,
+            vote_seen: AuthoritySet::default(),
             ready_stake: 0,
-            ready_seen: 0,
+            ready_seen: AuthoritySet::default(),
             ready_sent: false,
             certified: false,
         }
@@ -93,11 +93,10 @@ impl CertificationAggregator {
             .entry(message.block_ref)
             .or_insert_with(BlockCertState::new);
         let sender = message.sender;
-        let mask = 1u128 << sender;
-        if state.echo_seen & mask != 0 {
+        if state.echo_seen.contains(sender) {
             return Vec::new();
         }
-        state.echo_seen |= mask;
+        state.echo_seen.insert(sender);
         let stake = self.committee.get_stake(sender).unwrap_or(0);
         state.echo_stake += stake;
 
@@ -137,11 +136,10 @@ impl CertificationAggregator {
             .entry(message.block_ref)
             .or_insert_with(BlockCertState::new);
         let sender = message.sender;
-        let mask = 1u128 << sender;
-        if state.vote_seen & mask != 0 {
+        if state.vote_seen.contains(sender) {
             return Vec::new();
         }
-        state.vote_seen |= mask;
+        state.vote_seen.insert(sender);
         let stake = self.committee.get_stake(sender).unwrap_or(0);
         state.vote_stake += stake;
 
@@ -164,11 +162,10 @@ impl CertificationAggregator {
             .entry(message.block_ref)
             .or_insert_with(BlockCertState::new);
         let sender = message.sender;
-        let mask = 1u128 << sender;
-        if state.ready_seen & mask != 0 {
+        if state.ready_seen.contains(sender) {
             return Vec::new();
         }
-        state.ready_seen |= mask;
+        state.ready_seen.insert(sender);
         let stake = self.committee.get_stake(sender).unwrap_or(0);
         state.ready_stake += stake;
 

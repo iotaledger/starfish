@@ -31,15 +31,15 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, BlockDigest, BlockReference, BlsAggregateCertificate, ProvableShard,
-        RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake, TransactionData,
-        VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
+        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
+        TransactionData, VerifiedBlock,
     },
 };
 
-/// Bitmask tracking which authorities know about a block. Supports up to 128
+/// Bitmask tracking which authorities know about a block. Supports up to 256
 /// authorities.
-type AuthorityBitmask = u128;
+type AuthorityBitmask = AuthoritySet;
 
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
 
@@ -218,7 +218,7 @@ type DagAuthorityMap =
 
 #[derive(Default)]
 struct StarfishSpeedLeaderRoundHints {
-    voter_masks: AHashMap<AuthorityIndex, u128>,
+    voter_masks: AHashMap<AuthorityIndex, AuthoritySet>,
     complaint_counts: Vec<u16>,
 }
 
@@ -230,11 +230,9 @@ impl StarfishSpeedLeaderRoundHints {
         }
     }
 
-    fn apply_mask_delta(&mut self, mask: u128, delta: i32) {
-        for (authority, count) in self.complaint_counts.iter_mut().enumerate() {
-            if mask & (1u128 << authority) == 0 {
-                continue;
-            }
+    fn apply_mask_delta(&mut self, mask: AuthoritySet, delta: i32) {
+        for authority in mask.present() {
+            let count = &mut self.complaint_counts[authority as usize];
             if delta > 0 {
                 *count = count.saturating_add(delta as u16);
             } else {
@@ -243,7 +241,7 @@ impl StarfishSpeedLeaderRoundHints {
         }
     }
 
-    fn update_vote(&mut self, voter: AuthorityIndex, mask: u128) {
+    fn update_vote(&mut self, voter: AuthorityIndex, mask: AuthoritySet) {
         if let Some(previous_mask) = self.voter_masks.insert(voter, mask) {
             self.apply_mask_delta(previous_mask, -1);
         }
@@ -347,8 +345,8 @@ impl DagState {
         starfish_speed_adaptive_acknowledgments: bool,
     ) -> RecoveredState {
         assert!(
-            committee.len() <= 128,
-            "Committee size {} exceeds AuthorityBitmask capacity (128)",
+            committee.len() <= 256,
+            "Committee size {} exceeds AuthorityBitmask capacity (256)",
             committee.len()
         );
         let store: Arc<dyn Store> = match storage_backend {
@@ -466,7 +464,7 @@ impl DagState {
                 inner.add_block(
                     block,
                     0,
-                    committee.len() as AuthorityIndex,
+                    committee.len(),
                     &mut bfs_buf,
                     &committee,
                     &mut activated,
@@ -516,7 +514,7 @@ impl DagState {
                 inner.add_block(
                     block,
                     0,
-                    committee.len() as AuthorityIndex,
+                    committee.len(),
                     &mut bfs_buf,
                     &committee,
                     &mut activated,
@@ -586,7 +584,7 @@ impl DagState {
         // On clean start (no blocks recovered), insert genesis into the DAG
         // and populate the threshold clock.
         if block_count == 0 {
-            let committee_len = committee.len() as AuthorityIndex;
+            let committee_len = committee.len();
             for block in &genesis {
                 inner
                     .threshold_clock
@@ -730,8 +728,8 @@ impl DagState {
     pub fn insert_block_bounds(
         &self,
         block: Data<VerifiedBlock>,
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
+        authority_index_start: usize,
+        authority_index_end: usize,
     ) {
         self.metrics.dag_state_entries.inc();
 
@@ -782,7 +780,7 @@ impl DagState {
     pub fn insert_general_block(&self, block: Data<VerifiedBlock>, source: DataSource) {
         let has_tx = block.has_transaction_data();
         let authority_index_start = 0;
-        let authority_index_end = self.committee_size as AuthorityIndex;
+        let authority_index_end = self.committee_size;
         self.insert_block_bounds(block, authority_index_start, authority_index_end);
         let label = source.as_str();
         self.metrics
@@ -808,7 +806,7 @@ impl DagState {
             return;
         }
         let authority_index_start = 0;
-        let authority_index_end = self.committee_size as AuthorityIndex;
+        let authority_index_end = self.committee_size;
 
         // Record per-source metrics (additive: every block counts as a header;
         // full blocks also count as block + tx_data).
@@ -1491,11 +1489,11 @@ impl DagState {
         true
     }
 
-    pub fn starfish_speed_excluded_ack_authorities(&self) -> u128 {
+    pub fn starfish_speed_excluded_ack_authorities(&self) -> AuthoritySet {
         if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
             || !self.starfish_speed_adaptive_acknowledgments
         {
-            return 0;
+            return AuthoritySet::default();
         }
 
         let inner = self.dag_state_inner.read();
@@ -1512,11 +1510,13 @@ impl DagState {
         }
 
         let blame_threshold = self.committee.validity_threshold() as usize;
-        scores
-            .into_iter()
-            .enumerate()
-            .filter(|(_, score)| *score >= blame_threshold)
-            .fold(0u128, |mask, (authority, _)| mask | (1u128 << authority))
+        let mut mask = AuthoritySet::default();
+        for (authority, score) in scores.into_iter().enumerate() {
+            if score >= blame_threshold {
+                mask.insert(authority as AuthorityIndex);
+            }
+        }
+        mask
     }
 
     pub fn block_exists(&self, reference: BlockReference) -> bool {
@@ -2479,8 +2479,8 @@ impl DagStateInner {
     pub fn add_block(
         &mut self,
         block: Data<VerifiedBlock>,
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
+        authority_index_start: usize,
+        authority_index_end: usize,
         bfs_buffer: &mut Vec<BlockReference>,
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
@@ -2633,7 +2633,7 @@ impl DagStateInner {
     }
 
     fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
-        let bit = !(1u128 << peer);
+        let bit = !AuthoritySet::singleton(peer);
         for auth_dag in self.dag.iter_mut() {
             for (_, entries) in auth_dag.range_mut((round.saturating_add(1))..) {
                 for (_, (_, known_by)) in entries.iter_mut() {
@@ -2661,11 +2661,12 @@ impl DagStateInner {
         if self.dag_contains(&block_reference) {
             return;
         }
-        let known_by = (1u128 << block_reference.authority) | (1u128 << self.authority);
+        let known_by = AuthoritySet::singleton(block_reference.authority)
+            | AuthoritySet::singleton(self.authority);
         self.dag_insert(block_reference, (parents, known_by));
 
         let authority = block_reference.authority;
-        let bit = 1u128 << authority;
+        let bit = AuthoritySet::singleton(authority);
 
         bfs_buffer.clear();
         bfs_buffer.push(block_reference);
@@ -2685,7 +2686,7 @@ impl DagStateInner {
                 let Some((_, known_by)) = self.dag_get_mut(&parent) else {
                     continue; // evicted
                 };
-                if *known_by & bit == 0 {
+                if (*known_by & bit).is_empty() {
                     *known_by |= bit;
                     bfs_buffer.push(parent);
                 }
@@ -2811,7 +2812,7 @@ impl DagStateInner {
         filter: impl Fn(&BlockReference) -> bool,
         limit: usize,
     ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
-        let peer_bit = 1u128 << peer;
+        let peer_bit = AuthoritySet::singleton(peer);
         let mut candidates: Vec<(BlockReference, RoundNumber)> = self
             .dag
             .iter()
@@ -2830,7 +2831,7 @@ impl DagStateInner {
                     })
                 })
             })
-            .filter(|(r, known_by)| known_by & peer_bit == 0 && !sent.contains(r) && filter(r))
+            .filter(|(r, known_by)| (*known_by & peer_bit).is_empty() && !sent.contains(r) && filter(r))
             .map(|(r, _)| (r, r.round))
             .collect();
         candidates.sort_by_key(|(_, round)| *round);
@@ -2859,7 +2860,7 @@ impl DagStateInner {
             return Vec::new();
         }
 
-        let peer_bit = 1u128 << peer;
+        let peer_bit = AuthoritySet::singleton(peer);
         let mut per_authority: Vec<Vec<BlockReference>> = vec![Vec::new(); self.committee_size];
 
         for (auth_idx, auth_dag) in self.dag.iter().enumerate() {
@@ -2870,7 +2871,7 @@ impl DagStateInner {
                         round: *round,
                         digest: *digest,
                     };
-                    if known_by & peer_bit == 0 && !sent.contains(&r) && filter(&r) {
+                    if (*known_by & peer_bit).is_empty() && !sent.contains(&r) && filter(&r) {
                         per_authority[auth_idx].push(r);
                     }
                 }
@@ -2951,7 +2952,7 @@ impl DagStateInner {
         let Some(own_blocks) = self.own_blocks.get(peer as usize) else {
             return Vec::new();
         };
-        let peer_bit = 1u128 << peer;
+        let peer_bit = AuthoritySet::singleton(peer);
         let mut result = Vec::with_capacity(batch_own_block_size);
 
         for (round, digest) in own_blocks {
@@ -2974,7 +2975,7 @@ impl DagStateInner {
                 // is evicted, this path stops considering it for unsent scans.
                 continue;
             };
-            if known_by & peer_bit != 0 {
+            if !(*known_by & peer_bit).is_empty() {
                 continue;
             }
 
@@ -2993,7 +2994,7 @@ impl DagStateInner {
         peer: AuthorityIndex,
         limit: usize,
     ) -> Vec<BlockReference> {
-        let peer_bit = 1u128 << peer;
+        let peer_bit = AuthoritySet::singleton(peer);
         let mut result = Vec::with_capacity(limit.min(refs.len()));
 
         for block_ref in refs {
@@ -3002,7 +3003,7 @@ impl DagStateInner {
             }
 
             match self.dag_get(block_ref) {
-                Some((_, known_by)) if known_by & peer_bit != 0 => {}
+                Some((_, known_by)) if !(*known_by & peer_bit).is_empty() => {}
                 _ => result.push(*block_ref),
             }
         }
@@ -3076,8 +3077,8 @@ impl DagStateInner {
     fn add_own_index(
         &mut self,
         reference: &BlockReference,
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
+        authority_index_start: usize,
+        authority_index_end: usize,
     ) {
         if reference.authority != self.authority {
             return;
@@ -3088,7 +3089,7 @@ impl DagStateInner {
         for authority_index in authority_index_start..authority_index_end {
             // Re-receiving our own block from the network should not replace the
             // originally indexed block for this recipient/round.
-            self.own_blocks[authority_index as usize]
+            self.own_blocks[authority_index]
                 .entry(reference.round)
                 .or_insert(reference.digest);
         }
@@ -3102,15 +3103,15 @@ impl DagStateInner {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnBlockData {
     pub block: Data<VerifiedBlock>,
-    pub authority_index_start: AuthorityIndex,
-    pub authority_index_end: AuthorityIndex,
+    pub authority_index_start: usize,
+    pub authority_index_end: usize,
 }
 
 impl OwnBlockData {
     pub fn new(
         block: Data<VerifiedBlock>,
-        authority_index_start: AuthorityIndex,
-        authority_index_end: AuthorityIndex,
+        authority_index_start: usize,
+        authority_index_end: usize,
     ) -> Self {
         Self {
             block,
@@ -3157,6 +3158,7 @@ mod tests {
 
     use super::{
         CACHED_ROUNDS, ConsensusProtocol, DacCertificateVerificationState, DagState, DataSource,
+        OwnBlockData,
     };
     use crate::{
         committee::Committee,
@@ -3179,6 +3181,31 @@ mod tests {
 
     fn open_test_dag_state_for(consensus: &str, authority: AuthorityIndex) -> DagState {
         open_test_dag_state_for_with_feature(consensus, authority, false)
+    }
+
+    fn open_test_dag_state_for_size(
+        consensus: &str,
+        authority: AuthorityIndex,
+        committee_size: usize,
+    ) -> DagState {
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some(consensus), None);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        DagState::open(
+            authority,
+            path,
+            metrics,
+            committee,
+            "honest".to_string(),
+            consensus.to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        )
+        .dag_state
     }
 
     fn open_test_dag_state_at_path(
@@ -3232,7 +3259,7 @@ mod tests {
         authority: AuthorityIndex,
         round: RoundNumber,
         leader_ref: BlockReference,
-        strong_vote_mask: u128,
+        strong_vote_mask: AuthoritySet,
     ) -> Data<VerifiedBlock> {
         let own_previous = BlockReference::new_test(authority, round - 1);
         let mut block = VerifiedBlock::new(
@@ -3353,6 +3380,27 @@ mod tests {
         dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
 
         assert!(dag_state.is_data_available(&reference));
+    }
+
+    #[test]
+    fn own_block_bounds_reach_peer_255() {
+        let dag_state = open_test_dag_state_for_size("mysticeti", 0, 256);
+        let block = make_empty_full_block(0, 1, ConsensusProtocol::Mysticeti);
+
+        dag_state.insert_own_block(OwnBlockData {
+            block: block.clone(),
+            authority_index_start: 0,
+            authority_index_end: 256,
+        });
+
+        let transmitted = dag_state.get_own_transmission_blocks(255, 0, 10);
+        assert_eq!(
+            transmitted
+                .into_iter()
+                .map(|block| *block.reference())
+                .collect::<Vec<_>>(),
+            vec![*block.reference()]
+        );
     }
 
     #[test]
@@ -3601,19 +3649,19 @@ mod tests {
 
         dag_state.insert_general_blocks(
             vec![
-                make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
-                make_starfish_speed_vote_block(2, 5, own_leader_ref, 1u128 << 1),
-                make_starfish_speed_vote_block(3, 5, own_leader_ref, 1u128 << 0),
-                make_starfish_speed_vote_block(0, 2, other_leader_ref, 1u128 << 2),
-                make_starfish_speed_vote_block(2, 2, other_leader_ref, 1u128 << 2),
+                make_starfish_speed_vote_block(1, 5, own_leader_ref, AuthoritySet::singleton(1)),
+                make_starfish_speed_vote_block(2, 5, own_leader_ref, AuthoritySet::singleton(1)),
+                make_starfish_speed_vote_block(3, 5, own_leader_ref, AuthoritySet::singleton(0)),
+                make_starfish_speed_vote_block(0, 2, other_leader_ref, AuthoritySet::singleton(2)),
+                make_starfish_speed_vote_block(2, 2, other_leader_ref, AuthoritySet::singleton(2)),
             ],
             DataSource::BlockBundleStreaming,
         );
 
         let excluded = dag_state.starfish_speed_excluded_ack_authorities();
-        assert_ne!(excluded & (1u128 << 1), 0);
-        assert_eq!(excluded & (1u128 << 0), 0);
-        assert_eq!(excluded & (1u128 << 2), 0);
+        assert!(excluded.contains(1));
+        assert!(!excluded.contains(0));
+        assert!(!excluded.contains(2));
     }
 
     #[test]
@@ -3624,9 +3672,9 @@ mod tests {
         for leader_round in leader_rounds {
             let leader_ref = BlockReference::new_test(0, leader_round);
             let complaint_mask = if leader_round == 4 {
-                1u128 << 1
+                AuthoritySet::singleton(1)
             } else {
-                1u128 << 2
+                AuthoritySet::singleton(2)
             };
             blocks.push(make_starfish_speed_vote_block(
                 1,
@@ -3638,8 +3686,8 @@ mod tests {
         dag_state.insert_general_blocks(blocks, DataSource::BlockBundleStreaming);
 
         let excluded = dag_state.starfish_speed_excluded_ack_authorities();
-        assert_eq!(excluded & (1u128 << 1), 0);
-        assert_ne!(excluded & (1u128 << 2), 0);
+        assert!(!excluded.contains(1));
+        assert!(excluded.contains(2));
     }
 
     #[test]
@@ -3647,11 +3695,11 @@ mod tests {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, false);
         let own_leader_ref = BlockReference::new_test(0, 4);
         dag_state.insert_general_block(
-            make_starfish_speed_vote_block(1, 5, own_leader_ref, 1u128 << 1),
+            make_starfish_speed_vote_block(1, 5, own_leader_ref, AuthoritySet::singleton(1)),
             DataSource::BlockBundleStreaming,
         );
 
-        assert_eq!(dag_state.starfish_speed_excluded_ack_authorities(), 0);
+        assert!(dag_state.starfish_speed_excluded_ack_authorities().is_empty());
     }
 
     #[test]

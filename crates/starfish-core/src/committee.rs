@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Borrow, marker::PhantomData, ops::Range, sync::Arc};
+use std::{borrow::Borrow, marker::PhantomData, sync::Arc};
 
 use ahash::AHashSet;
 use rand::Rng;
@@ -47,8 +47,8 @@ impl Committee {
 
         // Ensure all stakes are positive
         assert!(authorities.iter().all(|a| a.stake() > 0));
-        // For now AuthoritySet only supports up to 128 authorities
-        assert!(authorities.len() <= 128);
+        // AuthoritySet supports up to 256 authorities ([u128; 2]).
+        assert!(authorities.len() <= 256);
 
         let mut total_stake: Stake = 0;
         for a in authorities.iter() {
@@ -130,11 +130,11 @@ impl Committee {
     }
 
     pub fn known_authority(&self, authority: AuthorityIndex) -> bool {
-        authority < self.len() as AuthorityIndex
+        (authority as usize) < self.len()
     }
 
-    pub fn authorities(&self) -> Range<AuthorityIndex> {
-        0..(self.authorities.len() as AuthorityIndex)
+    pub fn authorities(&self) -> impl Iterator<Item = AuthorityIndex> + Clone + '_ {
+        (0..self.authorities.len()).map(|authority| authority as AuthorityIndex)
     }
 
     /// Return own genesis block and other genesis blocks
@@ -178,7 +178,7 @@ impl Committee {
     }
 
     pub fn random_authority(&self, rng: &mut impl Rng) -> AuthorityIndex {
-        rng.gen_range(self.authorities())
+        rng.gen_range(0..self.len()) as AuthorityIndex
     }
 
     pub fn len(&self) -> usize {
@@ -306,4 +306,22 @@ impl<TH: CommitteeThreshold> StakeAggregator<TH> {
 pub enum TransactionVoteResult {
     Processed,
     VoteAccepted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Committee;
+
+    #[test]
+    fn authorities_and_known_authority_support_256() {
+        let committee = Committee::new_for_benchmarks(256);
+
+        let authorities: Vec<_> = committee.authorities().collect();
+        assert_eq!(authorities.len(), 256);
+        assert_eq!(authorities.first().copied(), Some(0));
+        assert_eq!(authorities.last().copied(), Some(255));
+
+        assert!(committee.known_authority(0));
+        assert!(committee.known_authority(255));
+    }
 }
