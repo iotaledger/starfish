@@ -101,7 +101,7 @@ pub enum ConsensusProtocol {
     StarfishSpeed,
     StarfishBls,
     SailfishPlusPlus,
-    MysticetiCompress,
+    Bluestreak,
 }
 
 impl ConsensusProtocol {
@@ -113,7 +113,7 @@ impl ConsensusProtocol {
             "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
             "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
             "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
-            "mysticeti-compress" => ConsensusProtocol::MysticetiCompress,
+            "bluestreak" => ConsensusProtocol::Bluestreak,
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -131,15 +131,15 @@ impl ConsensusProtocol {
         matches!(self, ConsensusProtocol::SailfishPlusPlus)
     }
 
-    pub fn is_mysticeti_compress(self) -> bool {
-        matches!(self, ConsensusProtocol::MysticetiCompress)
+    pub fn is_bluestreak(self) -> bool {
+        matches!(self, ConsensusProtocol::Bluestreak)
     }
 
     /// Protocols that use a dual dirty/clean DAG with vertex certification.
     pub fn uses_dual_dag(self) -> bool {
         matches!(
             self,
-            ConsensusProtocol::SailfishPlusPlus | ConsensusProtocol::MysticetiCompress
+            ConsensusProtocol::SailfishPlusPlus | ConsensusProtocol::Bluestreak
         )
     }
 
@@ -148,7 +148,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::Mysticeti | ConsensusProtocol::SailfishPlusPlus => {
                 DisseminationMode::Pull
             }
-            ConsensusProtocol::MysticetiCompress
+            ConsensusProtocol::Bluestreak
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
@@ -551,7 +551,7 @@ impl DagState {
             }
         }
 
-        // Recover persisted active Sailfish++ certifications. Only the active,
+        // Recover persisted active certified vertices. Only the active,
         // ancestor-closed frontier is persisted; preliminary waiting state is
         // intentionally not recovered.
         if consensus_protocol.uses_dual_dag() {
@@ -575,6 +575,19 @@ impl DagState {
                 {
                     inner.vertex_certificates[auth].insert(block_ref);
                 }
+            }
+        }
+        if consensus_protocol == ConsensusProtocol::Bluestreak {
+            let mut recovered_blocks: Vec<_> = inner
+                .index
+                .iter()
+                .flat_map(|auth_map| auth_map.values())
+                .flat_map(|blocks| blocks.values().cloned())
+                .collect();
+            recovered_blocks.sort_by_key(|block| *block.reference());
+            let mut activated = Vec::new();
+            for block in recovered_blocks {
+                inner.check_bluestreak_pre_clean(&block, &committee, &mut activated);
             }
         }
 
@@ -626,8 +639,8 @@ impl DagState {
             ConsensusProtocol::SailfishPlusPlus => {
                 tracing::info!("Starting Sailfish++ protocol")
             }
-            ConsensusProtocol::MysticetiCompress => {
-                tracing::info!("Starting MysticetiCompress protocol")
+            ConsensusProtocol::Bluestreak => {
+                tracing::info!("Starting Bluestreak protocol")
             }
         }
         let dag_state = Self {
@@ -2279,19 +2292,43 @@ impl DagStateInner {
         later_block: &Data<VerifiedBlock>,
         earlier_block: &Data<VerifiedBlock>,
     ) -> bool {
-        let mut parents = AHashSet::from([later_block.clone()]);
-        for _round_number in (earlier_block.round()..later_block.round()).rev() {
-            parents = parents
-                .iter()
-                .flat_map(|block| block.block_references())
-                .map(|block_reference| {
-                    self.get_storage_block(*block_reference)
-                        .expect("Block should be in DagState")
-                })
-                .filter(|included_block| included_block.round() >= earlier_block.round())
-                .collect();
+        let target = *earlier_block.reference();
+        let mut frontier = vec![later_block.clone()];
+        let mut visited = AHashSet::new();
+
+        while let Some(block) = frontier.pop() {
+            let block_ref = *block.reference();
+            if !visited.insert(block_ref) {
+                continue;
+            }
+            if block_ref == target {
+                return true;
+            }
+            if block.round() <= earlier_block.round() {
+                continue;
+            }
+
+            for parent_ref in block.block_references() {
+                let parent = self
+                    .get_storage_block(*parent_ref)
+                    .expect("Block should be in DagState");
+                if parent.round() >= earlier_block.round() {
+                    frontier.push(parent);
+                }
+            }
+            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+                if let Some(cert_ref) = block.unprovable_certificate() {
+                    let parent = self
+                        .get_storage_block(*cert_ref)
+                        .expect("Block should be in DagState");
+                    if parent.round() >= earlier_block.round() {
+                        frontier.push(parent);
+                    }
+                }
+            }
         }
-        parents.contains(earlier_block)
+
+        false
     }
 
     /// Compute all block references reachable from `later_block` at
@@ -2302,16 +2339,42 @@ impl DagStateInner {
         later_block: &Data<VerifiedBlock>,
         target_round: RoundNumber,
     ) -> AHashSet<BlockReference> {
-        let mut frontier = AHashSet::from([later_block.clone()]);
-        for _ in (target_round..later_block.round()).rev() {
-            frontier = frontier
-                .iter()
-                .flat_map(|block| block.block_references())
-                .filter_map(|r| self.get_storage_block(*r))
-                .filter(|b| b.round() >= target_round)
-                .collect();
+        let mut reachable = AHashSet::new();
+        let mut frontier = vec![later_block.clone()];
+        let mut visited = AHashSet::new();
+
+        while let Some(block) = frontier.pop() {
+            let block_ref = *block.reference();
+            if !visited.insert(block_ref) {
+                continue;
+            }
+            if block.round() == target_round {
+                reachable.insert(block_ref);
+                continue;
+            }
+            if block.round() < target_round {
+                continue;
+            }
+
+            for reference in block.block_references() {
+                if let Some(parent) = self.get_storage_block(*reference) {
+                    if parent.round() >= target_round {
+                        frontier.push(parent);
+                    }
+                }
+            }
+            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+                if let Some(cert_ref) = block.unprovable_certificate() {
+                    if let Some(parent) = self.get_storage_block(*cert_ref) {
+                        if parent.round() >= target_round {
+                            frontier.push(parent);
+                        }
+                    }
+                }
+            }
         }
-        frontier.iter().map(|b| *b.reference()).collect()
+
+        reachable
     }
 
     /// Per-authority eviction using BTreeMap::split_off.
@@ -2440,13 +2503,12 @@ impl DagStateInner {
                 missing.push(*parent);
             }
         }
-        // MysticetiCompress: the unprovable_certificate target is also a
+        // Bluestreak: the unprovable_certificate target is also a
         // causal dependency that must be ancestor-closed.
-        if self.consensus_protocol == ConsensusProtocol::MysticetiCompress {
+        if self.consensus_protocol == ConsensusProtocol::Bluestreak {
             if let Some(cert_ref) = block.unprovable_certificate() {
                 if cert_ref.round > 0
-                    && !self.vertex_certificates[cert_ref.authority as usize]
-                        .contains(cert_ref)
+                    && !self.vertex_certificates[cert_ref.authority as usize].contains(cert_ref)
                     && !missing.contains(cert_ref)
                 {
                     missing.push(*cert_ref);
@@ -2478,6 +2540,14 @@ impl DagStateInner {
                 children.remove(&block_ref);
                 if children.is_empty() {
                     self.pending_vertex_certificate_children.remove(parent);
+                }
+            }
+        }
+        if let Some(cert_ref) = block.unprovable_certificate() {
+            if let Some(children) = self.pending_vertex_certificate_children.get_mut(cert_ref) {
+                children.remove(&block_ref);
+                if children.is_empty() {
+                    self.pending_vertex_certificate_children.remove(cert_ref);
                 }
             }
         }
@@ -2531,7 +2601,7 @@ impl DagStateInner {
         self.update_data_availability(&block);
         self.update_starfish_speed_leader_hints(&block);
         self.update_inferred_sailfish_support(&block, committee, activated);
-        self.check_compress_pre_clean(&block, committee, activated);
+        self.check_bluestreak_pre_clean(&block, committee, activated);
     }
 
     fn update_inferred_sailfish_support(
@@ -2564,78 +2634,94 @@ impl DagStateInner {
         }
     }
 
-    /// MysticetiCompress pre-clean check: a block is pre-clean if it has no
+    /// Bluestreak pre-clean check: a block is pre-clean if it has no
     /// `unprovable_certificate`, or its certificate is verified via the dirty
     /// DAG. Pre-clean blocks feed into the vertex certification pipeline.
-    fn check_compress_pre_clean(
+    fn check_bluestreak_pre_clean(
         &mut self,
         block: &VerifiedBlock,
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
-        if self.consensus_protocol != ConsensusProtocol::MysticetiCompress {
+        if self.consensus_protocol != ConsensusProtocol::Bluestreak {
             return;
         }
         let block_ref = *block.reference();
         let is_pre_clean = match block.unprovable_certificate() {
             None => true,
             Some(leader_ref) => {
-                self.verify_unprovable_certificate_local(
-                    block_ref.round,
-                    leader_ref,
-                    committee,
-                )
+                self.verify_unprovable_certificate(block_ref.round, leader_ref, committee)
             }
         };
         if is_pre_clean {
             self.note_vertex_certified(block_ref, activated);
         }
+        self.reevaluate_bluestreak_pending(committee, activated);
     }
 
     /// Verify an unprovable certificate against the local dirty DAG.
     /// Returns true if 2f+1 blocks at r-1 reference the leader (direct)
     /// or f+1 blocks at r propagate the same certificate.
-    fn verify_unprovable_certificate_local(
+    fn verify_unprovable_certificate(
         &self,
         block_round: RoundNumber,
         leader_ref: &BlockReference,
         committee: &Committee,
     ) -> bool {
-        // Direct: 2f+1 at r-1 reference the leader.
-        let vote_round = block_round.saturating_sub(1);
-        let mut stake: Stake = 0;
-        for auth_dag in &self.index {
-            if let Some(round_blocks) = auth_dag.get(&vote_round) {
-                for block in round_blocks.values() {
-                    if block
-                        .block_references()
-                        .iter()
-                        .any(|r| r == leader_ref)
-                    {
-                        stake += committee
-                            .get_stake(block.authority())
-                            .unwrap_or(0);
-                    }
-                }
+        if leader_ref.round + 2 != block_round {
+            return false;
+        }
+
+        let vote_round = match block_round.checked_sub(1) {
+            Some(round) => round,
+            None => return false,
+        };
+        let mut stake = StakeAggregator::<QuorumThreshold>::new();
+        for block in self.get_blocks_by_round(vote_round) {
+            if block.block_references().iter().any(|r| r == leader_ref) {
+                stake.add(block.authority(), committee);
             }
         }
-        if committee.is_quorum(stake) {
+        if stake.is_quorum(committee) {
             return true;
         }
-        // Propagation: f+1 at round r carry the same certificate.
-        let mut prop_stake: Stake = 0;
-        for auth_dag in &self.index {
-            if let Some(round_blocks) = auth_dag.get(&block_round) {
+
+        let mut propagation = StakeAggregator::<ValidityThreshold>::new();
+        for block in self.get_blocks_by_round(block_round) {
+            if block.unprovable_certificate() == Some(leader_ref) {
+                propagation.add(block.authority(), committee);
+            }
+        }
+        propagation.get_stake() >= committee.validity_threshold()
+    }
+
+    fn reevaluate_bluestreak_pending(
+        &mut self,
+        committee: &Committee,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        let mut ready = Vec::new();
+        for auth_map in &self.index {
+            for round_blocks in auth_map.values() {
                 for block in round_blocks.values() {
-                    if block.unprovable_certificate() == Some(leader_ref) {
-                        prop_stake += committee
-                            .get_stake(block.authority())
-                            .unwrap_or(0);
+                    let block_ref = *block.reference();
+                    if self.vertex_certificates[block_ref.authority as usize].contains(&block_ref) {
+                        continue;
+                    }
+                    let Some(leader_ref) = block.unprovable_certificate() else {
+                        continue;
+                    };
+                    if self.verify_unprovable_certificate(block.round(), leader_ref, committee) {
+                        ready.push(block_ref);
                     }
                 }
             }
         }
-        prop_stake >= committee.validity_threshold()
+        ready.sort();
+        ready.dedup();
+        for block_ref in ready {
+            self.note_vertex_certified(block_ref, activated);
+        }
     }
 
     fn infer_vertex_certificate_closure(
@@ -2808,6 +2894,7 @@ impl DagStateInner {
             ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::Bluestreak
         ) && block.transactions().is_none()
             && block.merkle_root() == TransactionsCommitment::new_from_transactions(&Vec::new());
         if block.has_empty_payload() || is_empty_full_block {
@@ -3402,7 +3489,7 @@ mod tests {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => {
+            | ConsensusProtocol::Bluestreak => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
@@ -3437,7 +3524,7 @@ mod tests {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => {
+            | ConsensusProtocol::Bluestreak => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
@@ -3989,6 +4076,91 @@ mod tests {
             DacCertificateVerificationState::Verified
         );
         assert!(!dag_state.mark_dac_certified(rejected, cert));
+    }
+
+    #[test]
+    fn bluestreak_reachability_follows_unprovable_certificate() {
+        let dag_state = open_test_dag_state_for("bluestreak", 0);
+        let empty_transactions = Vec::new();
+        let commitment = TransactionsCommitment::new_from_transactions(&empty_transactions);
+
+        let mut leader = VerifiedBlock::new(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions.clone(),
+            commitment,
+            None,
+            None,
+            None,
+        );
+        leader.preserialize();
+        let leader = Data::new(leader);
+        let leader_ref = *leader.reference();
+
+        let mut own_round_one = VerifiedBlock::new(
+            0,
+            1,
+            vec![BlockReference::new_test(0, 0)],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions.clone(),
+            commitment,
+            None,
+            None,
+            None,
+        );
+        own_round_one.preserialize();
+        let own_round_one = Data::new(own_round_one);
+
+        let mut own_prev = VerifiedBlock::new(
+            0,
+            2,
+            vec![*own_round_one.reference()],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions.clone(),
+            commitment,
+            None,
+            None,
+            None,
+        );
+        own_prev.preserialize();
+        let own_prev = Data::new(own_prev);
+
+        let mut compress = VerifiedBlock::new_with_unprovable(
+            0,
+            3,
+            vec![*own_prev.reference()],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            empty_transactions,
+            commitment,
+            None,
+            None,
+            None,
+            Some(leader_ref),
+        );
+        compress.preserialize();
+        let compress = Data::new(compress);
+
+        dag_state.insert_general_block(leader.clone(), DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(own_round_one, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(own_prev, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(compress.clone(), DataSource::BlockBundleStreaming);
+
+        assert!(dag_state.linked(&compress, &leader));
+        assert!(
+            dag_state
+                .reachable_at_round(&compress, 1)
+                .contains(&leader_ref)
+        );
     }
 
     #[test]

@@ -283,7 +283,7 @@ pub struct BlockHeader {
     /// Sailfish++ control certificates (timeout/no-vote). None for all other
     /// protocols.
     pub(crate) sailfish: Option<Box<SailfishFields>>,
-    /// MysticetiCompress unprovable certificate: optional reference to a
+    /// Bluestreak unprovable certificate: optional reference to a
     /// leader at round r-2 certified by 2f+1 votes at r-1.
     pub(crate) unprovable_certificate: Option<BlockReference>,
 
@@ -702,6 +702,36 @@ impl VerifiedBlock {
         bls: Option<BlsFields>,
         sailfish: Option<SailfishFields>,
     ) -> Self {
+        Self::new_with_unprovable(
+            authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            signature,
+            transactions,
+            merkle_root,
+            strong_vote,
+            bls,
+            sailfish,
+            None,
+        )
+    }
+
+    pub fn new_with_unprovable(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        signature: SignatureBytes,
+        transactions: Vec<BaseTransaction>,
+        merkle_root: TransactionsCommitment,
+        strong_vote: Option<AuthoritySet>,
+        bls: Option<BlsFields>,
+        sailfish: Option<SailfishFields>,
+        unprovable_certificate: Option<BlockReference>,
+    ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
         let acknowledgments = expand_acknowledgments(
@@ -713,7 +743,7 @@ impl VerifiedBlock {
             reference: BlockReference {
                 authority,
                 round,
-                digest: BlockDigest::new_without_transactions(
+                digest: BlockDigest::new_without_transactions_with_unprovable(
                     authority,
                     round,
                     &block_references,
@@ -722,6 +752,7 @@ impl VerifiedBlock {
                     &signature,
                     merkle_root,
                     strong_vote,
+                    unprovable_certificate.as_ref(),
                 ),
             },
             block_references,
@@ -735,7 +766,7 @@ impl VerifiedBlock {
             strong_vote,
             bls: bls.map(Box::new),
             sailfish: sailfish.map(Box::new),
-            unprovable_certificate: None,
+            unprovable_certificate,
             serialized: None,
         };
 
@@ -813,6 +844,53 @@ impl VerifiedBlock {
         precomputed_leader_sig: Option<BlsSignatureBytes>,
         sailfish: Option<SailfishFields>,
     ) -> Self {
+        Self::new_with_signer_and_unprovable(
+            authority,
+            round,
+            block_references,
+            voted_leader_ref,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            signer,
+            bls_signer,
+            committee_opt,
+            aggregate_dac_sigs,
+            transactions,
+            encoded_transactions,
+            consensus_protocol,
+            strong_vote,
+            aggregate_round_sig,
+            certified_leader,
+            precomputed_round_sig,
+            precomputed_leader_sig,
+            sailfish,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_signer_and_unprovable(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        voted_leader_ref: Option<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        signer: &Signer,
+        bls_signer: Option<&BlsSigner>,
+        committee_opt: Option<&Committee>,
+        aggregate_dac_sigs: Vec<BlsAggregateCertificate>,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
+        consensus_protocol: ConsensusProtocol,
+        strong_vote: Option<AuthoritySet>,
+        aggregate_round_sig: Option<BlsAggregateCertificate>,
+        certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
+        precomputed_round_sig: Option<BlsSignatureBytes>,
+        precomputed_leader_sig: Option<BlsSignatureBytes>,
+        sailfish: Option<SailfishFields>,
+        unprovable_certificate: Option<BlockReference>,
+    ) -> Self {
         let transactions_commitment = match consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
@@ -830,7 +908,7 @@ impl VerifiedBlock {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => {
+            | ConsensusProtocol::Bluestreak => {
                 TransactionsCommitment::new_from_transactions(&transactions)
             }
         };
@@ -846,7 +924,7 @@ impl VerifiedBlock {
             &acknowledgment_references,
             aggregate_dac_sigs,
         );
-        let signature = signer.sign_block(
+        let signature = signer.sign_block_with_unprovable(
             authority,
             round,
             &block_references,
@@ -854,6 +932,7 @@ impl VerifiedBlock {
             meta_creation_time_ns,
             transactions_commitment,
             strong_vote,
+            unprovable_certificate.as_ref(),
         );
 
         // Build BLS fields when the StarfishBls path is active. Partial round
@@ -882,7 +961,7 @@ impl VerifiedBlock {
             }
         });
 
-        Self::new(
+        Self::new_with_unprovable(
             authority,
             round,
             block_references,
@@ -894,6 +973,7 @@ impl VerifiedBlock {
             strong_vote,
             bls,
             sailfish,
+            unprovable_certificate,
         )
     }
 
@@ -1126,7 +1206,7 @@ impl VerifiedBlock {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => {
+            | ConsensusProtocol::Bluestreak => {
                 let empty_transactions = Vec::new();
                 let empty_transactions_commitment =
                     TransactionsCommitment::new_from_transactions(&empty_transactions);
@@ -1163,7 +1243,7 @@ impl VerifiedBlock {
             );
         }
         let acknowledgments = self.header.acknowledgments();
-        let digest = BlockDigest::new(
+        let digest = BlockDigest::new_with_unprovable(
             self.authority(),
             round,
             &self.header.block_references,
@@ -1172,6 +1252,7 @@ impl VerifiedBlock {
             &self.header.signature,
             self.header.transactions_commitment,
             self.header.strong_vote,
+            self.header.unprovable_certificate(),
         );
         ensure!(
             digest == self.digest(),
@@ -1204,6 +1285,10 @@ impl VerifiedBlock {
         }
         match consensus_protocol {
             ConsensusProtocol::StarfishBls => {
+                ensure!(
+                    self.header.unprovable_certificate().is_none(),
+                    "Only Bluestreak blocks may carry unprovable_certificate"
+                );
                 let bls = self
                     .header
                     .bls()
@@ -1311,10 +1396,12 @@ impl VerifiedBlock {
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
                 );
+                ensure!(
+                    self.header.unprovable_certificate().is_none(),
+                    "Only Bluestreak blocks may carry unprovable_certificate"
+                );
             }
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::MysticetiCompress => {
+            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
                 ensure!(
                     acknowledgments.is_empty(),
                     "{consensus_protocol:?} blocks must not carry acknowledgments"
@@ -1327,6 +1414,56 @@ impl VerifiedBlock {
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
                 );
+                ensure!(
+                    self.header.unprovable_certificate().is_none(),
+                    "Only Bluestreak blocks may carry unprovable_certificate"
+                );
+            }
+            ConsensusProtocol::Bluestreak => {
+                ensure!(
+                    acknowledgments.is_empty(),
+                    "Bluestreak blocks must not carry acknowledgments"
+                );
+                ensure!(
+                    self.header.bls().is_none(),
+                    "Only StarfishBls blocks may carry BLS fields"
+                );
+                let is_leader = self.authority() == committee.elect_leader(round);
+                if !is_leader {
+                    ensure!(
+                        self.header.block_references.len() <= 2,
+                        "Bluestreak non-leader may reference at most own_prev + leader"
+                    );
+                    let _self_ref = *self
+                        .header
+                        .block_references
+                        .iter()
+                        .find(|r| r.authority == self.authority())
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Bluestreak non-leader block must reference its own previous block"
+                            )
+                        })?;
+                    if let Some(cert_ref) = self.header.unprovable_certificate() {
+                        ensure!(
+                            round >= 3 && cert_ref.round + 2 == round,
+                            "unprovable_certificate must reference leader at round r-2"
+                        );
+                        ensure!(
+                            cert_ref.authority == committee.elect_leader(cert_ref.round),
+                            "unprovable_certificate must reference the elected leader"
+                        );
+                    }
+                } else {
+                    ensure!(
+                        self.header.unprovable_certificate().is_none(),
+                        "Bluestreak leaders must not carry unprovable_certificate"
+                    );
+                    ensure!(
+                        threshold_clock_valid_block_header(&self.header, committee),
+                        "Bluestreak leader must reference 2f+1 blocks from previous round"
+                    );
+                }
             }
             ConsensusProtocol::SailfishPlusPlus => {
                 ensure!(
@@ -1340,6 +1477,10 @@ impl VerifiedBlock {
                 ensure!(
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
+                );
+                ensure!(
+                    self.header.unprovable_certificate().is_none(),
+                    "Only Bluestreak blocks may carry unprovable_certificate"
                 );
                 if round > 1 {
                     let prev_round = round - 1;
@@ -2197,6 +2338,102 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("CordialMiners blocks must not carry acknowledgments")
+        );
+    }
+
+    #[test]
+    fn verifies_bluestreak_non_leader_with_unprovable_certificate() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let authority = committee
+            .authorities()
+            .find(|authority| *authority != committee.elect_leader(3))
+            .unwrap();
+        let round_2_leader = committee.elect_leader(2);
+        let round_1_leader = committee.elect_leader(1);
+        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
+            authority,
+            3,
+            vec![
+                BlockReference::new_test(authority, 2),
+                BlockReference::new_test(round_2_leader, 2),
+            ],
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Bluestreak,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(BlockReference::new_test(round_1_leader, 1)),
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Bluestreak,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rejects_bluestreak_leader_with_unprovable_certificate() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let leader = committee.elect_leader(3);
+        let round_1_leader = committee.elect_leader(1);
+        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
+            leader,
+            3,
+            (0..committee.quorum_threshold() as AuthorityIndex)
+                .map(|authority| BlockReference::new_test(authority, 2))
+                .collect(),
+            None,
+            vec![],
+            0,
+            &signers[leader as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Bluestreak,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(BlockReference::new_test(round_1_leader, 1)),
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let err = block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Bluestreak,
+            )
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Bluestreak leaders must not carry unprovable_certificate")
         );
     }
 

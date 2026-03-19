@@ -13,7 +13,7 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
-    committee::Committee,
+    committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
     config::NodePrivateConfig,
     consensus::{
         CommitMetastate,
@@ -480,7 +480,7 @@ impl<H: BlockHandler> Core<H> {
         }
 
         // SailfishPlusPlus: require certified parent quorum before creating a block.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+        if self.dag_state.consensus_protocol.uses_dual_dag()
             && clock_round > 1
             && !self.dag_state.certified_parent_quorum(clock_round - 1)
         {
@@ -523,9 +523,13 @@ impl<H: BlockHandler> Core<H> {
         // set below threshold-clock quorum, we cannot build a valid block yet.
         // Requeue both transactions and include refs so the next attempt sees
         // them again.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+        let allow_own_prev_only = self.dag_state.consensus_protocol
+            == ConsensusProtocol::Bluestreak
+            && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
+        if self.dag_state.consensus_protocol.uses_dual_dag()
             && clock_round > 1
             && block_references.is_empty()
+            && !allow_own_prev_only
         {
             for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
@@ -688,15 +692,19 @@ impl<H: BlockHandler> Core<H> {
             self.compress_pending_block_references(&pending_refs, block_round);
 
         // SailfishPlusPlus: filter parents to only include certified blocks.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+        if self.dag_state.consensus_protocol.uses_dual_dag() {
             block_references.retain(|r| r.round == 0 || self.dag_state.has_vertex_certificate(r));
         }
 
         // SailfishPlusPlus: verify the filtered parent set, together with the
         // creator's own previous block (always included by build_block), still
         // has quorum stake at round-1.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+        let compress_non_leader = self.dag_state.consensus_protocol
+            == ConsensusProtocol::Bluestreak
+            && self.committee.elect_leader(block_round) != self.authority;
+        if self.dag_state.consensus_protocol.uses_dual_dag()
             && block_round > 1
+            && !compress_non_leader
         {
             let prev_round = block_round - 1;
             let mut prev_round_stake: u64 = 0;
@@ -747,7 +755,7 @@ impl<H: BlockHandler> Core<H> {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::MysticetiCompress => None,
+            | ConsensusProtocol::Bluestreak => None,
         }
     }
 
@@ -913,8 +921,17 @@ impl<H: BlockHandler> Core<H> {
         } else {
             None
         };
+        let unprovable_certificate = if self.dag_state.consensus_protocol
+            == ConsensusProtocol::Bluestreak
+            && self.committee.elect_leader(clock_round) != self.authority
+            && clock_round >= 3
+        {
+            self.compute_unprovable_certificate(clock_round, &block_references)
+        } else {
+            None
+        };
 
-        let mut block = VerifiedBlock::new_with_signer(
+        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
             self.authority,
             clock_round,
             block_references,
@@ -934,20 +951,8 @@ impl<H: BlockHandler> Core<H> {
             precomputed_round_sig,
             precomputed_leader_sig,
             sailfish_fields,
+            unprovable_certificate,
         );
-
-        // MysticetiCompress: compute and set unprovable_certificate for
-        // non-leader blocks.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::MysticetiCompress
-            && self.committee.elect_leader(clock_round) != self.authority
-            && clock_round >= 3
-        {
-            let cert = self.compute_unprovable_certificate(
-                clock_round,
-                block.block_references(),
-            );
-            block.header.unprovable_certificate = cert;
-        }
 
         self.metrics
             .proposed_block_refs
@@ -958,60 +963,6 @@ impl<H: BlockHandler> Core<H> {
 
         block.preserialize();
         Data::new(block)
-    }
-
-    /// Compute the unprovable certificate for a MysticetiCompress non-leader
-    /// block at `clock_round`. Returns a reference to the leader at r-2 if
-    /// 2f+1 blocks at r-1 reference it (direct evidence) or f+1 blocks at r
-    /// already propagate the same certificate.
-    fn compute_unprovable_certificate(
-        &self,
-        clock_round: RoundNumber,
-        _block_references: &[BlockReference],
-    ) -> Option<BlockReference> {
-        let leader_round = clock_round - 2;
-        let leader = self.committee.elect_leader(leader_round);
-        let leader_blocks =
-            self.dag_state
-                .get_blocks_at_authority_round(leader, leader_round);
-        let leader_ref = *leader_blocks.first()?.reference();
-
-        // Direct evidence: 2f+1 blocks at r-1 reference this leader.
-        let vote_round = clock_round - 1;
-        let vote_blocks = self.dag_state.get_blocks_by_round(vote_round);
-        let mut vote_stake: u64 = 0;
-        for block in &vote_blocks {
-            if block
-                .block_references()
-                .iter()
-                .any(|r| *r == leader_ref)
-            {
-                vote_stake += self
-                    .committee
-                    .get_stake(block.authority())
-                    .unwrap_or(0);
-            }
-        }
-        if self.committee.is_quorum(vote_stake) {
-            return Some(leader_ref);
-        }
-
-        // Propagation: f+1 blocks at round r carry the same certificate.
-        let current_blocks = self.dag_state.get_blocks_by_round(clock_round);
-        let mut prop_stake: u64 = 0;
-        for block in &current_blocks {
-            if block.unprovable_certificate() == Some(&leader_ref) {
-                prop_stake += self
-                    .committee
-                    .get_stake(block.authority())
-                    .unwrap_or(0);
-            }
-        }
-        if prop_stake >= self.committee.validity_threshold() {
-            return Some(leader_ref);
-        }
-
-        None
     }
 
     /// Compute SailfishPlusPlus control fields for a new block at
@@ -1092,6 +1043,46 @@ impl<H: BlockHandler> Core<H> {
         true
     }
 
+    fn compute_unprovable_certificate(
+        &self,
+        clock_round: RoundNumber,
+        _block_references: &[BlockReference],
+    ) -> Option<BlockReference> {
+        let leader_round = clock_round.checked_sub(2)?;
+        let leader = self.committee.elect_leader(leader_round);
+        let leader_block = self
+            .dag_state
+            .get_blocks_at_authority_round(leader, leader_round)
+            .into_iter()
+            .next()?;
+        let leader_ref = *leader_block.reference();
+
+        let vote_round = clock_round.checked_sub(1)?;
+        let vote_blocks = self.dag_state.get_blocks_by_round_cached(vote_round);
+        let mut vote_stake = StakeAggregator::<QuorumThreshold>::new();
+        for block in vote_blocks.iter() {
+            if block.block_references().iter().any(|r| *r == leader_ref) {
+                vote_stake.add(block.authority(), &self.committee);
+            }
+        }
+        if vote_stake.is_quorum(&self.committee) {
+            return Some(leader_ref);
+        }
+
+        let current_round_blocks = self.dag_state.get_blocks_by_round_cached(clock_round);
+        let mut propagation_stake = StakeAggregator::<ValidityThreshold>::new();
+        for block in current_round_blocks.iter() {
+            if block.unprovable_certificate() == Some(&leader_ref) {
+                propagation_stake.add(block.authority(), &self.committee);
+            }
+        }
+        if propagation_stake.get_stake() >= self.committee.validity_threshold() {
+            return Some(leader_ref);
+        }
+
+        None
+    }
+
     fn prepare_last_blocks(&mut self) {
         let target = match self.dag_state.byzantine_strategy {
             Some(
@@ -1127,6 +1118,30 @@ impl<H: BlockHandler> Core<H> {
         pending_refs: &[BlockReference],
         block_round: RoundNumber,
     ) -> Vec<BlockReference> {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak {
+            let is_leader = self.committee.elect_leader(block_round) == self.authority;
+            if !is_leader {
+                let prev_round = block_round.saturating_sub(1);
+                let leader = self.committee.elect_leader(prev_round);
+                return pending_refs
+                    .iter()
+                    .copied()
+                    .filter(|r| r.authority == leader && r.round == prev_round)
+                    .take(1)
+                    .collect();
+            }
+
+            let prev_round = block_round.saturating_sub(1);
+            let mut seen = AHashSet::new();
+            return pending_refs
+                .iter()
+                .copied()
+                .filter(|r| {
+                    r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
+                })
+                .collect();
+        }
+
         // SailfishPlusPlus: keep all previous-round references unconditionally
         // so that certified-parent filtering doesn't drop below quorum.
         // Only older-round references go through normal compression.
@@ -1141,10 +1156,10 @@ impl<H: BlockHandler> Core<H> {
                 })
                 .collect();
         }
-        // MysticetiCompress: non-leaders include only the leader at r-1
+        // Bluestreak: non-leaders include only the leader at r-1
         // (own_prev is always prepended by build_block). Leaders keep the
         // full clean-DAG frontier for the quorum requirement.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::MysticetiCompress {
+        if self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak {
             let is_leader = self.committee.elect_leader(block_round) == self.authority;
             if !is_leader {
                 let prev_round = block_round.saturating_sub(1);
@@ -1163,9 +1178,7 @@ impl<H: BlockHandler> Core<H> {
                 .iter()
                 .copied()
                 .filter(|r| {
-                    r.authority != self.authority
-                        && seen.insert(*r)
-                        && r.round >= prev_round
+                    r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
                 })
                 .collect();
         }
@@ -1396,7 +1409,7 @@ impl<H: BlockHandler> Core<H> {
     }
 
     fn flush_pending_sailfish_certified_refs(&self) {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::SailfishPlusPlus {
+        if !self.dag_state.consensus_protocol.uses_dual_dag() {
             return;
         }
         self.dag_state.flush_pending_sailfish_certified_refs();

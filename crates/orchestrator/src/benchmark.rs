@@ -38,7 +38,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
     // Consensus protocol to deploy
-    // (starfish | starfish-speed | starfish-bls | mysticeti | cordial-miners)
+    // (starfish | starfish-speed | starfish-bls | mysticeti |
+    // cordial-miners | bluestreak)
     pub consensus_protocol: String,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,
