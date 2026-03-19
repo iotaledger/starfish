@@ -432,6 +432,13 @@ impl UniversalCommitterBuilder {
                 wave_length: WAVE_LENGTH,
                 pipeline: false,
             },
+            ConsensusProtocol::MysticetiCompress => Self {
+                committee,
+                dag_state,
+                metrics,
+                wave_length: WAVE_LENGTH,
+                pipeline: true,
+            },
             ConsensusProtocol::CordialMiners => Self {
                 committee,
                 dag_state,

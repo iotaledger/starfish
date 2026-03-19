@@ -504,7 +504,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 // block and must follow the normal add_blocks path.
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
-                | ConsensusProtocol::SailfishPlusPlus => {
+                | ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::MysticetiCompress => {
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish

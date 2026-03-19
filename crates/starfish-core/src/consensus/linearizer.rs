@@ -259,7 +259,8 @@ impl Linearizer {
                 }
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
-                | ConsensusProtocol::SailfishPlusPlus => {
+                | ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::MysticetiCompress => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
             };

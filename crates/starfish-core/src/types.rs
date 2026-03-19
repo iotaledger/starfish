@@ -820,7 +820,8 @@ impl VerifiedBlock {
             }
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => {
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiCompress => {
                 TransactionsCommitment::new_from_transactions(&transactions)
             }
         };
@@ -1111,7 +1112,8 @@ impl VerifiedBlock {
             }
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus => {
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiCompress => {
                 let empty_transactions = Vec::new();
                 let empty_transactions_commitment =
                     TransactionsCommitment::new_from_transactions(&empty_transactions);
@@ -1297,7 +1299,9 @@ impl VerifiedBlock {
                     "Only StarfishBls blocks may carry BLS fields"
                 );
             }
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::CordialMiners => {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::CordialMiners
+            | ConsensusProtocol::MysticetiCompress => {
                 ensure!(
                     acknowledgments.is_empty(),
                     "{consensus_protocol:?} blocks must not carry acknowledgments"
