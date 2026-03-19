@@ -554,7 +554,7 @@ impl DagState {
         // Recover persisted active Sailfish++ certifications. Only the active,
         // ancestor-closed frontier is persisted; preliminary waiting state is
         // intentionally not recovered.
-        if consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+        if consensus_protocol.uses_dual_dag() {
             let certified_from_round = if use_windowed {
                 inner.evicted_rounds.iter().copied().min().unwrap_or(0)
             } else {
@@ -661,7 +661,7 @@ impl DagState {
     /// clock progress to `r` and quorum stake of RBC-certified vertices in
     /// round `r - 1`. Other protocols use the raw threshold clock directly.
     pub fn proposal_round(&self) -> RoundNumber {
-        if self.consensus_protocol != ConsensusProtocol::SailfishPlusPlus {
+        if !self.consensus_protocol.uses_dual_dag() {
             return self.threshold_clock_round();
         }
 
@@ -1497,7 +1497,7 @@ impl DagState {
             }
         }
 
-        if self.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
+        if self.consensus_protocol.uses_dual_dag()
             && quorum_round > 1
             && !self.certified_parent_quorum(quorum_round - 1)
         {
