@@ -936,6 +936,19 @@ impl<H: BlockHandler> Core<H> {
             sailfish_fields,
         );
 
+        // MysticetiCompress: compute and set unprovable_certificate for
+        // non-leader blocks.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::MysticetiCompress
+            && self.committee.elect_leader(clock_round) != self.authority
+            && clock_round >= 3
+        {
+            let cert = self.compute_unprovable_certificate(
+                clock_round,
+                block.block_references(),
+            );
+            block.header.unprovable_certificate = cert;
+        }
+
         self.metrics
             .proposed_block_refs
             .observe(block_ref_count as f64);
@@ -945,6 +958,60 @@ impl<H: BlockHandler> Core<H> {
 
         block.preserialize();
         Data::new(block)
+    }
+
+    /// Compute the unprovable certificate for a MysticetiCompress non-leader
+    /// block at `clock_round`. Returns a reference to the leader at r-2 if
+    /// 2f+1 blocks at r-1 reference it (direct evidence) or f+1 blocks at r
+    /// already propagate the same certificate.
+    fn compute_unprovable_certificate(
+        &self,
+        clock_round: RoundNumber,
+        _block_references: &[BlockReference],
+    ) -> Option<BlockReference> {
+        let leader_round = clock_round - 2;
+        let leader = self.committee.elect_leader(leader_round);
+        let leader_blocks =
+            self.dag_state
+                .get_blocks_at_authority_round(leader, leader_round);
+        let leader_ref = *leader_blocks.first()?.reference();
+
+        // Direct evidence: 2f+1 blocks at r-1 reference this leader.
+        let vote_round = clock_round - 1;
+        let vote_blocks = self.dag_state.get_blocks_by_round(vote_round);
+        let mut vote_stake: u64 = 0;
+        for block in &vote_blocks {
+            if block
+                .block_references()
+                .iter()
+                .any(|r| *r == leader_ref)
+            {
+                vote_stake += self
+                    .committee
+                    .get_stake(block.authority())
+                    .unwrap_or(0);
+            }
+        }
+        if self.committee.is_quorum(vote_stake) {
+            return Some(leader_ref);
+        }
+
+        // Propagation: f+1 blocks at round r carry the same certificate.
+        let current_blocks = self.dag_state.get_blocks_by_round(clock_round);
+        let mut prop_stake: u64 = 0;
+        for block in &current_blocks {
+            if block.unprovable_certificate() == Some(&leader_ref) {
+                prop_stake += self
+                    .committee
+                    .get_stake(block.authority())
+                    .unwrap_or(0);
+            }
+        }
+        if prop_stake >= self.committee.validity_threshold() {
+            return Some(leader_ref);
+        }
+
+        None
     }
 
     /// Compute SailfishPlusPlus control fields for a new block at
@@ -1071,6 +1138,34 @@ impl<H: BlockHandler> Core<H> {
                 .copied()
                 .filter(|r| {
                     r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
+                })
+                .collect();
+        }
+        // MysticetiCompress: non-leaders include only the leader at r-1
+        // (own_prev is always prepended by build_block). Leaders keep the
+        // full clean-DAG frontier for the quorum requirement.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::MysticetiCompress {
+            let is_leader = self.committee.elect_leader(block_round) == self.authority;
+            if !is_leader {
+                let prev_round = block_round.saturating_sub(1);
+                let leader = self.committee.elect_leader(prev_round);
+                return pending_refs
+                    .iter()
+                    .copied()
+                    .filter(|r| r.authority == leader && r.round == prev_round)
+                    .take(1)
+                    .collect();
+            }
+            // Leaders: keep all previous-round refs (same as SailfishPP).
+            let prev_round = block_round.saturating_sub(1);
+            let mut seen = AHashSet::new();
+            return pending_refs
+                .iter()
+                .copied()
+                .filter(|r| {
+                    r.authority != self.authority
+                        && seen.insert(*r)
+                        && r.round >= prev_round
                 })
                 .collect();
         }
