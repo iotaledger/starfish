@@ -918,6 +918,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::Bluestreak
         ) {
             self.metrics
                 .block_sync_requests_received
