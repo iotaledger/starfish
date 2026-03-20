@@ -1570,7 +1570,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(utilization_timer{node=~\"$node\", proc=~\"Core::.*|BlockManager::.*|Committer::.*|Syncer::.*\"}[1m]) / 1000",
+          "expr": "rate(utilization_timer{node=~\"$node\", proc=~\"Core::.*|BlockManager::.*\"}[1m]) / 1000",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "{{node}} - {{proc}}",

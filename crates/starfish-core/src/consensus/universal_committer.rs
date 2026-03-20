@@ -11,7 +11,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     consensus::base_committer::BaseCommitterOptions,
     dag_state::{ConsensusProtocol, DagState},
-    metrics::{Metrics, UtilizationTimerVecExt},
+    metrics::Metrics,
     types::{AuthorityIndex, BlockReference, RoundNumber, Stake, format_authority_round},
 };
 
@@ -125,20 +125,11 @@ impl UniversalCommitter {
                 let voter_info = &self.voters_cache[&(leader, round)].1;
 
                 // Try to directly decide the leader.
-                let timer_direct_decide = self
-                    .metrics
-                    .utilization_timer
-                    .utilization_timer("Committer::direct_decide");
                 let mut status = committer.try_direct_decide(leader, round, voter_info);
-                drop(timer_direct_decide);
                 tracing::debug!("Outcome of direct rule: {status}");
 
                 // If the leader is not final (undecided, or Commit(Pending) for StarfishSpeed),
                 // try to resolve via indirect rule.
-                let timer_indirect_decide = self
-                    .metrics
-                    .utilization_timer
-                    .utilization_timer("Committer::indirect_decide");
                 if !status.is_final() {
                     status =
                         committer.try_indirect_decide(leader, round, leaders.iter(), voter_info);
@@ -147,7 +138,6 @@ impl UniversalCommitter {
                     }
                     tracing::debug!("Outcome of indirect rule: {status}");
                 }
-                drop(timer_indirect_decide);
 
                 if status.is_final() {
                     self.decided.insert((leader, round), status.clone());
