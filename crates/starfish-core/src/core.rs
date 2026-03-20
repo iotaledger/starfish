@@ -1077,14 +1077,11 @@ impl<H: BlockHandler> Core<H> {
                     .collect();
             }
 
-            let prev_round = block_round.saturating_sub(1);
             let mut seen = AHashSet::new();
             return pending_refs
                 .iter()
                 .copied()
-                .filter(|r| {
-                    r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
-                })
+                .filter(|r| r.authority != self.authority && seen.insert(*r))
                 .collect();
         }
 
