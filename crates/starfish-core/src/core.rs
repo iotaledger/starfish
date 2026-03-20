@@ -466,7 +466,7 @@ impl<H: BlockHandler> Core<H> {
         let _block_timer = self
             .metrics
             .utilization_timer
-            .utilization_timer("Core::new_block::try_new_block");
+            .utilization_timer("Core::try_new_block");
 
         // Check if we're ready for a new block
         let clock_round = self.dag_state.proposal_round();
@@ -508,16 +508,9 @@ impl<H: BlockHandler> Core<H> {
                 None
             };
 
-        let pending_transactions = timed!(
-            self.metrics,
-            "Core::new_block::get_pending_transactions",
-            self.get_pending_transactions(clock_round)
-        );
-        let (mut transactions, block_references, raw_refs) = timed!(
-            self.metrics,
-            "Core::new_block::collect_transactions_and_references",
-            self.collect_transactions_and_references(pending_transactions, clock_round)
-        );
+        let pending_transactions = self.get_pending_transactions(clock_round);
+        let (mut transactions, block_references, raw_refs) =
+            self.collect_transactions_and_references(pending_transactions, clock_round);
 
         // SailfishPlusPlus: if the certified-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
@@ -556,23 +549,11 @@ impl<H: BlockHandler> Core<H> {
         if starfish_speed_excluded_authors.contains(self.authority) {
             self.requeue_transactions(std::mem::take(&mut transactions));
         }
-        timed!(
-            self.metrics,
-            "Core::new_block::prepare_last_blocks",
-            self.prepare_last_blocks()
-        );
-        let mut encoded_transactions = timed!(
-            self.metrics,
-            "Core::new_block::prepare_encoded_transactions",
-            self.prepare_encoded_transactions(&transactions)
-        );
+        self.prepare_last_blocks();
+        let mut encoded_transactions = self.prepare_encoded_transactions(&transactions);
         let acknowledgment_references =
             if self.dag_state.consensus_protocol.supports_acknowledgments() {
-                timed!(
-                    self.metrics,
-                    "Core::new_block::get_pending_acknowledgment",
-                    self.dag_state.get_pending_acknowledgment(clock_round)
-                )
+                self.dag_state.get_pending_acknowledgment(clock_round)
             } else {
                 Vec::new()
             };
@@ -581,11 +562,7 @@ impl<H: BlockHandler> Core<H> {
             acknowledgment_references,
         );
         let number_of_blocks_to_create = self.last_own_block.len();
-        let authority_bounds = timed!(
-            self.metrics,
-            "Core::new_block::calculate_authority_bounds",
-            self.calculate_authority_bounds(number_of_blocks_to_create)
-        );
+        let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
 
         let certified_leader =
             if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
@@ -617,30 +594,22 @@ impl<H: BlockHandler> Core<H> {
                 transactions = vec![];
                 encoded_transactions = self.prepare_encoded_transactions(&transactions);
             }
-            let block_data = timed!(
-                self.metrics,
-                "Core::new_block::build_block",
-                self.build_block(
-                    &block_references,
-                    voted_leader_ref,
-                    &transactions,
-                    &encoded_transactions,
-                    &acknowledgment_references,
-                    clock_round,
-                    block_id,
-                    aggregate_round_sig,
-                    certified_leader,
-                )
+            let block_data = self.build_block(
+                &block_references,
+                voted_leader_ref,
+                &transactions,
+                &encoded_transactions,
+                &acknowledgment_references,
+                clock_round,
+                block_id,
+                aggregate_round_sig,
+                certified_leader,
             );
             tracing::debug!("Created block {:?}", block_data);
             if first_block.is_none() {
                 first_block = Some(block_data.clone());
             }
-            timed!(
-                self.metrics,
-                "Core::new_block::store_block",
-                self.store_block(block_data, &authority_bounds, block_id)
-            );
+            self.store_block(block_data, &authority_bounds, block_id);
         }
 
         self.metrics
@@ -1131,32 +1100,6 @@ impl<H: BlockHandler> Core<H> {
         // so that certified-parent filtering doesn't drop below quorum.
         // Only older-round references go through normal compression.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
-            let prev_round = block_round.saturating_sub(1);
-            let mut seen = AHashSet::new();
-            return pending_refs
-                .iter()
-                .copied()
-                .filter(|r| {
-                    r.authority != self.authority && seen.insert(*r) && r.round >= prev_round
-                })
-                .collect();
-        }
-        // Bluestreak: non-leaders include only the leader at r-1
-        // (own_prev is always prepended by build_block). Leaders keep the
-        // full clean-DAG frontier for the quorum requirement.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak {
-            let is_leader = self.committee.elect_leader(block_round) == self.authority;
-            if !is_leader {
-                let prev_round = block_round.saturating_sub(1);
-                let leader = self.committee.elect_leader(prev_round);
-                return pending_refs
-                    .iter()
-                    .copied()
-                    .filter(|r| r.authority == leader && r.round == prev_round)
-                    .take(1)
-                    .collect();
-            }
-            // Leaders: keep all previous-round refs (same as SailfishPP).
             let prev_round = block_round.saturating_sub(1);
             let mut seen = AHashSet::new();
             return pending_refs

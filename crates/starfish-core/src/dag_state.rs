@@ -2817,6 +2817,15 @@ impl DagStateInner {
                     stack.push(*parent);
                 }
             }
+            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+                if let Some(cert_ref) = block.unprovable_certificate() {
+                    if cert_ref.round > 0
+                        && !self.vertex_certificates[cert_ref.authority as usize].contains(cert_ref)
+                    {
+                        stack.push(*cert_ref);
+                    }
+                }
+            }
         }
 
         for block_ref in to_activate {
