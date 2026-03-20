@@ -43,6 +43,16 @@ type AuthorityBitmask = AuthoritySet;
 
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
 
+#[derive(Default)]
+struct BluestreakCertificateState {
+    /// f+1 propagation support from round r for the same unprovable
+    /// certificate reference.
+    propagation_support: StakeAggregator<ValidityThreshold>,
+    /// Blocks waiting for this certificate to become provable in the dirty
+    /// DAG before they can join the clean DAG.
+    waiting_blocks: BTreeSet<BlockReference>,
+}
+
 /// Tracks where block headers and transaction data originate.
 /// Carried on the wire inside `BlockBatch` so the receiver can distinguish
 /// proactive dissemination from sync responses.
@@ -147,9 +157,7 @@ impl ConsensusProtocol {
         match self {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
-                DisseminationMode::Pull
-            }
+            | ConsensusProtocol::Bluestreak => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
@@ -343,6 +351,13 @@ struct DagStateInner {
     /// Once this reaches f+1 distinct authorities, we can infer that some
     /// honest node had the referenced block in its active-certified view.
     inferred_vertex_support: Vec<BTreeMap<BlockReference, StakeAggregator<ValidityThreshold>>>,
+    /// Direct next-round support for elected leader references. Kept generic
+    /// so other protocols can reuse leader vote aggregation without rescanning
+    /// dirty DAG rounds.
+    leader_vote_support: BTreeMap<BlockReference, StakeAggregator<QuorumThreshold>>,
+    /// Bluestreak-specific propagation support and blocks waiting for a given
+    /// unprovable certificate reference to become provable.
+    bluestreak_certificate_state: BTreeMap<BlockReference, BluestreakCertificateState>,
     /// Sailfish++ timeout certificates, indexed by round.
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
@@ -419,6 +434,8 @@ impl DagState {
             pending_vertex_certificate_children: BTreeMap::new(),
             pending_persisted_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
             inferred_vertex_support: (0..n).map(|_| BTreeMap::new()).collect(),
+            leader_vote_support: BTreeMap::new(),
+            bluestreak_certificate_state: BTreeMap::new(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
         };
@@ -1142,6 +1159,18 @@ impl DagState {
     pub fn has_vertex_certificate(&self, block_ref: &BlockReference) -> bool {
         self.dag_state_inner.read().vertex_certificates[block_ref.authority as usize]
             .contains(block_ref)
+    }
+
+    /// Check whether the local dirty DAG has enough evidence to prove a
+    /// Bluestreak unprovable certificate for `leader_ref` at `block_round`.
+    pub fn has_bluestreak_certificate_evidence(
+        &self,
+        block_round: RoundNumber,
+        leader_ref: &BlockReference,
+    ) -> bool {
+        self.dag_state_inner
+            .read()
+            .has_bluestreak_certificate_evidence(block_round, leader_ref, &self.committee)
     }
 
     /// Check whether 2f+1 stake is certified at the given round
@@ -2457,6 +2486,18 @@ impl DagStateInner {
                     .retain(|child| child.round >= self.evicted_rounds[child.authority as usize]);
                 !children.is_empty()
             });
+        let split_ref = BlockReference {
+            authority: 0,
+            round: min_evicted,
+            digest: BlockDigest::default(),
+        };
+        self.leader_vote_support = self.leader_vote_support.split_off(&split_ref);
+        self.bluestreak_certificate_state = self.bluestreak_certificate_state.split_off(&split_ref);
+        for state in self.bluestreak_certificate_state.values_mut() {
+            state.waiting_blocks.retain(|block_ref| {
+                block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
+            });
+        }
         // Prune Sailfish++ timeout and no-vote certificates.
         self.sailfish_timeout_certs = self.sailfish_timeout_certs.split_off(&min_evicted);
         self.sailfish_novote_certs = self.sailfish_novote_certs.split_off(&(min_evicted, 0));
@@ -2545,6 +2586,9 @@ impl DagStateInner {
             }
         }
         if let Some(cert_ref) = block.unprovable_certificate() {
+            if let Some(state) = self.bluestreak_certificate_state.get_mut(cert_ref) {
+                state.waiting_blocks.remove(&block_ref);
+            }
             if let Some(children) = self.pending_vertex_certificate_children.get_mut(cert_ref) {
                 children.remove(&block_ref);
                 if children.is_empty() {
@@ -2635,6 +2679,66 @@ impl DagStateInner {
         }
     }
 
+    fn has_bluestreak_certificate_evidence(
+        &self,
+        block_round: RoundNumber,
+        leader_ref: &BlockReference,
+        committee: &Committee,
+    ) -> bool {
+        if leader_ref.round + 2 != block_round {
+            return false;
+        }
+        if self
+            .leader_vote_support
+            .get(leader_ref)
+            .is_some_and(|support| support.is_quorum(committee))
+        {
+            return true;
+        }
+        self.bluestreak_certificate_state
+            .get(leader_ref)
+            .is_some_and(|state| state.propagation_support.is_quorum(committee))
+    }
+
+    fn record_leader_vote_support(
+        &mut self,
+        block: &VerifiedBlock,
+        committee: &Committee,
+        ready_certificates: &mut BTreeSet<BlockReference>,
+    ) {
+        for parent in block.block_references() {
+            if parent.round == 0 || parent.round + 1 != block.round() {
+                continue;
+            }
+            if parent.authority != committee.elect_leader(parent.round) {
+                continue;
+            }
+            if self
+                .leader_vote_support
+                .entry(*parent)
+                .or_default()
+                .add(block.authority(), committee)
+            {
+                ready_certificates.insert(*parent);
+            }
+        }
+    }
+
+    fn activate_bluestreak_waiters(
+        &mut self,
+        leader_ref: BlockReference,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        let waiting_blocks = self
+            .bluestreak_certificate_state
+            .get_mut(&leader_ref)
+            .map(|state| std::mem::take(&mut state.waiting_blocks))
+            .unwrap_or_default();
+        for block_ref in waiting_blocks {
+            self.note_vertex_certified(block_ref, activated);
+        }
+    }
+
     /// Bluestreak pre-clean check: a block is pre-clean if it has no
     /// `unprovable_certificate`, or its certificate is verified via the dirty
     /// DAG. Pre-clean blocks feed into the vertex certification pipeline.
@@ -2647,81 +2751,36 @@ impl DagStateInner {
         if self.consensus_protocol != ConsensusProtocol::Bluestreak {
             return;
         }
+        let mut ready_certificates = BTreeSet::new();
+        self.record_leader_vote_support(block, committee, &mut ready_certificates);
+
         let block_ref = *block.reference();
-        let is_pre_clean = match block.unprovable_certificate() {
-            None => true,
+        match block.unprovable_certificate() {
+            None => {
+                self.note_vertex_certified(block_ref, activated);
+            }
+            Some(leader_ref)
+                if self.has_bluestreak_certificate_evidence(
+                    block_ref.round,
+                    leader_ref,
+                    committee,
+                ) =>
+            {
+                self.note_vertex_certified(block_ref, activated);
+            }
             Some(leader_ref) => {
-                self.verify_unprovable_certificate(block_ref.round, leader_ref, committee)
-            }
-        };
-        if is_pre_clean {
-            self.note_vertex_certified(block_ref, activated);
-        }
-        self.reevaluate_bluestreak_pending(committee, activated);
-    }
-
-    /// Verify an unprovable certificate against the local dirty DAG.
-    /// Returns true if 2f+1 blocks at r-1 reference the leader (direct)
-    /// or f+1 blocks at r propagate the same certificate.
-    fn verify_unprovable_certificate(
-        &self,
-        block_round: RoundNumber,
-        leader_ref: &BlockReference,
-        committee: &Committee,
-    ) -> bool {
-        if leader_ref.round + 2 != block_round {
-            return false;
-        }
-
-        let vote_round = match block_round.checked_sub(1) {
-            Some(round) => round,
-            None => return false,
-        };
-        let mut stake = StakeAggregator::<QuorumThreshold>::new();
-        for block in self.get_blocks_by_round(vote_round) {
-            if block.block_references().iter().any(|r| r == leader_ref) {
-                stake.add(block.authority(), committee);
-            }
-        }
-        if stake.is_quorum(committee) {
-            return true;
-        }
-
-        let mut propagation = StakeAggregator::<ValidityThreshold>::new();
-        for block in self.get_blocks_by_round(block_round) {
-            if block.unprovable_certificate() == Some(leader_ref) {
-                propagation.add(block.authority(), committee);
-            }
-        }
-        propagation.get_stake() >= committee.validity_threshold()
-    }
-
-    fn reevaluate_bluestreak_pending(
-        &mut self,
-        committee: &Committee,
-        activated: &mut Vec<BlockReference>,
-    ) {
-        let mut ready = Vec::new();
-        for auth_map in &self.index {
-            for round_blocks in auth_map.values() {
-                for block in round_blocks.values() {
-                    let block_ref = *block.reference();
-                    if self.vertex_certificates[block_ref.authority as usize].contains(&block_ref) {
-                        continue;
-                    }
-                    let Some(leader_ref) = block.unprovable_certificate() else {
-                        continue;
-                    };
-                    if self.verify_unprovable_certificate(block.round(), leader_ref, committee) {
-                        ready.push(block_ref);
-                    }
+                let state = self
+                    .bluestreak_certificate_state
+                    .entry(*leader_ref)
+                    .or_default();
+                state.waiting_blocks.insert(block_ref);
+                if state.propagation_support.add(block.authority(), committee) {
+                    ready_certificates.insert(*leader_ref);
                 }
             }
         }
-        ready.sort();
-        ready.dedup();
-        for block_ref in ready {
-            self.note_vertex_certified(block_ref, activated);
+        for leader_ref in ready_certificates {
+            self.activate_bluestreak_waiters(leader_ref, activated);
         }
     }
 

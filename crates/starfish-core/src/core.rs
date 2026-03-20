@@ -13,7 +13,7 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
-    committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
+    committee::Committee,
     config::NodePrivateConfig,
     consensus::{
         CommitMetastate,
@@ -1050,34 +1050,19 @@ impl<H: BlockHandler> Core<H> {
     ) -> Option<BlockReference> {
         let leader_round = clock_round.checked_sub(2)?;
         let leader = self.committee.elect_leader(leader_round);
-        let leader_block = self
+        let leader_blocks = self
             .dag_state
             .get_blocks_at_authority_round(leader, leader_round)
-            .into_iter()
-            .next()?;
-        let leader_ref = *leader_block.reference();
+            .into_iter();
 
-        let vote_round = clock_round.checked_sub(1)?;
-        let vote_blocks = self.dag_state.get_blocks_by_round_cached(vote_round);
-        let mut vote_stake = StakeAggregator::<QuorumThreshold>::new();
-        for block in vote_blocks.iter() {
-            if block.block_references().iter().any(|r| *r == leader_ref) {
-                vote_stake.add(block.authority(), &self.committee);
+        for leader_block in leader_blocks {
+            let leader_ref = *leader_block.reference();
+            if self
+                .dag_state
+                .has_bluestreak_certificate_evidence(clock_round, &leader_ref)
+            {
+                return Some(leader_ref);
             }
-        }
-        if vote_stake.is_quorum(&self.committee) {
-            return Some(leader_ref);
-        }
-
-        let current_round_blocks = self.dag_state.get_blocks_by_round_cached(clock_round);
-        let mut propagation_stake = StakeAggregator::<ValidityThreshold>::new();
-        for block in current_round_blocks.iter() {
-            if block.unprovable_certificate() == Some(&leader_ref) {
-                propagation_stake.add(block.authority(), &self.committee);
-            }
-        }
-        if propagation_stake.get_stake() >= self.committee.validity_threshold() {
-            return Some(leader_ref);
         }
 
         None
