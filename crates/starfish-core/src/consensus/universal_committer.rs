@@ -183,8 +183,19 @@ impl UniversalCommitter {
         for round in last_decided_round + 1..=highest_anchor {
             let leader = self.committee.elect_leader(round);
 
+            // Fast path: reuse finalized decisions from previous calls.
+            let key = (leader, round);
+            if let Some(cached) = self.decided.get(&key) {
+                if cached.is_final() {
+                    committed.push(cached.clone());
+                    if matches!(cached, LeaderStatus::Commit(..)) {
+                        newly_committed.insert(key);
+                    }
+                    continue;
+                }
+            }
+
             if self.check_direct_skip_bluestreak(leader, round) {
-                let key = (leader, round);
                 if !self.decided.contains_key(&key) {
                     let status = LeaderStatus::Skip(leader, round);
                     self.decided.insert(key, status.clone());
