@@ -222,9 +222,19 @@
             "type": "prometheus",
             "uid": "Fixed-UID-testbed"
           },
+          "expr": "max by (mode) (dissemination_mode_info{node=~\"$node\"})",
+          "legendFormat": "{{mode}}",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
           "expr": "quantile(0.5, transaction_mode_info{node=~\"$node\"}) == 0",
           "legendFormat": "AllZero",
-          "refId": "B",
+          "refId": "C",
           "instant": true
         },
         {
@@ -234,7 +244,7 @@
           },
           "expr": "quantile(0.5, transaction_mode_info{node=~\"$node\"}) == 1",
           "legendFormat": "Random",
-          "refId": "C",
+          "refId": "D",
           "instant": true
         },
         {
@@ -244,7 +254,7 @@
           },
           "expr": "quantile(0.5, storage_backend_info{node=~\"$node\"}) == 0",
           "legendFormat": "RocksDB",
-          "refId": "D",
+          "refId": "E",
           "instant": true
         },
         {
@@ -254,16 +264,6 @@
           },
           "expr": "quantile(0.5, storage_backend_info{node=~\"$node\"}) == 1",
           "legendFormat": "TideHunter",
-          "refId": "E",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Fixed-UID-testbed"
-          },
-          "expr": "max by (mode) (dissemination_mode_info{node=~\"$node\"})",
-          "legendFormat": "{{mode}}",
           "refId": "F",
           "instant": true
         }
@@ -1570,10 +1570,10 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(utilization_timer{node=~\"$node\", proc=~\"Core::.*|BlockManager::.*\"}[1m]) / 1000",
+          "expr": "avg by (proc) (rate(utilization_timer{node=~\"$node\", proc=~\"Core::.*|BlockManager::.*\"}[1m])) / 1000",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{node}} - {{proc}}",
+          "legendFormat": "{{proc}}",
           "range": true,
           "refId": "A",
           "useBackend": false
