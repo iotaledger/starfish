@@ -364,6 +364,26 @@ struct DagStateInner {
     sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
 }
 
+/// O(log n) check whether `certs` contains any entry at the given round.
+/// Exploits `BlockReference` ordering `(round, authority, digest)` to
+/// binary-search instead of scanning the entire set.
+fn has_certificate_at_round(
+    certs: &BTreeSet<BlockReference>,
+    round: RoundNumber,
+) -> bool {
+    let lo = BlockReference {
+        round,
+        authority: 0,
+        digest: BlockDigest::default(),
+    };
+    let hi = BlockReference {
+        round: round + 1,
+        authority: 0,
+        digest: BlockDigest::default(),
+    };
+    certs.range(lo..hi).next().is_some()
+}
+
 impl DagState {
     pub fn open(
         authority: AuthorityIndex,
@@ -706,10 +726,10 @@ impl DagState {
             let prev_round = round - 1;
             let mut stake: Stake = 0;
             for auth in 0..inner.committee_size {
-                if inner.vertex_certificates[auth]
-                    .iter()
-                    .any(|reference| reference.round == prev_round)
-                {
+                if has_certificate_at_round(
+                    &inner.vertex_certificates[auth],
+                    prev_round,
+                ) {
                     stake += self
                         .committee
                         .get_stake(auth as AuthorityIndex)
@@ -1180,10 +1200,7 @@ impl DagState {
         let mut stake: Stake = 0;
         for auth in 0..inner.committee_size {
             // Check if this authority has any certified block at the round.
-            if inner.vertex_certificates[auth]
-                .iter()
-                .any(|r| r.round == round)
-            {
+            if has_certificate_at_round(&inner.vertex_certificates[auth], round) {
                 stake += self
                     .committee
                     .get_stake(auth as AuthorityIndex)
