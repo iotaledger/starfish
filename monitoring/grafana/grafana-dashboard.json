@@ -1116,7 +1116,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -1148,7 +1149,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_sent_total{node=~\"$node\"}[1m]))*8/1024/1024",
+          "expr": "avg(rate(bytes_sent_total{node=~\"$node\"}[1m]))*8",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1165,7 +1166,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(rate(bytes_received_total{node=~\"$node\"}[1m]))*8/1024/1024",
+          "expr": "avg(rate(bytes_received_total{node=~\"$node\"}[1m]))*8",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1176,7 +1177,7 @@
           "useBackend": false
         }
       ],
-      "title": "Average wire bandwidth (Mbps)",
+      "title": "Average wire bandwidth",
       "type": "timeseries"
     },
     {
@@ -5418,7 +5419,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -5450,7 +5452,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_sent_total{node=~\"$node\"}[1m])*8/1024/1024",
+          "expr": "rate(bytes_sent_total{node=~\"$node\"}[1m])*8",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -5460,7 +5462,7 @@
           "useBackend": false
         }
       ],
-      "title": "Network sent, wire (Mbps)",
+      "title": "Network sent, wire",
       "type": "timeseries"
     },
     {
@@ -5519,7 +5521,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -5551,7 +5554,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "rate(bytes_received_total{node=~\"$node\"}[1m])*8/1024/1024",
+          "expr": "rate(bytes_received_total{node=~\"$node\"}[1m])*8",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -5561,7 +5564,7 @@
           "useBackend": false
         }
       ],
-      "title": "Network received, wire (Mbps)",
+      "title": "Network received, wire",
       "type": "timeseries"
     },
     {
