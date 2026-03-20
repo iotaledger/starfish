@@ -184,11 +184,14 @@ impl UniversalCommitter {
             let leader = self.committee.elect_leader(round);
 
             // Fast path: reuse finalized decisions from previous calls.
+            // Only re-emit Commits; cached Skips still short-circuit evaluation
+            // but are not pushed to `committed` (matching the original guard
+            // behavior that never re-emitted Skips).
             let key = (leader, round);
             if let Some(cached) = self.decided.get(&key) {
                 if cached.is_final() {
-                    committed.push(cached.clone());
-                    if matches!(cached, LeaderStatus::Commit(..)) {
+                    if let LeaderStatus::Commit(..) = cached {
+                        committed.push(cached.clone());
                         newly_committed.insert(key);
                     }
                     continue;
