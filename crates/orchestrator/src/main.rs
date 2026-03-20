@@ -552,6 +552,9 @@ async fn run<C: ServerProviderClient>(
 
             // Destroy the testbed and terminate all instances.
             TestbedAction::Destroy { collect_monitoring } => {
+                if let Some(age) = testbed.testbed_age() {
+                    display::config("Testbed age", display::format_duration(age));
+                }
                 if collect_monitoring && settings.monitoring_enabled() {
                     // Stop conflicting local stacks first.
                     display::action("Stopping conflicting local monitoring stacks");

@@ -51,6 +51,9 @@ pub struct Instance {
     /// Whether this instance was launched as a spot instance.
     #[serde(default)]
     pub spot: bool,
+    /// Creation timestamp as Unix epoch seconds (populated from cloud provider).
+    #[serde(default)]
+    pub created_at: Option<i64>,
 }
 
 impl Instance {
@@ -86,6 +89,7 @@ impl Instance {
             specs: Default::default(),
             status: InstanceStatus::Active,
             spot: false,
+            created_at: None,
         }
     }
 }
@@ -233,6 +237,7 @@ pub mod test_client {
                 specs: self.settings.specs.clone(),
                 status: InstanceStatus::Active,
                 spot: false,
+                created_at: None,
             };
             guard.push(instance.clone());
             Ok(instance)

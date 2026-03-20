@@ -143,6 +143,9 @@ impl AwsClient {
             )
             .as_str()
             .into(),
+            created_at: aws_instance
+                .launch_time()
+                .map(|t| t.as_secs_f64() as i64),
         }
     }
 

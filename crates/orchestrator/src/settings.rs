@@ -346,6 +346,7 @@ impl Settings {
             specs: "external".into(),
             status: InstanceStatus::Active,
             spot: false,
+            created_at: None,
         }))
     }
 

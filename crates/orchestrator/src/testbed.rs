@@ -69,6 +69,17 @@ impl<C: ServerProviderClient> Testbed<C> {
             .map_err(TestbedError::from)
     }
 
+    /// Return the wall-clock age of the testbed based on the earliest instance
+    /// creation timestamp.
+    pub fn testbed_age(&self) -> Option<Duration> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let earliest = self.instances.iter().filter_map(|i| i.created_at).min()?;
+        Some(Duration::from_secs((now - earliest).max(0) as u64))
+    }
+
     /// Print the current status of the testbed.
     pub fn status(&self) {
         let filtered = self
@@ -124,6 +135,9 @@ impl<C: ServerProviderClient> Testbed<C> {
         display::config("Client", &self.client);
         let repo = &self.settings.repository;
         display::config("Repo", format!("{} ({})", repo.url, repo.commit));
+        if let Some(age) = self.testbed_age() {
+            display::config("Testbed age", display::format_duration(age));
+        }
         display::newline();
         table.printstd();
         display::newline();

@@ -4,6 +4,8 @@
 
 use std::{fmt::Display, net::Ipv4Addr};
 
+use chrono::DateTime;
+
 use reqwest::{Client as NetworkClient, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -44,6 +46,7 @@ pub struct VultrInstance {
     pub tags: Vec<String>,
     pub plan: String,
     pub power_status: String,
+    pub date_created: Option<String>,
 }
 
 impl From<VultrInstance> for Instance {
@@ -57,6 +60,10 @@ impl From<VultrInstance> for Instance {
             specs: instance.plan,
             status: instance.power_status.as_str().into(),
             spot: false,
+            created_at: instance
+                .date_created
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.timestamp()),
         }
     }
 }
