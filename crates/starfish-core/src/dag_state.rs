@@ -367,10 +367,7 @@ struct DagStateInner {
 /// O(log n) check whether `certs` contains any entry at the given round.
 /// Exploits `BlockReference` ordering `(round, authority, digest)` to
 /// binary-search instead of scanning the entire set.
-fn has_certificate_at_round(
-    certs: &BTreeSet<BlockReference>,
-    round: RoundNumber,
-) -> bool {
+fn has_certificate_at_round(certs: &BTreeSet<BlockReference>, round: RoundNumber) -> bool {
     let lo = BlockReference {
         round,
         authority: 0,
@@ -726,10 +723,7 @@ impl DagState {
             let prev_round = round - 1;
             let mut stake: Stake = 0;
             for auth in 0..inner.committee_size {
-                if has_certificate_at_round(
-                    &inner.vertex_certificates[auth],
-                    prev_round,
-                ) {
+                if has_certificate_at_round(&inner.vertex_certificates[auth], prev_round) {
                     stake += self
                         .committee
                         .get_stake(auth as AuthorityIndex)
