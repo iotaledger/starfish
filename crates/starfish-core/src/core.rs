@@ -232,10 +232,6 @@ impl<H: BlockHandler> Core<H> {
         Vec<BlockReference>,
         Vec<Data<VerifiedBlock>>,
     ) {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::add_blocks");
         let mut block_shards = Vec::new();
         let blocks: Vec<_> = blocks
             .into_iter()
@@ -322,10 +318,6 @@ impl<H: BlockHandler> Core<H> {
         Vec<BlockReference>,
         Vec<Data<VerifiedBlock>>,
     ) {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::add_headers");
         let (processed, _, missing_references) = timed!(
             self.metrics,
             "BlockManager::add_headers",
@@ -1231,6 +1223,10 @@ impl<H: BlockHandler> Core<H> {
 
     #[allow(clippy::type_complexity)]
     pub fn try_commit(&mut self) -> (Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>, bool) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::try_commit");
         let leaders = self.committer.try_commit(self.last_commit_leader);
         let any_decided = !leaders.is_empty();
         let sequence: Vec<_> = leaders
@@ -1246,6 +1242,10 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn cleanup(&mut self) -> RoundNumber {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::cleanup");
         self.dag_state.cleanup();
         let threshold = self.dag_state.gc_round();
         self.block_manager
@@ -1302,6 +1302,10 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn handle_committed_subdag(&mut self, committed: Vec<CommittedSubDag>, _any_decided: bool) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::handle_committed_subdag");
         let mut commit_data = vec![];
         for commit in &committed {
             let committed_rounds = self.dag_state.update_commit_state(commit);

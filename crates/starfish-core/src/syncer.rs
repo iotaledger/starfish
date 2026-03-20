@@ -16,7 +16,7 @@ use crate::{
     core::Core,
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
-    metrics::{Metrics, UtilizationTimerVecExt},
+    metrics::Metrics,
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
     types::{
@@ -388,16 +388,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     pub fn try_new_commit(&mut self) {
-        let _timer = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Syncer::try_new_commit");
-        let timer_core_commit = self
-            .metrics
-            .utilization_timer
-            .utilization_timer("Core::try_new_commit");
         let (newly_committed, any_decided) = self.core.try_commit();
-        drop(timer_core_commit);
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {
             let committed_refs: Vec<_> = newly_committed
