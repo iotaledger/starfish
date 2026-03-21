@@ -228,7 +228,7 @@ impl UniversalCommitter {
                     .dag_state
                     .get_blocks_at_authority_round(prev_leader, prev_round)
                     .into_iter()
-                    .filter(|block| self.dag_state.has_vertex_certificate(block.reference()))
+                    .filter(|block| self.dag_state.has_clean_vertex(block.reference()))
                     .filter(|block| self.dag_state.linked(&current, block))
                     .collect();
 
@@ -277,10 +277,7 @@ impl UniversalCommitter {
             .get_blocks_at_authority_round(leader, leader_round);
 
         for leader_block in leader_blocks {
-            if !self
-                .dag_state
-                .has_vertex_certificate(leader_block.reference())
-            {
+            if !self.dag_state.has_clean_vertex(leader_block.reference()) {
                 continue;
             }
             let leader_ref = *leader_block.reference();
@@ -375,7 +372,7 @@ impl UniversalCommitter {
                     .dag_state
                     .get_blocks_at_authority_round(prev_leader, prev_round)
                     .into_iter()
-                    .filter(|block| self.dag_state.has_vertex_certificate(block.reference()))
+                    .filter(|block| self.dag_state.has_clean_vertex(block.reference()))
                     .filter(|block| self.dag_state.linked(&current, block))
                     .collect();
 
@@ -425,10 +422,7 @@ impl UniversalCommitter {
 
         let mut committed_leaders: Vec<_> = leader_blocks
             .into_iter()
-            .filter(|leader_block| {
-                self.dag_state
-                    .has_vertex_certificate(leader_block.reference())
-            })
+            .filter(|leader_block| self.dag_state.has_clean_vertex(leader_block.reference()))
             .filter(|leader_block| {
                 let support =
                     self.supporting_stake_for_sailfish(leader_block.reference(), support_round);
@@ -478,7 +472,7 @@ impl UniversalCommitter {
         let supporting_blocks = self.dag_state.get_blocks_by_round_cached(support_round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in supporting_blocks.iter() {
-            if !self.dag_state.has_vertex_certificate(block.reference()) {
+            if !self.dag_state.has_clean_vertex(block.reference()) {
                 continue;
             }
             if block
@@ -687,7 +681,7 @@ mod tests {
         dag_state.insert_general_block(supporter_a.clone(), DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(supporter_b.clone(), DataSource::BlockBundleStreaming);
 
-        dag_state.mark_vertices_certified(&[
+        dag_state.mark_vertices_clean(&[
             leader_ref,
             *supporter_a.reference(),
             *supporter_b.reference(),

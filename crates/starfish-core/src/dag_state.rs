@@ -330,27 +330,26 @@ struct DagStateInner {
     consensus_protocol: ConsensusProtocol,
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
     precomputed_leader_sigs: BTreeMap<BlockReference, BlsSignatureBytes>,
-    /// Per-authority active RBC vertex certificates (SailfishPlusPlus).
-    /// A vertex is active only once its direct parents are also
-    /// active-certified (or genesis), making the usable certified DAG
-    /// ancestor-closed.
-    vertex_certificates: Vec<BTreeSet<BlockReference>>,
-    /// Preliminary SailfishPlusPlus local certifications that are waiting for
-    /// one or more direct parents to become active-certified.
-    pending_vertex_certificates: Vec<BTreeSet<BlockReference>>,
+    /// Per-authority clean vertices for dual-DAG protocols.
+    /// A vertex joins the clean DAG only once its direct parents are also
+    /// clean (or genesis), making the usable clean DAG ancestor-closed.
+    clean_vertices: Vec<BTreeSet<BlockReference>>,
+    /// Preliminary clean vertices that are waiting for one or more direct
+    /// parents to join the clean DAG.
+    pending_clean_vertices: Vec<BTreeSet<BlockReference>>,
     /// For each waiting vertex, the number of direct non-genesis parents that
-    /// are still missing active certification.
-    pending_vertex_certificate_counts: BTreeMap<BlockReference, usize>,
+    /// are still missing from the clean DAG.
+    pending_clean_vertex_counts: BTreeMap<BlockReference, usize>,
     /// Reverse dependency index: parent -> children that are waiting for that
-    /// parent to become active-certified.
-    pending_vertex_certificate_children: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
-    /// Active Sailfish certifications waiting to be persisted on the next
+    /// parent to join the clean DAG.
+    pending_clean_vertex_children: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
+    /// Clean dual-DAG vertices waiting to be persisted on the next
     /// storage flush boundary.
-    pending_persisted_vertex_certificates: Vec<BTreeSet<BlockReference>>,
+    pending_persisted_clean_vertices: Vec<BTreeSet<BlockReference>>,
     /// Supporters from the next round that directly reference a given block.
     /// Once this reaches f+1 distinct authorities, we can infer that some
-    /// honest node had the referenced block in its active-certified view.
-    inferred_vertex_support: Vec<BTreeMap<BlockReference, StakeAggregator<ValidityThreshold>>>,
+    /// honest node had the referenced block in its clean view.
+    inferred_clean_support: Vec<BTreeMap<BlockReference, StakeAggregator<ValidityThreshold>>>,
     /// Direct next-round support for elected leader references. Kept generic
     /// so other protocols can reuse leader vote aggregation without rescanning
     /// dirty DAG rounds.
@@ -364,10 +363,10 @@ struct DagStateInner {
     sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
 }
 
-/// O(log n) check whether `certs` contains any entry at the given round.
+/// O(log n) check whether `refs` contains any clean vertex at the given round.
 /// Exploits `BlockReference` ordering `(round, authority, digest)` to
 /// binary-search instead of scanning the entire set.
-fn has_certificate_at_round(certs: &BTreeSet<BlockReference>, round: RoundNumber) -> bool {
+fn has_clean_vertex_at_round(refs: &BTreeSet<BlockReference>, round: RoundNumber) -> bool {
     let lo = BlockReference {
         round,
         authority: 0,
@@ -378,7 +377,7 @@ fn has_certificate_at_round(certs: &BTreeSet<BlockReference>, round: RoundNumber
         authority: 0,
         digest: BlockDigest::default(),
     };
-    certs.range(lo..hi).next().is_some()
+    refs.range(lo..hi).next().is_some()
 }
 
 impl DagState {
@@ -445,12 +444,12 @@ impl DagState {
             consensus_protocol,
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
-            vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            pending_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            pending_vertex_certificate_counts: BTreeMap::new(),
-            pending_vertex_certificate_children: BTreeMap::new(),
-            pending_persisted_vertex_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            inferred_vertex_support: (0..n).map(|_| BTreeMap::new()).collect(),
+            clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
+            pending_clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
+            pending_clean_vertex_counts: BTreeMap::new(),
+            pending_clean_vertex_children: BTreeMap::new(),
+            pending_persisted_clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
+            inferred_clean_support: (0..n).map(|_| BTreeMap::new()).collect(),
             leader_vote_support: BTreeMap::new(),
             bluestreak_certificate_state: BTreeMap::new(),
             sailfish_timeout_certs: BTreeMap::new(),
@@ -586,19 +585,19 @@ impl DagState {
             }
         }
 
-        // Recover persisted active certified vertices. Only the active,
+        // Recover persisted clean vertices. Only the clean,
         // ancestor-closed frontier is persisted; preliminary waiting state is
         // intentionally not recovered.
         if consensus_protocol.uses_dual_dag() {
-            let certified_from_round = if use_windowed {
+            let clean_from_round = if use_windowed {
                 inner.evicted_rounds.iter().copied().min().unwrap_or(0)
             } else {
                 0
             };
-            let certified_refs = store
-                .scan_sailfish_certified_refs_from_round(certified_from_round)
-                .expect("Failed to read Sailfish certified refs from storage");
-            for block_ref in certified_refs {
+            let clean_refs = store
+                .scan_dual_dag_clean_refs_from_round(clean_from_round)
+                .expect("Failed to read dual-DAG clean refs from storage");
+            for block_ref in clean_refs {
                 let auth = block_ref.authority as usize;
                 if block_ref.round <= inner.evicted_rounds[auth] {
                     continue;
@@ -608,7 +607,7 @@ impl DagState {
                     .and_then(|blocks| blocks.get(&block_ref.digest))
                     .is_some()
                 {
-                    inner.vertex_certificates[auth].insert(block_ref);
+                    inner.clean_vertices[auth].insert(block_ref);
                 }
             }
         }
@@ -705,8 +704,8 @@ impl DagState {
 
     /// Return the protocol round that may be used for proposing a new block.
     ///
-    /// For SailfishPlusPlus, entering round `r` requires both raw threshold
-    /// clock progress to `r` and quorum stake of RBC-certified vertices in
+    /// For dual-DAG protocols, entering round `r` requires both raw threshold
+    /// clock progress to `r` and quorum stake of clean vertices in
     /// round `r - 1`. Other protocols use the raw threshold clock directly.
     pub fn proposal_round(&self) -> RoundNumber {
         if !self.consensus_protocol.uses_dual_dag() {
@@ -723,7 +722,7 @@ impl DagState {
             let prev_round = round - 1;
             let mut stake: Stake = 0;
             for auth in 0..inner.committee_size {
-                if has_certificate_at_round(&inner.vertex_certificates[auth], prev_round) {
+                if has_clean_vertex_at_round(&inner.clean_vertices[auth], prev_round) {
                     stake += self
                         .committee
                         .get_stake(auth as AuthorityIndex)
@@ -1121,10 +1120,10 @@ impl DagState {
             .contains(block_ref)
     }
 
-    /// Mark a batch of vertices as RBC-certified (SailfishPlusPlus).
-    /// A newly RBC-delivered vertex becomes usable certified state only after
-    /// all of its direct parents are also usable certified (or genesis).
-    pub fn mark_vertices_certified(&self, block_refs: &[BlockReference]) -> bool {
+    /// Mark a batch of dual-DAG vertices as clean.
+    /// A newly delivered vertex becomes usable only after all of its direct
+    /// parents are also clean (or genesis).
+    pub fn mark_vertices_clean(&self, block_refs: &[BlockReference]) -> bool {
         if block_refs.is_empty() {
             return false;
         }
@@ -1132,47 +1131,45 @@ impl DagState {
             let mut inner = self.dag_state_inner.write();
             let mut activated = Vec::new();
             for &block_ref in block_refs {
-                inner.note_vertex_certified(block_ref, &mut activated);
+                inner.note_clean_vertex(block_ref, &mut activated);
             }
             activated
         };
         !activated.is_empty()
     }
 
-    /// Mark a vertex as RBC-certified (SailfishPlusPlus).
-    pub fn mark_vertex_certified(&self, block_ref: BlockReference) -> bool {
-        self.mark_vertices_certified(&[block_ref])
+    /// Mark a vertex as clean.
+    pub fn mark_vertex_clean(&self, block_ref: BlockReference) -> bool {
+        self.mark_vertices_clean(&[block_ref])
     }
 
-    /// Drain active Sailfish certifications that still need to be persisted at
+    /// Drain clean dual-DAG vertices that still need to be persisted at
     /// the next storage flush boundary.
-    pub fn take_pending_sailfish_certified_refs(&self) -> Vec<BlockReference> {
+    pub fn take_pending_clean_refs(&self) -> Vec<BlockReference> {
         let mut inner = self.dag_state_inner.write();
         let mut refs = Vec::new();
-        for pending in &mut inner.pending_persisted_vertex_certificates {
+        for pending in &mut inner.pending_persisted_clean_vertices {
             refs.extend(std::mem::take(pending));
         }
         refs
     }
 
-    /// Persist active Sailfish certifications accumulated since the last flush
+    /// Persist clean dual-DAG vertices accumulated since the last flush
     /// boundary.
-    pub fn flush_pending_sailfish_certified_refs(&self) -> bool {
-        let refs = self.take_pending_sailfish_certified_refs();
+    pub fn flush_pending_clean_refs(&self) -> bool {
+        let refs = self.take_pending_clean_refs();
         if refs.is_empty() {
             return false;
         }
         self.store
-            .store_sailfish_certified_refs(&refs)
-            .expect("Failed to persist Sailfish certified refs");
+            .store_dual_dag_clean_refs(&refs)
+            .expect("Failed to persist dual-DAG clean refs");
         true
     }
 
-    /// Check whether a vertex is active-certified and therefore usable as part
-    /// of the certified SailfishPlusPlus DAG.
-    pub fn has_vertex_certificate(&self, block_ref: &BlockReference) -> bool {
-        self.dag_state_inner.read().vertex_certificates[block_ref.authority as usize]
-            .contains(block_ref)
+    /// Check whether a vertex is in the clean DAG.
+    pub fn has_clean_vertex(&self, block_ref: &BlockReference) -> bool {
+        self.dag_state_inner.read().clean_vertices[block_ref.authority as usize].contains(block_ref)
     }
 
     /// Check whether the local dirty DAG has enough evidence to prove a
@@ -1187,14 +1184,13 @@ impl DagState {
             .has_bluestreak_certificate_evidence(block_round, leader_ref, &self.committee)
     }
 
-    /// Check whether 2f+1 stake is certified at the given round
-    /// (SailfishPlusPlus certified parent quorum gate).
-    pub fn certified_parent_quorum(&self, round: RoundNumber) -> bool {
+    /// Check whether 2f+1 stake is present in the clean DAG at the given round.
+    pub fn clean_parent_quorum(&self, round: RoundNumber) -> bool {
         let inner = self.dag_state_inner.read();
         let mut stake: Stake = 0;
         for auth in 0..inner.committee_size {
-            // Check if this authority has any certified block at the round.
-            if has_certificate_at_round(&inner.vertex_certificates[auth], round) {
+            // Check if this authority has any clean block at the round.
+            if has_clean_vertex_at_round(&inner.clean_vertices[auth], round) {
                 stake += self
                     .committee
                     .get_stake(auth as AuthorityIndex)
@@ -1553,7 +1549,7 @@ impl DagState {
 
         if self.consensus_protocol.uses_dual_dag()
             && quorum_round > 1
-            && !self.certified_parent_quorum(quorum_round - 1)
+            && !self.clean_parent_quorum(quorum_round - 1)
         {
             return false;
         }
@@ -2476,19 +2472,18 @@ impl DagStateInner {
                 round: self.evicted_rounds[auth],
                 digest: BlockDigest::default(),
             };
-            self.vertex_certificates[auth] = self.vertex_certificates[auth].split_off(&split_ref);
-            self.pending_vertex_certificates[auth] =
-                self.pending_vertex_certificates[auth].split_off(&split_ref);
-            self.pending_persisted_vertex_certificates[auth] =
-                self.pending_persisted_vertex_certificates[auth].split_off(&split_ref);
-            self.inferred_vertex_support[auth] =
-                self.inferred_vertex_support[auth].split_off(&split_ref);
+            self.clean_vertices[auth] = self.clean_vertices[auth].split_off(&split_ref);
+            self.pending_clean_vertices[auth] =
+                self.pending_clean_vertices[auth].split_off(&split_ref);
+            self.pending_persisted_clean_vertices[auth] =
+                self.pending_persisted_clean_vertices[auth].split_off(&split_ref);
+            self.inferred_clean_support[auth] =
+                self.inferred_clean_support[auth].split_off(&split_ref);
         }
-        self.pending_vertex_certificate_counts
-            .retain(|block_ref, _| {
-                block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
-            });
-        self.pending_vertex_certificate_children
+        self.pending_clean_vertex_counts.retain(|block_ref, _| {
+            block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
+        });
+        self.pending_clean_vertex_children
             .retain(|parent, children| {
                 if parent.round < self.evicted_rounds[parent.authority as usize] {
                     return false;
@@ -2514,45 +2509,50 @@ impl DagStateInner {
         self.sailfish_novote_certs = self.sailfish_novote_certs.split_off(&(min_evicted, 0));
     }
 
-    fn note_vertex_certified(
+    /// Register a locally verified dual-DAG vertex.
+    /// If all causal predecessors are already clean, the vertex activates
+    /// immediately; otherwise it waits on the missing clean dependencies.
+    fn note_clean_vertex(
         &mut self,
         block_ref: BlockReference,
         activated: &mut Vec<BlockReference>,
     ) {
         let auth = block_ref.authority as usize;
-        if self.vertex_certificates[auth].contains(&block_ref)
-            || self.pending_vertex_certificates[auth].contains(&block_ref)
+        if self.clean_vertices[auth].contains(&block_ref)
+            || self.pending_clean_vertices[auth].contains(&block_ref)
         {
             return;
         }
 
-        let missing_parents = self.missing_active_certificate_parents(block_ref);
+        let missing_parents = self.missing_clean_parents(block_ref);
         if missing_parents.is_empty() {
-            self.activate_vertex_certificate(block_ref, activated);
+            self.activate_clean_vertex(block_ref, activated);
             return;
         }
 
-        self.pending_vertex_certificates[auth].insert(block_ref);
-        self.pending_vertex_certificate_counts
+        self.pending_clean_vertices[auth].insert(block_ref);
+        self.pending_clean_vertex_counts
             .insert(block_ref, missing_parents.len());
         for parent in missing_parents {
-            self.pending_vertex_certificate_children
+            self.pending_clean_vertex_children
                 .entry(parent)
                 .or_default()
                 .insert(block_ref);
         }
     }
 
-    fn missing_active_certificate_parents(&self, block_ref: BlockReference) -> Vec<BlockReference> {
+    /// Return the direct causal dependencies that still block this vertex from
+    /// entering the clean DAG.
+    fn missing_clean_parents(&self, block_ref: BlockReference) -> Vec<BlockReference> {
         let block = self
             .get_storage_block(block_ref)
-            .unwrap_or_else(|| panic!("Certified block {block_ref} should exist in DagState"));
+            .unwrap_or_else(|| panic!("Clean block {block_ref} should exist in DagState"));
         let mut missing = Vec::new();
         for parent in block.block_references() {
             if parent.round == 0 {
                 continue;
             }
-            if !self.vertex_certificates[parent.authority as usize].contains(parent) {
+            if !self.clean_vertices[parent.authority as usize].contains(parent) {
                 missing.push(*parent);
             }
         }
@@ -2561,7 +2561,7 @@ impl DagStateInner {
         if self.consensus_protocol == ConsensusProtocol::Bluestreak {
             if let Some(cert_ref) = block.unprovable_certificate() {
                 if cert_ref.round > 0
-                    && !self.vertex_certificates[cert_ref.authority as usize].contains(cert_ref)
+                    && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
                     && !missing.contains(cert_ref)
                 {
                     missing.push(*cert_ref);
@@ -2571,28 +2571,30 @@ impl DagStateInner {
         missing
     }
 
-    fn activate_vertex_certificate(
+    /// Move a vertex into the clean DAG and recursively wake any children that
+    /// were only waiting on this dependency.
+    fn activate_clean_vertex(
         &mut self,
         block_ref: BlockReference,
         activated: &mut Vec<BlockReference>,
     ) {
         let auth = block_ref.authority as usize;
-        if !self.vertex_certificates[auth].insert(block_ref) {
+        if !self.clean_vertices[auth].insert(block_ref) {
             return;
         }
 
-        self.pending_vertex_certificates[auth].remove(&block_ref);
-        self.pending_vertex_certificate_counts.remove(&block_ref);
-        self.inferred_vertex_support[auth].remove(&block_ref);
+        self.pending_clean_vertices[auth].remove(&block_ref);
+        self.pending_clean_vertex_counts.remove(&block_ref);
+        self.inferred_clean_support[auth].remove(&block_ref);
 
         let block = self
             .get_storage_block(block_ref)
-            .unwrap_or_else(|| panic!("Certified block {block_ref} should exist in DagState"));
+            .unwrap_or_else(|| panic!("Clean block {block_ref} should exist in DagState"));
         for parent in block.block_references() {
-            if let Some(children) = self.pending_vertex_certificate_children.get_mut(parent) {
+            if let Some(children) = self.pending_clean_vertex_children.get_mut(parent) {
                 children.remove(&block_ref);
                 if children.is_empty() {
-                    self.pending_vertex_certificate_children.remove(parent);
+                    self.pending_clean_vertex_children.remove(parent);
                 }
             }
         }
@@ -2600,35 +2602,35 @@ impl DagStateInner {
             if let Some(state) = self.bluestreak_certificate_state.get_mut(cert_ref) {
                 state.waiting_blocks.remove(&block_ref);
             }
-            if let Some(children) = self.pending_vertex_certificate_children.get_mut(cert_ref) {
+            if let Some(children) = self.pending_clean_vertex_children.get_mut(cert_ref) {
                 children.remove(&block_ref);
                 if children.is_empty() {
-                    self.pending_vertex_certificate_children.remove(cert_ref);
+                    self.pending_clean_vertex_children.remove(cert_ref);
                 }
             }
         }
 
         activated.push(block_ref);
-        self.pending_persisted_vertex_certificates[auth].insert(block_ref);
+        self.pending_persisted_clean_vertices[auth].insert(block_ref);
 
         let waiting_children = self
-            .pending_vertex_certificate_children
+            .pending_clean_vertex_children
             .remove(&block_ref)
             .unwrap_or_default();
         for child in waiting_children {
-            let should_activate = match self.pending_vertex_certificate_counts.get_mut(&child) {
+            let should_activate = match self.pending_clean_vertex_counts.get_mut(&child) {
                 Some(remaining) if *remaining > 1 => {
                     *remaining -= 1;
                     false
                 }
                 Some(_) => {
-                    self.pending_vertex_certificate_counts.remove(&child);
+                    self.pending_clean_vertex_counts.remove(&child);
                     true
                 }
                 None => false,
             };
             if should_activate {
-                self.activate_vertex_certificate(child, activated);
+                self.activate_clean_vertex(child, activated);
             }
         }
     }
@@ -2656,11 +2658,15 @@ impl DagStateInner {
         self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
         self.update_starfish_speed_leader_hints(&block);
-        self.update_inferred_sailfish_support(&block, committee, activated);
+        self.update_inferred_clean_support(&block, committee, activated);
         self.check_bluestreak_pre_clean(&block, committee, activated);
     }
 
-    fn update_inferred_sailfish_support(
+    /// Track f+1 next-round support for dual-DAG parents.
+    /// Once that threshold is reached we can infer that some honest node had
+    /// the referenced parent in its clean view and activate the ancestor-closed
+    /// clean closure rooted there.
+    fn update_inferred_clean_support(
         &mut self,
         block: &VerifiedBlock,
         committee: &Committee,
@@ -2676,7 +2682,7 @@ impl DagStateInner {
             if parent.round == 0 || parent.round + 1 != block.round() {
                 continue;
             }
-            let reached = self.inferred_vertex_support[parent.authority as usize]
+            let reached = self.inferred_clean_support[parent.authority as usize]
                 .entry(*parent)
                 .or_default()
                 .add(supporter, committee);
@@ -2686,7 +2692,7 @@ impl DagStateInner {
         }
 
         for root in infer_roots {
-            self.infer_vertex_certificate_closure(root, activated);
+            self.infer_clean_vertex_closure(root, activated);
         }
     }
 
@@ -2746,13 +2752,14 @@ impl DagStateInner {
             .map(|state| std::mem::take(&mut state.waiting_blocks))
             .unwrap_or_default();
         for block_ref in waiting_blocks {
-            self.note_vertex_certified(block_ref, activated);
+            self.note_clean_vertex(block_ref, activated);
         }
     }
 
     /// Bluestreak pre-clean check: a block is pre-clean if it has no
     /// `unprovable_certificate`, or its certificate is verified via the dirty
-    /// DAG. Pre-clean blocks feed into the vertex certification pipeline.
+    /// DAG. Pre-clean blocks then flow into the generic clean-DAG activation
+    /// pipeline above.
     fn check_bluestreak_pre_clean(
         &mut self,
         block: &VerifiedBlock,
@@ -2768,7 +2775,7 @@ impl DagStateInner {
         let block_ref = *block.reference();
         match block.unprovable_certificate() {
             None => {
-                self.note_vertex_certified(block_ref, activated);
+                self.note_clean_vertex(block_ref, activated);
             }
             Some(leader_ref)
                 if self.has_bluestreak_certificate_evidence(
@@ -2777,7 +2784,7 @@ impl DagStateInner {
                     committee,
                 ) =>
             {
-                self.note_vertex_certified(block_ref, activated);
+                self.note_clean_vertex(block_ref, activated);
             }
             Some(leader_ref) => {
                 let state = self
@@ -2795,12 +2802,14 @@ impl DagStateInner {
         }
     }
 
-    fn infer_vertex_certificate_closure(
+    /// Starting from a root that just gained inferred support, recursively
+    /// collect the ancestor-closed clean closure and activate it.
+    fn infer_clean_vertex_closure(
         &mut self,
         root: BlockReference,
         activated: &mut Vec<BlockReference>,
     ) {
-        if root.round == 0 || self.vertex_certificates[root.authority as usize].contains(&root) {
+        if root.round == 0 || self.clean_vertices[root.authority as usize].contains(&root) {
             return;
         }
 
@@ -2809,7 +2818,7 @@ impl DagStateInner {
 
         while let Some(block_ref) = stack.pop() {
             if block_ref.round == 0
-                || self.vertex_certificates[block_ref.authority as usize].contains(&block_ref)
+                || self.clean_vertices[block_ref.authority as usize].contains(&block_ref)
             {
                 continue;
             }
@@ -2823,7 +2832,7 @@ impl DagStateInner {
 
             for parent in block.block_references() {
                 if parent.round > 0
-                    && !self.vertex_certificates[parent.authority as usize].contains(parent)
+                    && !self.clean_vertices[parent.authority as usize].contains(parent)
                 {
                     stack.push(*parent);
                 }
@@ -2831,7 +2840,7 @@ impl DagStateInner {
             if self.consensus_protocol == ConsensusProtocol::Bluestreak {
                 if let Some(cert_ref) = block.unprovable_certificate() {
                     if cert_ref.round > 0
-                        && !self.vertex_certificates[cert_ref.authority as usize].contains(cert_ref)
+                        && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
                     {
                         stack.push(*cert_ref);
                     }
@@ -2840,7 +2849,7 @@ impl DagStateInner {
         }
 
         for block_ref in to_activate {
-            self.activate_vertex_certificate(block_ref, activated);
+            self.activate_clean_vertex(block_ref, activated);
         }
     }
 
@@ -3695,15 +3704,15 @@ mod tests {
 
         dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
-        dag_state.mark_vertices_certified(&[child_ref]);
+        dag_state.mark_vertices_clean(&[child_ref]);
 
-        assert!(!dag_state.has_vertex_certificate(&child_ref));
-        assert!(!dag_state.has_vertex_certificate(&parent_ref));
+        assert!(!dag_state.has_clean_vertex(&child_ref));
+        assert!(!dag_state.has_clean_vertex(&parent_ref));
 
-        dag_state.mark_vertices_certified(&[parent_ref]);
+        dag_state.mark_vertices_clean(&[parent_ref]);
 
-        assert!(dag_state.has_vertex_certificate(&parent_ref));
-        assert!(dag_state.has_vertex_certificate(&child_ref));
+        assert!(dag_state.has_clean_vertex(&parent_ref));
+        assert!(dag_state.has_clean_vertex(&child_ref));
     }
 
     #[test]
@@ -3724,10 +3733,10 @@ mod tests {
             dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
         }
 
-        dag_state.mark_vertices_certified(&certified);
+        dag_state.mark_vertices_clean(&certified);
 
-        assert!(dag_state.certified_parent_quorum(1));
-        assert!(!dag_state.certified_parent_quorum(2));
+        assert!(dag_state.clean_parent_quorum(1));
+        assert!(!dag_state.clean_parent_quorum(2));
     }
 
     #[test]
@@ -3745,10 +3754,10 @@ mod tests {
 
         dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
-        dag_state.mark_vertices_certified(&[child_ref, parent_ref]);
+        dag_state.mark_vertices_clean(&[child_ref, parent_ref]);
 
-        assert!(dag_state.has_vertex_certificate(&parent_ref));
-        assert!(dag_state.has_vertex_certificate(&child_ref));
+        assert!(dag_state.has_clean_vertex(&parent_ref));
+        assert!(dag_state.has_clean_vertex(&child_ref));
     }
 
     #[test]
@@ -3766,11 +3775,11 @@ mod tests {
 
         dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
-        dag_state.mark_vertices_certified(&[child_ref, parent_ref]);
+        dag_state.mark_vertices_clean(&[child_ref, parent_ref]);
 
-        let pending = dag_state.take_pending_sailfish_certified_refs();
+        let pending = dag_state.take_pending_clean_refs();
         assert_eq!(pending, vec![parent_ref, child_ref]);
-        assert!(dag_state.take_pending_sailfish_certified_refs().is_empty());
+        assert!(dag_state.take_pending_clean_refs().is_empty());
     }
 
     #[test]
@@ -3797,15 +3806,15 @@ mod tests {
 
         dag_state.insert_general_block(ancestor, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(target, DataSource::BlockBundleStreaming);
-        assert!(!dag_state.has_vertex_certificate(&ancestor_ref));
-        assert!(!dag_state.has_vertex_certificate(&target_ref));
+        assert!(!dag_state.has_clean_vertex(&ancestor_ref));
+        assert!(!dag_state.has_clean_vertex(&target_ref));
 
         dag_state.insert_general_block(supporter_a, DataSource::BlockBundleStreaming);
-        assert!(!dag_state.has_vertex_certificate(&target_ref));
+        assert!(!dag_state.has_clean_vertex(&target_ref));
 
         dag_state.insert_general_block(supporter_b, DataSource::BlockBundleStreaming);
-        assert!(dag_state.has_vertex_certificate(&target_ref));
-        assert!(dag_state.has_vertex_certificate(&ancestor_ref));
+        assert!(dag_state.has_clean_vertex(&target_ref));
+        assert!(dag_state.has_clean_vertex(&ancestor_ref));
     }
 
     #[test]
@@ -3826,16 +3835,16 @@ mod tests {
 
         dag_state.insert_general_block(parent, DataSource::BlockBundleStreaming);
         dag_state.insert_general_block(child, DataSource::BlockBundleStreaming);
-        dag_state.mark_vertices_certified(&[parent_ref, child_ref]);
-        dag_state.flush_pending_sailfish_certified_refs();
+        dag_state.mark_vertices_clean(&[parent_ref, child_ref]);
+        dag_state.flush_pending_clean_refs();
 
-        assert!(dag_state.has_vertex_certificate(&parent_ref));
-        assert!(dag_state.has_vertex_certificate(&child_ref));
+        assert!(dag_state.has_clean_vertex(&parent_ref));
+        assert!(dag_state.has_clean_vertex(&child_ref));
         drop(dag_state);
 
         let reopened = open_test_dag_state_at_path("sailfish-pp", 0, &path);
-        assert!(reopened.has_vertex_certificate(&parent_ref));
-        assert!(reopened.has_vertex_certificate(&child_ref));
+        assert!(reopened.has_clean_vertex(&parent_ref));
+        assert!(reopened.has_clean_vertex(&child_ref));
     }
 
     #[test]
@@ -3911,10 +3920,10 @@ mod tests {
         assert_eq!(dag_state.threshold_clock_round(), 4);
         assert_eq!(dag_state.proposal_round(), 1);
 
-        dag_state.mark_vertices_certified(&round_1_refs);
+        dag_state.mark_vertices_clean(&round_1_refs);
         assert_eq!(dag_state.proposal_round(), 2);
 
-        dag_state.mark_vertices_certified(&round_2_refs);
+        dag_state.mark_vertices_clean(&round_2_refs);
         assert_eq!(dag_state.proposal_round(), 3);
     }
 
@@ -4241,6 +4250,65 @@ mod tests {
                 .reachable_at_round(&compress, 1)
                 .contains(&leader_ref)
         );
+    }
+
+    #[test]
+    fn bluestreak_marks_waiting_vertices_clean_when_leader_arrives_late() {
+        let dag_state = open_test_dag_state_for("bluestreak", 0);
+        let empty_transactions = Vec::new();
+        let commitment = TransactionsCommitment::new_from_transactions(&empty_transactions);
+
+        let make_bluestreak_block =
+            |authority: AuthorityIndex,
+             round: RoundNumber,
+             parents: Vec<BlockReference>,
+             unprovable_certificate: Option<BlockReference>| {
+                let mut block = VerifiedBlock::new_with_unprovable(
+                    authority,
+                    round,
+                    parents,
+                    Vec::new(),
+                    0,
+                    SignatureBytes::default(),
+                    Vec::new(),
+                    commitment,
+                    None,
+                    None,
+                    None,
+                    unprovable_certificate,
+                );
+                block.preserialize();
+                Data::new(block)
+            };
+
+        let leader = make_bluestreak_block(1, 1, vec![BlockReference::new_test(1, 0)], None);
+        let leader_ref = *leader.reference();
+
+        let own_round_one = make_bluestreak_block(0, 1, vec![BlockReference::new_test(0, 0)], None);
+        let own_prev = make_bluestreak_block(0, 2, vec![*own_round_one.reference()], None);
+        let compress_a = make_bluestreak_block(0, 3, vec![*own_prev.reference()], Some(leader_ref));
+
+        let peer_round_one =
+            make_bluestreak_block(2, 1, vec![BlockReference::new_test(2, 0)], None);
+        let peer_prev = make_bluestreak_block(2, 2, vec![*peer_round_one.reference()], None);
+        let compress_b =
+            make_bluestreak_block(2, 3, vec![*peer_prev.reference()], Some(leader_ref));
+
+        dag_state.insert_general_block(own_round_one, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(own_prev, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(peer_round_one, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(peer_prev, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(compress_a.clone(), DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(compress_b.clone(), DataSource::BlockBundleStreaming);
+
+        assert!(!dag_state.has_clean_vertex(compress_a.reference()));
+        assert!(!dag_state.has_clean_vertex(compress_b.reference()));
+
+        dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
+
+        assert!(dag_state.has_clean_vertex(&leader_ref));
+        assert!(dag_state.has_clean_vertex(compress_a.reference()));
+        assert!(dag_state.has_clean_vertex(compress_b.reference()));
     }
 
     #[test]

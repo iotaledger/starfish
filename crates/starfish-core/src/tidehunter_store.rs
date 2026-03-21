@@ -39,7 +39,7 @@ pub struct TideHunterStore {
     ks_tx_data: KeySpace,
     ks_shard_data: KeySpace,
     ks_commits: KeySpace,
-    ks_sailfish_certified: KeySpace,
+    ks_dual_dag_clean: KeySpace,
 }
 
 impl TideHunterStore {
@@ -82,7 +82,7 @@ impl TideHunterStore {
         let ks_tx_data = Self::add_ks(&mut builder, "tx_data");
         let ks_shard_data = Self::add_ks(&mut builder, "shard_data");
         let ks_commits = Self::add_ks(&mut builder, "commits");
-        let ks_sailfish_certified = Self::add_ks(&mut builder, "sailfish_certified");
+        let ks_dual_dag_clean = Self::add_ks(&mut builder, "sailfish_certified");
         let key_shape = builder.build();
 
         let config = Arc::new(Config {
@@ -104,7 +104,7 @@ impl TideHunterStore {
             ks_tx_data,
             ks_shard_data,
             ks_commits,
-            ks_sailfish_certified,
+            ks_dual_dag_clean,
         })
     }
 
@@ -358,28 +358,28 @@ impl Store for TideHunterStore {
         self.point_read(self.ks_shard_data, &key)
     }
 
-    fn store_sailfish_certified_refs(&self, refs: &[BlockReference]) -> io::Result<()> {
+    fn store_dual_dag_clean_refs(&self, refs: &[BlockReference]) -> io::Result<()> {
         if refs.is_empty() {
             return Ok(());
         }
         let mut batch = self.db.write_batch();
         for reference in refs {
             let key = Self::encode_key(reference);
-            batch.write(self.ks_sailfish_certified, key.to_vec(), Vec::new());
+            batch.write(self.ks_dual_dag_clean, key.to_vec(), Vec::new());
         }
         batch
             .commit()
-            .map_err(|e| io::Error::other(format!("TideHunter store certified refs: {e:?}")))
+            .map_err(|e| io::Error::other(format!("TideHunter store clean refs: {e:?}")))
     }
 
-    fn scan_sailfish_certified_refs_from_round(
+    fn scan_dual_dag_clean_refs_from_round(
         &self,
         from_round: RoundNumber,
     ) -> io::Result<Vec<BlockReference>> {
         let mut refs = Vec::new();
         let lower = Self::round_lower_bound(from_round);
 
-        let mut iter = self.db.iterator(self.ks_sailfish_certified);
+        let mut iter = self.db.iterator(self.ks_dual_dag_clean);
         iter.set_lower_bound(lower.to_vec());
 
         for result in iter {

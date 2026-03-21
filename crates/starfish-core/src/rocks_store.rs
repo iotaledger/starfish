@@ -27,7 +27,7 @@ const CF_HEADERS: &str = "headers";
 const CF_TX_DATA: &str = "tx_data";
 const CF_SHARD_DATA: &str = "shard_data";
 const CF_COMMITS: &str = "commits";
-const CF_SAILFISH_CERTIFIED: &str = "sailfish_certified";
+const CF_DUAL_DAG_CLEAN: &str = "sailfish_certified";
 
 pub struct RocksStore {
     db: Arc<DB>,
@@ -143,7 +143,7 @@ impl RocksStore {
             ColumnFamilyDescriptor::new(CF_TX_DATA, Self::data_cf_options()),
             ColumnFamilyDescriptor::new(CF_SHARD_DATA, Self::data_cf_options()),
             ColumnFamilyDescriptor::new(CF_COMMITS, Self::metadata_cf_options()),
-            ColumnFamilyDescriptor::new(CF_SAILFISH_CERTIFIED, Self::metadata_cf_options()),
+            ColumnFamilyDescriptor::new(CF_DUAL_DAG_CLEAN, Self::metadata_cf_options()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(io::Error::other)?;
@@ -556,11 +556,11 @@ impl Store for RocksStore {
             .collect()
     }
 
-    fn store_sailfish_certified_refs(&self, refs: &[BlockReference]) -> io::Result<()> {
+    fn store_dual_dag_clean_refs(&self, refs: &[BlockReference]) -> io::Result<()> {
         if refs.is_empty() {
             return Ok(());
         }
-        let cf = self.cf(CF_SAILFISH_CERTIFIED)?;
+        let cf = self.cf(CF_DUAL_DAG_CLEAN)?;
         let mut wb = rocksdb::WriteBatch::default();
         for reference in refs {
             let key = serialize(reference).map_err(io::Error::other)?;
@@ -571,7 +571,7 @@ impl Store for RocksStore {
             .map_err(io::Error::other)
     }
 
-    fn scan_sailfish_certified_refs_from_round(
+    fn scan_dual_dag_clean_refs_from_round(
         &self,
         from_round: RoundNumber,
     ) -> io::Result<Vec<BlockReference>> {
@@ -583,7 +583,7 @@ impl Store for RocksStore {
         })
         .map_err(io::Error::other)?;
 
-        let cf = self.cf(CF_SAILFISH_CERTIFIED)?;
+        let cf = self.cf(CF_DUAL_DAG_CLEAN)?;
         let mut iter = self.db.raw_iterator_cf_opt(&cf, Self::get_read_opts());
         iter.seek(&seek_key);
 

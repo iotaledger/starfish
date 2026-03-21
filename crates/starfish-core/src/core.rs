@@ -471,10 +471,10 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        // SailfishPlusPlus: require certified parent quorum before creating a block.
+        // Dual-DAG protocols: require clean parent quorum before creating a block.
         if self.dag_state.consensus_protocol.uses_dual_dag()
             && clock_round > 1
-            && !self.dag_state.certified_parent_quorum(clock_round - 1)
+            && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
             return None;
         }
@@ -504,7 +504,7 @@ impl<H: BlockHandler> Core<H> {
         let (mut transactions, block_references, raw_refs) =
             self.collect_transactions_and_references(pending_transactions, clock_round);
 
-        // SailfishPlusPlus: if the certified-parent filter reduced the parent
+        // Dual-DAG protocols: if the clean-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
         // Requeue both transactions and include refs so the next attempt sees
         // them again.
@@ -652,9 +652,9 @@ impl<H: BlockHandler> Core<H> {
         let mut block_references =
             self.compress_pending_block_references(&pending_refs, block_round);
 
-        // SailfishPlusPlus: filter parents to only include certified blocks.
+        // Dual-DAG protocols: filter parents to only include clean blocks.
         if self.dag_state.consensus_protocol.uses_dual_dag() {
-            block_references.retain(|r| r.round == 0 || self.dag_state.has_vertex_certificate(r));
+            block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
         }
 
         // SailfishPlusPlus: verify the filtered parent set, together with the
@@ -1086,7 +1086,7 @@ impl<H: BlockHandler> Core<H> {
         }
 
         // SailfishPlusPlus: keep all previous-round references unconditionally
-        // so that certified-parent filtering doesn't drop below quorum.
+        // so that clean-parent filtering doesn't drop below quorum.
         // Only older-round references go through normal compression.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
             let prev_round = block_round.saturating_sub(1);
@@ -1170,7 +1170,7 @@ impl<H: BlockHandler> Core<H> {
         };
         self.last_own_block[block_id] = own_block.clone();
         self.dag_state.insert_own_block(own_block.clone());
-        self.flush_pending_sailfish_certified_refs();
+        self.flush_pending_clean_refs();
     }
 
     /// Generate an own DAC partial signature for a block we just created.
@@ -1316,7 +1316,7 @@ impl<H: BlockHandler> Core<H> {
             .store_commits_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
-        self.flush_pending_sailfish_certified_refs();
+        self.flush_pending_clean_refs();
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
@@ -1337,11 +1337,11 @@ impl<H: BlockHandler> Core<H> {
         &self.dag_state
     }
 
-    fn flush_pending_sailfish_certified_refs(&self) {
+    fn flush_pending_clean_refs(&self) {
         if !self.dag_state.consensus_protocol.uses_dual_dag() {
             return;
         }
-        self.dag_state.flush_pending_sailfish_certified_refs();
+        self.dag_state.flush_pending_clean_refs();
     }
 
     pub fn store(&self) -> Arc<dyn Store> {
