@@ -523,10 +523,25 @@ impl<H: BlockHandler> Core<H> {
         let allow_own_prev_only = self.dag_state.consensus_protocol
             == ConsensusProtocol::Bluestreak
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
+        // For Bluestreak non-leaders, forced (leader-timeout) block creation is
+        // allowed to fall back to "own-prev only" when the previous-round
+        // leader block is missing locally. Without this, a delayed/slow
+        // previous leader can stall block production at large scale even after
+        // the timeout fires.
+        let allow_timeout_prev_only = reason == "force_timeout"
+            && self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak
+            && self.committee.elect_leader(clock_round) != self.authority;
+        if allow_timeout_prev_only && block_references.is_empty() && !allow_own_prev_only {
+            tracing::debug!(
+                "Bluestreak: forcing block creation in round {} with only own-prev (missing clean prev-leader parent)",
+                clock_round
+            );
+        }
         if self.dag_state.consensus_protocol.uses_dual_dag()
             && clock_round > 1
             && block_references.is_empty()
             && !allow_own_prev_only
+            && !allow_timeout_prev_only
         {
             for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
@@ -1398,5 +1413,131 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn committee(&self) -> &Arc<Committee> {
         &self.committee
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        config::{NodePrivateConfig, StorageBackend},
+        crypto::Signer,
+        dag_state::{DagState, DataSource},
+        data::Data,
+        metrics::Metrics,
+        types::{BlockReference, VerifiedBlock},
+    };
+
+    struct NoopBlockHandler;
+
+    impl BlockHandler for NoopBlockHandler {
+        fn handle_proposal(&mut self, _number_transactions: usize) {}
+
+        fn handle_blocks(&mut self, _require_response: bool) -> Vec<BaseTransaction> {
+            Vec::new()
+        }
+    }
+
+    fn make_bluestreak_non_leader_round_1_block(
+        signers: &[Signer],
+        authority: AuthorityIndex,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_with_signer(
+            authority,
+            1,
+            vec![BlockReference::new_test(authority, 0)],
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Bluestreak,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    #[test]
+    fn bluestreak_force_timeout_allows_prev_only_when_prev_leader_missing() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("bluestreak"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "bluestreak".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        // Create our round-1 block (non-leader; may reference only own genesis).
+        let round_1 = core
+            .try_new_block("new_blocks")
+            .expect("round-1 block should be creatable");
+        assert_eq!(round_1.round(), 1);
+        assert_eq!(core.last_proposed(), 1);
+
+        // Advance the threshold clock + clean-parent quorum to round 2 without
+        // ever adding the elected leader's round-1 block (authority 1).
+        let signers = Signer::new_for_test(committee.len());
+        core.add_blocks(
+            vec![
+                (make_bluestreak_non_leader_round_1_block(&signers, 2), None),
+                (make_bluestreak_non_leader_round_1_block(&signers, 3), None),
+            ],
+            DataSource::BlockBundleStreaming,
+        );
+        assert_eq!(core.dag_state().proposal_round(), 2);
+
+        // Normal block creation stalls because we cannot reference the
+        // previous-round leader (authority 1) from the pending frontier.
+        assert!(
+            core.try_new_block("new_blocks").is_none(),
+            "expected normal creation to stall without prev-leader ref"
+        );
+
+        // Forced creation after timeout should fall back to own-prev only.
+        let round_2 = core
+            .try_new_block("force_timeout")
+            .expect("forced round-2 block should be creatable");
+        assert_eq!(round_2.round(), 2);
+        assert_eq!(core.last_proposed(), 2);
+
+        let refs = round_2.block_references();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], *round_1.reference());
     }
 }
