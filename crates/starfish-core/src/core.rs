@@ -539,7 +539,8 @@ impl<H: BlockHandler> Core<H> {
             && self.committee.elect_leader(clock_round) != self.authority;
         if allow_timeout_prev_only && block_references.is_empty() && !allow_own_prev_only {
             tracing::debug!(
-                "Bluestreak: forcing block creation in round {} with only own-prev (missing clean prev-leader parent)",
+                "Bluestreak: forcing block in round {} \
+                 with only own-prev (missing clean prev-leader parent)",
                 clock_round
             );
         }

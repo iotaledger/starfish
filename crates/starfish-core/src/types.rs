@@ -1430,7 +1430,8 @@ impl VerifiedBlock {
                         .find(|r| r.authority == self.authority())
                         .ok_or_else(|| {
                             eyre::eyre!(
-                                "MysticetiBls non-leader block must reference its own previous block"
+                                "MysticetiBls non-leader block must \
+                                 reference its own previous block"
                             )
                         })?;
                 }
