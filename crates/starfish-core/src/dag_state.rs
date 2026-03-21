@@ -151,7 +151,10 @@ impl ConsensusProtocol {
     pub fn uses_dual_dag(self) -> bool {
         matches!(
             self,
-            ConsensusProtocol::SailfishPlusPlus | ConsensusProtocol::Bluestreak
+            ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::MysticetiBls
         )
     }
 
@@ -712,25 +715,40 @@ impl DagState {
     ///
     /// For dual-DAG protocols, entering round `r` requires both raw threshold
     /// clock progress to `r` and quorum stake of clean vertices in
-    /// round `r - 1`. Other protocols use the raw threshold clock directly.
+    /// round `r - 1`. BLS protocols additionally gate on the highest BLS
+    /// round certificate + 1. Other protocols use the raw threshold clock.
     pub fn proposal_round(&self) -> RoundNumber {
-        if matches!(
-            self.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
-            return self.bls_proposal_round();
-        }
         if !self.consensus_protocol.uses_dual_dag() {
             return self.threshold_clock_round();
         }
 
+        let is_bls = matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        );
+
         let inner = self.dag_state_inner.read();
         let threshold_round = inner.threshold_clock.get_round();
-        if threshold_round <= 1 {
-            return threshold_round;
+
+        // BLS: additional gate from round certificates.
+        let upper_bound = if is_bls {
+            if let Some((&max_certified_round, _)) =
+                inner.round_certificates.iter().next_back()
+            {
+                (max_certified_round + 1).min(threshold_round)
+            } else {
+                1
+            }
+        } else {
+            threshold_round
+        };
+
+        if upper_bound <= 1 {
+            return upper_bound;
         }
 
-        for round in (2..=threshold_round).rev() {
+        // Clean quorum scan (shared logic for all dual-DAG protocols).
+        for round in (2..=upper_bound).rev() {
             let prev_round = round - 1;
             let mut stake: Stake = 0;
             for auth in 0..inner.committee_size {
@@ -747,22 +765,6 @@ impl DagState {
         }
 
         1
-    }
-
-    /// For BLS protocols, the proposal round is the minimum of the
-    /// threshold clock round and the highest BLS round certificate + 1.
-    /// The round certificate is an additional gate, not a replacement
-    /// for the threshold clock.
-    fn bls_proposal_round(&self) -> RoundNumber {
-        let inner = self.dag_state_inner.read();
-        let threshold = inner.threshold_clock.get_round();
-        if let Some((&max_certified_round, _)) =
-            inner.round_certificates.iter().next_back()
-        {
-            (max_certified_round + 1).min(threshold)
-        } else {
-            1
-        }
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
@@ -1098,6 +1100,11 @@ impl DagState {
                 }
                 CertificateEvent::PrecomputedLeaderSig(leader_ref, sig) => {
                     inner.precomputed_leader_sigs.insert(leader_ref, sig);
+                }
+                CertificateEvent::BlockVerified(block_ref) => {
+                    let mut activated = Vec::new();
+                    inner.note_clean_vertex(block_ref, &mut activated);
+                    changed |= !activated.is_empty();
                 }
             }
         }

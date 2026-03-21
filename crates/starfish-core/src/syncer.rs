@@ -221,8 +221,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// Fresh certificates can unblock both block production and sequencing, so
     /// retry both paths immediately when DAG state changed.
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
+        let previous_proposal_round = self.core.dag_state().proposal_round();
         if apply_certificate_events(self.core.dag_state(), events) {
             self.maybe_update_proposal_wait();
+            self.maybe_signal_threshold_round_advance(previous_proposal_round);
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }

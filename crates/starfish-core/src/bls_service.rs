@@ -217,6 +217,12 @@ fn count_cert_events(events: &[CertificateEvent], metrics: &Metrics) {
             }
             CertificateEvent::PrecomputedRoundSig(..)
             | CertificateEvent::PrecomputedLeaderSig(..) => {}
+            CertificateEvent::BlockVerified(..) => {
+                metrics
+                    .bls_certificates_total
+                    .with_label_values(&["block_verified"])
+                    .inc();
+            }
         }
     }
 }
