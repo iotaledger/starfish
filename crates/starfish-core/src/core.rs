@@ -594,19 +594,25 @@ impl<H: BlockHandler> Core<H> {
             self.dag_state.consensus_protocol,
             ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
         ) {
-            // Leader cert for leader of clock_round - 1 (if we include that leader).
-            if clock_round <= 2 {
+            // Votes for leader at round r are in round r+1; the
+            // aggregated certificate is embedded in round r+2.
+            if clock_round <= 3 {
                 None
             } else {
-                let leader_round = clock_round - 1;
-                let leader_authority = self.committee.elect_leader(leader_round);
-                block_references
-                    .iter()
-                    .find(|r| r.round == leader_round && r.authority == leader_authority)
-                    .and_then(|leader_ref| {
+                let leader_round = clock_round - 2;
+                let leader_authority =
+                    self.committee.elect_leader(leader_round);
+                self.dag_state
+                    .get_blocks_at_authority_round(
+                        leader_authority,
+                        leader_round,
+                    )
+                    .into_iter()
+                    .min_by_key(|b| *b.reference())
+                    .and_then(|b| {
                         self.dag_state
-                            .leader_certificate(leader_ref)
-                            .map(|cert| (*leader_ref, cert))
+                            .leader_certificate(b.reference())
+                            .map(|cert| (*b.reference(), cert))
                     })
             }
         } else {
