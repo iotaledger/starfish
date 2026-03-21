@@ -1111,7 +1111,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_msg_tx.clone(),
             sf_msg_tx.clone(),
         );
-        syncer.force_new_block(0);
+        let initial_round = syncer.core().next_block_round();
+        syncer.force_new_block(initial_round);
         let syncer = CoreThreadDispatcher::start(syncer);
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         // Occupy the only available permit, so that all other
@@ -1603,41 +1604,39 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     }
 
     async fn leader_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
-        let leader_timeout = inner.leader_timeout;
+        let mut armed_round = inner.dag_state.proposal_round().saturating_sub(1);
         loop {
-            let notified = inner.threshold_clock_notify.notified();
-            let round = if inner.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
-                || inner.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak
-            {
-                inner.dag_state.proposal_round().saturating_sub(1)
-            } else {
-                inner
-                    .dag_state
-                    .last_own_block_ref()
-                    .map(|b| b.round())
-                    .unwrap_or_default()
-            };
-            select! {
-                _sleep = sleep(leader_timeout) => {
-                    tracing::debug!("Timeout in round {round}");
-                    // SailfishPlusPlus: send LocalTimeout so the service can
-                    // sign and aggregate a timeout certificate for the round
-                    // we're stuck on (the leader at `round` hasn't been
-                    // certified in time).
-                    if let Some(ref sf) = inner.sailfish_handle {
-                        if round > 0 {
-                            sf.send(SailfishServiceMessage::LocalTimeout(round));
-                        }
+            while inner.dag_state.proposal_round() <= armed_round {
+                let notified = inner.threshold_clock_notify.notified();
+                select! {
+                    _notified = notified => {}
+                    _stopped = inner.stopped() => {
+                        return None;
                     }
-                    inner.syncer.force_new_block(round).await;
-                }
-                _notified = notified => {
-                    // Round advanced — restart timer
-                }
-                _stopped = inner.stopped() => {
-                    return None;
                 }
             }
+
+            let current_round = inner.dag_state.proposal_round();
+            for round in armed_round + 1..=current_round {
+                let timer_inner = inner.clone();
+                Handle::current().spawn(async move {
+                    let leader_timeout = timer_inner.leader_timeout;
+                    select! {
+                        _sleep = sleep(leader_timeout) => {
+                            tracing::debug!("Timeout for proposal round {round}");
+                            if let Some(ref sf) = timer_inner.sailfish_handle {
+                                let leader_round = round.saturating_sub(1);
+                                if leader_round > 0 {
+                                    sf.send(SailfishServiceMessage::LocalTimeout(leader_round));
+                                }
+                            }
+                            timer_inner.syncer.force_new_block(round).await;
+                        }
+                        _stopped = timer_inner.stopped() => {}
+                    }
+                });
+            }
+            armed_round = current_round;
         }
     }
 

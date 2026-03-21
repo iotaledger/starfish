@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use ahash::AHashSet;
 
@@ -53,7 +53,7 @@ impl BlockCreationReason {
 
 pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     core: Core<H>,
-    force_new_block: bool,
+    forced_block_rounds: BTreeSet<RoundNumber>,
     proposal_wait_started_at: Option<Instant>,
     proposal_wait_round: Option<RoundNumber>,
     signals: S,
@@ -103,7 +103,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .expect("Own authority should exist in committee");
         Self {
             core,
-            force_new_block: false,
+            forced_block_rounds: BTreeSet::new(),
             proposal_wait_started_at: None,
             proposal_wait_round: None,
             signals,
@@ -189,14 +189,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     /// Called after Sailfish RBC certification events have been applied to
     /// DagState on the core thread. Retries block creation and sequencing
-    /// when any certificate is new.
+    /// when any clean vertex is new.
     pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
         let previous_threshold_round = self.core.dag_state().proposal_round();
-        if self
-            .core
-            .dag_state()
-            .mark_vertices_certified(&certified_refs)
-        {
+        if self.core.dag_state().mark_vertices_clean(&certified_refs) {
             self.maybe_update_proposal_wait();
             self.maybe_signal_threshold_round_advance(previous_threshold_round);
             self.try_new_block(BlockCreationReason::CertificateEvent);
@@ -232,11 +228,12 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
+    /// Arm timeout-based block creation for a specific proposal round.
     pub fn force_new_block(&mut self, round: RoundNumber) -> bool {
-        if self.core.last_proposed() == round {
+        if self.core.last_proposed() < round {
             self.metrics.leader_timeout_total.inc();
-            self.force_new_block = true;
-            tracing::debug!("Attempt to force new block after timeout");
+            self.forced_block_rounds.insert(round);
+            tracing::debug!("Attempt to force new block in round {round} after timeout");
             self.maybe_update_proposal_wait();
             self.try_new_block(BlockCreationReason::ForceTimeout);
             true
@@ -286,7 +283,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
         }
-        let effective_reason = if self.force_new_block {
+        let target_round = self.core.next_block_round();
+        let effective_reason = if self.forced_block_rounds.contains(&target_round) {
             BlockCreationReason::ForceTimeout
         } else if !self.core.ready_new_block(&self.connected_authorities) {
             return false;
@@ -338,7 +336,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                 }));
             }
             self.signals.new_block_ready();
-            self.force_new_block = false;
+            self.forced_block_rounds.remove(&block.round());
             return true;
         }
         false
@@ -428,5 +426,180 @@ impl SyncerSignals for bool {
 
     fn threshold_clock_round_advanced(&mut self, _round: RoundNumber) {
         *self = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        block_handler::BlockHandler,
+        committee::Committee,
+        config::{NodePrivateConfig, StorageBackend},
+        crypto::Signer,
+        dag_state::DagState,
+        metrics::Metrics,
+        types::BaseTransaction,
+    };
+
+    #[derive(Default)]
+    struct TestBlockHandler;
+
+    impl BlockHandler for TestBlockHandler {
+        fn handle_proposal(&mut self, _number_transactions: usize) {}
+
+        fn handle_blocks(&mut self, _require_response: bool) -> Vec<BaseTransaction> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopCommitObserver;
+
+    impl CommitObserver for NoopCommitObserver {
+        fn handle_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
+
+        fn recover_committed(
+            &mut self,
+            _committed: AHashSet<BlockReference>,
+            _committed_leaders_count: usize,
+        ) {
+        }
+
+        fn cleanup(&mut self, _threshold_round: RoundNumber) {}
+    }
+
+    fn open_test_syncer_with_future_rounds() -> Syncer<TestBlockHandler, bool, NoopCommitObserver> {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some("mysticeti"), None);
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "mysticeti".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            TestBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics.clone(),
+            recovered,
+            None,
+        );
+        let signers = Signer::new_for_test(committee.len());
+
+        let round_1_refs = vec![
+            BlockReference::new_test(0, 0),
+            BlockReference::new_test(1, 0),
+            BlockReference::new_test(2, 0),
+        ];
+        let round_1_blocks = vec![
+            make_mysticeti_block(&signers, 1, 1, round_1_refs.clone()),
+            make_mysticeti_block(&signers, 2, 1, round_1_refs.clone()),
+            make_mysticeti_block(&signers, 3, 1, round_1_refs.clone()),
+        ];
+        let round_2_refs: Vec<_> = round_1_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        let round_2_blocks = vec![
+            make_mysticeti_block(&signers, 1, 2, round_2_refs.clone()),
+            make_mysticeti_block(&signers, 2, 2, round_2_refs.clone()),
+            make_mysticeti_block(&signers, 3, 2, round_2_refs),
+        ];
+
+        core.add_blocks(
+            round_1_blocks
+                .into_iter()
+                .map(|block| (block, None))
+                .collect(),
+            DataSource::BlockBundleStreaming,
+        );
+        core.add_blocks(
+            round_2_blocks
+                .into_iter()
+                .map(|block| (block, None))
+                .collect(),
+            DataSource::BlockBundleStreaming,
+        );
+        assert_eq!(core.dag_state().proposal_round(), 3);
+        assert_eq!(core.last_proposed(), 0);
+
+        let mut syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None);
+        syncer.connected_authorities.extend([1, 2, 3]);
+        syncer.subscribed_by_authorities.extend([1, 2, 3]);
+        syncer.recompute_subscriber_stake();
+        syncer
+    }
+
+    fn make_mysticeti_block(
+        signers: &[Signer],
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_with_signer(
+            authority,
+            round,
+            block_references,
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Mysticeti,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    #[test]
+    fn normal_block_creation_uses_next_missing_round() {
+        let mut syncer = open_test_syncer_with_future_rounds();
+
+        assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
+        assert_eq!(syncer.core.last_proposed(), 1);
+    }
+
+    #[test]
+    fn timeout_rounds_stay_pinned_until_their_turn() {
+        let mut syncer = open_test_syncer_with_future_rounds();
+
+        assert!(syncer.force_new_block(2));
+        assert_eq!(syncer.core.last_proposed(), 1);
+        assert!(syncer.forced_block_rounds.contains(&2));
+
+        assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
+        assert_eq!(syncer.core.last_proposed(), 2);
+        assert!(!syncer.forced_block_rounds.contains(&2));
     }
 }

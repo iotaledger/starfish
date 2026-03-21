@@ -455,19 +455,31 @@ impl<H: BlockHandler> Core<H> {
     }
 
     pub fn try_new_block(&mut self, reason: &'static str) -> Option<Data<VerifiedBlock>> {
+        let clock_round = self.next_block_round();
+        self.try_new_block_at_round(clock_round, reason)
+    }
+
+    fn try_new_block_at_round(
+        &mut self,
+        clock_round: RoundNumber,
+        reason: &'static str,
+    ) -> Option<Data<VerifiedBlock>> {
         let _block_timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::try_new_block");
 
-        // Check if we're ready for a new block
-        let clock_round = self.dag_state.proposal_round();
+        let proposal_round = self.dag_state.proposal_round();
         tracing::debug!(
-            "Attempt to construct block in round {}. Current pending: {:?}",
+            "Attempt to construct block in round {} (proposal round {}). Current pending: {:?}",
             clock_round,
+            proposal_round,
             self.pending
         );
-        if clock_round <= self.last_proposed() {
+        if clock_round == 0 || proposal_round < clock_round {
+            return None;
+        }
+        if clock_round != self.next_block_round() {
             return None;
         }
 
@@ -610,6 +622,10 @@ impl<H: BlockHandler> Core<H> {
             .inc();
 
         first_block
+    }
+
+    pub fn next_block_round(&self) -> RoundNumber {
+        self.last_proposed().saturating_add(1)
     }
 
     fn get_pending_transactions(&mut self, clock_round: RoundNumber) -> Vec<MetaTransaction> {
@@ -1263,19 +1279,24 @@ impl<H: BlockHandler> Core<H> {
         &self,
         connected_authorities: &AHashSet<AuthorityIndex>,
     ) -> bool {
-        self.ready_new_block_impl(connected_authorities, true)
+        let quorum_round = self.next_block_round();
+        self.ready_new_block_impl(quorum_round, connected_authorities, true)
     }
 
     pub fn ready_new_block(&self, connected_authorities: &AHashSet<AuthorityIndex>) -> bool {
-        self.ready_new_block_impl(connected_authorities, false)
+        let quorum_round = self.next_block_round();
+        self.ready_new_block_impl(quorum_round, connected_authorities, false)
     }
 
     fn ready_new_block_impl(
         &self,
+        quorum_round: RoundNumber,
         connected_authorities: &AHashSet<AuthorityIndex>,
         relaxed: bool,
     ) -> bool {
-        let quorum_round = self.dag_state.proposal_round();
+        if quorum_round == 0 || self.dag_state.proposal_round() < quorum_round {
+            return false;
+        }
         tracing::debug!("Attempt ready new block, quorum round {}", quorum_round);
 
         if quorum_round < self.last_commit_leader.round().max(1) {
