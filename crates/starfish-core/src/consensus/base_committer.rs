@@ -160,12 +160,27 @@ impl BaseCommitter {
 
         // Use those potential certificates to determine which (if any) of the target
         // leader blocks can be committed.
+        let is_bls = matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        );
         let mut certified_leader_blocks: Vec<_> = leader_blocks
             .into_iter()
             .filter(|leader_block| {
-                potential_certificates.iter().any(|potential_certificate| {
-                    self.is_certificate(potential_certificate, leader_block, voter_info)
-                })
+                if is_bls {
+                    // BLS: a reachable certifying block carrying
+                    // certified_leader for this leader is sufficient.
+                    let lr = leader_block.reference();
+                    potential_certificates.iter().any(|b| {
+                        b.header()
+                            .certified_leader()
+                            .is_some_and(|(ref r, _)| r == lr)
+                    })
+                } else {
+                    potential_certificates.iter().any(|c| {
+                        self.is_certificate(c, leader_block, voter_info)
+                    })
+                }
             })
             .collect();
 
