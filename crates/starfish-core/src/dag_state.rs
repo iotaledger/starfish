@@ -714,6 +714,12 @@ impl DagState {
     /// clock progress to `r` and quorum stake of clean vertices in
     /// round `r - 1`. Other protocols use the raw threshold clock directly.
     pub fn proposal_round(&self) -> RoundNumber {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
+            return self.bls_proposal_round();
+        }
         if !self.consensus_protocol.uses_dual_dag() {
             return self.threshold_clock_round();
         }
@@ -741,6 +747,21 @@ impl DagState {
         }
 
         1
+    }
+
+    /// For BLS protocols, the proposal round is determined by the highest
+    /// round certificate: if round `r` has a certificate, we can propose
+    /// in round `r + 1`.  Round 1 needs no certificate.
+    fn bls_proposal_round(&self) -> RoundNumber {
+        let inner = self.dag_state_inner.read();
+        if let Some((&max_certified_round, _)) =
+            inner.round_certificates.iter().next_back()
+        {
+            max_certified_round + 1
+        } else {
+            // No round certificates yet — can propose round 1.
+            1
+        }
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
