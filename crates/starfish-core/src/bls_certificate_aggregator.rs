@@ -93,8 +93,16 @@ pub(crate) enum TaskOrigin {
         sig: BlsSignatureBytes,
     },
     AggRound(RoundNumber, BlsAggregateCertificate, Option<BlockReference>),
-    AggLeader(BlockReference, BlsAggregateCertificate, Option<BlockReference>),
-    AggDac(BlockReference, BlsAggregateCertificate, Option<BlockReference>),
+    AggLeader(
+        BlockReference,
+        BlsAggregateCertificate,
+        Option<BlockReference>,
+    ),
+    AggDac(
+        BlockReference,
+        BlsAggregateCertificate,
+        Option<BlockReference>,
+    ),
 }
 
 /// Number of parallel threads used for BLS batch verification.
@@ -191,9 +199,7 @@ impl BlsCertificateAggregator {
                     {
                         // Already known — count as verified.
                         self.mark_block_field_verified(&source);
-                    } else if let Some(pk) =
-                        self.committee.get_bls_public_key(signer).cloned()
-                    {
+                    } else if let Some(pk) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_round_message(round),
                             signature: *sig,
@@ -222,9 +228,7 @@ impl BlsCertificateAggregator {
                             .is_some_and(|sigs| sigs.contains_key(&signer))
                     {
                         self.mark_block_field_verified(&source);
-                    } else if let Some(pk) =
-                        self.committee.get_bls_public_key(signer).cloned()
-                    {
+                    } else if let Some(pk) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_leader_message(leader_ref),
                             signature: *sig,
@@ -259,11 +263,7 @@ impl BlsCertificateAggregator {
                             block_index: origins.len(),
                             ..task
                         });
-                        origins.push(TaskOrigin::AggRound(
-                            certified_round,
-                            *cert,
-                            Some(source),
-                        ));
+                        origins.push(TaskOrigin::AggRound(certified_round, *cert, Some(source)));
                     }
                 }
             }
@@ -280,11 +280,7 @@ impl BlsCertificateAggregator {
                                 block_index: origins.len(),
                                 ..task
                             });
-                            origins.push(TaskOrigin::AggLeader(
-                                *leader_ref,
-                                *cert,
-                                Some(source),
-                            ));
+                            origins.push(TaskOrigin::AggLeader(*leader_ref, *cert, Some(source)));
                         }
                     }
                 }
@@ -377,9 +373,7 @@ impl BlsCertificateAggregator {
                 if cert.is_empty() {
                     continue;
                 }
-                if self.dac_certs.contains_key(&ack_ref)
-                    || self.dac_rejections.contains(&ack_ref)
-                {
+                if self.dac_certs.contains_key(&ack_ref) || self.dac_rejections.contains(&ack_ref) {
                     // Already known — count as verified for the carrier block.
                     self.mark_block_field_verified(&source);
                     continue;
@@ -786,6 +780,11 @@ impl BlsCertificateAggregator {
             .filter(|c| !c.is_empty())
             .count();
 
+        // Skip blocks with no BLS fields - they don't need verification tracking.
+        if expected == 0 {
+            return false;
+        }
+
         self.block_verification.insert(
             block_ref,
             BlockVerificationTracker {
@@ -1073,9 +1072,7 @@ impl BlsCertificateAggregator {
                                 block_index: entries.len(),
                                 ..task
                             });
-                            entries.push(AggregateTaskKind::Leader(
-                                *leader_ref, *cert, source,
-                            ));
+                            entries.push(AggregateTaskKind::Leader(*leader_ref, *cert, source));
                         }
                     }
                 }
@@ -1089,9 +1086,7 @@ impl BlsCertificateAggregator {
                 if cert.is_empty() {
                     continue;
                 }
-                if self.dac_certs.contains_key(&ack_ref)
-                    || self.dac_rejections.contains(&ack_ref)
-                {
+                if self.dac_certs.contains_key(&ack_ref) || self.dac_rejections.contains(&ack_ref) {
                     self.mark_block_field_verified(&source);
                     continue;
                 }

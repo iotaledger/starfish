@@ -363,6 +363,11 @@ struct DagStateInner {
     /// Bluestreak-specific propagation support and blocks waiting for a given
     /// unprovable certificate reference to become provable.
     bluestreak_certificate_state: BTreeMap<BlockReference, BluestreakCertificateState>,
+    /// Per-authority blocks whose BLS fields have all been verified (StarfishBls/MysticetiBls).
+    /// Stored per-authority to enable efficient cleanup at the eviction frontier.
+    /// Blocks are added here when BlockVerified events fire, and removed after being
+    /// marked as pre-clean or evicted.
+    bls_verified_blocks: Vec<BTreeSet<BlockReference>>,
     /// Sailfish++ timeout certificates, indexed by round.
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
@@ -458,6 +463,7 @@ impl DagState {
             inferred_clean_support: (0..n).map(|_| BTreeMap::new()).collect(),
             leader_vote_support: BTreeMap::new(),
             bluestreak_certificate_state: BTreeMap::new(),
+            bls_verified_blocks: (0..n).map(|_| BTreeSet::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
         };
@@ -732,9 +738,7 @@ impl DagState {
 
         // BLS: additional gate from round certificates.
         let upper_bound = if is_bls {
-            if let Some((&max_certified_round, _)) =
-                inner.round_certificates.iter().next_back()
-            {
+            if let Some((&max_certified_round, _)) = inner.round_certificates.iter().next_back() {
                 (max_certified_round + 1).min(threshold_round)
             } else {
                 1
@@ -1102,6 +1106,11 @@ impl DagState {
                     inner.precomputed_leader_sigs.insert(leader_ref, sig);
                 }
                 CertificateEvent::BlockVerified(block_ref) => {
+                    let auth = block_ref.authority as usize;
+                    if inner.get_block(block_ref).is_none() {
+                        inner.bls_verified_blocks[auth].insert(block_ref);
+                        continue;
+                    }
                     let mut activated = Vec::new();
                     inner.note_clean_vertex(block_ref, &mut activated);
                     changed |= !activated.is_empty();
@@ -1536,17 +1545,13 @@ impl DagState {
             ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
         ) {
             // Round certificate for r-1 must exist.
-            if leader_round > 0
-                && !inner.round_certificates.contains_key(&leader_round)
-            {
+            if leader_round > 0 && !inner.round_certificates.contains_key(&leader_round) {
                 return false;
             }
             // Leader certificate for the leader of r-2 must exist.
             if leader_round >= 2 {
-                let prev_leader_auth =
-                    committee.elect_leader(leader_round - 1);
-                let has_cert = inner.leader_certificates
-                    [prev_leader_auth as usize]
+                let prev_leader_auth = committee.elect_leader(leader_round - 1);
+                let has_cert = inner.leader_certificates[prev_leader_auth as usize]
                     .keys()
                     .any(|r| r.round == leader_round - 1);
                 if !has_cert {
@@ -1554,11 +1559,8 @@ impl DagState {
                 }
             }
             // Leaders must see a quorum of blocks in the previous round.
-            if leader_round > 0
-                && committee.elect_leader(quorum_round) == authority
-            {
-                let mut block_votes =
-                    StakeAggregator::<QuorumThreshold>::new();
+            if leader_round > 0 && committee.elect_leader(quorum_round) == authority {
+                let mut block_votes = StakeAggregator::<QuorumThreshold>::new();
                 for block in &blocks {
                     if block_votes.add(block.authority(), committee) {
                         break;
@@ -1573,18 +1575,14 @@ impl DagState {
             if leader_round >= 2 {
                 let prev_leader = committee.elect_leader(leader_round - 1);
                 let mut votes = StakeAggregator::<QuorumThreshold>::new();
-                let mut strong_votes =
-                    StakeAggregator::<QuorumThreshold>::new();
-                let count_strong_votes = !relaxed
-                    && self.consensus_protocol
-                        == ConsensusProtocol::StarfishSpeed;
+                let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
+                let count_strong_votes =
+                    !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
 
                 for block in &blocks {
-                    let votes_for_leader =
-                        block.block_references().iter().any(|reference| {
-                            reference.authority == prev_leader
-                                && reference.round == leader_round - 1
-                        });
+                    let votes_for_leader = block.block_references().iter().any(|reference| {
+                        reference.authority == prev_leader && reference.round == leader_round - 1
+                    });
                     if votes_for_leader {
                         votes.add(block.authority(), committee);
                     }
@@ -1596,9 +1594,7 @@ impl DagState {
                 if !votes.is_quorum(committee) {
                     return false;
                 }
-                if count_strong_votes
-                    && !strong_votes.is_quorum(committee)
-                {
+                if count_strong_votes && !strong_votes.is_quorum(committee) {
                     return false;
                 }
             }
@@ -2536,6 +2532,7 @@ impl DagStateInner {
                 self.pending_persisted_clean_vertices[auth].split_off(&split_ref);
             self.inferred_clean_support[auth] =
                 self.inferred_clean_support[auth].split_off(&split_ref);
+            self.bls_verified_blocks[auth] = self.bls_verified_blocks[auth].split_off(&split_ref);
         }
         self.pending_clean_vertex_counts.retain(|block_ref, _| {
             block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
@@ -2717,6 +2714,9 @@ impl DagStateInner {
         self.update_starfish_speed_leader_hints(&block);
         self.update_inferred_clean_support(&block, committee, activated);
         self.check_bluestreak_pre_clean(&block, committee, activated);
+        if self.bls_verified_blocks[auth].remove(reference) {
+            self.note_clean_vertex(*reference, activated);
+        }
     }
 
     /// Track f+1 next-round support for dual-DAG parents.
@@ -3499,8 +3499,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CACHED_ROUNDS, ConsensusProtocol, DacCertificateVerificationState, DagState, DataSource,
-        OwnBlockData,
+        CACHED_ROUNDS, CertificateEvent, ConsensusProtocol, DacCertificateVerificationState,
+        DagState, DataSource, OwnBlockData,
     };
     use crate::{
         committee::Committee,
@@ -3985,6 +3985,28 @@ mod tests {
 
         dag_state.mark_vertices_clean(&round_2_refs);
         assert_eq!(dag_state.proposal_round(), 3);
+    }
+
+    #[test]
+    fn bls_verified_block_waits_for_dag_insertion_before_marking_clean() {
+        let dag_state = open_test_dag_state_for("mysticeti-bls", 0);
+        let block = make_full_block(
+            1,
+            1,
+            vec![BlockReference::new_test(1, 0)],
+            ConsensusProtocol::MysticetiBls,
+        );
+        let block_ref = *block.reference();
+
+        assert!(!dag_state.has_clean_vertex(&block_ref));
+        assert!(
+            !dag_state.apply_certificate_events(vec![CertificateEvent::BlockVerified(block_ref,)])
+        );
+        assert!(!dag_state.has_clean_vertex(&block_ref));
+
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+
+        assert!(dag_state.has_clean_vertex(&block_ref));
     }
 
     #[test]
