@@ -8,7 +8,7 @@ NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, bluestreak
-CONSENSUS=${CONSENSUS:-bluestreak}
+CONSENSUS=${CONSENSUS:-mysticeti-bls}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,

@@ -139,6 +139,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if !processed_blocks.is_empty() {
             let block_refs: Vec<_> = processed_blocks.iter().map(|b| *b.reference()).collect();
             self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
+            // Send blocks to BLS service for verification of embedded BLS fields.
+            self.send_bls_message(BlsServiceMessage::ProcessBlocks(processed_blocks.clone()));
         }
         self.maybe_update_proposal_wait();
         self.maybe_signal_threshold_round_advance(previous_threshold_round);
@@ -163,6 +165,8 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers, source);
         if !processed_blocks.is_empty() {
+            // Send blocks to BLS service for verification of embedded BLS fields.
+            self.send_bls_message(BlsServiceMessage::ProcessBlocks(processed_blocks.clone()));
             let block_refs: Vec<_> = processed_blocks.iter().map(|b| *b.reference()).collect();
             self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
         }

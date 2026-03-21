@@ -524,11 +524,18 @@ impl<H: BlockHandler> Core<H> {
 
         // Dual-DAG protocols: if the clean-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
+        // BLS non-leaders are exempt because they may legally build with only
+        // their own previous block and, if present, the previous-round leader.
         // Requeue both transactions and include refs so the next attempt sees
         // them again.
         let allow_own_prev_only = self.dag_state.consensus_protocol
             == ConsensusProtocol::Bluestreak
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
+        let allow_bls_non_leader_prev_only = matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) && self.committee.elect_leader(clock_round)
+            != self.authority;
         // For Bluestreak non-leaders, forced (leader-timeout) block creation is
         // allowed to fall back to "own-prev only" when the previous-round
         // leader block is missing locally. Without this, a delayed/slow
@@ -548,6 +555,7 @@ impl<H: BlockHandler> Core<H> {
             && clock_round > 1
             && block_references.is_empty()
             && !allow_own_prev_only
+            && !allow_bls_non_leader_prev_only
             && !allow_timeout_prev_only
         {
             for r in raw_refs {
@@ -600,13 +608,9 @@ impl<H: BlockHandler> Core<H> {
                 None
             } else {
                 let leader_round = clock_round - 2;
-                let leader_authority =
-                    self.committee.elect_leader(leader_round);
+                let leader_authority = self.committee.elect_leader(leader_round);
                 self.dag_state
-                    .get_blocks_at_authority_round(
-                        leader_authority,
-                        leader_round,
-                    )
+                    .get_blocks_at_authority_round(leader_authority, leader_round)
                     .into_iter()
                     .min_by_key(|b| *b.reference())
                     .and_then(|b| {
@@ -703,15 +707,20 @@ impl<H: BlockHandler> Core<H> {
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
         }
 
-        // SailfishPlusPlus: verify the filtered parent set, together with the
-        // creator's own previous block (always included by build_block), still
-        // has quorum stake at round-1.
+        // SailfishPlusPlus and BLS leaders: verify the filtered parent set,
+        // together with the creator's own previous block (always included by
+        // build_block), still has quorum stake at round-1.
         let compress_non_leader = self.dag_state.consensus_protocol
             == ConsensusProtocol::Bluestreak
             && self.committee.elect_leader(block_round) != self.authority;
+        let bls_non_leader = matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) && self.committee.elect_leader(block_round) != self.authority;
         if self.dag_state.consensus_protocol.uses_dual_dag()
             && block_round > 1
             && !compress_non_leader
+            && !bls_non_leader
         {
             let prev_round = block_round - 1;
             let mut prev_round_stake: u64 = 0;
@@ -1156,8 +1165,17 @@ impl<H: BlockHandler> Core<H> {
             self.dag_state.consensus_protocol,
             ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
         ) {
+            let prev_round = block_round.saturating_sub(1);
+            let prev_leader = self.committee.elect_leader(prev_round);
             if self.committee.elect_leader(block_round) != self.authority {
-                return Vec::new();
+                return pending_refs
+                    .iter()
+                    .copied()
+                    .filter(|reference| {
+                        reference.round == prev_round && reference.authority == prev_leader
+                    })
+                    .take(1)
+                    .collect();
             }
 
             // BLS leaders keep the full frontier so their header preserves
@@ -1448,12 +1466,13 @@ mod tests {
 
     use super::*;
     use crate::{
+        bls_certificate_aggregator::CertificateEvent,
         config::{NodePrivateConfig, StorageBackend},
-        crypto::Signer,
+        crypto::{self, BlsSigner, Signer},
         dag_state::{DagState, DataSource},
         data::Data,
         metrics::Metrics,
-        types::{BlockReference, VerifiedBlock},
+        types::{AuthoritySet, BlockReference, BlsAggregateCertificate, VerifiedBlock},
     };
 
     struct NoopBlockHandler;
@@ -1493,6 +1512,59 @@ mod tests {
         );
         block.preserialize();
         Data::new(block)
+    }
+
+    fn make_mysticeti_bls_round_1_block(
+        committee: &Committee,
+        signers: &[Signer],
+        bls_signers: &[BlsSigner],
+        authority: AuthorityIndex,
+    ) -> Data<VerifiedBlock> {
+        let block_references = if authority == committee.elect_leader(1) {
+            committee
+                .authorities()
+                .map(|auth| BlockReference::new_test(auth, 0))
+                .collect()
+        } else {
+            vec![BlockReference::new_test(authority, 0)]
+        };
+        let mut block = VerifiedBlock::new_with_signer(
+            authority,
+            1,
+            block_references,
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            Some(&bls_signers[authority as usize]),
+            Some(committee),
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::MysticetiBls,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    fn make_test_round_certificate(
+        bls_signers: &[BlsSigner],
+        round: RoundNumber,
+    ) -> BlsAggregateCertificate {
+        let mut signers = AuthoritySet::default();
+        assert!(signers.insert(0));
+        assert!(signers.insert(1));
+        assert!(signers.insert(2));
+        BlsAggregateCertificate::new(
+            bls_signers[0].sign_digest(&crypto::bls_round_message(round)),
+            signers,
+        )
     }
 
     #[test]
@@ -1564,5 +1636,85 @@ mod tests {
         let refs = round_2.block_references();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], *round_1.reference());
+    }
+
+    #[test]
+    fn mysticeti_bls_non_leader_can_build_round_2_with_prev_leader_parent() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("mysticeti-bls"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "mysticeti-bls".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        let own_round_1 = core
+            .try_new_block("new_blocks")
+            .expect("round-1 block should be creatable");
+        let signers = Signer::new_for_test(committee.len());
+        let bls_signers = BlsSigner::new_for_test(committee.len());
+        let leader_round_1 =
+            make_mysticeti_bls_round_1_block(committee.as_ref(), &signers, &bls_signers, 1);
+        let peer_round_1_a =
+            make_mysticeti_bls_round_1_block(committee.as_ref(), &signers, &bls_signers, 2);
+        let peer_round_1_b =
+            make_mysticeti_bls_round_1_block(committee.as_ref(), &signers, &bls_signers, 3);
+
+        core.add_blocks(
+            vec![
+                (leader_round_1.clone(), None),
+                (peer_round_1_a.clone(), None),
+                (peer_round_1_b.clone(), None),
+            ],
+            DataSource::BlockBundleStreaming,
+        );
+
+        let round_1_refs = vec![
+            *own_round_1.reference(),
+            *leader_round_1.reference(),
+            *peer_round_1_a.reference(),
+            *peer_round_1_b.reference(),
+        ];
+        core.dag_state().mark_vertices_clean(&round_1_refs);
+        core.dag_state()
+            .apply_certificate_events(vec![CertificateEvent::Round(
+                1,
+                make_test_round_certificate(&bls_signers, 1),
+            )]);
+
+        assert_eq!(core.dag_state().proposal_round(), 2);
+
+        let round_2 = core
+            .try_new_block("new_blocks")
+            .expect("non-leader round-2 block should be creatable");
+        assert_eq!(round_2.round(), 2);
+
+        let refs = round_2.block_references();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], *own_round_1.reference());
+        assert_eq!(refs[1], *leader_round_1.reference());
     }
 }
