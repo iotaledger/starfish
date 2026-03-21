@@ -505,7 +505,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
-                | ConsensusProtocol::Bluestreak => {
+                | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::MysticetiBls => {
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
@@ -1559,7 +1560,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .write()
             .insert(peer_id, connection.sender.clone());
 
-        if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+        if matches!(
+            inner.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
             for (round, signature) in inner.dag_state.precomputed_round_sigs() {
                 let _ = connection
                     .sender

@@ -92,7 +92,10 @@ impl UniversalCommitter {
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
-                        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+                        if matches!(
+                            self.dag_state.consensus_protocol,
+                            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+                        ) {
                             if let Some(leader_ref) =
                                 vb.header().starfish_bls_voted_leader(&self.committee)
                             {
@@ -546,7 +549,8 @@ impl UniversalCommitterBuilder {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => Self {
+            | ConsensusProtocol::StarfishBls
+            | ConsensusProtocol::MysticetiBls => Self {
                 committee,
                 dag_state,
                 metrics,

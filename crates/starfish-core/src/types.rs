@@ -1389,6 +1389,91 @@ impl VerifiedBlock {
                     );
                 }
             }
+            ConsensusProtocol::MysticetiBls => {
+                ensure!(
+                    acknowledgments.is_empty(),
+                    "MysticetiBls blocks must not carry acknowledgments"
+                );
+                ensure!(
+                    self.header.unprovable_certificate().is_none(),
+                    "Only Bluestreak blocks may carry unprovable_certificate"
+                );
+                let bls = self
+                    .header
+                    .bls()
+                    .ok_or_else(|| eyre::eyre!("MysticetiBls block is missing BLS fields"))?;
+                ensure!(
+                    bls.round_signature != BlsSignatureBytes::default(),
+                    "MysticetiBls block is missing round BLS signature"
+                );
+                ensure!(
+                    self.header.acknowledgment_bls_signatures().is_empty(),
+                    "MysticetiBls blocks must not carry DAC certificates"
+                );
+                let is_round_leader = self.authority() == committee.elect_leader(round);
+                if is_round_leader {
+                    ensure!(
+                        threshold_clock_valid_block_header(&self.header, committee),
+                        "MysticetiBls leader block must reference a quorum of previous-round blocks"
+                    );
+                } else {
+                    ensure!(
+                        self.header.block_references.len() <= 2,
+                        "MysticetiBls non-leader block may reference only \
+                         the author's previous block and the \
+                         previous-round leader"
+                    );
+                    let _self_ref = *self
+                        .header
+                        .block_references
+                        .iter()
+                        .find(|r| r.authority == self.authority())
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "MysticetiBls non-leader block must reference its own previous block"
+                            )
+                        })?;
+                }
+                if let Some((leader_ref, _sig)) = self.header.voted_leader() {
+                    ensure!(
+                        leader_ref.round + 1 == round,
+                        "MysticetiBls leader vote {:?} must target the previous round",
+                        leader_ref
+                    );
+                    ensure!(
+                        leader_ref.authority == committee.elect_leader(leader_ref.round),
+                        "MysticetiBls leader vote {:?} must target the scheduled leader",
+                        leader_ref
+                    );
+                    ensure!(
+                        self.header.block_references.contains(leader_ref),
+                        "MysticetiBls leader vote {:?} must also appear in block references",
+                        leader_ref
+                    );
+                } else if !is_round_leader && round > 1 {
+                    ensure!(
+                        self.header
+                            .block_references
+                            .iter()
+                            .all(|r| r.authority == self.authority()),
+                        "MysticetiBls non-leader block without a leader \
+                         vote must not reference other parties"
+                    );
+                }
+                if let Some(cert) = self.header.bls_aggregate_round_signature() {
+                    ensure!(
+                        !cert.is_empty(),
+                        "MysticetiBls aggregate round certificate must not be empty"
+                    );
+                }
+                if let Some((leader_ref, cert)) = self.header.certified_leader() {
+                    ensure!(
+                        !cert.is_empty(),
+                        "MysticetiBls certified leader {:?} must not have an empty certificate",
+                        leader_ref
+                    );
+                }
+            }
             ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),

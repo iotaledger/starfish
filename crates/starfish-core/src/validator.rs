@@ -124,8 +124,10 @@ impl Validator {
             RealCommitHandler::new_with_handler(committee.clone(), metrics.clone());
         tracing::info!("Commit handler");
 
-        let is_starfish_l =
-            recovered.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls;
+        let is_starfish_l = matches!(
+            recovered.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        );
         let (partial_sig_tx, partial_sig_rx) = if is_starfish_l {
             let (tx, rx) = mpsc::unbounded_channel::<PartialSig>();
             (Some(tx), Some(rx))
@@ -311,6 +313,7 @@ mod smoke_tests {
     #[test_case("starfish-bls", 100)]
     #[test_case("sailfish++", 120)]
     #[test_case("bluestreak", 140)]
+    #[test_case("mysticeti-bls", 160)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -409,6 +412,7 @@ mod smoke_tests {
     #[test_case("starfish-bls", 200)]
     #[test_case("sailfish++", 220)]
     #[test_case("bluestreak", 260)]
+    #[test_case("mysticeti-bls", 280)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
@@ -473,6 +477,7 @@ mod smoke_tests {
     #[test_case("starfish-bls", 300)]
     #[test_case("sailfish++", 320)]
     #[test_case("bluestreak", 380)]
+    #[test_case("mysticeti-bls", 400)]
     #[tokio::test]
     async fn validator_crash_faults(consensus: &str, port_offset: u16) {
         run_crash_faults_test(consensus, port_offset).await;
@@ -674,6 +679,7 @@ mod smoke_tests {
     #[test_case("starfish-bls", 600)]
     #[tokio::test(flavor = "multi_thread")]
     #[test_case("sailfish++", 620)]
+    #[test_case("mysticeti-bls", 640)]
     async fn validator_lifecycle_and_recovery(consensus: &str, port_offset: u16) {
         run_lifecycle_test(consensus, port_offset).await;
     }
