@@ -1521,62 +1521,76 @@ impl DagState {
             return false;
         }
 
-        if leader_round >= 2 {
-            let prev_leader = committee.elect_leader(leader_round - 1);
-            let mut votes = StakeAggregator::<QuorumThreshold>::new();
-            let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
-            let count_strong_votes =
-                !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
-
-            for block in &blocks {
-                let votes_for_leader = if matches!(
-                    self.consensus_protocol,
-                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-                ) {
-                    block
-                        .header()
-                        .starfish_bls_voted_leader(committee)
-                        .is_some_and(|leader_ref| {
-                            leader_ref.authority == prev_leader
-                                && leader_ref.round == leader_round - 1
-                        })
-                } else {
-                    block.block_references().iter().any(|reference| {
-                        reference.authority == prev_leader && reference.round == leader_round - 1
-                    })
-                };
-                if votes_for_leader {
-                    votes.add(block.authority(), committee);
-                }
-                if count_strong_votes && block.is_strong_vote() {
-                    strong_votes.add(block.authority(), committee);
-                }
-            }
-
-            if !votes.is_quorum(committee) {
-                return false;
-            }
-            if count_strong_votes && !strong_votes.is_quorum(committee) {
-                return false;
-            }
-        }
-
+        // BLS protocols: check round certificate, leader certificate for
+        // the leader two rounds back, and leader visibility.
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
         ) {
-            let prev_round = quorum_round.saturating_sub(1);
-            if prev_round > 0 && !inner.round_certificates.contains_key(&prev_round) {
+            // Round certificate for r-1 must exist.
+            if leader_round > 0
+                && !inner.round_certificates.contains_key(&leader_round)
+            {
                 return false;
             }
-            if prev_round > 0 && committee.elect_leader(quorum_round) == authority {
-                let mut block_votes = StakeAggregator::<QuorumThreshold>::new();
+            // Leader certificate for the leader of r-2 must exist.
+            if leader_round >= 2 {
+                let prev_leader_auth =
+                    committee.elect_leader(leader_round - 1);
+                let has_cert = inner.leader_certificates
+                    [prev_leader_auth as usize]
+                    .keys()
+                    .any(|r| r.round == leader_round - 1);
+                if !has_cert {
+                    return false;
+                }
+            }
+            // Leaders must see a quorum of blocks in the previous round.
+            if leader_round > 0
+                && committee.elect_leader(quorum_round) == authority
+            {
+                let mut block_votes =
+                    StakeAggregator::<QuorumThreshold>::new();
                 for block in &blocks {
                     if block_votes.add(block.authority(), committee) {
                         break;
                     }
                 }
                 if !block_votes.is_quorum(committee) {
+                    return false;
+                }
+            }
+        } else {
+            // Non-BLS protocols: vote quorum for leader two rounds back.
+            if leader_round >= 2 {
+                let prev_leader = committee.elect_leader(leader_round - 1);
+                let mut votes = StakeAggregator::<QuorumThreshold>::new();
+                let mut strong_votes =
+                    StakeAggregator::<QuorumThreshold>::new();
+                let count_strong_votes = !relaxed
+                    && self.consensus_protocol
+                        == ConsensusProtocol::StarfishSpeed;
+
+                for block in &blocks {
+                    let votes_for_leader =
+                        block.block_references().iter().any(|reference| {
+                            reference.authority == prev_leader
+                                && reference.round == leader_round - 1
+                        });
+                    if votes_for_leader {
+                        votes.add(block.authority(), committee);
+                    }
+                    if count_strong_votes && block.is_strong_vote() {
+                        strong_votes.add(block.authority(), committee);
+                    }
+                }
+
+                if !votes.is_quorum(committee) {
+                    return false;
+                }
+                if count_strong_votes
+                    && !strong_votes.is_quorum(committee)
+                {
                     return false;
                 }
             }
