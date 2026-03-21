@@ -908,7 +908,8 @@ impl VerifiedBlock {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => {
                 TransactionsCommitment::new_from_transactions(&transactions)
             }
         };
@@ -1206,7 +1207,8 @@ impl VerifiedBlock {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => {
                 let empty_transactions = Vec::new();
                 let empty_transactions_commitment =
                     TransactionsCommitment::new_from_transactions(&empty_transactions);
