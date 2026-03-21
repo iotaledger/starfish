@@ -51,7 +51,8 @@ pub struct Instance {
     /// Whether this instance was launched as a spot instance.
     #[serde(default)]
     pub spot: bool,
-    /// Creation timestamp as Unix epoch seconds (populated from cloud provider).
+    /// Creation timestamp as Unix epoch seconds (populated from cloud
+    /// provider).
     #[serde(default)]
     pub created_at: Option<i64>,
 }
