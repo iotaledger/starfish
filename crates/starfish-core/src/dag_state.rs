@@ -749,17 +749,18 @@ impl DagState {
         1
     }
 
-    /// For BLS protocols, the proposal round is determined by the highest
-    /// round certificate: if round `r` has a certificate, we can propose
-    /// in round `r + 1`.  Round 1 needs no certificate.
+    /// For BLS protocols, the proposal round is the minimum of the
+    /// threshold clock round and the highest BLS round certificate + 1.
+    /// The round certificate is an additional gate, not a replacement
+    /// for the threshold clock.
     fn bls_proposal_round(&self) -> RoundNumber {
         let inner = self.dag_state_inner.read();
+        let threshold = inner.threshold_clock.get_round();
         if let Some((&max_certified_round, _)) =
             inner.round_certificates.iter().next_back()
         {
-            max_certified_round + 1
+            (max_certified_round + 1).min(threshold)
         } else {
-            // No round certificates yet — can propose round 1.
             1
         }
     }
