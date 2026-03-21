@@ -74,7 +74,9 @@ impl BroadcasterParameters {
         causal_push_shard_round_lag: RoundNumber,
     ) -> Self {
         match consensus_protocol {
-            ConsensusProtocol::Mysticeti | ConsensusProtocol::SailfishPlusPlus => Self {
+            ConsensusProtocol::Mysticeti
+            | ConsensusProtocol::SailfishPlusPlus
+            | ConsensusProtocol::MysticetiBls => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: 3 * committee_size,
                 batch_shard_size: 3 * committee_size,
@@ -419,7 +421,8 @@ where
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => {
                 let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
 
                 let mut blocks = Vec::new();
@@ -824,7 +827,8 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
         ConsensusProtocol::CordialMiners
         | ConsensusProtocol::Mysticeti
         | ConsensusProtocol::SailfishPlusPlus
-        | ConsensusProtocol::Bluestreak => PushOtherBlocksFormat::FullBlocks,
+        | ConsensusProtocol::Bluestreak
+        | ConsensusProtocol::MysticetiBls => PushOtherBlocksFormat::FullBlocks,
     }
 }
 

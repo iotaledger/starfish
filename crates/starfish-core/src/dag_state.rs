@@ -112,6 +112,7 @@ pub enum ConsensusProtocol {
     StarfishBls,
     SailfishPlusPlus,
     Bluestreak,
+    MysticetiBls,
 }
 
 impl ConsensusProtocol {
@@ -124,6 +125,7 @@ impl ConsensusProtocol {
             "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
             "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
             "bluestreak" => ConsensusProtocol::Bluestreak,
+            "mysticeti-bls" | "mysticeti-l" => ConsensusProtocol::MysticetiBls,
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -157,7 +159,8 @@ impl ConsensusProtocol {
         match self {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => DisseminationMode::Pull,
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
@@ -675,6 +678,9 @@ impl DagState {
             }
             ConsensusProtocol::Bluestreak => {
                 tracing::info!("Starting Bluestreak protocol")
+            }
+            ConsensusProtocol::MysticetiBls => {
+                tracing::info!("Starting Mysticeti-BLS protocol")
             }
         }
         let dag_state = Self {
@@ -1430,7 +1436,10 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+            let votes_for_leader = if matches!(
+                self.consensus_protocol,
+                ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+            ) {
                 block
                     .header()
                     .starfish_bls_voted_leader(committee)
@@ -1499,8 +1508,10 @@ impl DagState {
                 !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
 
             for block in &blocks {
-                let votes_for_leader = if self.consensus_protocol == ConsensusProtocol::StarfishBls
-                {
+                let votes_for_leader = if matches!(
+                    self.consensus_protocol,
+                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+                ) {
                     block
                         .header()
                         .starfish_bls_voted_leader(committee)
@@ -1529,7 +1540,10 @@ impl DagState {
             }
         }
 
-        if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
             let prev_round = quorum_round.saturating_sub(1);
             if prev_round > 0 && !inner.round_certificates.contains_key(&prev_round) {
                 return false;
@@ -2984,6 +2998,7 @@ impl DagStateInner {
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::MysticetiBls
         ) && block.transactions().is_none()
             && block.merkle_root() == TransactionsCommitment::new_from_transactions(&Vec::new());
         if block.has_empty_payload() || is_empty_full_block {
@@ -3578,7 +3593,8 @@ mod tests {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
@@ -3613,7 +3629,8 @@ mod tests {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => {
                 TransactionsCommitment::new_from_transactions(&empty_transactions)
             }
             ConsensusProtocol::Starfish
