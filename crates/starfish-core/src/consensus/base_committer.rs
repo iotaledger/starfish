@@ -9,7 +9,10 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator},
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
-    types::{AuthorityIndex, AuthoritySet, RoundNumber, VerifiedBlock, format_authority_round},
+    types::{
+        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        format_authority_round,
+    },
 };
 
 /// The consensus protocol operates in 'waves'. Each wave is
@@ -286,6 +289,27 @@ impl BaseCommitter {
         )
     }
 
+    /// Check whether 2f+1 blocks in the certifying round carry an
+    /// explicit BLS leader certificate for the given leader.
+    fn enough_certified_leader_support(
+        &self,
+        certifying_round: RoundNumber,
+        leader_ref: &BlockReference,
+    ) -> bool {
+        let certifying_blocks =
+            self.dag_state.get_blocks_by_round_cached(certifying_round);
+        self.has_quorum_support(
+            certifying_blocks
+                .iter()
+                .filter(|b| {
+                    b.header()
+                        .certified_leader()
+                        .is_some_and(|(ref r, _)| r == leader_ref)
+                })
+                .map(|b| b.authority()),
+        )
+    }
+
     /// Check whether a single certifying-round block carries a StrongQC for the
     /// leader. A block carries StrongQC if its includes contain >=2f+1
     /// round-(r+1) blocks that both vote for the leader AND carry
@@ -430,8 +454,10 @@ impl BaseCommitter {
                     self.dag_state.consensus_protocol,
                     ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
                 ) {
-                    // BLS protocols: require BLS leader certificate instead of DAG-edge quorum.
-                    self.dag_state.has_leader_certificate(l.reference())
+                    self.enough_certified_leader_support(
+                        certifying_round,
+                        l.reference(),
+                    )
                 } else if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
                     self.dag_state.has_clean_vertex(l.reference())
                         && self.enough_leader_support(certifying_round, l, voter_info)
