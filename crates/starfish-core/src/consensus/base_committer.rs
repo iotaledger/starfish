@@ -426,8 +426,11 @@ impl BaseCommitter {
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
             .filter(|l| {
-                if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                    // StarfishBls: require BLS leader certificate instead of DAG-edge quorum.
+                if matches!(
+                    self.dag_state.consensus_protocol,
+                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+                ) {
+                    // BLS protocols: require BLS leader certificate instead of DAG-edge quorum.
                     self.dag_state.has_leader_certificate(l.reference())
                 } else if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
                     self.dag_state.has_clean_vertex(l.reference())

@@ -43,7 +43,9 @@ fn peer_can_serve_missing_data(
     peer_id: AuthorityIndex,
 ) -> bool {
     match consensus_protocol {
-        ConsensusProtocol::StarfishBls => holders.votes.contains(peer_id),
+        ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls => {
+            holders.votes.contains(peer_id)
+        }
         _ => !holders.votes.contains(own_id) && holders.votes.contains(peer_id),
     }
 }

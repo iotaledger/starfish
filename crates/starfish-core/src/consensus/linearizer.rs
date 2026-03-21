@@ -268,7 +268,8 @@ impl Linearizer {
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
-                | ConsensusProtocol::Bluestreak => {
+                | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::MysticetiBls => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
             };
@@ -309,7 +310,9 @@ impl Linearizer {
                 .blocks
                 .iter()
                 .map(|x| match consensus_protocol {
-                    ConsensusProtocol::StarfishBls => self.potential_data_holders(),
+                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls => {
+                        self.potential_data_holders()
+                    }
                     _ => self
                         .votes
                         .get(x.reference())

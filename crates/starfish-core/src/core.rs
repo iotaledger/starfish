@@ -160,8 +160,10 @@ impl<H: BlockHandler> Core<H> {
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
-        let bls_cert_aggregator = if dag_state.consensus_protocol == ConsensusProtocol::StarfishBls
-        {
+        let bls_cert_aggregator = if matches!(
+            dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
@@ -491,26 +493,30 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let voted_leader_ref =
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                self.select_starfish_bls_voted_leader(clock_round)
-            } else {
-                None
-            };
+        let voted_leader_ref = if matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
+            self.select_starfish_bls_voted_leader(clock_round)
+        } else {
+            None
+        };
 
-        // StarfishBls must not drain the pending frontier before the previous
+        // BLS protocols must not drain the pending frontier before the previous
         // round certificate is available, otherwise timeout retries can rebuild
         // the same round from a truncated queue.
-        let aggregate_round_sig =
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                if clock_round <= 1 {
-                    None
-                } else {
-                    Some(self.dag_state.round_certificate(clock_round - 1)?)
-                }
-            } else {
+        let aggregate_round_sig = if matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
+            if clock_round <= 1 {
                 None
-            };
+            } else {
+                Some(self.dag_state.round_certificate(clock_round - 1)?)
+            }
+        } else {
+            None
+        };
 
         let pending_transactions = self.get_pending_transactions(clock_round);
         let (mut transactions, block_references, raw_refs) =
@@ -583,26 +589,28 @@ impl<H: BlockHandler> Core<H> {
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
 
-        let certified_leader =
-            if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
-                // Leader cert for leader of clock_round - 1 (if we include that leader).
-                if clock_round <= 2 {
-                    None
-                } else {
-                    let leader_round = clock_round - 1;
-                    let leader_authority = self.committee.elect_leader(leader_round);
-                    block_references
-                        .iter()
-                        .find(|r| r.round == leader_round && r.authority == leader_authority)
-                        .and_then(|leader_ref| {
-                            self.dag_state
-                                .leader_certificate(leader_ref)
-                                .map(|cert| (*leader_ref, cert))
-                        })
-                }
-            } else {
+        let certified_leader = if matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
+            // Leader cert for leader of clock_round - 1 (if we include that leader).
+            if clock_round <= 2 {
                 None
-            };
+            } else {
+                let leader_round = clock_round - 1;
+                let leader_authority = self.committee.elect_leader(leader_round);
+                block_references
+                    .iter()
+                    .find(|r| r.round == leader_round && r.authority == leader_authority)
+                    .and_then(|leader_ref| {
+                        self.dag_state
+                            .leader_certificate(leader_ref)
+                            .map(|cert| (*leader_ref, cert))
+                    })
+            }
+        } else {
+            None
+        };
 
         // Create and store blocks
         let mut first_block = None;
@@ -747,7 +755,8 @@ impl<H: BlockHandler> Core<H> {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::CordialMiners
             | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak => None,
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::MysticetiBls => None,
         }
     }
 
@@ -839,7 +848,10 @@ impl<H: BlockHandler> Core<H> {
         let time_ns = timestamp_utc().as_nanos() as u64 + block_id_in_round as u64;
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
         let mut block_references = vec![own_previous];
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+        if matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
             if let Some(leader_ref) = voted_leader_ref {
                 if leader_ref != own_previous {
                     block_references.push(leader_ref);
@@ -861,7 +873,10 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let is_starfish_l = self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls;
+        let is_starfish_l = matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        );
         let bls_signer_opt = if is_starfish_l {
             Some(&self.bls_signer)
         } else {
@@ -1130,12 +1145,15 @@ impl<H: BlockHandler> Core<H> {
                 })
                 .collect();
         }
-        if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
+        if matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        ) {
             if self.committee.elect_leader(block_round) != self.authority {
                 return Vec::new();
             }
 
-            // StarfishBls leaders keep the full frontier so their header preserves
+            // BLS leaders keep the full frontier so their header preserves
             // the direct previous-round quorum required by the protocol.
             let mut seen_references = AHashSet::new();
             return pending_refs
