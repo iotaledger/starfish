@@ -49,4 +49,4 @@ jobs:
 
             **Warning**: Some checks did not succeed. Please check the [action output][run] before merging this PR.
 
-            [run]: https://github.com/asonnino/mysticeti/actions/runs/${{ github.run_id }}
+            [run]: https://github.com/iotaledger/starfish/actions/runs/${{ github.run_id }}

@@ -40,6 +40,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
     steps:
       - uses: actions/checkout@v4
       - name: Detect Changes
@@ -47,16 +49,18 @@ jobs:
         id: diff
         with:
           filters: |
-            - 'crates/**'
-            - 'Cargo.toml'
-            - 'Cargo.lock'
-            - 'rust-toolchain'
-            - 'deny.toml'
-            - '.github/workflows/code.yml'
+            code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain'
+              - 'deny.toml'
+              - '.github/workflows/code.yml'
 
   dependencies:
     name: Check dependencies
     needs: diff
+    if: needs.diff.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +75,7 @@ jobs:
   dependencies-schedule:
     name: Check dependencies (including vulnerabilities)
     needs: diff
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +88,7 @@ jobs:
   test-coverage:
     name: Run all Rust tests and report coverage
     needs: diff
+    if: needs.diff.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -163,6 +169,7 @@ jobs:
   lint:
     name: Lint Rust code
     needs: diff
+    if: needs.diff.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,6 +195,7 @@ jobs:
   build:
     name: Build Rust code
     needs: diff
+    if: needs.diff.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -195,7 +203,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
       - name: Build Rust code
-        run: cargo build --verbose
+        run: cargo build --all-features --verbose
 
   check-all:
     name: Check if all code checks succeeded
