@@ -714,3 +714,46 @@ impl NodeExporter {
         .join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Prometheus;
+
+    #[test]
+    fn prometheus_reload_commands_copy_rules_and_reload() {
+        let commands = Prometheus::reload_commands("prometheus.yml", "recording_rules.yml");
+
+        assert!(commands.contains("sudo cp prometheus.yml /etc/prometheus/prometheus.yml"));
+        assert!(
+            commands.contains("sudo cp recording_rules.yml /etc/prometheus/recording_rules.yml")
+        );
+        assert!(commands.contains("http://localhost:9090/-/reload"));
+        assert!(commands.contains("sudo service prometheus restart"));
+    }
+
+    #[test]
+    fn prometheus_global_configuration_references_recording_rules() {
+        let config = Prometheus::global_configuration(60);
+
+        assert!(config.contains("scrape_interval: 10s"));
+        assert!(config.contains("scrape_timeout: 5s"));
+        assert!(config.contains("evaluation_interval: 10s"));
+        assert!(config.contains("rule_files:"));
+        assert!(config.contains("/etc/prometheus/recording_rules.yml"));
+    }
+
+    #[test]
+    fn prometheus_recording_rules_cover_dashboard_series() {
+        let rules = Prometheus::recording_rules();
+
+        for metric in [
+            "starfish:tx_throughput:rate1m",
+            "starfish:bytes_sent:rate1m",
+            "starfish:bytes_received:rate1m",
+            "starfish:bandwidth:rate1m",
+            "starfish:committed_leaders:rate1m",
+        ] {
+            assert!(rules.contains(metric), "missing recording rule for {metric}");
+        }
+    }
+}
