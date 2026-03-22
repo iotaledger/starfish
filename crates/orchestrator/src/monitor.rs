@@ -93,7 +93,20 @@ impl Monitor {
             )
             .await?;
 
-        let commands = Prometheus::reload_commands(&remote_config);
+        // Upload recording rules for pre-aggregated dashboard queries.
+        let rules = Prometheus::recording_rules();
+        let remote_rules_file: PathBuf = "recording_rules.yml".into();
+        let remote_rules_path = self.working_dir.join(&remote_rules_file);
+        self.ssh_manager
+            .upload_bytes_to_all(
+                std::iter::once(self.instance.clone()),
+                rules.into_bytes(),
+                &remote_rules_path,
+            )
+            .await?;
+
+        let commands =
+            Prometheus::reload_commands(&remote_config, &remote_rules_file);
         let context = CommandContext::new().with_execute_from_path(self.working_dir.clone());
         self.ssh_manager
             .execute(std::iter::once(self.instance.clone()), commands, context)
@@ -160,6 +173,8 @@ pub struct Prometheus;
 impl Prometheus {
     /// The default prometheus configuration path.
     const DEFAULT_PROMETHEUS_CONFIG_PATH: &'static str = "/etc/prometheus/prometheus.yml";
+    /// The path for recording rules on the remote machine.
+    const RECORDING_RULES_PATH: &'static str = "/etc/prometheus/recording_rules.yml";
     /// The default prometheus port.
     pub const DEFAULT_PORT: u16 = 9090;
 
@@ -168,6 +183,12 @@ impl Prometheus {
         vec![
             "sudo apt-get -y install prometheus",
             "sudo chmod 777 -R /var/lib/prometheus/ /etc/prometheus/",
+            // Enable HTTP lifecycle API and set retention limits.
+            "echo 'ARGS=\"--web.enable-lifecycle \
+                --storage.tsdb.retention.time=30d \
+                --storage.tsdb.retention.size=100GB\"' \
+                | sudo tee /etc/default/prometheus",
+            "sudo service prometheus restart",
         ]
     }
 
@@ -177,9 +198,9 @@ impl Prometheus {
         I: IntoIterator<Item = Instance>,
         P: ProtocolMetrics,
     {
-        let mut config = vec![Self::global_configuration()];
-
         let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
+        let mut config = vec![Self::global_configuration(nodes_metrics_path.len())];
+
         for (i, (_, nodes_metrics_path)) in nodes_metrics_path.into_iter().enumerate() {
             let id = format!("node-{i}");
             let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
@@ -189,27 +210,69 @@ impl Prometheus {
         config.join("\n")
     }
 
-    /// Generate the commands to install the uploaded configuration and restart
-    /// prometheus.
-    pub fn reload_commands<P: AsRef<Path>>(remote_config_path: P) -> String {
+    /// Generate the commands to install the uploaded configuration and hot-reload
+    /// prometheus (falls back to a full restart when the lifecycle API is
+    /// unavailable).
+    pub fn reload_commands<P: AsRef<Path>>(
+        remote_config_path: P,
+        remote_rules_path: P,
+    ) -> String {
         format!(
-            "sudo cp {} {} && (sudo fuser -k {}/tcp || true) && sudo service prometheus restart",
+            "sudo cp {} {} && sudo cp {} {} && \
+             (curl -sf -X POST http://localhost:{}/-/reload \
+              || {{ (sudo fuser -k {}/tcp || true) && \
+              sudo service prometheus restart; }})",
             remote_config_path.as_ref().display(),
             Self::DEFAULT_PROMETHEUS_CONFIG_PATH,
-            Self::DEFAULT_PORT
+            remote_rules_path.as_ref().display(),
+            Self::RECORDING_RULES_PATH,
+            Self::DEFAULT_PORT,
+            Self::DEFAULT_PORT,
         )
     }
 
     /// Generate the global prometheus configuration.
     /// NOTE: The configuration file is a yaml file so spaces are important.
-    fn global_configuration() -> String {
+    fn global_configuration(nodes: usize) -> String {
+        let scrape_secs = (nodes / 6).max(5);
+        let timeout_secs = (scrape_secs / 2).max(3);
         [
-            "global:",
-            "  scrape_interval: 5s",
-            "  evaluation_interval: 5s",
-            "scrape_configs:",
+            "global:".to_string(),
+            format!("  scrape_interval: {scrape_secs}s"),
+            format!("  scrape_timeout: {timeout_secs}s"),
+            format!("  evaluation_interval: {scrape_secs}s"),
+            "rule_files:".to_string(),
+            format!("  - {}", Self::RECORDING_RULES_PATH),
+            "scrape_configs:".to_string(),
         ]
         .join("\n")
+    }
+
+    /// Pre-computed recording rules so Grafana queries hit pre-aggregated
+    /// metrics instead of scanning raw data on every refresh.
+    pub fn recording_rules() -> String {
+        // editorconfig-checker-disable
+        "\
+groups:
+  - name: starfish
+    rules:
+      - record: starfish:tx_throughput:rate1m
+        expr: rate(sequenced_transactions_total[1m])
+      - record: starfish:bytes_sent:rate1m
+        expr: rate(bytes_sent_total[1m])
+      - record: starfish:bytes_received:rate1m
+        expr: rate(bytes_received_total[1m])
+      - record: starfish:bandwidth:rate1m
+        expr: rate(bytes_sent_total[1m]) + rate(bytes_received_total[1m])
+      - record: starfish:committed_leaders:rate1m
+        expr: rate(committed_leaders_total[1m])
+      - record: starfish:network_requests_sent:rate1m
+        expr: rate(network_requests_sent_total[1m])
+      - record: starfish:network_requests_received:rate1m
+        expr: rate(network_requests_received_total[1m])
+"
+        // editorconfig-checker-enable
+        .to_string()
     }
 
     /// Generate the prometheus configuration from the given metrics path.
