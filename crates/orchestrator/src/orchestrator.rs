@@ -7,7 +7,7 @@ use std::{
     fs,
     io::Read,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use flate2::read::GzDecoder;
@@ -147,6 +147,10 @@ impl<P> Orchestrator<P> {
 }
 
 impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
+    const NODE_BOOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+    const MIN_NODE_BOOT_TIMEOUT: Duration = Duration::from_secs(120);
+    const MAX_NODE_BOOT_LOG_SAMPLES: usize = 3;
+
     fn mark_instances_inactive(&mut self, instances: &[Instance]) {
         for failed in instances {
             if let Some(instance) = self
@@ -200,6 +204,147 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
 
         successes
+    }
+
+    async fn probe_instances_best_effort<S>(
+        &mut self,
+        instances: Vec<(Instance, S)>,
+        context: CommandContext,
+    ) -> Vec<Instance>
+    where
+        S: Into<String> + Send + 'static + Clone,
+    {
+        let handles = self
+            .ssh_manager
+            .run_per_instance(instances.clone(), context);
+        let mut successes = Vec::new();
+        let mut lost_instances = Vec::new();
+
+        for ((instance, _), handle) in instances.into_iter().zip(handles) {
+            match handle.await {
+                Ok(Ok(_)) => successes.push(instance),
+                Ok(Err(error)) => {
+                    if matches!(
+                        error,
+                        SshError::ConnectionError { .. } | SshError::SessionError { .. }
+                    ) {
+                        lost_instances.push(instance);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        if !lost_instances.is_empty() {
+            self.mark_instances_inactive(&lost_instances);
+        }
+
+        successes
+    }
+
+    fn node_boot_timeout(node_count: usize) -> Duration {
+        Self::MIN_NODE_BOOT_TIMEOUT.max(Duration::from_secs((node_count as u64 / 2).max(120)))
+    }
+
+    async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
+        let samples: Vec<_> = instances
+            .iter()
+            .take(Self::MAX_NODE_BOOT_LOG_SAMPLES)
+            .cloned()
+            .collect();
+        if samples.is_empty() {
+            return String::new();
+        }
+
+        let commands = samples
+            .clone()
+            .into_iter()
+            .map(|instance| {
+                (
+                    instance,
+                    "tail -n 40 ~/node.log 2>/dev/null || echo '(node.log unavailable)'",
+                )
+            })
+            .collect();
+        let outputs = self
+            .execute_per_instance_best_effort(
+                commands,
+                CommandContext::default(),
+                "Startup log fetch",
+            )
+            .await;
+        if outputs.is_empty() {
+            return "No startup log samples available.".into();
+        }
+
+        outputs
+            .into_iter()
+            .map(|(instance, (stdout, stderr))| {
+                let snippet = if stdout.trim().is_empty() {
+                    stderr.trim()
+                } else {
+                    stdout.trim()
+                };
+                format!("{}:\n{}", instance.main_ip, snippet)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    async fn wait_for_nodes_ready(
+        &mut self,
+        instances: Vec<Instance>,
+        parameters: &BenchmarkParameters,
+    ) -> TestbedResult<()> {
+        let total = instances.len();
+        let timeout = Self::node_boot_timeout(total);
+        let mut pending: HashMap<_, _> = self
+            .protocol_commands
+            .nodes_metrics_command(instances, parameters)
+            .into_iter()
+            .map(|(instance, command)| (instance.id.clone(), (instance, command)))
+            .collect();
+        let start = Instant::now();
+        display::status(format!("0/{total}"));
+
+        while !pending.is_empty() {
+            let probes: Vec<_> = pending.values().cloned().collect();
+            let ready = self
+                .probe_instances_best_effort(probes, CommandContext::default())
+                .await;
+            for instance in ready {
+                pending.remove(&instance.id);
+            }
+
+            let completed = total - pending.len();
+            display::status(format!(
+                "{completed}/{total} {}s",
+                start.elapsed().as_secs()
+            ));
+
+            if pending.is_empty() {
+                return Ok(());
+            }
+
+            if start.elapsed() >= timeout {
+                let stalled: Vec<_> = pending
+                    .values()
+                    .map(|(instance, _)| instance.clone())
+                    .collect();
+                let sample_logs = self.sample_node_startup_logs(&stalled).await;
+                return Err(TestbedError::NodeBootError(format!(
+                    "{} of {} validators did not expose metrics within {}s.\nStartup log samples:\n{}",
+                    stalled.len(),
+                    total,
+                    timeout.as_secs(),
+                    sample_logs
+                )));
+            }
+
+            time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
+        }
+
+        Ok(())
     }
 
     fn log_download_ssh_manager(&self) -> SshConnectionManager {
@@ -525,20 +670,18 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .await?;
 
         // Wait until all nodes are reachable.
-        let commands = self
-            .protocol_commands
-            .nodes_metrics_command(instances.clone(), parameters);
-        self.ssh_manager.wait_for_success(commands).await;
-
+        // Moved to `wait_for_nodes_ready` to accumulate partial readiness and
+        // fail with diagnostics instead of spinning forever.
         Ok(())
     }
 
     /// Deploy the nodes.
-    pub async fn run_nodes(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
+    pub async fn run_nodes(&mut self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         display::action("\nDeploying validators");
 
         let (nodes, _) = self.select_instances(parameters)?;
-        self.boot_nodes(nodes, parameters).await?;
+        self.boot_nodes(nodes.clone(), parameters).await?;
+        self.wait_for_nodes_ready(nodes, parameters).await?;
 
         display::done();
         Ok(())
@@ -899,5 +1042,27 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         display::print_timeline();
         display::header("Latency-throughput sweep completed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Orchestrator;
+    use crate::protocol::starfish::StarfishProtocol;
+
+    #[test]
+    fn node_boot_timeout_has_sane_floor() {
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::node_boot_timeout(10),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn node_boot_timeout_scales_for_large_committees() {
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::node_boot_timeout(400),
+            std::time::Duration::from_secs(200)
+        );
     }
 }

@@ -105,8 +105,7 @@ impl Monitor {
             )
             .await?;
 
-        let commands =
-            Prometheus::reload_commands(&remote_config, &remote_rules_file);
+        let commands = Prometheus::reload_commands(&remote_config, &remote_rules_file);
         let context = CommandContext::new().with_execute_from_path(self.working_dir.clone());
         self.ssh_manager
             .execute(std::iter::once(self.instance.clone()), commands, context)
@@ -173,21 +172,33 @@ pub struct Prometheus;
 impl Prometheus {
     /// The default prometheus configuration path.
     const DEFAULT_PROMETHEUS_CONFIG_PATH: &'static str = "/etc/prometheus/prometheus.yml";
+    #[cfg(test)]
+    /// The default prometheus environment file path.
+    const DEFAULT_PROMETHEUS_ENV_PATH: &'static str = "/etc/default/prometheus";
     /// The path for recording rules on the remote machine.
     const RECORDING_RULES_PATH: &'static str = "/etc/prometheus/recording_rules.yml";
     /// The default prometheus port.
     pub const DEFAULT_PORT: u16 = 9090;
+
+    fn ensure_runtime_flags_command() -> &'static str {
+        "sudo sh -c 'file=/etc/default/prometheus; touch \"$file\"; \
+            current=$(sed -n \"s/^ARGS=\\\"\\(.*\\)\\\"$/\\1/p\" \"$file\"); \
+            for flag in --web.enable-lifecycle --storage.tsdb.retention.time=30d --storage.tsdb.retention.size=100GB; do \
+                case \" $current \" in *\" $flag \"*) ;; *) current=\"${current:+$current }$flag\" ;; esac; \
+            done; \
+            awk \"!/^ARGS=/\" \"$file\" > \"$file.tmp\"; \
+            printf \"ARGS=\\\"%s\\\"\\n\" \"$current\" >> \"$file.tmp\"; \
+            mv \"$file.tmp\" \"$file\"'"
+    }
 
     /// The commands to install prometheus.
     pub fn install_commands() -> Vec<&'static str> {
         vec![
             "sudo apt-get -y install prometheus",
             "sudo chmod 777 -R /var/lib/prometheus/ /etc/prometheus/",
-            // Enable HTTP lifecycle API and set retention limits.
-            "echo 'ARGS=\"--web.enable-lifecycle \
-                --storage.tsdb.retention.time=30d \
-                --storage.tsdb.retention.size=100GB\"' \
-                | sudo tee /etc/default/prometheus",
+            // Preserve unrelated distro defaults while ensuring Prometheus has
+            // the flags needed for fast config reloads and larger retained TSDBs.
+            Self::ensure_runtime_flags_command(),
             "sudo service prometheus restart",
         ]
     }
@@ -213,15 +224,14 @@ impl Prometheus {
     /// Generate the commands to install the uploaded configuration and hot-reload
     /// prometheus (falls back to a full restart when the lifecycle API is
     /// unavailable).
-    pub fn reload_commands<P: AsRef<Path>>(
-        remote_config_path: P,
-        remote_rules_path: P,
-    ) -> String {
+    pub fn reload_commands<P: AsRef<Path>>(remote_config_path: P, remote_rules_path: P) -> String {
         format!(
-            "sudo cp {} {} && sudo cp {} {} && \
-             (curl -sf -X POST http://localhost:{}/-/reload \
+            "{} && sudo cp {} {} && sudo cp {} {} && \
+             (curl --silent --show-error --fail --connect-timeout 1 --max-time 2 \
+              -X POST http://127.0.0.1:{}/-/reload \
               || {{ (sudo fuser -k {}/tcp || true) && \
               sudo service prometheus restart; }})",
+            Self::ensure_runtime_flags_command(),
             remote_config_path.as_ref().display(),
             Self::DEFAULT_PROMETHEUS_CONFIG_PATH,
             remote_rules_path.as_ref().display(),
@@ -727,7 +737,10 @@ mod tests {
         assert!(
             commands.contains("sudo cp recording_rules.yml /etc/prometheus/recording_rules.yml")
         );
-        assert!(commands.contains("http://localhost:9090/-/reload"));
+        assert!(commands.contains(Prometheus::DEFAULT_PROMETHEUS_ENV_PATH));
+        assert!(commands.contains("http://127.0.0.1:9090/-/reload"));
+        assert!(commands.contains("--connect-timeout 1"));
+        assert!(commands.contains("--max-time 2"));
         assert!(commands.contains("sudo service prometheus restart"));
     }
 
@@ -753,7 +766,24 @@ mod tests {
             "starfish:bandwidth:rate1m",
             "starfish:committed_leaders:rate1m",
         ] {
-            assert!(rules.contains(metric), "missing recording rule for {metric}");
+            assert!(
+                rules.contains(metric),
+                "missing recording rule for {metric}"
+            );
         }
+    }
+
+    #[test]
+    fn prometheus_install_commands_preserve_default_file_and_enable_lifecycle() {
+        let commands = Prometheus::install_commands();
+
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains(Prometheus::DEFAULT_PROMETHEUS_ENV_PATH))
+        );
+        assert!(commands.iter().any(|c| c.contains("--web.enable-lifecycle")
+            && c.contains("--storage.tsdb.retention.time=30d")
+            && c.contains("--storage.tsdb.retention.size=100GB")));
     }
 }

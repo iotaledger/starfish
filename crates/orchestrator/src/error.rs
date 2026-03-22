@@ -104,6 +104,9 @@ pub enum TestbedError {
     #[error(transparent)]
     MonitorError(#[from] MonitorError),
 
+    #[error("Failed to boot validators: {0}")]
+    NodeBootError(String),
+
     #[error("Failed to process logs: {0}")]
     LogProcessingError(String),
 }

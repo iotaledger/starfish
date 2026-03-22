@@ -284,24 +284,6 @@ impl SshConnectionManager {
         Ok(())
     }
 
-    pub async fn wait_for_success<I, S>(&self, instances: I)
-    where
-        I: IntoIterator<Item = (Instance, S)> + Clone,
-        S: Into<String> + Send + 'static + Clone,
-    {
-        loop {
-            sleep(Self::RETRY_DELAY).await;
-
-            if self
-                .execute_per_instance(instances.clone(), CommandContext::default())
-                .await
-                .is_ok()
-            {
-                break;
-            }
-        }
-    }
-
     /// Kill a command running in the background of the specified instances.
     pub async fn kill<I>(&self, instances: I, command_id: &str) -> SshResult<()>
     where
