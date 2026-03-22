@@ -24,6 +24,13 @@ use crate::{
     error::{SshError, SshResult},
 };
 
+fn is_retryable_ssh_error(error: &SshError) -> bool {
+    matches!(
+        error,
+        SshError::ConnectionError { .. } | SshError::SessionError { .. }
+    )
+}
+
 #[derive(PartialEq, Eq)]
 /// The status of a ssh command running in the background.
 pub enum CommandStatus {
@@ -243,6 +250,9 @@ impl SshConnectionManager {
                         {
                             Ok(result) => return Ok(result),
                             Err(e) => {
+                                if !is_retryable_ssh_error(&e) {
+                                    return Err(e);
+                                }
                                 error = Some(e);
                                 sleep(Self::RETRY_DELAY).await;
                             }
@@ -465,7 +475,12 @@ impl SshConnection {
             };
             match self.execute_impl(channel, command.clone()) {
                 r @ Ok(..) => return r,
-                Err(e) => error = Some(e),
+                Err(e) => {
+                    if !is_retryable_ssh_error(&e) {
+                        return Err(e);
+                    }
+                    error = Some(e);
+                }
             }
         }
         Err(error.unwrap())
@@ -567,5 +582,47 @@ impl SshConnection {
             }
         }
         Err(error.unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io, net::SocketAddr};
+
+    use ssh2::{Error, ErrorCode};
+
+    use super::is_retryable_ssh_error;
+    use crate::error::SshError;
+
+    fn test_address() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 22))
+    }
+
+    #[test]
+    fn retries_transport_errors() {
+        let error = SshError::ConnectionError {
+            address: test_address(),
+            error: io::Error::other("connection reset"),
+        };
+        assert!(is_retryable_ssh_error(&error));
+    }
+
+    #[test]
+    fn does_not_retry_non_zero_exit_codes() {
+        let error = SshError::NonZeroExitCode {
+            address: test_address(),
+            code: 7,
+            message: "curl failed".into(),
+        };
+        assert!(!is_retryable_ssh_error(&error));
+    }
+
+    #[test]
+    fn retries_session_errors() {
+        let error = SshError::SessionError {
+            address: test_address(),
+            error: Error::from_errno(ErrorCode::Session(-1)),
+        };
+        assert!(is_retryable_ssh_error(&error));
     }
 }

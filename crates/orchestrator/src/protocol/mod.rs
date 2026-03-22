@@ -15,6 +15,8 @@ use crate::{benchmark::BenchmarkParameters, client::Instance};
 pub mod starfish;
 
 pub const BINARY_PATH: &str = "target/release";
+const METRICS_CURL_CONNECT_TIMEOUT_SECS: u64 = 1;
+const METRICS_CURL_MAX_TIME_SECS: u64 = 3;
 
 pub trait ProtocolParameters:
     Default + Clone + Serialize + DeserializeOwned + Debug + Display
@@ -86,7 +88,16 @@ pub trait ProtocolMetrics {
     {
         self.nodes_metrics_path(instances, parameters)
             .into_iter()
-            .map(|(instance, path)| (instance, format!("curl {path}")))
+            .map(|(instance, path)| {
+                (
+                    instance,
+                    format!(
+                        "curl --silent --show-error --fail --connect-timeout \
+                         {METRICS_CURL_CONNECT_TIMEOUT_SECS} --max-time \
+                         {METRICS_CURL_MAX_TIME_SECS} {path}"
+                    ),
+                )
+            })
             .collect()
     }
 }
@@ -115,5 +126,32 @@ pub mod test_protocol_metrics {
                 .map(|(i, instance)| (instance, format!("localhost:{}/metrics", 8000 + i as u16)))
                 .collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        METRICS_CURL_CONNECT_TIMEOUT_SECS, METRICS_CURL_MAX_TIME_SECS, ProtocolMetrics,
+        test_protocol_metrics::TestProtocolMetrics,
+    };
+    use crate::{benchmark::BenchmarkParameters, client::Instance};
+
+    #[test]
+    fn metrics_commands_use_bounded_curl() {
+        let instance = Instance::new_for_test("1".into());
+        let parameters = BenchmarkParameters::new_for_tests();
+        let command = TestProtocolMetrics
+            .nodes_metrics_command(vec![instance], &parameters)
+            .pop()
+            .unwrap()
+            .1;
+
+        assert!(command.contains("--silent --show-error --fail"));
+        assert!(command.contains(&format!(
+            "--connect-timeout {METRICS_CURL_CONNECT_TIMEOUT_SECS}"
+        )));
+        assert!(command.contains(&format!("--max-time {METRICS_CURL_MAX_TIME_SECS}")));
+        assert!(command.ends_with("localhost:8000/metrics"));
     }
 }

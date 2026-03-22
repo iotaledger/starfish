@@ -305,7 +305,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .map(|(instance, command)| (instance.id.clone(), (instance, command)))
             .collect();
         let start = Instant::now();
-        display::status(format!("0/{total}"));
+        display::status(format!("ready 0/{total}"));
 
         while !pending.is_empty() {
             let probes: Vec<_> = pending.values().cloned().collect();
@@ -318,7 +318,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             let completed = total - pending.len();
             display::status(format!(
-                "{completed}/{total} {}s",
+                "ready {completed}/{total} {}s",
                 start.elapsed().as_secs()
             ));
 

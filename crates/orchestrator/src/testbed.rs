@@ -76,7 +76,14 @@ impl<C: ServerProviderClient> Testbed<C> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let earliest = self.instances.iter().filter_map(|i| i.created_at).min()?;
+        let earliest = self
+            .instances
+            .iter()
+            .filter(|instance| {
+                self.settings.filter_instances(instance) && !instance.is_terminated()
+            })
+            .filter_map(|instance| instance.created_at)
+            .min()?;
         Some(Duration::from_secs((now - earliest).max(0) as u64))
     }
 
@@ -446,7 +453,13 @@ impl<C: ServerProviderClient> Testbed<C> {
 
 #[cfg(test)]
 mod test {
-    use crate::{client::test_client::TestClient, settings::Settings, testbed::Testbed};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use crate::{
+        client::{Instance, InstanceStatus, test_client::TestClient},
+        settings::Settings,
+        testbed::Testbed,
+    };
 
     #[tokio::test]
     async fn deploy() {
@@ -563,5 +576,57 @@ mod test {
 
         assert_eq!(selected.len(), 3);
         assert!(selected.iter().all(|instance| instance.is_active()));
+    }
+
+    #[tokio::test]
+    async fn testbed_age_ignores_terminated_instances() {
+        let mut settings = Settings::new_for_test();
+        settings.regions = vec!["test-region".into()];
+        let client = TestClient::new(settings.clone());
+        let mut testbed = Testbed::new(settings, client).await.unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut terminated = Instance::new_for_test("terminated".into());
+        terminated.status = InstanceStatus::Terminated;
+        terminated.created_at = Some(now - 3_600);
+        terminated.region = testbed.settings.regions[0].clone();
+        terminated.specs = testbed.settings.specs.clone();
+
+        let mut active = Instance::new_for_test("active".into());
+        active.status = InstanceStatus::Active;
+        active.created_at = Some(now - 30);
+        active.region = testbed.settings.regions[0].clone();
+        active.specs = testbed.settings.specs.clone();
+
+        testbed.instances = vec![terminated, active];
+
+        let age = testbed.testbed_age().unwrap();
+        assert!(age >= Duration::from_secs(30));
+        assert!(age < Duration::from_secs(120));
+    }
+
+    #[tokio::test]
+    async fn testbed_age_is_none_when_only_terminated_instances_exist() {
+        let mut settings = Settings::new_for_test();
+        settings.regions = vec!["test-region".into()];
+        let client = TestClient::new(settings.clone());
+        let mut testbed = Testbed::new(settings, client).await.unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut terminated = Instance::new_for_test("terminated".into());
+        terminated.status = InstanceStatus::Terminated;
+        terminated.created_at = Some(now - 60);
+        terminated.region = testbed.settings.regions[0].clone();
+        terminated.specs = testbed.settings.specs.clone();
+
+        testbed.instances = vec![terminated];
+
+        assert!(testbed.testbed_age().is_none());
     }
 }
