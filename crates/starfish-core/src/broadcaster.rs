@@ -425,31 +425,40 @@ where
             | ConsensusProtocol::SailfishPlusPlus
             | ConsensusProtocol::Bluestreak
             | ConsensusProtocol::MysticetiBls => {
-                let all_blocks = self.inner.dag_state.get_storage_blocks(&block_references);
+                let all_blocks: Vec<_> = self
+                    .inner
+                    .dag_state
+                    .get_storage_blocks(&block_references)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                let chunk_size = batch_block_size.max(1);
 
-                let mut blocks = Vec::new();
-                for block in all_blocks.into_iter().flatten() {
-                    blocks.push(block);
-                    if blocks.len() >= batch_block_size {
-                        break;
+                // MissingParentsRequest responses must serve the entire requested
+                // parent set. Truncating to a single batch can strand late
+                // validators permanently behind during catch-up.
+                let total_chunks = all_blocks.len().div_ceil(chunk_size);
+                for (index, chunk) in all_blocks.chunks(chunk_size).enumerate() {
+                    {
+                        let mut sent = self.sent_to_peer.write();
+                        for block in chunk {
+                            sent.insert(*block.reference());
+                        }
+                    }
+                    tracing::debug!(
+                        "Requested missing blocks {chunk:?} are sent from {own_index:?} to {peer:?}"
+                    );
+                    self.sender
+                        .send(NetworkMessage::Batch(BlockBatch::full_only(
+                            DataSource::BlockHeaderRequest,
+                            chunk.to_vec(),
+                        )))
+                        .await
+                        .ok()?;
+                    if index + 1 < total_chunks {
+                        let _sleep = sleep(MISSING_PARENTS_CHUNK_DELAY).await;
                     }
                 }
-                {
-                    let mut sent = self.sent_to_peer.write();
-                    for block in blocks.iter() {
-                        sent.insert(*block.reference());
-                    }
-                }
-                tracing::debug!(
-                    "Requested missing blocks {blocks:?} are sent from {own_index:?} to {peer:?}"
-                );
-                self.sender
-                    .send(NetworkMessage::Batch(BlockBatch::full_only(
-                        DataSource::BlockHeaderRequest,
-                        blocks,
-                    )))
-                    .await
-                    .ok()?;
             }
         }
         Some(())
@@ -800,6 +809,7 @@ fn report_useful_authorities(
 }
 
 const HEADER_PRUNE_OVERFETCH_FACTOR: usize = 4;
+const MISSING_PARENTS_CHUNK_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy)]
 enum PushSelectionMode {

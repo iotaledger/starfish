@@ -914,6 +914,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Mysticeti
+                | ConsensusProtocol::MysticetiBls
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed

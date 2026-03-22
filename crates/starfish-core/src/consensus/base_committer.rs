@@ -177,9 +177,9 @@ impl BaseCommitter {
                             .is_some_and(|(ref r, _)| r == lr)
                     })
                 } else {
-                    potential_certificates.iter().any(|c| {
-                        self.is_certificate(c, leader_block, voter_info)
-                    })
+                    potential_certificates
+                        .iter()
+                        .any(|c| self.is_certificate(c, leader_block, voter_info))
                 }
             })
             .collect();
@@ -311,8 +311,7 @@ impl BaseCommitter {
         certifying_round: RoundNumber,
         leader_ref: &BlockReference,
     ) -> bool {
-        let certifying_blocks =
-            self.dag_state.get_blocks_by_round_cached(certifying_round);
+        let certifying_blocks = self.dag_state.get_blocks_by_round_cached(certifying_round);
         self.has_quorum_support(
             certifying_blocks
                 .iter()
@@ -469,10 +468,7 @@ impl BaseCommitter {
                     self.dag_state.consensus_protocol,
                     ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
                 ) {
-                    self.enough_certified_leader_support(
-                        certifying_round,
-                        l.reference(),
-                    )
+                    self.enough_certified_leader_support(certifying_round, l.reference())
                 } else if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
                     self.dag_state.has_clean_vertex(l.reference())
                         && self.enough_leader_support(certifying_round, l, voter_info)

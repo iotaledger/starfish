@@ -8,9 +8,9 @@ publish = false
 
 [dependencies]
 aws-config = "1.5.1"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 aws-runtime = "1.2.3"
 aws-sdk-ec2 = "1.51.1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 crossterm = "0.27.0"

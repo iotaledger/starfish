@@ -32,8 +32,8 @@ use crate::{
     threshold_clock::ThresholdClockAggregator,
     types::{
         AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
-        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
-        TransactionData, VerifiedBlock,
+        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, TransactionData,
+        VerifiedBlock,
     },
 };
 
@@ -340,6 +340,12 @@ struct DagStateInner {
     /// A vertex joins the clean DAG only once its direct parents are also
     /// clean (or genesis), making the usable clean DAG ancestor-closed.
     clean_vertices: Vec<BTreeSet<BlockReference>>,
+    /// Per-round support (by stake) for clean vertices. Tracks which
+    /// authorities have at least one clean vertex at a given round so we can
+    /// answer clean-quorum checks without scanning all authorities.
+    clean_round_support: BTreeMap<RoundNumber, StakeAggregator<QuorumThreshold>>,
+    /// Highest round for which the clean DAG has quorum (2f+1 by stake).
+    clean_quorum_round: RoundNumber,
     /// Preliminary clean vertices that are waiting for one or more direct
     /// parents to join the clean DAG.
     pending_clean_vertices: Vec<BTreeSet<BlockReference>>,
@@ -363,32 +369,16 @@ struct DagStateInner {
     /// Bluestreak-specific propagation support and blocks waiting for a given
     /// unprovable certificate reference to become provable.
     bluestreak_certificate_state: BTreeMap<BlockReference, BluestreakCertificateState>,
-    /// Per-authority blocks whose BLS fields have all been verified (StarfishBls/MysticetiBls).
-    /// Stored per-authority to enable efficient cleanup at the eviction frontier.
-    /// Blocks are added here when BlockVerified events fire, and removed after being
+    /// Per-authority blocks whose BLS fields have all been verified
+    /// (StarfishBls/MysticetiBls). Stored per-authority to enable efficient
+    /// cleanup at the eviction frontier. Blocks are added here when
+    /// BlockVerified events fire, and removed after being
     /// marked as pre-clean or evicted.
     bls_verified_blocks: Vec<BTreeSet<BlockReference>>,
     /// Sailfish++ timeout certificates, indexed by round.
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
     sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
-}
-
-/// O(log n) check whether `refs` contains any clean vertex at the given round.
-/// Exploits `BlockReference` ordering `(round, authority, digest)` to
-/// binary-search instead of scanning the entire set.
-fn has_clean_vertex_at_round(refs: &BTreeSet<BlockReference>, round: RoundNumber) -> bool {
-    let lo = BlockReference {
-        round,
-        authority: 0,
-        digest: BlockDigest::default(),
-    };
-    let hi = BlockReference {
-        round: round + 1,
-        authority: 0,
-        digest: BlockDigest::default(),
-    };
-    refs.range(lo..hi).next().is_some()
 }
 
 impl DagState {
@@ -456,6 +446,8 @@ impl DagState {
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
             clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
+            clean_round_support: BTreeMap::new(),
+            clean_quorum_round: 0,
             pending_clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
             pending_clean_vertex_counts: BTreeMap::new(),
             pending_clean_vertex_children: BTreeMap::new(),
@@ -618,8 +610,9 @@ impl DagState {
                     .get(&block_ref.round)
                     .and_then(|blocks| blocks.get(&block_ref.digest))
                     .is_some()
+                    && inner.clean_vertices[auth].insert(block_ref)
                 {
-                    inner.clean_vertices[auth].insert(block_ref);
+                    inner.note_clean_round_support(block_ref, &committee);
                 }
             }
         }
@@ -750,25 +743,10 @@ impl DagState {
         if upper_bound <= 1 {
             return upper_bound;
         }
-
-        // Clean quorum scan (shared logic for all dual-DAG protocols).
-        for round in (2..=upper_bound).rev() {
-            let prev_round = round - 1;
-            let mut stake: Stake = 0;
-            for auth in 0..inner.committee_size {
-                if has_clean_vertex_at_round(&inner.clean_vertices[auth], prev_round) {
-                    stake += self
-                        .committee
-                        .get_stake(auth as AuthorityIndex)
-                        .unwrap_or(0);
-                }
-            }
-            if self.committee.is_quorum(stake) {
-                return round;
-            }
-        }
-
-        1
+        // Track highest prev-round clean quorum incrementally as blocks become
+        // clean, so proposal_round is O(1) on the critical path.
+        let proposal = inner.clean_quorum_round.saturating_add(1);
+        proposal.min(upper_bound)
     }
 
     pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
@@ -1112,7 +1090,7 @@ impl DagState {
                         continue;
                     }
                     let mut activated = Vec::new();
-                    inner.note_clean_vertex(block_ref, &mut activated);
+                    inner.note_clean_vertex(block_ref, &self.committee, &mut activated);
                     changed |= !activated.is_empty();
                 }
             }
@@ -1175,7 +1153,7 @@ impl DagState {
             let mut inner = self.dag_state_inner.write();
             let mut activated = Vec::new();
             for &block_ref in block_refs {
-                inner.note_clean_vertex(block_ref, &mut activated);
+                inner.note_clean_vertex(block_ref, &self.committee, &mut activated);
             }
             activated
         };
@@ -1230,18 +1208,14 @@ impl DagState {
 
     /// Check whether 2f+1 stake is present in the clean DAG at the given round.
     pub fn clean_parent_quorum(&self, round: RoundNumber) -> bool {
-        let inner = self.dag_state_inner.read();
-        let mut stake: Stake = 0;
-        for auth in 0..inner.committee_size {
-            // Check if this authority has any clean block at the round.
-            if has_clean_vertex_at_round(&inner.clean_vertices[auth], round) {
-                stake += self
-                    .committee
-                    .get_stake(auth as AuthorityIndex)
-                    .unwrap_or(0);
-            }
+        if round == 0 {
+            return true;
         }
-        self.committee.is_quorum(stake)
+        let inner = self.dag_state_inner.read();
+        inner
+            .clean_round_support
+            .get(&round)
+            .is_some_and(|s| s.is_quorum(&self.committee))
     }
 
     /// Store a Sailfish++ timeout certificate for a round.
@@ -2534,6 +2508,7 @@ impl DagStateInner {
                 self.inferred_clean_support[auth].split_off(&split_ref);
             self.bls_verified_blocks[auth] = self.bls_verified_blocks[auth].split_off(&split_ref);
         }
+        self.clean_round_support = self.clean_round_support.split_off(&min_evicted);
         self.pending_clean_vertex_counts.retain(|block_ref, _| {
             block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
         });
@@ -2563,12 +2538,23 @@ impl DagStateInner {
         self.sailfish_novote_certs = self.sailfish_novote_certs.split_off(&(min_evicted, 0));
     }
 
+    fn note_clean_round_support(&mut self, block_ref: BlockReference, committee: &Committee) {
+        if block_ref.round == 0 {
+            return;
+        }
+        let support = self.clean_round_support.entry(block_ref.round).or_default();
+        if support.add(block_ref.authority, committee) {
+            self.clean_quorum_round = self.clean_quorum_round.max(block_ref.round);
+        }
+    }
+
     /// Register a locally verified dual-DAG vertex.
     /// If all causal predecessors are already clean, the vertex activates
     /// immediately; otherwise it waits on the missing clean dependencies.
     fn note_clean_vertex(
         &mut self,
         block_ref: BlockReference,
+        committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
         let auth = block_ref.authority as usize;
@@ -2580,7 +2566,7 @@ impl DagStateInner {
 
         let missing_parents = self.missing_clean_parents(block_ref);
         if missing_parents.is_empty() {
-            self.activate_clean_vertex(block_ref, activated);
+            self.activate_clean_vertex(block_ref, committee, activated);
             return;
         }
 
@@ -2630,12 +2616,14 @@ impl DagStateInner {
     fn activate_clean_vertex(
         &mut self,
         block_ref: BlockReference,
+        committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
         let auth = block_ref.authority as usize;
         if !self.clean_vertices[auth].insert(block_ref) {
             return;
         }
+        self.note_clean_round_support(block_ref, committee);
 
         self.pending_clean_vertices[auth].remove(&block_ref);
         self.pending_clean_vertex_counts.remove(&block_ref);
@@ -2684,7 +2672,7 @@ impl DagStateInner {
                 None => false,
             };
             if should_activate {
-                self.activate_clean_vertex(child, activated);
+                self.activate_clean_vertex(child, committee, activated);
             }
         }
     }
@@ -2715,7 +2703,7 @@ impl DagStateInner {
         self.update_inferred_clean_support(&block, committee, activated);
         self.check_bluestreak_pre_clean(&block, committee, activated);
         if self.bls_verified_blocks[auth].remove(reference) {
-            self.note_clean_vertex(*reference, activated);
+            self.note_clean_vertex(*reference, committee, activated);
         }
     }
 
@@ -2749,7 +2737,7 @@ impl DagStateInner {
         }
 
         for root in infer_roots {
-            self.infer_clean_vertex_closure(root, activated);
+            self.infer_clean_vertex_closure(root, committee, activated);
         }
     }
 
@@ -2801,6 +2789,7 @@ impl DagStateInner {
     fn activate_bluestreak_waiters(
         &mut self,
         leader_ref: BlockReference,
+        committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
         let waiting_blocks = self
@@ -2809,7 +2798,7 @@ impl DagStateInner {
             .map(|state| std::mem::take(&mut state.waiting_blocks))
             .unwrap_or_default();
         for block_ref in waiting_blocks {
-            self.note_clean_vertex(block_ref, activated);
+            self.note_clean_vertex(block_ref, committee, activated);
         }
     }
 
@@ -2832,7 +2821,7 @@ impl DagStateInner {
         let block_ref = *block.reference();
         match block.unprovable_certificate() {
             None => {
-                self.note_clean_vertex(block_ref, activated);
+                self.note_clean_vertex(block_ref, committee, activated);
             }
             Some(leader_ref)
                 if self.has_bluestreak_certificate_evidence(
@@ -2841,7 +2830,7 @@ impl DagStateInner {
                     committee,
                 ) =>
             {
-                self.note_clean_vertex(block_ref, activated);
+                self.note_clean_vertex(block_ref, committee, activated);
             }
             Some(leader_ref) => {
                 let state = self
@@ -2855,7 +2844,7 @@ impl DagStateInner {
             }
         }
         for leader_ref in ready_certificates {
-            self.activate_bluestreak_waiters(leader_ref, activated);
+            self.activate_bluestreak_waiters(leader_ref, committee, activated);
         }
     }
 
@@ -2864,6 +2853,7 @@ impl DagStateInner {
     fn infer_clean_vertex_closure(
         &mut self,
         root: BlockReference,
+        committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
         if root.round == 0 || self.clean_vertices[root.authority as usize].contains(&root) {
@@ -2906,7 +2896,7 @@ impl DagStateInner {
         }
 
         for block_ref in to_activate {
-            self.activate_clean_vertex(block_ref, activated);
+            self.activate_clean_vertex(block_ref, committee, activated);
         }
     }
 

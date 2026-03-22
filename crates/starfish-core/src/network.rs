@@ -36,6 +36,7 @@ use crate::{
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(3);
+
 // Max buffer size controls the max amount of data (in bytes) to
 // be sent/received when sending batches of blocks. Based on the
 // committee size we control the max number of transactions in a
@@ -561,20 +562,74 @@ impl Worker {
             }
         });
 
-        // Spawn the third task for handling message sending
+        // Spawn the third task(s) for handling message sending.
+        //
+        // Important: keep encoding (serialize/compress) decoupled from timed
+        // socket writes. If we combine them, bursts of large writes can
+        // backpressure encoding and starve catch-up for late joiners under
+        // latency simulation.
+        if connection_latency == 0.0 {
+            let message_task = tokio::spawn(async move {
+                while let Some(message) = receiver.recv().await {
+                    let request_type = message.request_type();
+                    let serialized = bincode::serialize(&message).expect("Serialization failed");
+                    let wire_bytes = if compress_network {
+                        metrics
+                            .bytes_uncompressed_sent_total
+                            .inc_by(serialized.len() as u64);
+                        lz4_flex::compress_prepend_size(&serialized)
+                    } else {
+                        serialized
+                    };
+
+                    match async {
+                        let mut writer_guard = writer.lock().await;
+                        writer_guard.write_u32(wire_bytes.len() as u32).await?;
+
+                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
+                        writer_guard.write_all(&wire_bytes).await
+                    }
+                    .await
+                    {
+                        Ok(()) => {
+                            network_requests_sent_total
+                                .with_label_values(&[request_type])
+                                .inc();
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to write message: {e}");
+                        }
+                    }
+                }
+            });
+
+            // Wait for all tasks to complete.
+            let _ = tokio::try_join!(ping_task, pong_task, message_task);
+            return Ok(());
+        }
+
+        // When simulating latency, preserve the "many in-flight messages"
+        // behavior by sleeping inside per-message tasks, but keep concurrency
+        // bounded to avoid unbounded task buildup under heavy load.
+        const MAX_IN_FLIGHT: usize = NETWORK_MESSAGE_CHANNEL_CAPACITY * 64;
         let message_task = tokio::spawn(async move {
-            let mut inner_task_handles = Vec::new();
+            let mut join_set = tokio::task::JoinSet::new();
 
             while let Some(message) = receiver.recv().await {
+                while join_set.len() >= MAX_IN_FLIGHT {
+                    if join_set.join_next().await.is_none() {
+                        break;
+                    }
+                }
+
                 let writer = writer.clone();
-                let bytes_sent_total_clone = bytes_sent_total.clone();
+                let bytes_sent_total = bytes_sent_total.clone();
                 let network_requests_sent_total = network_requests_sent_total.clone();
+                let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
                 let latency = generate_latency(connection_latency);
                 let request_type = message.request_type();
 
-                // Spawn an inner task and collect its handle
-                let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
-                let handle = tokio::spawn(async move {
+                join_set.spawn(async move {
                     let serialized = bincode::serialize(&message).expect("Serialization failed");
                     let wire_bytes = if compress_network {
                         bytes_uncompressed_sent_total.inc_by(serialized.len() as u64);
@@ -588,7 +643,7 @@ impl Worker {
                         let mut writer_guard = writer.lock().await;
                         writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        bytes_sent_total_clone.inc_by(wire_bytes.len() as u64 + 4);
+                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
                         writer_guard.write_all(&wire_bytes).await
                     }
                     .await
@@ -603,19 +658,16 @@ impl Worker {
                         }
                     }
                 });
-
-                inner_task_handles.push(handle);
             }
 
-            // Await all inner tasks
-            for handle in inner_task_handles {
-                if let Err(e) = handle.await {
+            while let Some(result) = join_set.join_next().await {
+                if let Err(e) = result {
                     tracing::error!("An inner task failed: {e:?}");
                 }
             }
         });
 
-        // Wait for all tasks to complete
+        // Wait for all tasks to complete.
         let _ = tokio::try_join!(ping_task, pong_task, message_task);
 
         Ok(())
@@ -628,11 +680,10 @@ impl Worker {
         metrics: Arc<Metrics>,
         compress_network: bool,
     ) -> io::Result<()> {
-        // stdlib has a special fast implementation for generating n-size byte vectors,
-        // see impl SpecFromElem for u8
-        // Note that Box::new([0u8; Self::MAX_BUFFER_SIZE as usize]);
-        // does not work with large MAX_BUFFER_SIZE
-        let mut buf = vec![0u8; Self::MAX_BUFFER_SIZE as usize].into_boxed_slice();
+        // Reusable receive buffer. Grow on demand up to MAX_BUFFER_SIZE.
+        // Avoid allocating MAX_BUFFER_SIZE for every connection — that
+        // explodes memory at 100-200 validators (full mesh).
+        let mut buf: Vec<u8> = Vec::new();
         let bytes_received_total = metrics.bytes_received_total.clone();
         loop {
             let size = stream.read_u32().await?;
@@ -642,22 +693,30 @@ impl Worker {
             }
             if size == 0 {
                 // ping message
-                let buf = &mut buf[..PING_SIZE - 4 /*Already read size(u32)*/];
-                let read = stream.read_exact(buf).await?;
-                assert_eq!(read, buf.len());
+                let ping_len = PING_SIZE - 4 /*Already read size(u32)*/;
+                if buf.len() < ping_len {
+                    buf.resize(ping_len, 0);
+                }
+                let ping_buf = &mut buf[..ping_len];
+                let read = stream.read_exact(ping_buf).await?;
+                assert_eq!(read, ping_buf.len());
                 bytes_received_total.inc_by(read as u64);
-                let pong = decode_ping(buf);
+                let pong = decode_ping(ping_buf);
                 if pong_sender.send(pong).await.is_err() {
                     return Ok(()); // write stream closed
                 }
                 continue;
             }
-            let buf = &mut buf[..size as usize];
-            let read = stream.read_exact(buf).await?;
-            assert_eq!(read, buf.len());
+            let size = size as usize;
+            if buf.len() < size {
+                buf.resize(size, 0);
+            }
+            let msg_buf = &mut buf[..size];
+            let read = stream.read_exact(msg_buf).await?;
+            assert_eq!(read, msg_buf.len());
             bytes_received_total.inc_by(read as u64);
             let deserialize_result = if compress_network {
-                match lz4_flex::decompress_size_prepended(buf) {
+                match lz4_flex::decompress_size_prepended(msg_buf) {
                     Ok(decompressed) => bincode::deserialize::<NetworkMessage>(&decompressed).ok(),
                     Err(e) => {
                         tracing::warn!("lz4 decompression failed: {e}");
@@ -665,7 +724,7 @@ impl Worker {
                     }
                 }
             } else {
-                bincode::deserialize::<NetworkMessage>(buf).ok()
+                bincode::deserialize::<NetworkMessage>(msg_buf).ok()
             };
             match deserialize_result {
                 Some(message) => {

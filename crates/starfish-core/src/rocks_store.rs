@@ -208,18 +208,17 @@ impl Store for RocksStore {
         // All blocks must be pre-serialized before reaching the store.
         let header_bytes = block
             .serialized_header_bytes()
-            .expect("header must be preserialized before store")
-            .to_vec();
+            .expect("header must be preserialized before store");
 
         let mut wb = rocksdb::WriteBatch::default();
         let cf_headers = self.cf(CF_HEADERS)?;
-        wb.put_cf(&cf_headers, &key, header_bytes);
+        wb.put_cf(&cf_headers, &key, header_bytes.as_ref());
 
         if let Some(_tx) = block.transaction_data() {
             let tx_bytes = block
                 .serialized_tx_data_bytes()
                 .expect("tx_data must be preserialized before store")
-                .to_vec();
+                .as_ref();
             let cf_tx_data = self.cf(CF_TX_DATA)?;
             wb.put_cf(&cf_tx_data, &key, tx_bytes);
         }
