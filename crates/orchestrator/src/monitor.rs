@@ -178,8 +178,14 @@ impl Prometheus {
     fn ensure_runtime_flags_command() -> &'static str {
         "sudo sh -c 'file=/etc/default/prometheus; touch \"$file\"; \
             current=$(sed -n \"s/^ARGS=\\\"\\(.*\\)\\\"$/\\1/p\" \"$file\"); \
-            for flag in --web.enable-lifecycle --storage.tsdb.retention.time=30d --storage.tsdb.retention.size=100GB; do \
-                case \" $current \" in *\" $flag \"*) ;; *) current=\"${current:+$current }$flag\" ;; esac; \
+            for flag in \
+                --web.enable-lifecycle \
+                --storage.tsdb.retention.time=30d \
+                --storage.tsdb.retention.size=100GB; do \
+                case \" $current \" in \
+                    *\" $flag \"*) ;; \
+                    *) current=\"${current:+$current }$flag\" ;; \
+                esac; \
             done; \
             awk \"!/^ARGS=/\" \"$file\" > \"$file.tmp\"; \
             printf \"ARGS=\\\"%s\\\"\\n\" \"$current\" >> \"$file.tmp\"; \
