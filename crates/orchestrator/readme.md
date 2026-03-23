@@ -246,9 +246,18 @@ The value accepts `[user@]host` format. When set, the orchestrator:
 - Never destroys the external server on `testbed destroy`.
 
 The server must be reachable via SSH with the same private key configured in
-`ssh_private_key_file`. Hostnames are resolved via DNS. When running with
-`--use-internal-ip-addresses`, the server must be able to reach the validators'
-private IPs (e.g., it should be in the same VPC).
+`ssh_private_key_file`. Hostnames are resolved via DNS. The monitoring server
+scrapes whichever validator addresses the benchmark itself uses:
+
+- Single-region runs scrape private IPs, so the monitoring host must be inside
+  the same VPC or another network that can route to those addresses.
+- Multi-region runs scrape public IPs, so the validator metrics ports must be
+  reachable from the monitoring host.
+
+The monitoring scrape cadence is controlled by `scrape_interval` in
+`settings.yml` and no longer slows down automatically as the committee grows.
+Prometheus uses one shared validator job and one shared node-exporter job so
+large committees remain manageable.
 
 ### Collecting monitoring data locally
 
