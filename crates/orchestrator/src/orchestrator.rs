@@ -333,7 +333,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     .collect();
                 let sample_logs = self.sample_node_startup_logs(&stalled).await;
                 return Err(TestbedError::NodeBootError(format!(
-                    "{} of {} validators did not expose metrics within {}s.\nStartup log samples:\n{}",
+                    "{} of {} validators did not expose metrics within {}s.\n\
+                     Startup log samples:\n{}",
                     stalled.len(),
                     total,
                     timeout.as_secs(),
