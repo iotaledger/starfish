@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 RUN apt-get update && apt-get install -y clang libclang-dev lld \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY . .
-RUN --mount=type=cache,target=/usr/local/rustup \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target,sharing=locked \
     cargo build --release --all-features --bin starfish && \
