@@ -148,7 +148,7 @@ impl BlockBatch {
 pub enum NetworkMessage {
     SubscribeBroadcastRequest(RoundNumber), // subscribe from round number excluding
     /// A structured batch of block data.
-    Batch(BlockBatch),
+    Batch(Box<BlockBatch>),
     /// Request specific block (blocks with full data are sent)
     MissingParentsRequest(Vec<BlockReference>),
     /// Request a tx data for a few specific block references (only shards are

@@ -797,7 +797,7 @@ mod tests {
         let digest = crypto::sailfish_timeout_digest(round);
 
         // Send 3 timeout messages (quorum = 3 for N=4)
-        for sender in 0..3u8 {
+        for sender in 0..3u16 {
             let sig = signers[sender as usize].sign_digest(&digest);
             msg_tx
                 .send(SailfishServiceMessage::TimeoutMsg(SailfishTimeoutMsg {
@@ -1129,7 +1129,7 @@ mod tests {
         let signers = crate::crypto::Signer::new_for_test(4);
         let digest = crypto::sailfish_novote_digest(round, leader);
 
-        for sender in 0..3u8 {
+        for sender in 0..3u16 {
             let sig = signers[sender as usize].sign_digest(&digest);
             msg_tx
                 .send(SailfishServiceMessage::NoVoteMsg(SailfishNoVoteMsg {

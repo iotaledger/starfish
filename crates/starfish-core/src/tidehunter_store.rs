@@ -21,8 +21,8 @@ use crate::{
     },
 };
 
-/// Key = round(4B BE) ++ authority(1B) ++ digest(32B) = 37 bytes.
-const KEY_SIZE: usize = 37;
+/// Key = round(4B BE) ++ authority(2B BE) ++ digest(32B) = 38 bytes.
+const KEY_SIZE: usize = 38;
 
 /// Prefix length for `PrefixUniform` key type.
 /// Top 3 bytes of big-endian round → one shard per ~256 rounds, covers rounds
@@ -43,12 +43,12 @@ pub struct TideHunterStore {
 }
 
 impl TideHunterStore {
-    /// Encode a [`BlockReference`] as a fixed 48-byte big-endian key.
+    /// Encode a [`BlockReference`] as a fixed 38-byte big-endian key.
     fn encode_key(reference: &BlockReference) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
         key[0..4].copy_from_slice(&reference.round.to_be_bytes());
-        key[4] = reference.authority;
-        key[5..37].copy_from_slice(reference.digest.as_ref());
+        key[4..6].copy_from_slice(&reference.authority.to_be_bytes());
+        key[6..38].copy_from_slice(reference.digest.as_ref());
         key
     }
 
@@ -390,14 +390,43 @@ impl Store for TideHunterStore {
                 .map_err(|_| io::Error::other("invalid key length"))?;
 
             let mut digest = [0u8; 32];
-            digest.copy_from_slice(&key[5..37]);
+            digest.copy_from_slice(&key[6..38]);
             refs.push(BlockReference {
                 round: u32::from_be_bytes(key[0..4].try_into().expect("slice length checked")),
-                authority: key[4],
+                authority: u16::from_be_bytes(key[4..6].try_into().expect("slice length checked")),
                 digest: digest.into(),
             });
         }
 
         Ok(refs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TideHunterStore;
+    use crate::types::BlockReference;
+
+    #[test]
+    fn encode_key_preserves_u16_authority() {
+        let reference = BlockReference::new_test(513, 42);
+        let key = TideHunterStore::encode_key(&reference);
+
+        assert_eq!(key.len(), 38);
+        assert_eq!(&key[0..4], &42u32.to_be_bytes());
+        assert_eq!(&key[4..6], &513u16.to_be_bytes());
+    }
+
+    #[test]
+    fn encode_key_distinguishes_255_from_256() {
+        let low = BlockReference::new_test(255, 7);
+        let high = BlockReference::new_test(256, 7);
+
+        let low_key = TideHunterStore::encode_key(&low);
+        let high_key = TideHunterStore::encode_key(&high);
+
+        assert_ne!(low_key, high_key);
+        assert_eq!(&low_key[4..6], &255u16.to_be_bytes());
+        assert_eq!(&high_key[4..6], &256u16.to_be_bytes());
     }
 }

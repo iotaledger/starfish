@@ -47,8 +47,13 @@ impl Committee {
 
         // Ensure all stakes are positive
         assert!(authorities.iter().all(|a| a.stake() > 0));
-        // AuthoritySet supports up to 256 authorities ([u128; 2]).
-        assert!(authorities.len() <= 256);
+        use crate::types::MAX_COMMITTEE_SIZE;
+        assert!(
+            authorities.len() <= MAX_COMMITTEE_SIZE as usize,
+            "Committee size {} exceeds MAX_COMMITTEE_SIZE ({})",
+            authorities.len(),
+            MAX_COMMITTEE_SIZE
+        );
 
         let mut total_stake: Stake = 0;
         for a in authorities.iter() {
@@ -313,15 +318,15 @@ mod tests {
     use super::Committee;
 
     #[test]
-    fn authorities_and_known_authority_support_256() {
-        let committee = Committee::new_for_benchmarks(256);
+    fn authorities_and_known_authority_support_more_than_255() {
+        let committee = Committee::new_test(vec![1; 300]);
 
         let authorities: Vec<_> = committee.authorities().collect();
-        assert_eq!(authorities.len(), 256);
+        assert_eq!(authorities.len(), 300);
         assert_eq!(authorities.first().copied(), Some(0));
-        assert_eq!(authorities.last().copied(), Some(255));
+        assert_eq!(authorities.last().copied(), Some(299));
 
         assert!(committee.known_authority(0));
-        assert!(committee.known_authority(255));
+        assert!(committee.known_authority(299));
     }
 }

@@ -2,7 +2,10 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-pub type AuthorityIndex = u8;
+pub type AuthorityIndex = u16;
+
+pub const MAX_COMMITTEE_SIZE: AuthorityIndex = 512;
+const MAX_COMMITTEE_WORDS: usize = (MAX_COMMITTEE_SIZE as usize).div_ceil(64);
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct Transaction {
@@ -1695,7 +1698,7 @@ fn verify_signed_quorum(
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Default, Debug)]
-pub struct AuthoritySet([u128; 2]);
+pub struct AuthoritySet([u64; MAX_COMMITTEE_WORDS]);
 
 pub type TimestampNs = u64;
 const NANOS_IN_SEC: u64 = 1_000_000_000;
@@ -1760,16 +1763,42 @@ impl fmt::Display for BlockReference {
 impl AuthoritySet {
     /// Decompose an authority index into (word index, bit within word).
     #[inline]
-    const fn pos(v: AuthorityIndex) -> (usize, u8) {
-        ((v as usize) / 128, v % 128)
+    fn pos(v: AuthorityIndex) -> (usize, u32) {
+        assert!(
+            v < MAX_COMMITTEE_SIZE,
+            "Authority index {} exceeds MAX_COMMITTEE_SIZE ({})",
+            v,
+            MAX_COMMITTEE_SIZE
+        );
+        ((v as usize) / 64, (v % 64) as u32)
     }
 
     /// Create a set containing a single authority.
     #[inline]
     pub fn singleton(v: AuthorityIndex) -> Self {
         let (word, bit) = Self::pos(v);
-        let mut words = [0u128; 2];
-        words[word] = 1u128 << bit;
+        let mut words = [0u64; MAX_COMMITTEE_WORDS];
+        words[word] = 1u64 << bit;
+        Self(words)
+    }
+
+    /// Create a set containing all authorities `0..committee_size`.
+    pub fn full(committee_size: AuthorityIndex) -> Self {
+        assert!(
+            committee_size <= MAX_COMMITTEE_SIZE,
+            "Committee size {} exceeds MAX_COMMITTEE_SIZE ({})",
+            committee_size,
+            MAX_COMMITTEE_SIZE
+        );
+        let mut words = [0u64; MAX_COMMITTEE_WORDS];
+        let full_words = committee_size as usize / 64;
+        let remaining_bits = committee_size % 64;
+        for w in words.iter_mut().take(full_words) {
+            *w = u64::MAX;
+        }
+        if remaining_bits > 0 {
+            words[full_words] = (1u64 << remaining_bits) - 1;
+        }
         Self(words)
     }
 
@@ -1777,8 +1806,8 @@ impl AuthoritySet {
     #[inline]
     pub fn insert(&mut self, v: AuthorityIndex) -> bool {
         let (word, bit) = Self::pos(v);
-        let mask = 1u128 << bit;
-        if self.0[word] & mask == mask {
+        let mask = 1u64 << bit;
+        if self.0[word] & mask != 0 {
             return false;
         }
         self.0[word] |= mask;
@@ -1789,7 +1818,7 @@ impl AuthoritySet {
     #[inline]
     pub fn remove(&mut self, v: AuthorityIndex) -> bool {
         let (word, bit) = Self::pos(v);
-        let mask = 1u128 << bit;
+        let mask = 1u64 << bit;
         if self.0[word] & mask == 0 {
             return false;
         }
@@ -1808,36 +1837,35 @@ impl AuthoritySet {
     #[inline]
     pub fn contains(&self, v: AuthorityIndex) -> bool {
         let (word, bit) = Self::pos(v);
-        let mask = 1u128 << bit;
-        self.0[word] & mask == mask
+        self.0[word] & (1u64 << bit) != 0
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.0[0] == 0 && self.0[1] == 0
+        self.0.iter().all(|&w| w == 0)
     }
 
     #[inline]
     pub fn clear(&mut self) {
-        self.0 = [0; 2];
+        self.0 = [0u64; MAX_COMMITTEE_WORDS];
     }
 
     /// Number of authorities in the set.
     #[inline]
     pub fn count_ones(&self) -> u32 {
-        self.0[0].count_ones() + self.0[1].count_ones()
+        self.0.iter().map(|w| w.count_ones()).sum()
     }
 
-    /// Access the raw `[u128; 2]` words.
+    /// Access the raw words.
     #[inline]
-    pub fn words(&self) -> &[u128; 2] {
+    pub fn words(&self) -> &[u64; MAX_COMMITTEE_WORDS] {
         &self.0
     }
 }
 
 /// O(popcount) iterator over set bits in an `AuthoritySet`.
 pub struct AuthoritySetIter {
-    words: [u128; 2],
+    words: [u64; MAX_COMMITTEE_WORDS],
     word_index: usize,
 }
 
@@ -1846,13 +1874,13 @@ impl Iterator for AuthoritySetIter {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        while self.word_index < 2 {
+        while self.word_index < MAX_COMMITTEE_WORDS {
             let w = self.words[self.word_index];
             if w != 0 {
-                let bit = w.trailing_zeros() as u8;
+                let bit = w.trailing_zeros() as AuthorityIndex;
                 // Clear the lowest set bit.
                 self.words[self.word_index] = w & (w - 1);
-                return Some(bit + (self.word_index as u8) * 128);
+                return Some(bit + (self.word_index as AuthorityIndex) * 64);
             }
             self.word_index += 1;
         }
@@ -1872,15 +1900,20 @@ impl BitOr for AuthoritySet {
     type Output = Self;
     #[inline]
     fn bitor(self, rhs: Self) -> Self {
-        Self([self.0[0] | rhs.0[0], self.0[1] | rhs.0[1]])
+        let mut words = self.0;
+        for (w, r) in words.iter_mut().zip(rhs.0.iter()) {
+            *w |= r;
+        }
+        Self(words)
     }
 }
 
 impl BitOrAssign for AuthoritySet {
     #[inline]
     fn bitor_assign(&mut self, rhs: Self) {
-        self.0[0] |= rhs.0[0];
-        self.0[1] |= rhs.0[1];
+        for (w, r) in self.0.iter_mut().zip(rhs.0.iter()) {
+            *w |= r;
+        }
     }
 }
 
@@ -1888,15 +1921,20 @@ impl BitAnd for AuthoritySet {
     type Output = Self;
     #[inline]
     fn bitand(self, rhs: Self) -> Self {
-        Self([self.0[0] & rhs.0[0], self.0[1] & rhs.0[1]])
+        let mut words = self.0;
+        for (w, r) in words.iter_mut().zip(rhs.0.iter()) {
+            *w &= r;
+        }
+        Self(words)
     }
 }
 
 impl BitAndAssign for AuthoritySet {
     #[inline]
     fn bitand_assign(&mut self, rhs: Self) {
-        self.0[0] &= rhs.0[0];
-        self.0[1] &= rhs.0[1];
+        for (w, r) in self.0.iter_mut().zip(rhs.0.iter()) {
+            *w &= r;
+        }
     }
 }
 
@@ -1904,15 +1942,19 @@ impl Not for AuthoritySet {
     type Output = Self;
     #[inline]
     fn not(self) -> Self {
-        Self([!self.0[0], !self.0[1]])
+        let mut words = self.0;
+        for w in words.iter_mut() {
+            *w = !*w;
+        }
+        Self(words)
     }
 }
 
 pub fn format_authority_index(i: AuthorityIndex) -> String {
     if i < 26 {
-        ((b'A' + i) as char).to_string()
+        ((b'A' + i as u8) as char).to_string()
     } else {
-        format!("[{i:02}]")
+        format!("[{i}]")
     }
 }
 
@@ -2809,12 +2851,17 @@ mod test {
         assert!(a.insert(200));
         assert!(a.insert(255));
         assert!(!a.insert(255));
+        assert!(a.insert(500));
+        assert!(a.insert(1023));
+        assert!(!a.insert(1023));
         assert!(a.contains(128));
         assert!(a.contains(200));
         assert!(a.contains(255));
+        assert!(a.contains(500));
+        assert!(a.contains(1023));
         assert!(!a.contains(0));
         assert!(!a.contains(127));
-        assert_eq!(a.count_ones(), 3);
+        assert_eq!(a.count_ones(), 5);
     }
 
     #[test]
@@ -2828,9 +2875,9 @@ mod test {
     }
 
     #[test]
-    fn authority_present_spans_both_words() {
+    fn authority_present_spans_multiple_words() {
         let mut a = AuthoritySet::default();
-        let present = vec![0, 63, 127, 128, 200, 255];
+        let present = vec![0, 63, 127, 128, 200, 255, 256, 500, 1023];
         for x in &present {
             a.insert(*x);
         }
@@ -2840,32 +2887,60 @@ mod test {
     #[test]
     fn authority_set_singleton_and_ops() {
         let a = AuthoritySet::singleton(5);
-        let b = AuthoritySet::singleton(130);
+        let b = AuthoritySet::singleton(500);
         let c = a | b;
         assert!(c.contains(5));
-        assert!(c.contains(130));
+        assert!(c.contains(500));
         assert!(!c.contains(0));
 
         let d = c & a;
         assert!(d.contains(5));
-        assert!(!d.contains(130));
+        assert!(!d.contains(500));
+    }
 
-        let neg = !AuthoritySet::default();
-        assert!(neg.contains(0));
-        assert!(neg.contains(127));
-        assert!(neg.contains(128));
-        assert!(neg.contains(255));
+    #[test]
+    fn authority_set_full() {
+        let f = AuthoritySet::full(100);
+        assert_eq!(f.count_ones(), 100);
+        assert!(f.contains(0));
+        assert!(f.contains(99));
+        assert!(!f.contains(100));
+
+        let f = AuthoritySet::full(1024);
+        assert_eq!(f.count_ones(), 1024);
+        assert!(f.contains(0));
+        assert!(f.contains(1023));
+
+        let f = AuthoritySet::full(64);
+        assert_eq!(f.count_ones(), 64);
+        assert!(f.contains(63));
+        assert!(!f.contains(64));
+
+        let f = AuthoritySet::full(0);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn authority_set_not_as_mask() {
+        // Not is safe when used as a mask with &= against a bounded set
+        let full = AuthoritySet::full(100);
+        let exclude = AuthoritySet::singleton(50);
+        let result = full & !exclude;
+        assert_eq!(result.count_ones(), 99);
+        assert!(!result.contains(50));
+        assert!(result.contains(49));
+        assert!(result.contains(51));
     }
 
     #[test]
     fn authority_set_remove() {
         let mut a = AuthoritySet::default();
         a.insert(10);
-        a.insert(200);
+        a.insert(500);
         assert!(a.remove(10));
         assert!(!a.remove(10));
         assert!(!a.contains(10));
-        assert!(a.contains(200));
+        assert!(a.contains(500));
     }
 
     #[test]
@@ -2874,5 +2949,6 @@ mod test {
         assert_eq!(format_authority_index(25), "Z");
         assert_eq!(format_authority_index(26), "[26]");
         assert_eq!(format_authority_index(255), "[255]");
+        assert_eq!(format_authority_index(1023), "[1023]");
     }
 }

@@ -37,8 +37,8 @@ use crate::{
     },
 };
 
-/// Bitmask tracking which authorities know about a block. Supports up to 256
-/// authorities.
+/// Bitmask tracking which authorities know about a block. Supports up to
+/// `MAX_COMMITTEE_SIZE` authorities.
 type AuthorityBitmask = AuthoritySet;
 
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
@@ -398,9 +398,10 @@ impl DagState {
         dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
         assert!(
-            committee.len() <= 256,
-            "Committee size {} exceeds AuthorityBitmask capacity (256)",
-            committee.len()
+            committee.len() <= crate::types::MAX_COMMITTEE_SIZE as usize,
+            "Committee size {} exceeds MAX_COMMITTEE_SIZE ({})",
+            committee.len(),
+            crate::types::MAX_COMMITTEE_SIZE
         );
         let store: Arc<dyn Store> = match storage_backend {
             #[cfg(feature = "tidehunter")]
@@ -3783,17 +3784,17 @@ mod tests {
     }
 
     #[test]
-    fn own_block_bounds_reach_peer_255() {
-        let dag_state = open_test_dag_state_for_size("mysticeti", 0, 256);
+    fn own_block_bounds_reach_peer_above_255() {
+        let dag_state = open_test_dag_state_for_size("mysticeti", 0, 300);
         let block = make_empty_full_block(0, 1, ConsensusProtocol::Mysticeti);
 
         dag_state.insert_own_block(OwnBlockData {
             block: block.clone(),
             authority_index_start: 0,
-            authority_index_end: 256,
+            authority_index_end: 300,
         });
 
-        let transmitted = dag_state.get_own_transmission_blocks(255, 0, 10);
+        let transmitted = dag_state.get_own_transmission_blocks(299, 0, 10);
         assert_eq!(
             transmitted
                 .into_iter()

@@ -29,6 +29,13 @@ const CHANNEL_CAPACITY: usize = 100_000;
 // Messages
 // ---------------------------------------------------------------------------
 
+pub struct UsefulAuthorsMessage {
+    pub peer: AuthorityIndex,
+    pub headers: AuthoritySet,
+    pub shards: AuthoritySet,
+    pub round: RoundNumber,
+}
+
 /// Events sent to the [`CordialKnowledge`] actor.
 pub enum CordialKnowledgeMessage {
     /// A new block header was added to the DAG.
@@ -53,12 +60,7 @@ pub enum CordialKnowledgeMessage {
         block_ref: BlockReference,
     },
     /// Update useful-authors feedback from a peer's batch.
-    UsefulAuthors {
-        peer: AuthorityIndex,
-        headers: AuthoritySet,
-        shards: AuthoritySet,
-        round: RoundNumber,
-    },
+    UsefulAuthors(Box<UsefulAuthorsMessage>),
     /// A batch of newly useful shard authors was observed locally. Fan this
     /// demand out to all peers so they can proactively push shards for these
     /// authors to us.
@@ -431,7 +433,13 @@ impl ConnectionKnowledge {
     /// Drain the oldest unknown headers, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_headers(&mut self, limit: usize) -> Vec<BlockReference> {
-        self.take_from_cursors(true, limit, None, !AuthoritySet::default(), None)
+        self.take_from_cursors(
+            true,
+            limit,
+            None,
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
+            None,
+        )
     }
 
     /// Drain the oldest unknown headers, excluding a single authority.
@@ -444,7 +452,7 @@ impl ConnectionKnowledge {
             true,
             limit,
             Some(excluded_authority),
-            !AuthoritySet::default(),
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
             None,
         )
     }
@@ -470,14 +478,20 @@ impl ConnectionKnowledge {
             limit,
             round,
             Some(excluded_authority),
-            !AuthoritySet::default(),
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
         )
     }
 
     /// Drain the oldest unknown shards, up to `limit`, returning their block
     /// references.
     pub fn take_unsent_shards(&mut self, limit: usize) -> Vec<BlockReference> {
-        self.take_from_cursors(false, limit, None, !AuthoritySet::default(), None)
+        self.take_from_cursors(
+            false,
+            limit,
+            None,
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
+            None,
+        )
     }
 
     /// Drain the oldest unknown shards, but only for authorities currently
@@ -495,7 +509,13 @@ impl ConnectionKnowledge {
         limit: usize,
         round: RoundNumber,
     ) -> Vec<BlockReference> {
-        self.take_from_cursors(false, limit, None, !AuthoritySet::default(), Some(round))
+        self.take_from_cursors(
+            false,
+            limit,
+            None,
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
+            Some(round),
+        )
     }
 
     pub fn take_unsent_shards_up_to_round_excluding_authority(
@@ -508,7 +528,7 @@ impl ConnectionKnowledge {
             false,
             limit,
             Some(excluded_authority),
-            !AuthoritySet::default(),
+            AuthoritySet::full(self.committee_size as AuthorityIndex),
             Some(round),
         )
     }
@@ -753,12 +773,13 @@ impl CordialKnowledge {
                             .mark_shard_known(block_ref);
                     }
                 }
-                CordialKnowledgeMessage::UsefulAuthors {
-                    peer,
-                    headers,
-                    shards,
-                    round,
-                } => {
+                CordialKnowledgeMessage::UsefulAuthors(msg) => {
+                    let UsefulAuthorsMessage {
+                        peer,
+                        headers,
+                        shards,
+                        round,
+                    } = *msg;
                     let idx = peer as usize;
                     if idx < self.committee_size {
                         self.connection_knowledges[idx]
@@ -1143,12 +1164,14 @@ mod tests {
 
         // Peer 1 tells us authorities 0 and 2 are useful at round 10
         let bitmask = AuthoritySet::singleton(0) | AuthoritySet::singleton(2);
-        handle.send(CordialKnowledgeMessage::UsefulAuthors {
-            peer: 1,
-            headers: bitmask,
-            shards: bitmask,
-            round: 10,
-        });
+        handle.send(CordialKnowledgeMessage::UsefulAuthors(Box::new(
+            UsefulAuthorsMessage {
+                peer: 1,
+                headers: bitmask,
+                shards: bitmask,
+                round: 10,
+            },
+        )));
 
         tokio::task::yield_now().await;
 

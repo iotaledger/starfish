@@ -353,6 +353,12 @@ impl CryptoHash for u8 {
     }
 }
 
+impl CryptoHash for u16 {
+    fn crypto_hash(&self, state: &mut Blake3Hasher) {
+        state.update(&self.to_be_bytes());
+    }
+}
+
 impl CryptoHash for u32 {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {
         state.update(&self.to_be_bytes());
@@ -379,8 +385,9 @@ impl CryptoHash for u128 {
 
 impl CryptoHash for AuthoritySet {
     fn crypto_hash(&self, state: &mut Blake3Hasher) {
-        state.update(&self.words()[0].to_be_bytes());
-        state.update(&self.words()[1].to_be_bytes());
+        for word in self.words() {
+            state.update(&word.to_be_bytes());
+        }
     }
 }
 

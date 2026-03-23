@@ -27,7 +27,9 @@ use crate::{
     committee::Committee,
     config::{DisseminationMode, NodeParameters},
     consensus::universal_committer::UniversalCommitter,
-    cordial_knowledge::{ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage},
+    cordial_knowledge::{
+        ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage, UsefulAuthorsMessage,
+    },
     core::Core,
     core_thread::CoreThreadDispatcher,
     crypto::BlsSigner,
@@ -165,7 +167,7 @@ impl FilterForShards {
             Some(status) => {
                 !status.full_block_received
                     && status.count < self.info_length
-                    && !status.bitmap.contains(shard_index as u8)
+                    && !status.bitmap.contains(shard_index as AuthorityIndex)
             }
             None => true,
         }
@@ -357,7 +359,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 self.handle_subscribe(round).await;
             }
             NetworkMessage::Batch(blocks) => {
-                self.handle_batch(blocks).await;
+                self.handle_batch(*blocks).await;
             }
             NetworkMessage::MissingParentsRequest(refs) => {
                 return self.handle_missing_parents_request(refs).await;
@@ -477,12 +479,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .unwrap_or(0);
             self.inner
                 .cordial_knowledge
-                .send(CordialKnowledgeMessage::UsefulAuthors {
-                    peer: self.peer_id,
-                    headers: useful_headers_authors,
-                    shards: useful_shards_authors,
-                    round: max_round,
-                });
+                .send(CordialKnowledgeMessage::UsefulAuthors(Box::new(
+                    UsefulAuthorsMessage {
+                        peer: self.peer_id,
+                        headers: useful_headers_authors,
+                        shards: useful_shards_authors,
+                        round: max_round,
+                    },
+                )));
         }
 
         // Update ConnectionKnowledge directly — infer what the peer knows

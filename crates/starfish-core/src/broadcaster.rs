@@ -329,10 +329,10 @@ where
             shards.len(),
         );
         self.sender
-            .send(NetworkMessage::Batch(BlockBatch::shards_only(
+            .send(NetworkMessage::Batch(Box::new(BlockBatch::shards_only(
                 DataSource::TransactionDataRequest,
                 shards,
-            )))
+            ))))
             .await
             .ok()?;
         Some(())
@@ -409,14 +409,14 @@ where
                     headers
                 );
                 self.sender
-                    .send(NetworkMessage::Batch(BlockBatch {
+                    .send(NetworkMessage::Batch(Box::new(BlockBatch {
                         source: DataSource::BlockHeaderRequest,
                         full_blocks: Vec::new(),
                         headers,
                         shards,
                         useful_headers_authors: AuthoritySet::default(),
                         useful_shards_authors: AuthoritySet::default(),
-                    }))
+                    })))
                     .await
                     .ok()?;
             }
@@ -449,10 +449,10 @@ where
                         "Requested missing blocks {chunk:?} are sent from {own_index:?} to {peer:?}"
                     );
                     self.sender
-                        .send(NetworkMessage::Batch(BlockBatch::full_only(
+                        .send(NetworkMessage::Batch(Box::new(BlockBatch::full_only(
                             DataSource::BlockHeaderRequest,
                             chunk.to_vec(),
-                        )))
+                        ))))
                         .await
                         .ok()?;
                     if index + 1 < total_chunks {
@@ -788,7 +788,7 @@ where
     if let Ok(size) = bincode::serialized_size(&batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
-    to.send(NetworkMessage::Batch(batch)).await.ok()?;
+    to.send(NetworkMessage::Batch(Box::new(batch))).await.ok()?;
     Some(())
 }
 
@@ -866,7 +866,7 @@ where
         sent.retain(|r| r.round >= lowest_round);
     }
     if !batch.is_empty() {
-        to.send(NetworkMessage::Batch(batch)).await.ok()?;
+        to.send(NetworkMessage::Batch(Box::new(batch))).await.ok()?;
     }
     Some(())
 }
