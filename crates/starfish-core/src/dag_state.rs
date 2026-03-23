@@ -379,6 +379,10 @@ struct DagStateInner {
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
     sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
+    /// When true, skip the BFS known_by propagation in update_dag and
+    /// don't populate the per-block dag metadata. Pull-mode protocols
+    /// don't need cordial-knowledge tracking.
+    skip_dag_bfs: bool,
 }
 
 impl DagState {
@@ -391,6 +395,7 @@ impl DagState {
         consensus: String,
         storage_backend: &StorageBackend,
         starfish_speed_adaptive_acknowledgments: bool,
+        dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
         assert!(
             committee.len() <= 256,
@@ -414,6 +419,9 @@ impl DagState {
             }
         };
         let consensus_protocol = ConsensusProtocol::from_str(&consensus);
+        let resolved_dissemination =
+            consensus_protocol.resolve_dissemination_mode(dissemination_mode);
+        let skip_dag_bfs = matches!(resolved_dissemination, DisseminationMode::Pull);
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let n = committee.len();
         let mut inner = DagStateInner {
@@ -458,6 +466,7 @@ impl DagState {
             bls_verified_blocks: (0..n).map(|_| BTreeSet::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
+            skip_dag_bfs,
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -2242,11 +2251,19 @@ impl DagState {
 
 impl DagStateInner {
     fn global_lowest_round(&self) -> RoundNumber {
-        self.dag
-            .iter()
-            .filter_map(|m| m.keys().next().copied())
-            .min()
-            .unwrap_or(0)
+        if self.skip_dag_bfs {
+            self.index
+                .iter()
+                .filter_map(|m| m.keys().next().copied())
+                .min()
+                .unwrap_or(0)
+        } else {
+            self.dag
+                .iter()
+                .filter_map(|m| m.keys().next().copied())
+                .min()
+                .unwrap_or(0)
+        }
     }
 
     fn min_evicted_round(&self) -> RoundNumber {
@@ -2453,7 +2470,9 @@ impl DagStateInner {
 
             self.index[auth] = self.index[auth].split_off(&threshold);
             self.shard_index[auth] = self.shard_index[auth].split_off(&threshold);
-            self.dag[auth] = self.dag[auth].split_off(&threshold);
+            if !self.skip_dag_bfs {
+                self.dag[auth] = self.dag[auth].split_off(&threshold);
+            }
             if auth == self.authority as usize {
                 for own_blocks_by_peer in &mut self.own_blocks {
                     *own_blocks_by_peer = own_blocks_by_peer.split_off(&threshold);
@@ -2961,6 +2980,9 @@ impl DagStateInner {
     }
 
     fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
+        if self.skip_dag_bfs {
+            return;
+        }
         let bit = !AuthoritySet::singleton(peer);
         for auth_dag in self.dag.iter_mut() {
             for (_, entries) in auth_dag.range_mut((round.saturating_add(1))..) {
@@ -2983,7 +3005,7 @@ impl DagStateInner {
         parents: Vec<BlockReference>,
         bfs_buffer: &mut Vec<BlockReference>,
     ) {
-        if block_reference.round == 0 {
+        if self.skip_dag_bfs || block_reference.round == 0 {
             return;
         }
         if self.dag_contains(&block_reference) {
@@ -3368,6 +3390,10 @@ impl DagStateInner {
         batch_other_block_size: usize,
         authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
     ) -> Vec<Data<VerifiedBlock>> {
+        if self.skip_dag_bfs {
+            let own = self.collect_own_blocks_no_dag(sent, peer, batch_own_block_size);
+            return Self::into_sorted_blocks(own);
+        }
         let auth = self.authority;
         let own =
             self.collect_unsent_blocks(sent, peer, |r| r.authority == auth, batch_own_block_size);
@@ -3379,6 +3405,41 @@ impl DagStateInner {
             batch_other_block_size,
         );
         Self::into_sorted_blocks(own.into_iter().chain(other).collect())
+    }
+
+    /// Collect own unsent blocks without DAG known_by metadata.
+    /// Used by pull-mode protocols where the BFS is skipped.
+    fn collect_own_blocks_no_dag(
+        &self,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Some(own_blocks) = self.own_blocks.get(peer as usize) else {
+            return Vec::new();
+        };
+        let mut result = Vec::with_capacity(limit);
+        for (round, digest) in own_blocks {
+            if result.len() >= limit {
+                break;
+            }
+            let block_ref = BlockReference {
+                authority: self.authority,
+                round: *round,
+                digest: *digest,
+            };
+            if sent.contains(&block_ref) {
+                continue;
+            }
+            let Some(block) = self.get_block(block_ref) else {
+                continue;
+            };
+            result.push((block, *round));
+        }
+        result
     }
 
     pub fn get_unsent_past_cone(
@@ -3536,6 +3597,7 @@ mod tests {
             consensus.to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         )
         .dag_state
     }
@@ -3558,6 +3620,7 @@ mod tests {
             consensus.to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         )
         .dag_state
     }
@@ -3583,6 +3646,7 @@ mod tests {
             consensus.to_string(),
             &StorageBackend::Rocksdb,
             enable_starfish_speed_adaptive_acknowledgments,
+            DisseminationMode::ProtocolDefault,
         )
         .dag_state
     }

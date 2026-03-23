@@ -107,6 +107,7 @@ impl Validator {
             public_config
                 .parameters
                 .enable_starfish_speed_adaptive_acknowledgments,
+            resolved_dissemination,
         );
 
         // Rest of the function remains the same

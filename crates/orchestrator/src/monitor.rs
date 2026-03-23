@@ -221,9 +221,9 @@ impl Prometheus {
         config.join("\n")
     }
 
-    /// Generate the commands to install the uploaded configuration and hot-reload
-    /// prometheus (falls back to a full restart when the lifecycle API is
-    /// unavailable).
+    /// Generate the commands to install the uploaded configuration and
+    /// hot-reload prometheus (falls back to a full restart when the
+    /// lifecycle API is unavailable).
     pub fn reload_commands<P: AsRef<Path>>(remote_config_path: P, remote_rules_path: P) -> String {
         format!(
             "{} && sudo cp {} {} && sudo cp {} {} && \

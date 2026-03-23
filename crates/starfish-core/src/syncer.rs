@@ -444,7 +444,7 @@ mod tests {
     use crate::{
         block_handler::BlockHandler,
         committee::Committee,
-        config::{NodePrivateConfig, StorageBackend},
+        config::{DisseminationMode, NodePrivateConfig, StorageBackend},
         crypto::Signer,
         dag_state::DagState,
         metrics::Metrics,
@@ -500,6 +500,7 @@ mod tests {
             "mysticeti".to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         );
         let private_config = NodePrivateConfig::new_for_tests(authority);
         let (mut core, _) = Core::open(

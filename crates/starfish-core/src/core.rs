@@ -1467,7 +1467,7 @@ mod tests {
     use super::*;
     use crate::{
         bls_certificate_aggregator::CertificateEvent,
-        config::{NodePrivateConfig, StorageBackend},
+        config::{DisseminationMode, NodePrivateConfig, StorageBackend},
         crypto::{self, BlsSigner, Signer},
         dag_state::{DagState, DataSource},
         data::Data,
@@ -1588,6 +1588,7 @@ mod tests {
             "bluestreak".to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         );
         let private_config = NodePrivateConfig::new_for_tests(authority);
         let (mut core, _) = Core::open(
@@ -1659,6 +1660,7 @@ mod tests {
             "mysticeti-bls".to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         );
         let private_config = NodePrivateConfig::new_for_tests(authority);
         let (mut core, _) = Core::open(

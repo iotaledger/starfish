@@ -612,7 +612,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        config::StorageBackend,
+        config::{DisseminationMode, StorageBackend},
         crypto::{SignatureBytes, TransactionsCommitment},
         dag_state::DataSource,
         data::Data,
@@ -636,6 +636,7 @@ mod tests {
             consensus.to_string(),
             &StorageBackend::Rocksdb,
             false,
+            DisseminationMode::ProtocolDefault,
         )
         .dag_state
     }
