@@ -2852,13 +2852,13 @@ mod test {
         assert!(a.insert(255));
         assert!(!a.insert(255));
         assert!(a.insert(500));
-        assert!(a.insert(1023));
-        assert!(!a.insert(1023));
+        assert!(a.insert(MAX_COMMITTEE_SIZE - 1));
+        assert!(!a.insert(MAX_COMMITTEE_SIZE - 1));
         assert!(a.contains(128));
         assert!(a.contains(200));
         assert!(a.contains(255));
         assert!(a.contains(500));
-        assert!(a.contains(1023));
+        assert!(a.contains(MAX_COMMITTEE_SIZE - 1));
         assert!(!a.contains(0));
         assert!(!a.contains(127));
         assert_eq!(a.count_ones(), 5);
@@ -2877,7 +2877,7 @@ mod test {
     #[test]
     fn authority_present_spans_multiple_words() {
         let mut a = AuthoritySet::default();
-        let present = vec![0, 63, 127, 128, 200, 255, 256, 500, 1023];
+        let present = vec![0, 63, 127, 128, 200, 255, 256, 500, MAX_COMMITTEE_SIZE - 1];
         for x in &present {
             a.insert(*x);
         }
@@ -2906,10 +2906,10 @@ mod test {
         assert!(f.contains(99));
         assert!(!f.contains(100));
 
-        let f = AuthoritySet::full(1024);
-        assert_eq!(f.count_ones(), 1024);
+        let f = AuthoritySet::full(MAX_COMMITTEE_SIZE);
+        assert_eq!(f.count_ones(), MAX_COMMITTEE_SIZE as u32);
         assert!(f.contains(0));
-        assert!(f.contains(1023));
+        assert!(f.contains(MAX_COMMITTEE_SIZE - 1));
 
         let f = AuthoritySet::full(64);
         assert_eq!(f.count_ones(), 64);
