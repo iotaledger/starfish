@@ -610,6 +610,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 nodes,
                 ssh_manager,
                 self.settings.monitoring_working_dir(),
+                self.settings.monitoring_scrape_over_public_ip(),
             );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;

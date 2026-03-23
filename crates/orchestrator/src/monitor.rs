@@ -24,6 +24,7 @@ pub struct Monitor {
     nodes: Vec<Instance>,
     ssh_manager: SshConnectionManager,
     working_dir: PathBuf,
+    scrape_over_public_ip: bool,
 }
 
 impl Monitor {
@@ -33,12 +34,14 @@ impl Monitor {
         nodes: Vec<Instance>,
         ssh_manager: SshConnectionManager,
         working_dir: PathBuf,
+        scrape_over_public_ip: bool,
     ) -> Self {
         Self {
             instance,
             nodes,
             ssh_manager,
             working_dir,
+            scrape_over_public_ip,
         }
     }
 
@@ -71,7 +74,13 @@ impl Monitor {
     ) -> MonitorResult<()> {
         self.ensure_working_dir().await?;
 
-        let config = Prometheus::configuration(self.nodes.clone(), protocol_commands, parameters);
+        let mut scrape_parameters = parameters.clone();
+        if self.scrape_over_public_ip {
+            scrape_parameters.use_internal_ip_address = false;
+        }
+
+        let config =
+            Prometheus::configuration(self.nodes.clone(), protocol_commands, &scrape_parameters);
         let remote_config: PathBuf = "prometheus.yml".into();
         let remote_config_path = self.working_dir.join(&remote_config);
 

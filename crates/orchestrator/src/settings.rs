@@ -185,6 +185,12 @@ pub struct Settings {
     /// same public key as `ssh_private_key_file`.
     #[serde(default)]
     pub monitoring_server: Option<String>,
+    /// Override whether the monitoring Prometheus should scrape validator
+    /// public IPs. When unset, external monitoring servers default to public
+    /// IPs while orchestrator-managed monitoring instances follow the
+    /// benchmark's network mode.
+    #[serde(default)]
+    pub monitoring_scrape_public_ip: Option<bool>,
     /// The timeout duration for ssh commands (in seconds).
     #[serde(default = "defaults::default_ssh_timeout")]
     #[serde_as(as = "DurationSeconds")]
@@ -290,6 +296,13 @@ impl Settings {
     /// was specified in the `user@host` format.
     pub fn monitoring_ssh_user(&self) -> Option<&str> {
         self.parse_monitoring_server().and_then(|(user, _)| user)
+    }
+
+    /// Whether Prometheus should scrape validator public IPs from the
+    /// monitoring host.
+    pub fn monitoring_scrape_over_public_ip(&self) -> bool {
+        self.monitoring_scrape_public_ip
+            .unwrap_or(self.is_external_monitoring())
     }
 
     /// Return the isolated working directory for monitoring assets on the
@@ -522,5 +535,22 @@ mod test {
         assert_eq!(instance.id, EXTERNAL_MONITORING_ID);
         assert_eq!(instance.main_ip.to_string(), "127.0.0.1");
         assert_eq!(settings.monitoring_ssh_user(), Some("root"));
+    }
+
+    #[test]
+    fn external_monitoring_scrapes_public_ips_by_default() {
+        let mut settings = Settings::new_for_test();
+        settings.monitoring_server = Some("root@127.0.0.1".into());
+
+        assert!(settings.monitoring_scrape_over_public_ip());
+    }
+
+    #[test]
+    fn monitoring_scrape_public_ip_override_is_respected() {
+        let mut settings = Settings::new_for_test();
+        settings.monitoring_server = Some("root@127.0.0.1".into());
+        settings.monitoring_scrape_public_ip = Some(false);
+
+        assert!(!settings.monitoring_scrape_over_public_ip());
     }
 }
