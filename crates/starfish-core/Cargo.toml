@@ -37,6 +37,7 @@ tempfile = { workspace = true } # todo - move to dev-dep
 tidehunter = { git = "https://github.com/MystenLabs/tidehunter", rev = "cfe208a", optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tower-http = { version = "0.6.8", features = ["compression-gzip"] }
 zeroize = "1.6.0"
 zstd = { version = "0.13.3", default-features = false }
 

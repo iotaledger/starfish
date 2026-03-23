@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use axum::{Extension, Router, http::StatusCode, routing::get};
 use prometheus::{Registry, TextEncoder};
 use tokio::net::TcpListener;
+use tower_http::compression::CompressionLayer;
 
 use crate::runtime::{Handle, JoinHandle};
 
@@ -18,6 +19,7 @@ pub fn start_prometheus_server(
 ) -> JoinHandle<Result<(), std::io::Error>> {
     let app = Router::new()
         .route(METRICS_ROUTE, get(metrics))
+        .layer(CompressionLayer::new())
         .layer(Extension(registry.clone()));
 
     tracing::info!("Prometheus server booted on {address}");
