@@ -246,13 +246,16 @@ The value accepts `[user@]host` format. When set, the orchestrator:
 - Never destroys the external server on `testbed destroy`.
 
 The server must be reachable via SSH with the same private key configured in
-`ssh_private_key_file`. Hostnames are resolved via DNS. The monitoring server
-scrapes whichever validator addresses the benchmark itself uses:
+`ssh_private_key_file`. Hostnames are resolved via DNS. By default, external
+monitoring servers scrape validator public IPs so a machine outside AWS can
+still collect metrics while validators themselves use private IPs for
+single-region traffic. If your monitoring server is inside the same VPC or can
+otherwise route to validator private IPs, override that behavior in
+`settings.yml`:
 
-- Single-region runs scrape private IPs, so the monitoring host must be inside
-  the same VPC or another network that can route to those addresses.
-- Multi-region runs scrape public IPs, so the validator metrics ports must be
-  reachable from the monitoring host.
+```yml
+monitoring_scrape_public_ip: false
+```
 
 The monitoring scrape cadence is controlled by `scrape_interval` in
 `settings.yml` and no longer slows down automatically as the committee grows.

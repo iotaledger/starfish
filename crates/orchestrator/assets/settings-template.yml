@@ -13,11 +13,13 @@ repository:
 # spot: true
 # External monitoring server (optional). Uses this server for Prometheus +
 # Grafana instead of allocating a cloud instance. Accepts [user@]host format.
-# The server must authorize the same public key as ssh_private_key_file and
-# must be able to reach the validator metrics endpoints selected by the
-# benchmark network mode. Single-region runs use private IPs; multi-region
-# runs use public IPs.
+# The server must authorize the same public key as ssh_private_key_file.
+# External monitoring defaults to scraping validator public IPs so a host
+# outside AWS can still collect metrics.
 # monitoring_server: root@monitor.example.com
+# Override the scrape-address policy when the monitoring host can reach the
+# validator private network directly.
+# monitoring_scrape_public_ip: false
 # Scrape cadence shared by benchmark measurements and Prometheus monitoring.
 # The monitoring stack enforces a minimum of 5 seconds and keeps node-exporter
 # on a slower cadence to reduce load on large committees.
