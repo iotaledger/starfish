@@ -609,7 +609,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 nodes,
                 ssh_manager,
                 self.settings.monitoring_working_dir(),
-                self.settings.is_external_monitoring(),
             );
             let commands = &self.protocol_commands;
             monitor.start_prometheus(commands, parameters).await?;

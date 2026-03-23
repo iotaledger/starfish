@@ -7,6 +7,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use crate::{
@@ -23,7 +24,6 @@ pub struct Monitor {
     nodes: Vec<Instance>,
     ssh_manager: SshConnectionManager,
     working_dir: PathBuf,
-    scrape_over_public_ip: bool,
 }
 
 impl Monitor {
@@ -33,14 +33,12 @@ impl Monitor {
         nodes: Vec<Instance>,
         ssh_manager: SshConnectionManager,
         working_dir: PathBuf,
-        scrape_over_public_ip: bool,
     ) -> Self {
         Self {
             instance,
             nodes,
             ssh_manager,
             working_dir,
-            scrape_over_public_ip,
         }
     }
 
@@ -73,13 +71,7 @@ impl Monitor {
     ) -> MonitorResult<()> {
         self.ensure_working_dir().await?;
 
-        let mut scrape_parameters = parameters.clone();
-        if self.scrape_over_public_ip {
-            scrape_parameters.use_internal_ip_address = false;
-        }
-
-        let config =
-            Prometheus::configuration(self.nodes.clone(), protocol_commands, &scrape_parameters);
+        let config = Prometheus::configuration(self.nodes.clone(), protocol_commands, parameters);
         let remote_config: PathBuf = "prometheus.yml".into();
         let remote_config_path = self.working_dir.join(&remote_config);
 
@@ -170,6 +162,9 @@ impl Monitor {
 pub struct Prometheus;
 
 impl Prometheus {
+    const MIN_SCRAPE_INTERVAL_SECS: u64 = 5;
+    const VALIDATOR_SAMPLE_LIMIT: usize = 50_000;
+    const NODE_EXPORTER_SAMPLE_LIMIT: usize = 20_000;
     /// The default prometheus configuration path.
     const DEFAULT_PROMETHEUS_CONFIG_PATH: &'static str = "/etc/prometheus/prometheus.yml";
     #[cfg(test)]
@@ -209,13 +204,27 @@ impl Prometheus {
         I: IntoIterator<Item = Instance>,
         P: ProtocolMetrics,
     {
-        let nodes_metrics_path = protocol.nodes_metrics_path(nodes, parameters);
-        let mut config = vec![Self::global_configuration(nodes_metrics_path.len())];
+        let targets: Vec<_> = protocol
+            .nodes_metrics_path(nodes, parameters)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, nodes_metrics_path))| {
+                Self::parse_scrape_target(&format!("node-{i}"), &nodes_metrics_path)
+            })
+            .collect();
+        let scrape_interval = parameters.settings.scrape_interval;
+        let mut config = vec![Self::global_configuration(scrape_interval)];
 
-        for (i, (_, nodes_metrics_path)) in nodes_metrics_path.into_iter().enumerate() {
-            let id = format!("node-{i}");
-            let scrape_config = Self::scrape_configuration(&id, &nodes_metrics_path);
-            config.push(scrape_config);
+        if let Some(metrics_path) = targets.first().map(|target| target.metrics_path.as_str()) {
+            config.push(Self::validator_scrape_configuration(
+                metrics_path,
+                &targets,
+                scrape_interval,
+            ));
+            config.push(Self::node_exporter_scrape_configuration(
+                &targets,
+                Self::node_exporter_scrape_interval(scrape_interval),
+            ));
         }
 
         config.join("\n")
@@ -243,13 +252,11 @@ impl Prometheus {
 
     /// Generate the global prometheus configuration.
     /// NOTE: The configuration file is a yaml file so spaces are important.
-    fn global_configuration(nodes: usize) -> String {
-        let scrape_secs = (nodes / 6).max(5);
-        let timeout_secs = (scrape_secs / 2).max(3);
+    fn global_configuration(scrape_interval: Duration) -> String {
+        let scrape_secs = Self::scrape_interval_secs(scrape_interval);
         [
             "global:".to_string(),
             format!("  scrape_interval: {scrape_secs}s"),
-            format!("  scrape_timeout: {timeout_secs}s"),
             format!("  evaluation_interval: {scrape_secs}s"),
             "rule_files:".to_string(),
             format!("  - {}", Self::RECORDING_RULES_PATH),
@@ -285,33 +292,101 @@ groups:
         .to_string()
     }
 
-    /// Generate the prometheus configuration from the given metrics path.
-    /// NOTE: The configuration file is a yaml file so spaces are important.
-    fn scrape_configuration(id: &str, nodes_metrics_path: &str) -> String {
-        let parts: Vec<_> = nodes_metrics_path.split('/').collect();
-        let address = parts[0].parse::<SocketAddr>().unwrap();
-        let ip = address.ip();
-        let port = address.port();
-        let path = parts[1];
-
-        [
-            &format!("  - job_name: instance-{id}"),
-            &format!("    metrics_path: /{path}"),
-            "    honor_labels: true",
-            "    static_configs:",
-            "      - targets:",
-            &format!("        - {ip}:{port}"),
-            "        labels:",
-            &format!("          validator: {id}"),
-            &format!("  - job_name: instance-node-exporter-{id}"),
-            "    static_configs:",
-            "      - targets:",
-            &format!("        - {ip}:9200"),
-            "        labels:",
-            &format!("          validator: {id}"),
-        ]
-        .join("\n")
+    fn scrape_interval_secs(scrape_interval: Duration) -> u64 {
+        scrape_interval
+            .as_secs()
+            .max(Self::MIN_SCRAPE_INTERVAL_SECS)
     }
+
+    fn scrape_timeout_secs(scrape_interval_secs: u64) -> u64 {
+        scrape_interval_secs.saturating_sub(1).clamp(4, 10)
+    }
+
+    fn node_exporter_scrape_interval(scrape_interval: Duration) -> Duration {
+        Duration::from_secs(Self::scrape_interval_secs(scrape_interval).max(30))
+    }
+
+    fn validator_scrape_configuration(
+        metrics_path: &str,
+        targets: &[ScrapeTarget],
+        scrape_interval: Duration,
+    ) -> String {
+        let scrape_interval_secs = Self::scrape_interval_secs(scrape_interval);
+        let scrape_timeout_secs = Self::scrape_timeout_secs(scrape_interval_secs);
+        let mut config = vec![
+            "  - job_name: validators".to_string(),
+            format!("    metrics_path: {metrics_path}"),
+            "    honor_labels: true".to_string(),
+            format!("    scrape_interval: {scrape_interval_secs}s"),
+            format!("    scrape_timeout: {scrape_timeout_secs}s"),
+            format!("    sample_limit: {}", Self::VALIDATOR_SAMPLE_LIMIT),
+            "    static_configs:".to_string(),
+        ];
+        config.extend(
+            targets
+                .iter()
+                .flat_map(|target| {
+                    [
+                        "      - targets:".to_string(),
+                        format!("        - {}:{}", target.ip, target.port),
+                        "        labels:".to_string(),
+                        format!("          validator: {}", target.id),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        config.join("\n")
+    }
+
+    fn node_exporter_scrape_configuration(
+        targets: &[ScrapeTarget],
+        scrape_interval: Duration,
+    ) -> String {
+        let scrape_interval_secs = Self::scrape_interval_secs(scrape_interval);
+        let scrape_timeout_secs = Self::scrape_timeout_secs(scrape_interval_secs);
+        let mut config = vec![
+            "  - job_name: node-exporters".to_string(),
+            format!("    scrape_interval: {scrape_interval_secs}s"),
+            format!("    scrape_timeout: {scrape_timeout_secs}s"),
+            format!("    sample_limit: {}", Self::NODE_EXPORTER_SAMPLE_LIMIT),
+            "    static_configs:".to_string(),
+        ];
+        config.extend(
+            targets
+                .iter()
+                .flat_map(|target| {
+                    [
+                        "      - targets:".to_string(),
+                        format!("        - {}:9200", target.ip),
+                        "        labels:".to_string(),
+                        format!("          validator: {}", target.id),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        config.join("\n")
+    }
+
+    /// Parse one prometheus scrape target emitted by the protocol.
+    /// NOTE: The configuration file is a yaml file so spaces are important.
+    fn parse_scrape_target(id: &str, nodes_metrics_path: &str) -> ScrapeTarget {
+        let (address, path) = nodes_metrics_path.split_once('/').unwrap();
+        let address = address.parse::<SocketAddr>().unwrap();
+
+        ScrapeTarget {
+            id: id.to_string(),
+            ip: address.ip().to_string(),
+            port: address.port(),
+            metrics_path: format!("/{path}"),
+        }
+    }
+}
+
+struct ScrapeTarget {
+    id: String,
+    ip: String,
+    port: u16,
+    metrics_path: String,
 }
 
 pub struct Grafana;
@@ -727,7 +802,9 @@ impl NodeExporter {
 
 #[cfg(test)]
 mod tests {
-    use super::Prometheus;
+    use std::time::Duration;
+
+    use super::{Prometheus, ScrapeTarget};
 
     #[test]
     fn prometheus_reload_commands_copy_rules_and_reload() {
@@ -746,13 +823,57 @@ mod tests {
 
     #[test]
     fn prometheus_global_configuration_references_recording_rules() {
-        let config = Prometheus::global_configuration(60);
+        let config = Prometheus::global_configuration(Duration::from_secs(15));
 
-        assert!(config.contains("scrape_interval: 10s"));
-        assert!(config.contains("scrape_timeout: 5s"));
-        assert!(config.contains("evaluation_interval: 10s"));
+        assert!(config.contains("scrape_interval: 15s"));
+        assert!(config.contains("evaluation_interval: 15s"));
         assert!(config.contains("rule_files:"));
         assert!(config.contains("/etc/prometheus/recording_rules.yml"));
+    }
+
+    #[test]
+    fn prometheus_uses_shared_jobs_for_targets() {
+        let targets = vec![
+            ScrapeTarget {
+                id: "node-0".into(),
+                ip: "10.0.0.1".into(),
+                port: 1900,
+                metrics_path: "/metrics".into(),
+            },
+            ScrapeTarget {
+                id: "node-1".into(),
+                ip: "10.0.0.2".into(),
+                port: 1901,
+                metrics_path: "/metrics".into(),
+            },
+        ];
+
+        let validators = Prometheus::validator_scrape_configuration(
+            "/metrics",
+            &targets,
+            Duration::from_secs(15),
+        );
+        let exporters =
+            Prometheus::node_exporter_scrape_configuration(&targets, Duration::from_secs(30));
+
+        assert!(validators.contains("job_name: validators"));
+        assert_eq!(validators.matches("job_name:").count(), 1);
+        assert!(validators.contains("metrics_path: /metrics"));
+        assert!(validators.contains("scrape_interval: 15s"));
+        assert!(validators.contains("scrape_timeout: 10s"));
+        assert!(validators.contains("sample_limit: 50000"));
+        assert!(validators.contains("10.0.0.1:1900"));
+        assert!(validators.contains("10.0.0.2:1901"));
+        assert!(validators.contains("validator: node-0"));
+        assert!(validators.contains("validator: node-1"));
+
+        assert!(exporters.contains("job_name: node-exporters"));
+        assert_eq!(exporters.matches("job_name:").count(), 1);
+        assert!(exporters.contains("scrape_interval: 30s"));
+        assert!(exporters.contains("scrape_timeout: 10s"));
+        assert!(exporters.contains("sample_limit: 20000"));
+        assert!(exporters.contains("10.0.0.1:9200"));
+        assert!(exporters.contains("10.0.0.2:9200"));
     }
 
     #[test]
