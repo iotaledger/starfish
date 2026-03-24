@@ -360,7 +360,8 @@ docker volume create prometheus_data >/dev/null 2>&1 || true
 docker volume create grafana_data >/dev/null 2>&1 || true
 rm -f "$DATA_DIR"/*.log \
     "$DATA_DIR"/docker-compose.yml
-rm -rf "$DATA_DIR"/prometheus.yaml
+rm -f "$DATA_DIR"/prometheus.yaml \
+    "$DATA_DIR"/recording_rules.yml
 mkdir -p "$DATA_DIR"
 
 #----------------------------------------------------------------------
@@ -395,11 +396,35 @@ rm -f "$BUILD_LOG"
 #----------------------------------------------------------------------
 # Generate Prometheus Configuration
 #----------------------------------------------------------------------
+cat <<'EOR' > "$DATA_DIR/recording_rules.yml"
+groups:
+  - name: starfish
+    rules:
+      - record: starfish:tx_throughput:rate1m
+        expr: rate(sequenced_transactions_total[1m])
+      - record: starfish:bytes_sent:rate1m
+        expr: rate(bytes_sent_total[1m])
+      - record: starfish:bytes_received:rate1m
+        expr: rate(bytes_received_total[1m])
+      - record: starfish:bandwidth:rate1m
+        expr: >-
+          rate(bytes_sent_total[1m])
+          + rate(bytes_received_total[1m])
+      - record: starfish:committed_leaders:rate1m
+        expr: rate(committed_leaders_total[1m])
+      - record: starfish:network_requests_sent:rate1m
+        expr: rate(network_requests_sent_total[1m])
+      - record: starfish:network_requests_received:rate1m
+        expr: rate(network_requests_received_total[1m])
+EOR
+
 PROMETHEUS_CONFIG="$DATA_DIR/prometheus.yaml"
 {
     cat <<'EOH'
 global:
   scrape_interval: 1s
+rule_files:
+  - /etc/prometheus/recording_rules.yml
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
@@ -458,6 +483,7 @@ services:
       - "$PROMETHEUS_PORT:9090"
     volumes:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ./recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
       - prometheus_data:/prometheus
     networks:
       starfish-net:
