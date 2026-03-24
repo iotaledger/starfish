@@ -100,7 +100,7 @@ impl Linearizer {
         let mut to_commit = Vec::new();
         let leader_block_ref = *leader_block.reference();
         let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
-        let follow_unprovable = dag_state.consensus_protocol == ConsensusProtocol::Bluestreak;
+        let follow_unprovable = dag_state.consensus_protocol.is_bluestreak();
 
         assert!(self.committed.insert(leader_block_ref));
         let mut current_level = vec![leader_block];
@@ -309,15 +309,15 @@ impl Linearizer {
             let acknowledgement_authorities: Vec<_> = sub_dag
                 .blocks
                 .iter()
-                .map(|x| match consensus_protocol {
-                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls => {
+                .map(|x| {
+                    if consensus_protocol.uses_bls() {
                         self.potential_data_holders()
+                    } else {
+                        self.votes
+                            .get(x.reference())
+                            .expect("After committing expect a quorum in starfish")
+                            .clone()
                     }
-                    _ => self
-                        .votes
-                        .get(x.reference())
-                        .expect("After committing expect a quorum in starfish")
-                        .clone(),
                 })
                 .collect();
             tracing::debug!("Committed sub DAG {:?}", sub_dag);

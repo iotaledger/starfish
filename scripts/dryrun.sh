@@ -63,6 +63,45 @@ YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)
 RESET=$(tput sgr0)
 
+#----------------------------------------------------------------------
+# Ensure Docker Daemon Is Running
+#----------------------------------------------------------------------
+docker_ready() {
+    # Use "docker ps" — it returns quickly even when
+    # the daemon is mid-startup (unlike "docker info"
+    # which can hang indefinitely).
+    docker ps >/dev/null 2>&1
+}
+
+if ! docker_ready; then
+    echo -ne \
+        "${CYAN}Starting Docker daemon...${RESET}"
+    if [[ "$OSTYPE" == darwin* ]]; then
+        open -a Docker
+    elif command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl start docker
+    else
+        echo -e \
+            "\n${RED}Docker is not running" \
+            "and could not be started" \
+            "automatically.${RESET}"
+        exit 1
+    fi
+    for _ in $(seq 1 60); do
+        if docker_ready; then break; fi
+        sleep 1
+        printf "."
+    done
+    echo ""
+    if ! docker_ready; then
+        echo -e \
+            "${RED}Docker daemon did not start" \
+            "within 60 s.${RESET}"
+        exit 1
+    fi
+    echo -e "${GREEN}Docker is ready.${RESET}"
+fi
+
 ipv4_add() {
     local ip="$1"
     local offset="$2"
@@ -92,23 +131,72 @@ derive_subnet_from_base_ip() {
     printf "%d.%d.%d.0/23" "$a" "$b" $(( c & 254 ))
 }
 
+ip_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+cidr_range() {
+    local ip="${1%/*}" mask="${1#*/}"
+    local start end size
+    start=$(ip_to_int "$ip")
+    size=$(( 1 << (32 - mask) ))
+    end=$(( start + size - 1 ))
+    echo "$start $end"
+}
+
+used_docker_subnets() {
+    docker network inspect --format \
+        '{{range .IPAM.Config}}{{.Subnet}} {{end}}' \
+        $(docker network ls -q) 2>/dev/null
+}
+
+reuse_existing_network() {
+    local existing
+    existing=$(docker network inspect --format \
+        '{{range .IPAM.Config}}{{.Subnet}}{{end}}' \
+        "$COMPOSE_NETWORK_NAME" 2>/dev/null) \
+        || return 1
+    [[ -n "$existing" ]] || return 1
+    SUBNET="$existing"
+    return 0
+}
+
 pick_available_subnet() {
-    local probe_network="${COMPOSE_PROJECT_NAME}-subnet-probe-$$"
-    local candidate
-    for candidate in \
-        172.28.0.0/23 \
-        172.29.0.0/23 \
-        172.30.0.0/23 \
-        172.31.0.0/23 \
-        172.31.2.0/23
-    do
-        if docker network create --driver bridge --subnet "$candidate" \
-            "$probe_network" >/dev/null 2>&1
-        then
-            docker network rm "$probe_network" >/dev/null 2>&1 || true
-            SUBNET="$candidate"
-            return 0
-        fi
+    local used=()
+    local word
+    for word in $(used_docker_subnets); do
+        [[ -n "$word" ]] && used+=("$word")
+    done
+
+    # Scan 172.16.0.0/12 (172.16–172.31) in /23 steps.
+    # Skip 172.17.0.0/16 (Docker default bridge pool).
+    local second third candidate cstart cend
+    for second in $(seq 16 31); do
+        (( second == 17 )) && continue
+        for third in $(seq 0 2 255); do
+            candidate="172.${second}.${third}.0/23"
+            read -r cstart cend \
+                < <(cidr_range "$candidate")
+
+            local overlap=false
+            local u ustart uend
+            for u in "${used[@]}"; do
+                read -r ustart uend \
+                    < <(cidr_range "$u")
+                if (( cstart <= uend \
+                    && ustart <= cend )); then
+                    overlap=true
+                    break
+                fi
+            done
+
+            if ! $overlap; then
+                SUBNET="$candidate"
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -116,11 +204,15 @@ pick_available_subnet() {
 if [ -z "$SUBNET" ]; then
     if [ -n "$BASE_IP" ]; then
         SUBNET=$(derive_subnet_from_base_ip "$BASE_IP")
+    elif reuse_existing_network; then
+        BASE_IP=$(derive_base_ip_from_subnet "$SUBNET")
     elif pick_available_subnet; then
         BASE_IP=$(derive_base_ip_from_subnet "$SUBNET")
     else
         echo -e \
-            "${RED}Could not find a free /23 Docker subnet. Set SUBNET and BASE_IP explicitly.${RESET}"
+            "${RED}Could not find a free /23 Docker" \
+            "subnet in 172.16.0.0/12." \
+            "Set SUBNET and BASE_IP explicitly.${RESET}"
         exit 1
     fi
 fi

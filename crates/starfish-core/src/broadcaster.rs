@@ -42,11 +42,10 @@ fn peer_can_serve_missing_data(
     own_id: AuthorityIndex,
     peer_id: AuthorityIndex,
 ) -> bool {
-    match consensus_protocol {
-        ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls => {
-            holders.votes.contains(peer_id)
-        }
-        _ => !holders.votes.contains(own_id) && holders.votes.contains(peer_id),
+    if consensus_protocol.uses_bls() {
+        holders.votes.contains(peer_id)
+    } else {
+        !holders.votes.contains(own_id) && holders.votes.contains(peer_id)
     }
 }
 

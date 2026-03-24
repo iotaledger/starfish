@@ -1519,6 +1519,10 @@ impl VerifiedBlock {
                     self.header.bls().is_none(),
                     "Only StarfishBls blocks may carry BLS fields"
                 );
+                ensure!(
+                    self.header.sailfish().is_none(),
+                    "Only SailfishPlusPlus blocks may carry sailfish fields"
+                );
                 let is_leader = self.authority() == committee.elect_leader(round);
                 if !is_leader {
                     ensure!(
@@ -1535,24 +1539,20 @@ impl VerifiedBlock {
                                 "Bluestreak non-leader block must reference its own previous block"
                             )
                         })?;
-                    if let Some(cert_ref) = self.header.unprovable_certificate() {
-                        ensure!(
-                            round >= 3 && cert_ref.round + 2 == round,
-                            "unprovable_certificate must reference leader at round r-2"
-                        );
-                        ensure!(
-                            cert_ref.authority == committee.elect_leader(cert_ref.round),
-                            "unprovable_certificate must reference the elected leader"
-                        );
-                    }
                 } else {
-                    ensure!(
-                        self.header.unprovable_certificate().is_none(),
-                        "Bluestreak leaders must not carry unprovable_certificate"
-                    );
                     ensure!(
                         threshold_clock_valid_block_header(&self.header, committee),
                         "Bluestreak leader must reference 2f+1 blocks from previous round"
+                    );
+                }
+                if let Some(cert_ref) = self.header.unprovable_certificate() {
+                    ensure!(
+                        round >= 3 && cert_ref.round + 2 == round,
+                        "unprovable_certificate must reference leader at round r-2"
+                    );
+                    ensure!(
+                        cert_ref.authority == committee.elect_leader(cert_ref.round),
+                        "unprovable_certificate must reference the elected leader"
                     );
                 }
             }
@@ -2520,7 +2520,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bluestreak_leader_with_unprovable_certificate() {
+    fn accepts_bluestreak_leader_with_unprovable_certificate() {
         let committee = Committee::new_for_benchmarks(4);
         let signers = Signer::new_for_test(committee.len());
         let leader = committee.elect_leader(3);
@@ -2551,7 +2551,7 @@ mod tests {
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
-        let err = block
+        block
             .verify(
                 committee.as_ref(),
                 0,
@@ -2559,12 +2559,7 @@ mod tests {
                 &mut encoder,
                 ConsensusProtocol::Bluestreak,
             )
-            .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("Bluestreak leaders must not carry unprovable_certificate")
-        );
+            .unwrap();
     }
 
     #[test]

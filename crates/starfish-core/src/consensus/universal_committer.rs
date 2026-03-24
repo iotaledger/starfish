@@ -40,10 +40,10 @@ impl UniversalCommitter {
     /// list of ordered decided leaders.
     #[tracing::instrument(skip_all, fields(last_decided = %last_decided))]
     pub fn try_commit(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+        if self.dag_state.consensus_protocol.is_sailfish_pp() {
             return self.try_commit_sailfish(last_decided);
         }
-        if self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak {
+        if self.dag_state.consensus_protocol.is_bluestreak() {
             return self.try_commit_bluestreak(last_decided);
         }
 
@@ -92,10 +92,7 @@ impl UniversalCommitter {
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
                         let vb_ref = *vb.reference();
-                        if matches!(
-                            self.dag_state.consensus_protocol,
-                            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-                        ) {
+                        if self.dag_state.consensus_protocol.uses_bls() {
                             if let Some(leader_ref) =
                                 vb.header().starfish_bls_voted_leader(&self.committee)
                             {

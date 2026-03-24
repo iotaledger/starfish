@@ -1091,7 +1091,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             (None, None)
         };
         // Create Sailfish service channel for SailfishPlusPlus protocol.
-        let is_sailfish_pp = dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus;
+        let is_sailfish_pp = dag_state.consensus_protocol.is_sailfish_pp();
         let sailfish_signer = if is_sailfish_pp {
             Some(core.get_signer().clone())
         } else {
@@ -1565,10 +1565,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .write()
             .insert(peer_id, connection.sender.clone());
 
-        if matches!(
-            inner.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        if inner.dag_state.consensus_protocol.uses_bls() {
             for (round, signature) in inner.dag_state.precomputed_round_sigs() {
                 let _ = connection
                     .sender

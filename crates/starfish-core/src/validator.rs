@@ -125,10 +125,7 @@ impl Validator {
             RealCommitHandler::new_with_handler(committee.clone(), metrics.clone());
         tracing::info!("Commit handler");
 
-        let is_starfish_l = matches!(
-            recovered.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        );
+        let is_starfish_l = recovered.dag_state.consensus_protocol.uses_bls();
         let (partial_sig_tx, partial_sig_rx) = if is_starfish_l {
             let (tx, rx) = mpsc::unbounded_channel::<PartialSig>();
             (Some(tx), Some(rx))

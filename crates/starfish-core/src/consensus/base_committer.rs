@@ -160,10 +160,7 @@ impl BaseCommitter {
 
         // Use those potential certificates to determine which (if any) of the target
         // leader blocks can be committed.
-        let is_bls = matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        );
+        let is_bls = self.dag_state.consensus_protocol.uses_bls();
         let mut certified_leader_blocks: Vec<_> = leader_blocks
             .into_iter()
             .filter(|leader_block| {
@@ -184,7 +181,7 @@ impl BaseCommitter {
             })
             .collect();
 
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+        if self.dag_state.consensus_protocol.is_sailfish_pp() {
             certified_leader_blocks.retain(|l| self.dag_state.has_clean_vertex(l.reference()));
         }
 
@@ -464,12 +461,9 @@ impl BaseCommitter {
         let mut leaders_with_enough_support: Vec<_> = leader_blocks
             .into_iter()
             .filter(|l| {
-                if matches!(
-                    self.dag_state.consensus_protocol,
-                    ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-                ) {
+                if self.dag_state.consensus_protocol.uses_bls() {
                     self.enough_certified_leader_support(certifying_round, l.reference())
-                } else if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+                } else if self.dag_state.consensus_protocol.is_sailfish_pp() {
                     self.dag_state.has_clean_vertex(l.reference())
                         && self.enough_leader_support(certifying_round, l, voter_info)
                 } else {

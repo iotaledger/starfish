@@ -147,6 +147,26 @@ impl ConsensusProtocol {
         matches!(self, ConsensusProtocol::Bluestreak)
     }
 
+    /// Protocols using BLS aggregate signatures (voted leader, round certs,
+    /// DAC aggregation, pre-computed sigs).
+    pub fn uses_bls(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
+        )
+    }
+
+    /// Protocols where non-leaders compress block_references to only the
+    /// previous-round leader, and leaders keep the full reference frontier.
+    pub fn uses_compressed_refs(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::MysticetiBls
+        )
+    }
+
     /// Protocols that use a dual dirty/clean DAG with vertex certification.
     pub fn uses_dual_dag(self) -> bool {
         matches!(
@@ -626,7 +646,7 @@ impl DagState {
                 }
             }
         }
-        if consensus_protocol == ConsensusProtocol::Bluestreak {
+        if consensus_protocol.is_bluestreak() {
             let mut recovered_blocks: Vec<_> = inner
                 .index
                 .iter()
@@ -731,10 +751,7 @@ impl DagState {
             return self.threshold_clock_round();
         }
 
-        let is_bls = matches!(
-            self.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        );
+        let is_bls = self.consensus_protocol.uses_bls();
 
         let inner = self.dag_state_inner.read();
         let threshold_round = inner.threshold_clock.get_round();
@@ -1458,10 +1475,7 @@ impl DagState {
         let blocks = inner.get_blocks_by_round(round);
         let mut aggregator = StakeAggregator::<QuorumThreshold>::new();
         for block in &blocks {
-            let votes_for_leader = if matches!(
-                self.consensus_protocol,
-                ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-            ) {
+            let votes_for_leader = if self.consensus_protocol.uses_bls() {
                 block
                     .header()
                     .starfish_bls_voted_leader(committee)
@@ -1524,10 +1538,7 @@ impl DagState {
 
         // BLS protocols: check round certificate, leader certificate for
         // the leader two rounds back, and leader visibility.
-        if matches!(
-            self.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        if self.consensus_protocol.uses_bls() {
             // Round certificate for r-1 must exist.
             if leader_round > 0 && !inner.round_certificates.contains_key(&leader_round) {
                 return false;
@@ -2398,7 +2409,7 @@ impl DagStateInner {
                     frontier.push(parent);
                 }
             }
-            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+            if self.consensus_protocol.is_bluestreak() {
                 if let Some(cert_ref) = block.unprovable_certificate() {
                     let parent = self
                         .get_storage_block(*cert_ref)
@@ -2445,7 +2456,7 @@ impl DagStateInner {
                     }
                 }
             }
-            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+            if self.consensus_protocol.is_bluestreak() {
                 if let Some(cert_ref) = block.unprovable_certificate() {
                     if let Some(parent) = self.get_storage_block(*cert_ref) {
                         if parent.round() >= target_round {
@@ -2618,7 +2629,7 @@ impl DagStateInner {
         }
         // Bluestreak: the unprovable_certificate target is also a
         // causal dependency that must be ancestor-closed.
-        if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+        if self.consensus_protocol.is_bluestreak() {
             if let Some(cert_ref) = block.unprovable_certificate() {
                 if cert_ref.round > 0
                     && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
@@ -2904,7 +2915,7 @@ impl DagStateInner {
                     stack.push(*parent);
                 }
             }
-            if self.consensus_protocol == ConsensusProtocol::Bluestreak {
+            if self.consensus_protocol.is_bluestreak() {
                 if let Some(cert_ref) = block.unprovable_certificate() {
                     if cert_ref.round > 0
                         && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)

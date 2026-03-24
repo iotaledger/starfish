@@ -14,7 +14,7 @@ use crate::{
     bls_service::BlsServiceMessage,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
     core::Core,
-    dag_state::{ConsensusProtocol, DagState, DataSource},
+    dag_state::{DagState, DataSource},
     data::Data,
     metrics::Metrics,
     runtime::timestamp_utc,
@@ -318,7 +318,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             // SailfishPlusPlus: if we created a block without referencing the
             // previous-round leader, send a LocalNoVote so the service can
             // sign and aggregate a no-vote certificate.
-            if self.core.dag_state().consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+            if self.core.dag_state().consensus_protocol.is_sailfish_pp() {
                 let block_round = block.round();
                 if block_round > 1 {
                     let prev_leader = self.core.committee().elect_leader(block_round - 1);
@@ -446,7 +446,7 @@ mod tests {
         committee::Committee,
         config::{DisseminationMode, NodePrivateConfig, StorageBackend},
         crypto::Signer,
-        dag_state::DagState,
+        dag_state::{ConsensusProtocol, DagState},
         metrics::Metrics,
         types::BaseTransaction,
     };

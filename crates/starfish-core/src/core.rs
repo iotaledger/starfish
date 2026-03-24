@@ -160,10 +160,7 @@ impl<H: BlockHandler> Core<H> {
                 .build();
         let encoder = ReedSolomonEncoder::new(2, 4, 2).unwrap();
 
-        let bls_cert_aggregator = if matches!(
-            dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        let bls_cert_aggregator = if dag_state.consensus_protocol.uses_bls() {
             let mut aggregator = BlsCertificateAggregator::new(committee.clone());
             // Replay recovered blocks through the aggregator to rebuild
             // certificate state (in-memory only — not persisted).
@@ -485,18 +482,17 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
+        let protocol = self.dag_state.consensus_protocol;
+
         // Dual-DAG protocols: require clean parent quorum before creating a block.
-        if self.dag_state.consensus_protocol.uses_dual_dag()
+        if protocol.uses_dual_dag()
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
             return None;
         }
 
-        let voted_leader_ref = if matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        let voted_leader_ref = if protocol.uses_bls() {
             self.select_starfish_bls_voted_leader(clock_round)
         } else {
             None
@@ -505,10 +501,7 @@ impl<H: BlockHandler> Core<H> {
         // BLS protocols must not drain the pending frontier before the previous
         // round certificate is available, otherwise timeout retries can rebuild
         // the same round from a truncated queue.
-        let aggregate_round_sig = if matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        let aggregate_round_sig = if protocol.uses_bls() {
             if clock_round <= 1 {
                 None
             } else {
@@ -528,35 +521,31 @@ impl<H: BlockHandler> Core<H> {
         // their own previous block and, if present, the previous-round leader.
         // Requeue both transactions and include refs so the next attempt sees
         // them again.
-        let allow_own_prev_only = self.dag_state.consensus_protocol
-            == ConsensusProtocol::Bluestreak
+        let is_current_leader = self.committee.elect_leader(clock_round) == self.authority;
+        // BLS non-leaders can always build with minimal refs.
+        let bls_non_leader = protocol.uses_bls() && !is_current_leader;
+        // Bluestreak prev-round leader can build with own-prev only.
+        let bluestreak_prev_leader = protocol.is_bluestreak()
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
-        let allow_bls_non_leader_prev_only = matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) && self.committee.elect_leader(clock_round)
-            != self.authority;
         // For Bluestreak non-leaders, forced (leader-timeout) block creation is
         // allowed to fall back to "own-prev only" when the previous-round
         // leader block is missing locally. Without this, a delayed/slow
         // previous leader can stall block production at large scale even after
         // the timeout fires.
-        let allow_timeout_prev_only = reason == "force_timeout"
-            && self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak
-            && self.committee.elect_leader(clock_round) != self.authority;
-        if allow_timeout_prev_only && block_references.is_empty() && !allow_own_prev_only {
+        let bluestreak_timeout =
+            reason == "force_timeout" && protocol.is_bluestreak() && !is_current_leader;
+        let allows_minimal_refs = bls_non_leader || bluestreak_prev_leader || bluestreak_timeout;
+        if bluestreak_timeout && block_references.is_empty() && !bluestreak_prev_leader {
             tracing::debug!(
                 "Bluestreak: forcing block in round {} \
                  with only own-prev (missing clean prev-leader parent)",
                 clock_round
             );
         }
-        if self.dag_state.consensus_protocol.uses_dual_dag()
+        if protocol.uses_dual_dag()
             && clock_round > 1
             && block_references.is_empty()
-            && !allow_own_prev_only
-            && !allow_bls_non_leader_prev_only
-            && !allow_timeout_prev_only
+            && !allows_minimal_refs
         {
             for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
@@ -569,8 +558,7 @@ impl<H: BlockHandler> Core<H> {
         // the timeout-control rule must be satisfied before we construct the
         // block. Requeue both transactions and include refs so the next retry
         // sees the full frontier again.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus
-            && !self.sailfish_control_ready(clock_round, &block_references)
+        if protocol.is_sailfish_pp() && !self.sailfish_control_ready(clock_round, &block_references)
         {
             for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
@@ -585,12 +573,11 @@ impl<H: BlockHandler> Core<H> {
         }
         self.prepare_last_blocks();
         let mut encoded_transactions = self.prepare_encoded_transactions(&transactions);
-        let acknowledgment_references =
-            if self.dag_state.consensus_protocol.supports_acknowledgments() {
-                self.dag_state.get_pending_acknowledgment(clock_round)
-            } else {
-                Vec::new()
-            };
+        let acknowledgment_references = if protocol.supports_acknowledgments() {
+            self.dag_state.get_pending_acknowledgment(clock_round)
+        } else {
+            Vec::new()
+        };
         let acknowledgment_references = self.filter_starfish_speed_leader_acknowledgments(
             starfish_speed_excluded_authors,
             acknowledgment_references,
@@ -598,10 +585,7 @@ impl<H: BlockHandler> Core<H> {
         let number_of_blocks_to_create = self.last_own_block.len();
         let authority_bounds = self.calculate_authority_bounds(number_of_blocks_to_create);
 
-        let certified_leader = if matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        let certified_leader = if protocol.uses_bls() {
             // Votes for leader at round r are in round r+1; the
             // aggregated certificate is embedded in round r+2.
             if clock_round <= 3 {
@@ -707,20 +691,15 @@ impl<H: BlockHandler> Core<H> {
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
         }
 
-        // SailfishPlusPlus and BLS leaders: verify the filtered parent set,
-        // together with the creator's own previous block (always included by
-        // build_block), still has quorum stake at round-1.
-        let compress_non_leader = self.dag_state.consensus_protocol
-            == ConsensusProtocol::Bluestreak
+        // Dual-DAG leaders: verify the filtered parent set, together with
+        // the creator's own previous block (always included by build_block),
+        // still has quorum stake at round-1. Compressed-ref non-leaders are
+        // exempt since they only carry 1-2 references by design.
+        let is_compressed_non_leader = self.dag_state.consensus_protocol.uses_compressed_refs()
             && self.committee.elect_leader(block_round) != self.authority;
-        let bls_non_leader = matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) && self.committee.elect_leader(block_round) != self.authority;
         if self.dag_state.consensus_protocol.uses_dual_dag()
             && block_round > 1
-            && !compress_non_leader
-            && !bls_non_leader
+            && !is_compressed_non_leader
         {
             let prev_round = block_round - 1;
             let mut prev_round_stake: u64 = 0;
@@ -760,19 +739,13 @@ impl<H: BlockHandler> Core<H> {
         let info_length = self.committee.info_length();
         let parity_length = self.committee.len() - info_length;
 
-        match self.dag_state.consensus_protocol {
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => Some(self.encoder.encode_transactions(
-                transactions,
-                info_length,
-                parity_length,
-            )),
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => None,
+        if self.dag_state.consensus_protocol.supports_acknowledgments() {
+            Some(
+                self.encoder
+                    .encode_transactions(transactions, info_length, parity_length),
+            )
+        } else {
+            None
         }
     }
 
@@ -864,10 +837,8 @@ impl<H: BlockHandler> Core<H> {
         let time_ns = timestamp_utc().as_nanos() as u64 + block_id_in_round as u64;
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
         let mut block_references = vec![own_previous];
-        if matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
+        let protocol = self.dag_state.consensus_protocol;
+        if protocol.uses_bls() {
             if let Some(leader_ref) = voted_leader_ref {
                 if leader_ref != own_previous {
                     block_references.push(leader_ref);
@@ -889,23 +860,20 @@ impl<H: BlockHandler> Core<H> {
 
         let strong_vote = self.compute_strong_vote(clock_round, &block_references);
 
-        let is_starfish_l = matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        );
-        let bls_signer_opt = if is_starfish_l {
+        let uses_bls = protocol.uses_bls();
+        let bls_signer_opt = if uses_bls {
             Some(&self.bls_signer)
         } else {
             None
         };
-        let committee_opt = if is_starfish_l {
+        let committee_opt = if uses_bls {
             Some(self.committee.as_ref())
         } else {
             None
         };
 
         // Fetch aggregated DAC certificates from the BLS aggregator.
-        let aggregate_dac_sigs = if is_starfish_l {
+        let aggregate_dac_sigs = if uses_bls {
             acknowledgment_references
                 .iter()
                 .map(|ack_ref| {
@@ -918,7 +886,7 @@ impl<H: BlockHandler> Core<H> {
             vec![]
         };
 
-        let precomputed_round_sig = if is_starfish_l {
+        let precomputed_round_sig = if uses_bls {
             let sig = self.dag_state.take_precomputed_round_sig(clock_round);
             if sig.is_some() {
                 self.metrics.bls_presign_hit_total.inc();
@@ -929,26 +897,19 @@ impl<H: BlockHandler> Core<H> {
         } else {
             None
         };
-        let precomputed_leader_sig = if is_starfish_l {
+        let precomputed_leader_sig = if uses_bls {
             voted_leader_ref.and_then(|r| self.dag_state.take_precomputed_leader_sig(&r))
         } else {
             None
         };
 
         // SailfishPlusPlus: compute control-plane fields (TC / NVC).
-        let sailfish_fields = if self.dag_state.consensus_protocol
-            == ConsensusProtocol::SailfishPlusPlus
-            && clock_round > 1
-        {
+        let sailfish_fields = if protocol.is_sailfish_pp() && clock_round > 1 {
             self.compute_sailfish_fields(clock_round, &block_references)
         } else {
             None
         };
-        let unprovable_certificate = if self.dag_state.consensus_protocol
-            == ConsensusProtocol::Bluestreak
-            && self.committee.elect_leader(clock_round) != self.authority
-            && clock_round >= 3
-        {
+        let unprovable_certificate = if protocol.is_bluestreak() && clock_round >= 3 {
             self.compute_unprovable_certificate(clock_round, &block_references)
         } else {
             None
@@ -1126,7 +1087,12 @@ impl<H: BlockHandler> Core<H> {
         pending_refs: &[BlockReference],
         block_round: RoundNumber,
     ) -> Vec<BlockReference> {
-        if self.dag_state.consensus_protocol == ConsensusProtocol::Bluestreak {
+        let protocol = self.dag_state.consensus_protocol;
+
+        // Compressed-ref protocols (Bluestreak, StarfishBls, MysticetiBls):
+        // non-leaders keep only the prev-round leader, leaders keep the full
+        // unique frontier.
+        if protocol.uses_compressed_refs() {
             let is_leader = self.committee.elect_leader(block_round) == self.authority;
             if !is_leader {
                 let prev_round = block_round.saturating_sub(1);
@@ -1138,7 +1104,6 @@ impl<H: BlockHandler> Core<H> {
                     .take(1)
                     .collect();
             }
-
             let mut seen = AHashSet::new();
             return pending_refs
                 .iter()
@@ -1149,8 +1114,7 @@ impl<H: BlockHandler> Core<H> {
 
         // SailfishPlusPlus: keep all previous-round references unconditionally
         // so that clean-parent filtering doesn't drop below quorum.
-        // Only older-round references go through normal compression.
-        if self.dag_state.consensus_protocol == ConsensusProtocol::SailfishPlusPlus {
+        if protocol.is_sailfish_pp() {
             let prev_round = block_round.saturating_sub(1);
             let mut seen = AHashSet::new();
             return pending_refs
@@ -1161,35 +1125,9 @@ impl<H: BlockHandler> Core<H> {
                 })
                 .collect();
         }
-        if matches!(
-            self.dag_state.consensus_protocol,
-            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls
-        ) {
-            let prev_round = block_round.saturating_sub(1);
-            let prev_leader = self.committee.elect_leader(prev_round);
-            if self.committee.elect_leader(block_round) != self.authority {
-                return pending_refs
-                    .iter()
-                    .copied()
-                    .filter(|reference| {
-                        reference.round == prev_round && reference.authority == prev_leader
-                    })
-                    .take(1)
-                    .collect();
-            }
 
-            // BLS leaders keep the full frontier so their header preserves
-            // the direct previous-round quorum required by the protocol.
-            let mut seen_references = AHashSet::new();
-            return pending_refs
-                .iter()
-                .copied()
-                .filter(|reference| {
-                    reference.authority != self.authority && seen_references.insert(*reference)
-                })
-                .collect();
-        }
-
+        // Default (Mysticeti, CordialMiners, Starfish, StarfishSpeed):
+        // transitive reduction.
         let mut references_in_block: AHashSet<BlockReference> = AHashSet::new();
 
         let blocks = self.dag_state.get_storage_blocks(pending_refs);
