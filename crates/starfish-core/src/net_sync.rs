@@ -1786,7 +1786,7 @@ impl SyncerSignals for NetworkSyncSignals {
 mod tests {
     use super::*;
     use crate::{
-        crypto::{SignatureBytes, TransactionsCommitment},
+        crypto::SignatureBytes,
         types::{BaseTransaction, BlockReference},
     };
 
@@ -1815,7 +1815,7 @@ mod tests {
             0,
             SignatureBytes::default(),
             Vec::<BaseTransaction>::new(),
-            TransactionsCommitment::default(),
+            None,
             None,
             None,
             None,

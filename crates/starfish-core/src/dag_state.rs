@@ -3066,8 +3066,7 @@ impl DagStateInner {
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::MysticetiBls
-        ) && block.transactions().is_none()
-            && block.merkle_root() == TransactionsCommitment::new_from_transactions(&Vec::new());
+        ) && block.transactions().is_none();
         if block.has_empty_payload() || is_empty_full_block {
             self.data_availability[auth].insert(*r);
             return;
@@ -3678,7 +3677,7 @@ mod tests {
             0,
             SignatureBytes::default(),
             Vec::new(),
-            TransactionsCommitment::default(),
+            None,
             Some(strong_vote_mask),
             None,
             None,
@@ -3690,25 +3689,12 @@ mod tests {
     fn make_empty_full_block(
         authority: AuthorityIndex,
         round: RoundNumber,
-        consensus_protocol: ConsensusProtocol,
+        _consensus_protocol: ConsensusProtocol,
     ) -> Data<VerifiedBlock> {
         let block_refs = if round == 0 {
             Vec::new()
         } else {
             vec![BlockReference::new_test(authority, round - 1)]
-        };
-        let empty_transactions = Vec::new();
-        let merkle_root = match consensus_protocol {
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => {
-                TransactionsCommitment::new_from_transactions(&empty_transactions)
-            }
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => TransactionsCommitment::default(),
         };
         let mut block = VerifiedBlock::new(
             authority,
@@ -3717,8 +3703,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions,
-            merkle_root,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -3731,21 +3717,8 @@ mod tests {
         authority: AuthorityIndex,
         round: RoundNumber,
         parents: Vec<BlockReference>,
-        consensus_protocol: ConsensusProtocol,
+        _consensus_protocol: ConsensusProtocol,
     ) -> Data<VerifiedBlock> {
-        let empty_transactions = Vec::new();
-        let merkle_root = match consensus_protocol {
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => {
-                TransactionsCommitment::new_from_transactions(&empty_transactions)
-            }
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => TransactionsCommitment::default(),
-        };
         let mut block = VerifiedBlock::new(
             authority,
             round,
@@ -3753,8 +3726,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions,
-            merkle_root,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4318,8 +4291,6 @@ mod tests {
     #[test]
     fn bluestreak_reachability_follows_unprovable_certificate() {
         let dag_state = open_test_dag_state_for("bluestreak", 0);
-        let empty_transactions = Vec::new();
-        let commitment = TransactionsCommitment::new_from_transactions(&empty_transactions);
 
         let mut leader = VerifiedBlock::new(
             1,
@@ -4328,8 +4299,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions.clone(),
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4345,8 +4316,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions.clone(),
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4361,8 +4332,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions.clone(),
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4377,8 +4348,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions,
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4403,8 +4374,6 @@ mod tests {
     #[test]
     fn bluestreak_marks_waiting_vertices_clean_when_leader_arrives_late() {
         let dag_state = open_test_dag_state_for("bluestreak", 0);
-        let empty_transactions = Vec::new();
-        let commitment = TransactionsCommitment::new_from_transactions(&empty_transactions);
 
         let make_bluestreak_block =
             |authority: AuthorityIndex,
@@ -4419,7 +4388,7 @@ mod tests {
                     0,
                     SignatureBytes::default(),
                     Vec::new(),
-                    commitment,
+                    None,
                     None,
                     None,
                     None,

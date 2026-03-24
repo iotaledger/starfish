@@ -610,7 +610,7 @@ mod tests {
 
     use crate::{
         config::{DisseminationMode, StorageBackend},
-        crypto::{SignatureBytes, TransactionsCommitment},
+        crypto::SignatureBytes,
         dag_state::DataSource,
         data::Data,
     };
@@ -643,8 +643,6 @@ mod tests {
         round: RoundNumber,
         parents: Vec<BlockReference>,
     ) -> Data<crate::types::VerifiedBlock> {
-        let empty_transactions = Vec::new();
-        let merkle_root = TransactionsCommitment::new_from_transactions(&empty_transactions);
         let mut block = crate::types::VerifiedBlock::new(
             authority,
             round,
@@ -652,8 +650,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions,
-            merkle_root,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -722,9 +720,6 @@ mod tests {
         let vote_b = make_full_block(2, 2, vec![leader_ref]);
         let vote_c = make_full_block(3, 2, vec![leader_ref]);
 
-        let empty_transactions = Vec::new();
-        let commitment = TransactionsCommitment::new_from_transactions(&empty_transactions);
-
         let mut cert_a = crate::types::VerifiedBlock::new_with_unprovable(
             0,
             3,
@@ -732,8 +727,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions.clone(),
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -749,8 +744,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions.clone(),
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,
@@ -766,8 +761,8 @@ mod tests {
             Vec::new(),
             0,
             SignatureBytes::default(),
-            empty_transactions,
-            commitment,
+            Vec::new(),
+            None,
             None,
             None,
             None,

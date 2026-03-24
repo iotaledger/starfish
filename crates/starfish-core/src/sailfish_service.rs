@@ -552,7 +552,7 @@ mod tests {
                 &[],
                 1,
                 &crate::crypto::SignatureBytes::default(),
-                crate::crypto::TransactionsCommitment::default(),
+                None,
                 None,
             ),
             ..block_ref

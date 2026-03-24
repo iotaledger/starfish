@@ -76,7 +76,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::{SignatureBytes, TransactionsCommitment},
+        crypto::SignatureBytes,
         types::{AckFields, AuthorityIndex, BlockDigest, RoundNumber},
     };
 
@@ -101,18 +101,18 @@ mod tests {
                     &ack_refs,
                     0,
                     &SignatureBytes::default(),
-                    TransactionsCommitment::default(),
+                    None,
                     None,
                 ),
             },
             block_references,
             meta_creation_time_ns: 0,
             signature: SignatureBytes::default(),
-            transactions_commitment: TransactionsCommitment::default(),
-            ack: AckFields {
+            transactions_commitment: None,
+            ack: Some(AckFields {
                 intersection: None,
                 extra_references: ack_refs,
-            },
+            }),
             strong_vote: None,
             bls: None,
             sailfish: None,

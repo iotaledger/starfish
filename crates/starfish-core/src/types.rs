@@ -269,12 +269,14 @@ pub struct BlockHeader {
     pub(crate) meta_creation_time_ns: TimestampNs,
     /// Signature by the block author over the header fields.
     pub(crate) signature: SignatureBytes,
-    /// Merkle root over encoded shards (Starfish) or Blake3 hash over raw
-    /// transactions (Mysticeti).
-    pub(crate) transactions_commitment: TransactionsCommitment,
+    /// Explicit payload commitment stored in the header.
+    /// Starfish-family protocols carry the Merkle root over encoded shards.
+    /// Full-block protocols leave this as `None` and recompute the raw
+    /// transaction hash directly from the payload while verifying.
+    pub(crate) transactions_commitment: Option<TransactionsCommitment>,
 
     // -- Acknowledgment fields (Starfish variants) ----------------------------
-    pub(crate) ack: AckFields,
+    pub(crate) ack: Option<AckFields>,
 
     // -- Protocol-specific extensions -----------------------------------------
     /// StarfishSpeed strong-vote hint mask. `Some(empty)` means a strong vote;
@@ -308,26 +310,36 @@ impl BlockHeader {
     }
 
     pub fn acknowledgment_intersection(&self) -> Option<usize> {
-        self.ack.intersection.map(|start| start as usize)
+        self.ack
+            .as_ref()
+            .and_then(|ack| ack.intersection.map(|start| start as usize))
     }
 
-    pub fn extra_acknowledgment_references(&self) -> &Vec<BlockReference> {
-        &self.ack.extra_references
+    pub fn extra_acknowledgment_references(&self) -> &[BlockReference] {
+        self.ack
+            .as_ref()
+            .map_or(&[], |ack| ack.extra_references.as_slice())
     }
 
     pub fn acknowledgments(&self) -> Vec<BlockReference> {
+        let Some(ack) = self.ack.as_ref() else {
+            return Vec::new();
+        };
         expand_acknowledgments(
             &self.block_references,
-            self.ack.intersection,
-            &self.ack.extra_references,
+            ack.intersection,
+            &ack.extra_references,
         )
     }
 
     pub fn acknowledgment_count(&self) -> usize {
+        let Some(ack) = self.ack.as_ref() else {
+            return 0;
+        };
         count_acknowledgments(
             &self.block_references,
-            self.ack.intersection,
-            &self.ack.extra_references,
+            ack.intersection,
+            &ack.extra_references,
         )
     }
 
@@ -361,12 +373,17 @@ impl BlockHeader {
         Duration::new(secs, nanos as u32)
     }
 
+    /// Returns the stored header commitment. Panics if the field is `None`.
     pub fn merkle_root(&self) -> TransactionsCommitment {
         self.transactions_commitment
+            .expect("transactions_commitment required for this protocol")
     }
 
     pub fn has_empty_payload(&self) -> bool {
-        self.transactions_commitment == TransactionsCommitment::default()
+        match self.transactions_commitment {
+            None => false,
+            Some(tc) => tc == TransactionsCommitment::default(),
+        }
     }
 
     pub fn strong_vote(&self) -> Option<AuthoritySet> {
@@ -700,7 +717,7 @@ impl VerifiedBlock {
         meta_creation_time_ns: TimestampNs,
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
-        merkle_root: TransactionsCommitment,
+        merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         bls: Option<BlsFields>,
         sailfish: Option<SailfishFields>,
@@ -729,7 +746,7 @@ impl VerifiedBlock {
         meta_creation_time_ns: TimestampNs,
         signature: SignatureBytes,
         transactions: Vec<BaseTransaction>,
-        merkle_root: TransactionsCommitment,
+        merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         bls: Option<BlsFields>,
         sailfish: Option<SailfishFields>,
@@ -762,10 +779,10 @@ impl VerifiedBlock {
             meta_creation_time_ns,
             signature,
             transactions_commitment: merkle_root,
-            ack: AckFields {
+            ack: Some(AckFields {
                 intersection: acknowledgment_intersection,
                 extra_references: acknowledgment_references,
-            },
+            }),
             strong_vote,
             bls: bls.map(Box::new),
             sailfish: sailfish.map(Box::new),
@@ -798,18 +815,15 @@ impl VerifiedBlock {
                     &ack_refs,
                     0,
                     &SignatureBytes::default(),
-                    TransactionsCommitment::default(),
+                    None,
                     None,
                 ),
             },
             block_references: block_refs,
             meta_creation_time_ns: 0,
             signature: SignatureBytes::default(),
-            transactions_commitment: TransactionsCommitment::default(),
-            ack: AckFields {
-                intersection: Some(0),
-                extra_references: ack_refs,
-            },
+            transactions_commitment: None,
+            ack: None,
             strong_vote: None,
             bls: None,
             sailfish: None,
@@ -894,28 +908,28 @@ impl VerifiedBlock {
         sailfish: Option<SailfishFields>,
         unprovable_certificate: Option<BlockReference>,
     ) -> Self {
-        let transactions_commitment = match consensus_protocol {
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => {
-                if let Some(ref encoded) = encoded_transactions {
-                    TransactionsCommitment::new_from_encoded_transactions(
-                        encoded,
-                        authority as usize,
-                    )
-                    .0
-                } else {
-                    TransactionsCommitment::default()
-                }
-            }
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => {
-                TransactionsCommitment::new_from_transactions(&transactions)
-            }
+        let supports_acknowledgments = consensus_protocol.supports_acknowledgments();
+        let header_transactions_commitment = if consensus_protocol.supports_acknowledgments() {
+            Some(if let Some(ref encoded) = encoded_transactions {
+                TransactionsCommitment::new_from_encoded_transactions(encoded, authority as usize).0
+            } else {
+                TransactionsCommitment::default()
+            })
+        } else {
+            None
         };
+        let acknowledgment_references = if supports_acknowledgments {
+            acknowledgment_references
+        } else {
+            Vec::new()
+        };
+        let aggregate_dac_sigs = if supports_acknowledgments {
+            aggregate_dac_sigs
+        } else {
+            Vec::new()
+        };
+        let digest_transactions_commitment = header_transactions_commitment
+            .or_else(|| Some(TransactionsCommitment::new_from_transactions(&transactions)));
         let (acknowledgment_intersection, extra_acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
         let acknowledgments = expand_acknowledgments(
@@ -934,7 +948,7 @@ impl VerifiedBlock {
             &block_references,
             &acknowledgments,
             meta_creation_time_ns,
-            transactions_commitment,
+            digest_transactions_commitment,
             strong_vote,
             unprovable_certificate.as_ref(),
         );
@@ -965,20 +979,46 @@ impl VerifiedBlock {
             }
         });
 
-        Self::new_with_unprovable(
-            authority,
-            round,
+        let transaction_data = if transactions.is_empty() {
+            None
+        } else {
+            Some(TransactionData::new(transactions))
+        };
+        let header = BlockHeader {
+            reference: BlockReference {
+                authority,
+                round,
+                digest: BlockDigest::new_without_transactions_with_unprovable(
+                    authority,
+                    round,
+                    &block_references,
+                    &acknowledgments,
+                    meta_creation_time_ns,
+                    &signature,
+                    digest_transactions_commitment,
+                    strong_vote,
+                    unprovable_certificate.as_ref(),
+                ),
+            },
             block_references,
-            acknowledgment_references,
             meta_creation_time_ns,
             signature,
-            transactions,
-            transactions_commitment,
+            transactions_commitment: header_transactions_commitment,
+            ack: supports_acknowledgments.then_some(AckFields {
+                intersection: acknowledgment_intersection,
+                extra_references: extra_acknowledgment_references,
+            }),
             strong_vote,
-            bls,
-            sailfish,
+            bls: bls.map(Box::new),
+            sailfish: sailfish.map(Box::new),
             unprovable_certificate,
-        )
+            serialized: None,
+        };
+
+        Self {
+            header,
+            transaction_data,
+        }
     }
 
     // --- Header accessors (delegate) ---
@@ -999,7 +1039,7 @@ impl VerifiedBlock {
         self.header.acknowledgment_intersection()
     }
 
-    pub fn extra_acknowledgment_references(&self) -> &Vec<BlockReference> {
+    pub fn extra_acknowledgment_references(&self) -> &[BlockReference] {
         self.header.extra_acknowledgment_references()
     }
 
@@ -1161,8 +1201,13 @@ impl VerifiedBlock {
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<Option<ProvableShard>> {
-        let shard = self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
-        self.verify_block_structure(committee, consensus_protocol)?;
+        let (shard, digest_transactions_commitment) =
+            self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
+        self.verify_block_structure(
+            committee,
+            consensus_protocol,
+            digest_transactions_commitment,
+        )?;
         Ok(shard)
     }
 
@@ -1175,61 +1220,56 @@ impl VerifiedBlock {
         own_id: usize,
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
-    ) -> eyre::Result<Option<ProvableShard>> {
-        match consensus_protocol {
-            ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => {
-                let info_length = committee.info_length();
-                let parity_length = committee.len() - info_length;
-                if let Some(td) = self.transaction_data.as_ref() {
-                    if td.transactions.is_empty() && self.header.has_empty_payload() {
-                        return Ok(None);
-                    }
-                    let encoded_transactions =
-                        encoder.encode_transactions(&td.transactions, info_length, parity_length);
-                    let (transactions_commitment, merkle_proof_bytes) =
-                        TransactionsCommitment::new_from_encoded_transactions(
-                            &encoded_transactions,
-                            own_id,
-                        );
-                    ensure!(
-                        transactions_commitment == self.header.transactions_commitment,
-                        "Incorrect Merkle root"
+    ) -> eyre::Result<(Option<ProvableShard>, Option<TransactionsCommitment>)> {
+        if consensus_protocol.supports_acknowledgments() {
+            let Some(header_commitment) = self.header.transactions_commitment else {
+                bail!("Starfish block missing transactions commitment")
+            };
+            let info_length = committee.info_length();
+            let parity_length = committee.len() - info_length;
+            if let Some(td) = self.transaction_data.as_ref() {
+                if td.transactions.is_empty() && self.header.has_empty_payload() {
+                    return Ok((None, Some(header_commitment)));
+                }
+                let encoded_transactions =
+                    encoder.encode_transactions(&td.transactions, info_length, parity_length);
+                let (transactions_commitment, merkle_proof_bytes) =
+                    TransactionsCommitment::new_from_encoded_transactions(
+                        &encoded_transactions,
+                        own_id,
                     );
-                    return Ok(Some(ProvableShard::new(
+                ensure!(
+                    transactions_commitment == header_commitment,
+                    "Incorrect Merkle root"
+                );
+                return Ok((
+                    Some(ProvableShard::new(
                         encoded_transactions[own_id].clone(),
                         own_id,
                         merkle_proof_bytes,
-                        self.header.transactions_commitment,
-                    )));
-                }
-                // Header-only blocks: shard sidecars are verified and carried
-                // externally via `process_standalone_shards`.
+                        header_commitment,
+                    )),
+                    Some(header_commitment),
+                ));
             }
-            ConsensusProtocol::Mysticeti
-            | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::SailfishPlusPlus
-            | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => {
-                let empty_transactions = Vec::new();
-                let empty_transactions_commitment =
-                    TransactionsCommitment::new_from_transactions(&empty_transactions);
-                if let Some(td) = &self.transaction_data {
-                    let transactions_commitment =
-                        TransactionsCommitment::new_from_transactions(&td.transactions);
-                    ensure!(
-                        transactions_commitment == self.header.transactions_commitment,
-                        "Incorrect Merkle root"
-                    );
-                } else if self.header.transactions_commitment == empty_transactions_commitment {
-                    return Ok(None);
-                } else {
-                    bail!("The peer didn't include transactions in block");
-                }
-            }
+            // Header-only blocks: shard sidecars are verified and carried
+            // externally via `process_standalone_shards`.
+            Ok((None, Some(header_commitment)))
+        } else {
+            ensure!(
+                self.header.transactions_commitment.is_none(),
+                "Full-block protocols must not carry transactions_commitment"
+            );
+            let empty_transactions = Vec::new();
+            let transactions = self
+                .transaction_data
+                .as_ref()
+                .map_or(&empty_transactions, |td| &td.transactions);
+            Ok((
+                None,
+                Some(TransactionsCommitment::new_from_transactions(transactions)),
+            ))
         }
-        Ok(None)
     }
 
     /// Verify digest, signature, includes, and threshold clock.
@@ -1237,6 +1277,7 @@ impl VerifiedBlock {
         &self,
         committee: &Committee,
         consensus_protocol: ConsensusProtocol,
+        digest_transactions_commitment: Option<TransactionsCommitment>,
     ) -> eyre::Result<()> {
         let round = self.round();
         if let Some(intersection_start) = self.header.acknowledgment_intersection() {
@@ -1248,6 +1289,16 @@ impl VerifiedBlock {
             );
         }
         let acknowledgments = self.header.acknowledgments();
+        if !consensus_protocol.supports_acknowledgments() {
+            ensure!(
+                self.header.ack.is_none(),
+                "{consensus_protocol:?} blocks must not carry AckFields"
+            );
+            ensure!(
+                acknowledgments.is_empty(),
+                "{consensus_protocol:?} blocks must not carry acknowledgments"
+            );
+        }
         let digest = BlockDigest::new_with_unprovable(
             self.authority(),
             round,
@@ -1255,7 +1306,7 @@ impl VerifiedBlock {
             &acknowledgments,
             self.header.meta_creation_time_ns,
             &self.header.signature,
-            self.header.transactions_commitment,
+            digest_transactions_commitment,
             self.header.strong_vote,
             self.header.unprovable_certificate(),
         );
@@ -1272,7 +1323,9 @@ impl VerifiedBlock {
         if round == GENESIS_ROUND {
             bail!("Genesis block should not go through verification");
         }
-        if let Err(e) = pub_key.verify_signature_in_block(&self.header) {
+        if let Err(e) =
+            pub_key.verify_signature_in_block(&self.header, digest_transactions_commitment)
+        {
             bail!("Block signature verification has failed: {:?}", e);
         }
         for include in &self.header.block_references {
@@ -2216,7 +2269,7 @@ mod tests {
             0,
             SignatureBytes::default(),
             vec![],
-            TransactionsCommitment::default(),
+            None,
             None,
             None,
             None,
@@ -2251,11 +2304,11 @@ mod tests {
             block_references: vec![a],
             meta_creation_time_ns: 0,
             signature: SignatureBytes::default(),
-            transactions_commitment: TransactionsCommitment::default(),
-            ack: AckFields {
+            transactions_commitment: None,
+            ack: Some(AckFields {
                 intersection: None,
                 extra_references: vec![b],
-            },
+            }),
             strong_vote: None,
             bls: None,
             sailfish: None,
@@ -2452,7 +2505,23 @@ mod tests {
     #[test]
     fn rejects_cordial_miners_acknowledgments() {
         let ack_ref = BlockReference::new_test(1, 1);
-        let (mut block, committee) = make_cordial_miners_block(0, 2, vec![ack_ref]);
+        let committee = Committee::new_for_benchmarks(4);
+        let block_references: Vec<_> = (0..committee.quorum_threshold() as AuthorityIndex)
+            .map(|a| BlockReference::new_test(a, 1))
+            .collect();
+        let mut block = VerifiedBlock::new(
+            0,
+            2,
+            block_references,
+            vec![ack_ref],
+            0,
+            SignatureBytes::default(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+        );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
         let err = block
@@ -2467,8 +2536,45 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("CordialMiners blocks must not carry acknowledgments")
+                .contains("CordialMiners blocks must not carry AckFields")
         );
+    }
+
+    #[test]
+    fn bluestreak_blocks_omit_ack_fields() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let authority = committee
+            .authorities()
+            .find(|authority| *authority != committee.elect_leader(1))
+            .unwrap();
+        let block = VerifiedBlock::new_with_signer(
+            authority,
+            2,
+            vec![
+                BlockReference::new_test(authority, 1),
+                BlockReference::new_test(committee.elect_leader(1), 1),
+            ],
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Bluestreak,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(block.header.ack.is_none());
+        assert!(block.acknowledgments().is_empty());
     }
 
     #[test]
@@ -2572,7 +2678,6 @@ mod tests {
             vec![
                 BlockReference::new_test(0, 1),
                 BlockReference::new_test(1, 1),
-                BlockReference::new_test(2, 1),
             ],
             None,
             vec![],
@@ -2618,6 +2723,74 @@ mod tests {
                 ConsensusProtocol::CordialMiners,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn rejects_bluestreak_payload_tampering_without_header_commitment() {
+        let committee = Committee::new_for_benchmarks(4);
+        let signers = Signer::new_for_test(committee.len());
+        let leader = committee.elect_leader(1);
+        let authority = committee
+            .authorities()
+            .find(|authority| *authority != leader)
+            .unwrap();
+        let mut block = VerifiedBlock::new_with_signer(
+            authority,
+            2,
+            vec![
+                BlockReference::new_test(authority, 1),
+                BlockReference::new_test(leader, 1),
+            ],
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![BaseTransaction::Share(Transaction {
+                data: vec![1, 2, 3, 4],
+            })],
+            None,
+            ConsensusProtocol::Bluestreak,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Bluestreak,
+            )
+            .unwrap();
+
+        block
+            .transaction_data
+            .as_mut()
+            .expect("block should carry payload")
+            .transactions[0] = BaseTransaction::Share(Transaction {
+            data: vec![9, 9, 9, 9],
+        });
+
+        let err = block
+            .verify(
+                committee.as_ref(),
+                0,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Bluestreak,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Digest does not match"));
     }
 
     #[test]

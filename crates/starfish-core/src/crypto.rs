@@ -182,7 +182,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
-        merkle_root: TransactionsCommitment,
+        merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
         Self::new_without_transactions_with_unprovable(
@@ -205,7 +205,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
-        merkle_root: TransactionsCommitment,
+        merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&BlockReference>,
     ) -> Self {
@@ -232,7 +232,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
-        transactions_commitment: TransactionsCommitment,
+        transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
         Self::new_with_unprovable(
@@ -255,7 +255,7 @@ impl BlockDigest {
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
         signature: &SignatureBytes,
-        transactions_commitment: TransactionsCommitment,
+        transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&BlockReference>,
     ) -> Self {
@@ -282,7 +282,7 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        transactions_commitment: TransactionsCommitment,
+        transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) {
         authority.crypto_hash(hasher);
@@ -294,7 +294,9 @@ impl BlockDigest {
             block_ref.crypto_hash(hasher);
         }
         meta_creation_time_ns.crypto_hash(hasher);
-        transactions_commitment.crypto_hash(hasher);
+        if let Some(tc) = transactions_commitment {
+            tc.crypto_hash(hasher);
+        }
         // Conditional hashing: only hash when Some for backward compatibility.
         if let Some(mask) = strong_vote {
             CryptoHash::crypto_hash(&mask, hasher);
@@ -474,6 +476,7 @@ impl PublicKey {
     pub fn verify_signature_in_block(
         &self,
         header: &BlockHeader,
+        transactions_commitment: Option<TransactionsCommitment>,
     ) -> Result<(), ed25519_consensus::Error> {
         let signature = Signature::from(header.signature().0);
         let acknowledgments = header.acknowledgments();
@@ -485,7 +488,7 @@ impl PublicKey {
             header.block_references(),
             &acknowledgments,
             header.meta_creation_time_ns(),
-            header.merkle_root(),
+            transactions_commitment,
             header.strong_vote(),
         );
         BlockDigest::hash_unprovable_certificate(&mut hasher, header.unprovable_certificate());
@@ -530,7 +533,7 @@ impl Signer {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        transactions_commitment: TransactionsCommitment,
+        transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> SignatureBytes {
         self.sign_block_with_unprovable(
@@ -552,7 +555,7 @@ impl Signer {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        transactions_commitment: TransactionsCommitment,
+        transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&BlockReference>,
     ) -> SignatureBytes {
