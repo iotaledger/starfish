@@ -13,7 +13,9 @@ use std::{
 
 use ahash::{AHashMap, AHashSet};
 use futures::future::join_all;
+use rand::seq::SliceRandom;
 use reed_solomon_simd::ReedSolomonEncoder;
+use tokio::time::Instant;
 use tokio::{
     select,
     sync::{Notify, mpsc},
@@ -415,6 +417,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     sf.send(SailfishServiceMessage::NoVoteMsg(msg));
                 }
             }
+            NetworkMessage::UnprovableCertificateRequest {
+                leader_ref,
+                known_voters,
+            } => {
+                return self
+                    .handle_unprovable_cert_request(leader_ref, known_voters)
+                    .await;
+            }
         }
         true
     }
@@ -456,6 +466,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             useful_headers_authors,
             useful_shards_authors,
         } = batch;
+
+        tracing::debug!(
+            "Received batch from peer {:?}: source={}, full_blocks={}, headers={}, shards={}",
+            self.peer,
+            source,
+            full_blocks.len(),
+            headers.len(),
+            shards.len()
+        );
 
         // Mark received full blocks as "sent" so we don't re-send them.
         {
@@ -703,8 +722,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, {} new blocks without transactions {:?}",
+            "To be processed after verification from {:?}, source={}, {} new blocks without transactions {:?}",
             self.peer,
+            source,
             new_data_blocks.len(),
             new_data_blocks
         );
@@ -741,9 +761,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if !missing_parents.is_empty() {
                 let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                 tracing::debug!(
-                    "Make request missing parents of header/shard blocks {:?} from peer {:?}",
+                    "Make request missing parents of header/shard blocks {:?} from peer {:?} after source={}",
                     missing_parents,
-                    self.peer
+                    self.peer,
+                    source
                 );
                 self.metrics
                     .block_sync_requests_sent
@@ -851,8 +872,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, {} blocks with transactions {:?}",
+            "To be processed after verification from {:?}, source={}, {} blocks with transactions {:?}",
             self.peer,
+            source,
             verified_data_blocks.len(),
             verified_data_blocks
         );
@@ -886,17 +908,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .await;
             if !missing_parents.is_empty() {
                 tracing::debug!(
-                    "Missing parents when processing block from peer {:?}: {:?}",
+                    "Missing parents when processing block from peer {:?} after source={}: {:?}",
                     self.peer,
+                    source,
                     missing_parents
                 );
             }
             if !missing_parents.is_empty() {
                 let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                 tracing::debug!(
-                    "Make request missing parents of blocks {:?} from peer {:?}",
+                    "Make request missing parents of blocks {:?} from peer {:?} after source={}",
                     missing_parents,
-                    self.peer
+                    self.peer,
+                    source
                 );
                 self.metrics
                     .block_sync_requests_sent
@@ -934,6 +958,22 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 "Received request missing data {:?} from peer {:?}",
                 block_references,
                 self.peer
+            );
+            let available = self
+                .inner
+                .dag_state
+                .get_storage_blocks(&block_references)
+                .into_iter()
+                .flatten()
+                .count();
+            let unavailable = block_references.len().saturating_sub(available);
+            tracing::debug!(
+                "MissingParentsRequest stats for peer {:?}: requested={}, available={}, unavailable={}, serving_allowed={}",
+                self.peer,
+                block_references.len(),
+                available,
+                unavailable,
+                self.inner.dag_state.byzantine_strategy.is_none()
             );
             if self.inner.dissemination_mode == DisseminationMode::PushUseful {
                 if let Some(ck) = self
@@ -1012,6 +1052,43 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
         true
+    }
+
+    /// Respond with voting blocks for a Bluestreak unprovable certificate.
+    /// Returns `true` to continue, `false` to break the connection loop.
+    async fn handle_unprovable_cert_request(
+        &mut self,
+        leader_ref: BlockReference,
+        known_voters: AuthoritySet,
+    ) -> bool {
+        if self.consensus_protocol != ConsensusProtocol::Bluestreak {
+            return true;
+        }
+        // Voting blocks live at leader_ref.round + 1 and reference the leader.
+        let voting_round = leader_ref.round + 1;
+        let voting_blocks = self.inner.dag_state.get_blocks_by_round(voting_round);
+        let missing: Vec<_> = voting_blocks
+            .into_iter()
+            .filter(|b| {
+                !known_voters.contains(b.authority()) && b.block_references().contains(&leader_ref)
+            })
+            .collect();
+        tracing::debug!(
+            "UnprovableCertificateRequest from peer {:?} for leader {}: known_voters={}, serving_blocks={}",
+            self.peer,
+            leader_ref,
+            known_voters.count_ones(),
+            missing.len()
+        );
+        if missing.is_empty() {
+            return true;
+        }
+        let batch = BlockBatch::full_only(DataSource::UnprovableCertificateResponse, missing);
+        self.sender
+            .send(NetworkMessage::Batch(Box::new(batch)))
+            .await
+            .ok()
+            .is_some()
     }
 
     async fn shutdown(self) {
@@ -1485,6 +1562,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_service.clone(),
             sf_service.clone(),
         ));
+        let cert_pull_task = if inner.dag_state.consensus_protocol.is_bluestreak() {
+            Some(handle.spawn(Self::unprovable_cert_pull_task(inner.clone())))
+        } else {
+            None
+        };
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
@@ -1515,7 +1597,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             connections
                 .into_values()
                 .chain([leader_timeout_task, commit_timeout_task, cleanup_task].into_iter())
-                .chain(soft_block_timeout_task),
+                .chain(soft_block_timeout_task)
+                .chain(cert_pull_task),
         )
         .await;
         Arc::try_unwrap(block_fetcher)
@@ -1704,6 +1787,75 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 _stopped = inner.stopped() => {
                     return None;
                 }
+            }
+        }
+    }
+
+    /// Periodically scans for stalled Bluestreak unprovable certificates and
+    /// requests missing voting blocks from random peers.
+    async fn unprovable_cert_pull_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
+        const SCAN_INTERVAL: Duration = Duration::from_millis(200);
+
+        let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
+        let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
+
+        loop {
+            select! {
+                _ = sleep(SCAN_INTERVAL) => {}
+                _ = inner.stopped() => { return None; }
+            }
+
+            let pending = inner.dag_state.pending_unprovable_certificates();
+            let now = Instant::now();
+
+            // Prune tracking maps for leaders no longer pending.
+            first_seen.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
+            last_requested.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
+
+            for (leader_ref, known_voters) in &pending {
+                // Must have been waiting >= SCAN_INTERVAL before first request.
+                let first = first_seen.entry(*leader_ref).or_insert(now);
+                if now.duration_since(*first) < SCAN_INTERVAL {
+                    continue;
+                }
+                // Rate limit: one request per leader per interval.
+                if let Some(last) = last_requested.get(leader_ref) {
+                    if now.duration_since(*last) < SCAN_INTERVAL {
+                        continue;
+                    }
+                }
+
+                // Pick up to 5 random connected peers.
+                let senders: Vec<_> = {
+                    let peer_senders = inner.peer_senders.read();
+                    let mut candidates: Vec<AuthorityIndex> =
+                        peer_senders.keys().copied().collect();
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    candidates.shuffle(&mut rand::thread_rng());
+                    let n = candidates.len().min(5);
+                    candidates[..n]
+                        .iter()
+                        .filter_map(|a| peer_senders.get(a).map(|s| (*a, s.clone())))
+                        .collect()
+                };
+
+                tracing::debug!(
+                    "Request unprovable certificate support for leader {} from {} peers (known_voters={})",
+                    leader_ref,
+                    senders.len(),
+                    known_voters.count_ones()
+                );
+                for (_peer, sender) in &senders {
+                    let msg = NetworkMessage::UnprovableCertificateRequest {
+                        leader_ref: *leader_ref,
+                        known_voters: *known_voters,
+                    };
+                    let _ = sender.send(msg).await;
+                }
+
+                last_requested.insert(*leader_ref, now);
             }
         }
     }

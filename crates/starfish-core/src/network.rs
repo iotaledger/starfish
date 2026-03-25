@@ -163,6 +163,13 @@ pub enum NetworkMessage {
     SailfishTimeout(SailfishTimeoutMsg),
     /// SailfishPlusPlus: Signed no-vote message for leader skip proof.
     SailfishNoVote(SailfishNoVoteMsg),
+    /// Bluestreak: request voting blocks for an unprovable certificate.
+    /// Carries the leader reference and a bitmask of authorities whose
+    /// voting blocks the requester already has.
+    UnprovableCertificateRequest {
+        leader_ref: BlockReference,
+        known_voters: AuthoritySet,
+    },
 }
 
 impl NetworkMessage {
@@ -180,6 +187,7 @@ impl NetworkMessage {
             },
             Self::SailfishTimeout(_) => "sailfish_timeout",
             Self::SailfishNoVote(_) => "sailfish_no_vote",
+            Self::UnprovableCertificateRequest { .. } => "unprovable_cert_request",
         }
     }
 }

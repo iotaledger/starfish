@@ -73,6 +73,8 @@ pub enum DataSource {
     OwnBlock,
     /// Data loaded from storage during recovery.
     Recover,
+    /// Response to UnprovableCertificateRequest (Bluestreak voting blocks).
+    UnprovableCertificateResponse,
 }
 
 impl DataSource {
@@ -85,6 +87,7 @@ impl DataSource {
             Self::ShardReconstructor => "shard_reconstructor",
             Self::OwnBlock => "own_block",
             Self::Recover => "recover",
+            Self::UnprovableCertificateResponse => "unprovable_certificate_response",
         }
     }
 }
@@ -824,6 +827,26 @@ impl DagState {
         self.dag_state_inner
             .write()
             .update_pending_unavailable(pending);
+    }
+
+    /// Returns leaders with non-empty waiting blocks (unprovable certificates
+    /// not yet resolved) and the `AuthoritySet` of authorities whose voting
+    /// blocks we already have for each leader.
+    pub fn pending_unprovable_certificates(&self) -> Vec<(BlockReference, AuthoritySet)> {
+        let inner = self.dag_state_inner.read();
+        inner
+            .bluestreak_certificate_state
+            .iter()
+            .filter(|(_, state)| !state.waiting_blocks.is_empty())
+            .map(|(leader_ref, _)| {
+                let known_voters = inner
+                    .leader_vote_support
+                    .get(leader_ref)
+                    .map(|agg| agg.votes)
+                    .unwrap_or_default();
+                (*leader_ref, known_voters)
+            })
+            .collect()
     }
 
     pub fn insert_block_bounds(

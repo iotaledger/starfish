@@ -489,6 +489,11 @@ impl<H: BlockHandler> Core<H> {
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
+            tracing::debug!(
+                "Cannot construct block in round {}: clean parent quorum missing for previous round {}",
+                clock_round,
+                clock_round - 1
+            );
             return None;
         }
 
@@ -547,6 +552,13 @@ impl<H: BlockHandler> Core<H> {
             && block_references.is_empty()
             && !allows_minimal_refs
         {
+            tracing::debug!(
+                "Cannot construct block in round {}: no usable clean parent refs after filtering. raw_refs={:?}, reason={}, is_current_leader={}",
+                clock_round,
+                raw_refs,
+                reason,
+                is_current_leader
+            );
             for r in raw_refs {
                 self.pending.push(MetaTransaction::Include(r));
             }
@@ -688,7 +700,20 @@ impl<H: BlockHandler> Core<H> {
 
         // Dual-DAG protocols: filter parents to only include clean blocks.
         if self.dag_state.consensus_protocol.uses_dual_dag() {
+            let before = block_references.clone();
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
+            let filtered_out_refs: Vec<_> = before
+                .into_iter()
+                .filter(|r| !block_references.contains(r))
+                .collect();
+            if !filtered_out_refs.is_empty() {
+                tracing::debug!(
+                    "Filtered non-clean parent refs for block round {}: kept={:?}, dropped={:?}",
+                    block_round,
+                    block_references,
+                    filtered_out_refs
+                );
+            }
         }
 
         // Dual-DAG leaders: verify the filtered parent set, together with
@@ -722,6 +747,16 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
             if !self.committee.is_quorum(prev_round_stake) {
+                tracing::debug!(
+                    "Insufficient clean parent stake for block round {}: prev_round={}, prev_round_stake={}, filtered_refs={:?}, raw_refs={:?}, own_prev_present={}, is_compressed_non_leader={}",
+                    block_round,
+                    prev_round,
+                    prev_round_stake,
+                    block_references,
+                    raw_refs,
+                    seen.contains(self.authority),
+                    is_compressed_non_leader
+                );
                 return (transactions, vec![], raw_refs);
             }
         }
