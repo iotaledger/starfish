@@ -11,6 +11,7 @@ use std::{
 };
 
 use flate2::read::GzDecoder;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::time::{self, Instant};
 
 use crate::{
@@ -178,8 +179,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let mut successes = Vec::new();
         let mut lost_instances = Vec::new();
 
-        for ((instance, _), handle) in instances.into_iter().zip(handles) {
-            match handle.await {
+        let mut pending: FuturesUnordered<_> = instances
+            .into_iter()
+            .zip(handles)
+            .map(|((instance, _), handle)| async move { (instance, handle.await) })
+            .collect();
+
+        while let Some((instance, join_result)) = pending.next().await {
+            match join_result {
                 Ok(Ok(output)) => successes.push((instance, output)),
                 Ok(Err(error)) => {
                     display::error(format!("{stage} failed on {}: {error}", instance.main_ip));
@@ -220,8 +227,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let mut successes = Vec::new();
         let mut lost_instances = Vec::new();
 
-        for ((instance, _), handle) in instances.into_iter().zip(handles) {
-            match handle.await {
+        let mut pending: FuturesUnordered<_> = instances
+            .into_iter()
+            .zip(handles)
+            .map(|((instance, _), handle)| async move { (instance, handle.await) })
+            .collect();
+
+        while let Some((instance, join_result)) = pending.next().await {
+            match join_result {
                 Ok(Ok(_)) => successes.push(instance),
                 Ok(Err(error)) => {
                     if matches!(
@@ -712,19 +725,21 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let mut metrics_interval = time::interval(self.settings.scrape_interval);
+        metrics_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         metrics_interval.tick().await; // The first tick returns immediately.
 
         let faults_type = parameters.settings.faults.clone();
         let mut faults_schedule = CrashRecoverySchedule::new(faults_type, nodes.clone());
         let mut faults_interval = time::interval(self.settings.faults.crash_interval());
+        faults_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         faults_interval.tick().await; // The first tick returns immediately.
 
         let start = Instant::now();
         loop {
             tokio::select! {
                 // Scrape metrics.
-                now = metrics_interval.tick() => {
-                    let elapsed = now.duration_since(start).as_secs_f64().ceil() as u64;
+                _ = metrics_interval.tick() => {
+                    let elapsed = start.elapsed().as_secs_f64().ceil() as u64;
                     display::status(format!("{elapsed}s"));
 
                     let mut instances = metrics_commands.clone();

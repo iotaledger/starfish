@@ -2678,6 +2678,7 @@ mod tests {
             vec![
                 BlockReference::new_test(0, 1),
                 BlockReference::new_test(1, 1),
+                BlockReference::new_test(2, 1),
             ],
             None,
             vec![],

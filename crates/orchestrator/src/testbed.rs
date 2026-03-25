@@ -427,12 +427,13 @@ impl<C: ServerProviderClient> Testbed<C> {
         let instances_ids: Vec<_> = instances.map(|x| x.id.clone()).collect();
 
         let mut interval = time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         interval.tick().await; // The first tick returns immediately.
 
         let start = Instant::now();
         loop {
-            let now = interval.tick().await;
-            let elapsed = now.duration_since(start).as_secs_f64().ceil() as u64;
+            interval.tick().await;
+            let elapsed = start.elapsed().as_secs_f64().ceil() as u64;
             display::status(format!("{elapsed}s"));
 
             let instances = self.client.list_instances().await?;
