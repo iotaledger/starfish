@@ -298,6 +298,18 @@ impl Settings {
         self.parse_monitoring_server().and_then(|(user, _)| user)
     }
 
+    /// Derive the Pushgateway URL from the external monitoring server, if
+    /// configured. For cloud-managed monitoring the URL is derived later
+    /// from the allocated instance IP.
+    pub fn external_pushgateway_url(&self) -> Option<String> {
+        let (_, host) = self.parse_monitoring_server()?;
+        Some(format!(
+            "http://{}:{}",
+            host,
+            crate::monitor::Pushgateway::DEFAULT_PORT
+        ))
+    }
+
     /// Whether Prometheus should scrape validator public IPs from the
     /// monitoring host.
     pub fn monitoring_scrape_over_public_ip(&self) -> bool {

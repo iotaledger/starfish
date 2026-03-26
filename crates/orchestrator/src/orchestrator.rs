@@ -707,11 +707,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<MeasurementsCollection> {
         display::action(format!(
-            "Scraping metrics (at least {}s)",
+            "Collecting metrics (at least {}s)",
             self.settings.benchmark_duration.as_secs()
         ));
 
-        let (nodes, _) = self.select_instances(parameters)?;
+        let (nodes, monitoring_instance) = self.select_instances(parameters)?;
         let mut killed_nodes: Vec<Instance> = Vec::new();
 
         let node_indices: HashMap<_, _> = nodes
@@ -722,6 +722,27 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let metrics_commands = self
             .protocol_commands
             .nodes_metrics_command(nodes.clone(), parameters);
+
+        // Derive the Pushgateway URL for pull-from-gateway collection.
+        let pushgateway_url: Option<String> = self
+            .settings
+            .external_pushgateway_url()
+            .or_else(|| {
+                monitoring_instance.map(|inst| {
+                    format!(
+                        "http://{}:{}",
+                        inst.main_ip,
+                        crate::monitor::Pushgateway::DEFAULT_PORT,
+                    )
+                })
+            });
+        let http_client = pushgateway_url.as_ref().map(|_| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Failed to build HTTP client for Pushgateway")
+        });
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let mut metrics_interval = time::interval(self.settings.scrape_interval);
@@ -742,29 +763,59 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     let elapsed = start.elapsed().as_secs_f64().ceil() as u64;
                     display::status(format!("{elapsed}s"));
 
-                    let mut instances = metrics_commands.clone();
-                    instances.retain(|(instance, _)| !killed_nodes.contains(instance));
-
-                    let stdio = self
-                        .execute_per_instance_best_effort(
-                            instances,
-                            CommandContext::default(),
-                            "Metrics scrape",
-                        )
-                        .await;
-                    if stdio.is_empty() {
-                        display::warn(
-                            "All metrics scrapes failed for this \
-                             interval; continuing benchmark",
-                        );
+                    // Try Pushgateway first (single HTTP GET), fall back to SSH+curl.
+                    let mut got_pushgateway = false;
+                    if let (Some(url), Some(client)) = (&pushgateway_url, &http_client) {
+                        match client.get(format!("{url}/metrics")).send().await {
+                            Ok(resp) => match resp.text().await {
+                                Ok(text) => {
+                                    let per_validator =
+                                        Measurement::from_pushgateway_response::<P>(&text);
+                                    got_pushgateway = !per_validator.is_empty();
+                                    for (i, measurements) in per_validator {
+                                        for (label, measurement) in measurements {
+                                            aggregator.add(i, label, measurement);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    display::warn(
+                                        format!("Pushgateway response read failed: {e}"),
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                display::warn(format!("Pushgateway request failed: {e}"));
+                            }
+                        }
                     }
 
-                    for (instance, (stdout, _stderr)) in &stdio {
-                        let Some(i) = node_indices.get(&instance.id).copied() else {
-                            continue;
-                        };
-                        for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
-                            aggregator.add(i, label, measurement);
+                    // Fall back to SSH+curl when Pushgateway is unavailable.
+                    if !got_pushgateway {
+                        let mut instances = metrics_commands.clone();
+                        instances.retain(|(instance, _)| !killed_nodes.contains(instance));
+
+                        let stdio = self
+                            .execute_per_instance_best_effort(
+                                instances,
+                                CommandContext::default(),
+                                "Metrics scrape",
+                            )
+                            .await;
+                        if stdio.is_empty() {
+                            display::warn(
+                                "All metrics scrapes failed for this \
+                                 interval; continuing benchmark",
+                            );
+                        }
+
+                        for (instance, (stdout, _stderr)) in &stdio {
+                            let Some(i) = node_indices.get(&instance.id).copied() else {
+                                continue;
+                            };
+                            for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                                aggregator.add(i, label, measurement);
+                            }
                         }
                     }
 
@@ -802,6 +853,50 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         display::done();
         Ok(aggregator)
+    }
+
+    /// Measure total database size on each node (in bytes).
+    async fn measure_db_sizes(&mut self, nodes: &[Instance]) -> Vec<u64> {
+        display::action("Measuring database sizes");
+
+        let db_dirs = self.protocol_commands.db_directories();
+        if db_dirs.is_empty() {
+            display::done();
+            return vec![0; nodes.len()];
+        }
+
+        let pattern = db_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd = format!(
+            "du -sb {pattern} 2>/dev/null | awk '{{s+=$1}} END {{print s+0}}'"
+        );
+        let commands: Vec<_> = nodes
+            .iter()
+            .map(|node| (node.clone(), cmd.clone()))
+            .collect();
+
+        let stdio = self
+            .execute_per_instance_best_effort(commands, CommandContext::default(), "DB size")
+            .await;
+
+        let node_indices: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.clone(), index))
+            .collect();
+        let mut sizes = vec![0; nodes.len()];
+        for (instance, (stdout, _)) in stdio {
+            let Some(index) = node_indices.get(&instance.id).copied() else {
+                continue;
+            };
+            sizes[index] = stdout.trim().parse::<u64>().unwrap_or(0);
+        }
+
+        display::done();
+        sizes
     }
 
     /// Download the log files from the nodes.
@@ -928,7 +1023,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
 
         // Wait for the benchmark to terminate. Then save the results.
-        let aggregator = self.run(parameters).await?;
+        let mut aggregator = self.run(parameters).await?;
+
+        // Measure database sizes before cleanup deletes the storage.
+        let db_sizes = self.measure_db_sizes(&selected_nodes).await;
+        aggregator.set_db_sizes(db_sizes);
 
         // Kill the nodes (without deleting the log files).
         self.cleanup(false).await?;

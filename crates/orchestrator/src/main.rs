@@ -828,7 +828,8 @@ async fn run<C: ServerProviderClient>(
                     .await
                     .wrap_err("Failed to load testbed setup commands")?;
 
-                let protocol_commands = Protocol::new(&settings);
+                let pushgateway_url = settings.external_pushgateway_url();
+                let protocol_commands = Protocol::new(&settings, pushgateway_url);
                 Orchestrator::new(
                     settings,
                     instances,
@@ -993,7 +994,8 @@ async fn run<C: ServerProviderClient>(
                     .await
                     .wrap_err("Failed to load testbed setup commands")?;
 
-                let protocol_commands = Protocol::new(&settings);
+                let pushgateway_url = settings.external_pushgateway_url();
+                let protocol_commands = Protocol::new(&settings, pushgateway_url);
                 Orchestrator::new(
                     settings,
                     instances,

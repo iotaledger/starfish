@@ -8,7 +8,7 @@ NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, bluestreak
-CONSENSUS=${CONSENSUS:-mysticeti-bls}
+CONSENSUS=${CONSENSUS:-starfish}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -224,8 +224,6 @@ fi
 NETWORK_BASE_IP="${SUBNET%/*}"
 PROMETHEUS_IP=$(ipv4_add "$NETWORK_BASE_IP" 2)
 GRAFANA_IP=$(ipv4_add "$NETWORK_BASE_IP" 3)
-NODE_EXPORTER_IP=$(ipv4_add "$NETWORK_BASE_IP" 4)
-CADVISOR_IP=$(ipv4_add "$NETWORK_BASE_IP" 5)
 
 if (( NUM_NODES < 1 || NUM_NODES > 256 )); then
     echo -e \
@@ -429,12 +427,6 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['prometheus:9090']
-  - job_name: 'node-exporter'
-    static_configs:
-      - targets: ['node-exporter:9100']
-  - job_name: 'cadvisor'
-    static_configs:
-      - targets: ['cadvisor:8080']
   - job_name: 'starfish-metrics'
     static_configs:
 EOH
@@ -512,33 +504,6 @@ services:
         ipv4_address: $GRAFANA_IP
     restart: unless-stopped
 
-  node-exporter:
-    image: prom/node-exporter:latest
-    pid: "host"
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--path.rootfs=/rootfs'
-      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
-    networks:
-      starfish-net:
-        ipv4_address: $NODE_EXPORTER_IP
-    restart: unless-stopped
-
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-    networks:
-      starfish-net:
-        ipv4_address: $CADVISOR_IP
-    restart: unless-stopped
 EOH
 
     # Node services

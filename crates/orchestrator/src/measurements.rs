@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     fs,
     io::BufRead,
@@ -209,6 +209,89 @@ impl Measurement {
     pub fn average_latency(&self) -> Duration {
         self.sum.checked_div(self.count as u32).unwrap_or_default()
     }
+
+    /// Parse metrics from a Pushgateway combined response, grouping by
+    /// the `instance` label to produce per-validator measurements.
+    pub fn from_pushgateway_response<M: ProtocolMetrics>(
+        text: &str,
+    ) -> HashMap<usize, HashMap<Label, Self>> {
+        let br = std::io::BufReader::new(text.as_bytes());
+        let parsed = Scrape::parse(br.lines()).unwrap();
+
+        // Group samples by instance (e.g. "node-0", "node-1").
+        let mut by_instance: HashMap<String, Vec<&prometheus_parse::Sample>> = HashMap::new();
+        for sample in &parsed.samples {
+            let instance = sample
+                .labels
+                .get("instance")
+                .or_else(|| sample.labels.get("exported_instance"))
+                .map(str::to_owned)
+                .unwrap_or_default();
+            by_instance.entry(instance).or_default().push(sample);
+        }
+
+        let mut result = HashMap::new();
+        for (instance, samples) in by_instance {
+            let Some(idx) =
+                instance.strip_prefix("node-").and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+
+            // Reconstruct per-validator Prometheus text for the existing parser.
+            let mut lines = Vec::new();
+            let mut emitted_types = HashSet::new();
+            for sample in &samples {
+                let metric_type = match sample.value {
+                    prometheus_parse::Value::Counter(_) => "counter",
+                    prometheus_parse::Value::Gauge(_) => "gauge",
+                    prometheus_parse::Value::Untyped(_) => "untyped",
+                    _ => continue,
+                };
+                if emitted_types.insert(sample.metric.clone()) {
+                    lines.push(format!("# TYPE {} {metric_type}", sample.metric));
+                }
+
+                let labels_str: String = sample
+                    .labels
+                    .iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "instance"
+                                | "exported_instance"
+                                | "exported_job"
+                                | "job"
+                                | "push_time_seconds"
+                        )
+                    })
+                    .map(|(k, v)| format!("{k}=\"{v}\""))
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                let value = match sample.value {
+                    prometheus_parse::Value::Counter(v)
+                    | prometheus_parse::Value::Gauge(v)
+                    | prometheus_parse::Value::Untyped(v) => v,
+                    _ => continue,
+                };
+
+                if labels_str.is_empty() {
+                    lines.push(format!("{} {value}", sample.metric));
+                } else {
+                    lines.push(format!("{}{{{labels_str}}} {value}", sample.metric));
+                }
+            }
+
+            let text = lines.join("\n");
+            let measurements = Self::from_prometheus::<M>(&text);
+            if !measurements.is_empty() {
+                result.insert(idx, measurements);
+            }
+        }
+
+        result
+    }
 }
 
 /// The identifier of the scrapers collecting the prometheus metrics.
@@ -220,6 +303,9 @@ pub struct MeasurementsCollection {
     pub parameters: BenchmarkParameters,
     /// The data collected by each scraper.
     pub data: HashMap<Label, HashMap<ScraperId, Vec<Measurement>>>,
+    /// Database sizes in bytes per validator, measured after the benchmark.
+    #[serde(default)]
+    pub db_sizes: Vec<u64>,
 }
 
 impl MeasurementsCollection {
@@ -231,6 +317,7 @@ impl MeasurementsCollection {
         Self {
             parameters,
             data: HashMap::new(),
+            db_sizes: Vec::new(),
         }
     }
 
@@ -249,6 +336,10 @@ impl MeasurementsCollection {
             .entry(scraper_id)
             .or_default()
             .push(measurement);
+    }
+
+    pub fn set_db_sizes(&mut self, db_sizes: Vec<u64>) {
+        self.db_sizes = db_sizes;
     }
 
     /// Get all labels.
@@ -384,6 +475,10 @@ impl MeasurementsCollection {
             .collect()
     }
 
+    fn db_size_samples(&self) -> Vec<f64> {
+        self.db_sizes.iter().map(|size| *size as f64).collect()
+    }
+
     pub fn benchmark_run_summary(&self) -> BenchmarkRunSummary {
         let duration_secs = self.benchmark_duration().as_secs_f64();
         let tps = self.tps();
@@ -426,6 +521,7 @@ impl MeasurementsCollection {
             bandwidth_efficiency: Self::percentile_summary(&efficiency_samples),
             bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
             cpu_cores: Self::percentile_summary(&self.cpu_samples()),
+            db_size_bytes: Self::percentile_summary(&self.db_size_samples()),
         }
     }
 
@@ -502,6 +598,15 @@ impl MeasurementsCollection {
                 summary.cpu_cores.p25,
                 summary.cpu_cores.p50,
                 summary.cpu_cores.p75
+            )
+        ]);
+        table.add_row(row![
+            b->"DB size:",
+            format!(
+                "p25={:.0} B, p50={:.0} B, p75={:.0} B",
+                summary.db_size_bytes.p25,
+                summary.db_size_bytes.p50,
+                summary.db_size_bytes.p75
             )
         ]);
 
@@ -709,6 +814,7 @@ process_cpu_seconds_total 320
         for (label, measurement) in measurements {
             aggregator.add(0, label, measurement);
         }
+        aggregator.set_db_sizes(vec![10_000, 20_000, 30_000]);
 
         let summary = aggregator.benchmark_run_summary();
         assert_eq!(summary.protocol, "starfish");
@@ -723,8 +829,43 @@ process_cpu_seconds_total 320
         assert_eq!(summary.tps, 200.0);
         assert_eq!(summary.bps, 5.0);
         assert_eq!(summary.bandwidth_per_round_bytes.p50, 6_000.0);
+        assert_eq!(summary.db_size_bytes.p25, 15_000.0);
+        assert_eq!(summary.db_size_bytes.p50, 20_000.0);
+        assert_eq!(summary.db_size_bytes.p75, 25_000.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pushgateway_parse_groups_metrics_by_instance() {
+        let report = r#"
+# TYPE benchmark_duration counter
+benchmark_duration{instance="node-0"} 10
+benchmark_duration{instance="node-1"} 20
+# TYPE bytes_sent_total counter
+bytes_sent_total{instance="node-0"} 100
+bytes_sent_total{instance="node-1"} 300
+        "#;
+
+        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(report);
+
+        assert_eq!(measurements.len(), 2);
+        assert_eq!(
+            measurements[&0]["bytes_sent_total"].count,
+            100
+        );
+        assert_eq!(
+            measurements[&0]["bytes_sent_total"].timestamp,
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            measurements[&1]["bytes_sent_total"].count,
+            300
+        );
+        assert_eq!(
+            measurements[&1]["bytes_sent_total"].timestamp,
+            Duration::from_secs(20)
+        );
     }
 
     #[test]

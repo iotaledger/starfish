@@ -90,6 +90,7 @@ impl ProtocolParameters for StarfishParameters {}
 
 pub struct StarfishProtocol {
     working_dir: PathBuf,
+    pushgateway_url: Option<String>,
 }
 
 impl ProtocolCommands for StarfishProtocol {
@@ -193,6 +194,11 @@ impl ProtocolCommands for StarfishProtocol {
                     command_parts.push(format!("--byzantine-strategy {}", byzantine_strategy));
                 }
 
+                // Add pushgateway URL for push-based metrics collection
+                if let Some(ref url) = self.pushgateway_url {
+                    command_parts.push(format!("--pushgateway-url {url}"));
+                }
+
                 // Add tracing if enabled
                 if parameters.enable_tracing {
                     // Add environment variables for tracing
@@ -253,9 +259,10 @@ impl ProtocolMetrics for StarfishProtocol {
 
 impl StarfishProtocol {
     /// Make a new instance of the Mysticeti protocol commands generator.
-    pub fn new(settings: &Settings) -> Self {
+    pub fn new(settings: &Settings, pushgateway_url: Option<String>) -> Self {
         Self {
             working_dir: settings.working_dir.clone(),
+            pushgateway_url,
         }
     }
 }
