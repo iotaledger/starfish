@@ -490,7 +490,8 @@ impl<H: BlockHandler> Core<H> {
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
             tracing::debug!(
-                "Cannot construct block in round {}: clean parent quorum missing for previous round {}",
+                "Cannot construct block in round {}: clean parent quorum \
+                 missing for previous round {}",
                 clock_round,
                 clock_round - 1
             );
@@ -553,7 +554,9 @@ impl<H: BlockHandler> Core<H> {
             && !allows_minimal_refs
         {
             tracing::debug!(
-                "Cannot construct block in round {}: no usable clean parent refs after filtering. raw_refs={:?}, reason={}, is_current_leader={}",
+                "Cannot construct block in round {}: no usable clean parent \
+                 refs after filtering. raw_refs={:?}, reason={}, \
+                 is_current_leader={}",
                 clock_round,
                 raw_refs,
                 reason,
@@ -748,7 +751,10 @@ impl<H: BlockHandler> Core<H> {
             }
             if !self.committee.is_quorum(prev_round_stake) {
                 tracing::debug!(
-                    "Insufficient clean parent stake for block round {}: prev_round={}, prev_round_stake={}, filtered_refs={:?}, raw_refs={:?}, own_prev_present={}, is_compressed_non_leader={}",
+                    "Insufficient clean parent stake for block round {}: \
+                     prev_round={}, prev_round_stake={}, filtered_refs={:?}, \
+                     raw_refs={:?}, own_prev_present={}, \
+                     is_compressed_non_leader={}",
                     block_round,
                     prev_round,
                     prev_round_stake,

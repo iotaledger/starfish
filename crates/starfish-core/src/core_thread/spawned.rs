@@ -51,6 +51,7 @@ enum CoreThreadCommand {
         DataSource,
         oneshot::Sender<()>,
     ),
+    MissingParentReferences(oneshot::Sender<Vec<BlockReference>>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     /// Attempt block creation with relaxed readiness checks (StarfishSpeed soft
     /// timeout).
@@ -129,6 +130,13 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
     ) {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::AddTransactionData(items, source, sender))
+            .await;
+        receiver.await.expect("core thread is not expected to stop")
+    }
+
+    pub async fn missing_parent_references(&self) -> Vec<BlockReference> {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::MissingParentReferences(sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
     }
@@ -268,6 +276,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     self.syncer.add_transaction_data(items, source);
                     sender.send(()).ok();
                 }
+                CoreThreadCommand::MissingParentReferences(sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["missing_parent_references"])
+                        .inc();
+                    let refs = self.syncer.missing_parent_references();
+                    sender.send(refs).ok();
+                }
                 CoreThreadCommand::ForceNewBlock(round, sender) => {
                     metrics
                         .core_thread_tasks_total
@@ -378,5 +394,150 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
             }
         }
         self.syncer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ahash::AHashSet;
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        block_handler::BlockHandler,
+        committee::Committee,
+        config::{DisseminationMode, NodePrivateConfig, StorageBackend},
+        consensus::{CommitMetastate, linearizer::CommittedSubDag},
+        core::Core,
+        crypto::Signer,
+        dag_state::{ConsensusProtocol, DagState},
+        metrics::Metrics,
+        types::BaseTransaction,
+    };
+
+    #[derive(Default)]
+    struct TestBlockHandler;
+
+    impl BlockHandler for TestBlockHandler {
+        fn handle_proposal(&mut self, _number_transactions: usize) {}
+
+        fn handle_blocks(&mut self, _require_response: bool) -> Vec<BaseTransaction> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopCommitObserver;
+
+    impl CommitObserver for NoopCommitObserver {
+        fn handle_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
+
+        fn recover_committed(
+            &mut self,
+            _committed: AHashSet<BlockReference>,
+            _committed_leaders_count: usize,
+        ) {
+        }
+
+        fn cleanup(&mut self, _threshold_round: RoundNumber) {}
+    }
+
+    fn open_test_dispatcher() -> CoreThreadDispatcher<TestBlockHandler, bool, NoopCommitObserver> {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some("mysticeti"), None);
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "mysticeti".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (core, _) = Core::open(
+            TestBlockHandler,
+            authority,
+            committee,
+            private_config,
+            metrics.clone(),
+            recovered,
+            None,
+        );
+        let syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None);
+        CoreThreadDispatcher::start(syncer)
+    }
+
+    fn make_mysticeti_block(
+        signers: &[Signer],
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_with_signer(
+            authority,
+            round,
+            block_references,
+            None,
+            vec![],
+            0,
+            &signers[authority as usize],
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            ConsensusProtocol::Mysticeti,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    #[tokio::test]
+    async fn missing_parent_references_snapshot_is_sorted() {
+        let dispatcher = open_test_dispatcher();
+        let signers = Signer::new_for_test(4);
+        let missing_later = BlockReference::new_test(3, 2);
+        let missing_earlier = BlockReference::new_test(2, 1);
+
+        dispatcher
+            .add_blocks(
+                vec![
+                    (
+                        make_mysticeti_block(&signers, 1, 1, vec![missing_later]),
+                        None,
+                    ),
+                    (
+                        make_mysticeti_block(&signers, 2, 1, vec![missing_earlier]),
+                        None,
+                    ),
+                ],
+                DataSource::BlockBundleStreaming,
+            )
+            .await;
+
+        let refs = dispatcher.missing_parent_references().await;
+        assert_eq!(refs, vec![missing_earlier, missing_later]);
+
+        dispatcher.stop();
     }
 }

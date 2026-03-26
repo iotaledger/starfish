@@ -302,6 +302,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     fn create_new_block(&mut self, reason: BlockCreationReason) -> bool {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
+        let previous_proposal_round = self.core.dag_state().proposal_round();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
@@ -341,6 +342,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     signature: sig,
                 }));
             }
+            self.maybe_signal_threshold_round_advance(previous_proposal_round);
             self.signals.new_block_ready();
             self.forced_block_rounds.remove(&block.round());
             return true;
@@ -423,6 +425,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn core(&self) -> &Core<H> {
         &self.core
     }
+
+    pub fn missing_parent_references(&self) -> Vec<BlockReference> {
+        self.core.block_manager().missing_block_references()
+    }
 }
 
 impl SyncerSignals for bool {
@@ -482,6 +488,22 @@ mod tests {
         }
 
         fn cleanup(&mut self, _threshold_round: RoundNumber) {}
+    }
+
+    #[derive(Default)]
+    struct TestSignals {
+        new_block_ready_count: usize,
+        threshold_round_advances: Vec<RoundNumber>,
+    }
+
+    impl SyncerSignals for TestSignals {
+        fn new_block_ready(&mut self) {
+            self.new_block_ready_count += 1;
+        }
+
+        fn threshold_clock_round_advanced(&mut self, round: RoundNumber) {
+            self.threshold_round_advances.push(round);
+        }
     }
 
     fn open_test_syncer_with_future_rounds() -> Syncer<TestBlockHandler, bool, NoopCommitObserver> {
@@ -558,6 +580,103 @@ mod tests {
         syncer
     }
 
+    fn open_test_syncer_where_local_block_advances_round()
+    -> Syncer<TestBlockHandler, TestSignals, NoopCommitObserver> {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some("mysticeti"), None);
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "mysticeti".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            TestBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics.clone(),
+            recovered,
+            None,
+        );
+        let signers = Signer::new_for_test(committee.len());
+
+        let round_1_refs = vec![
+            BlockReference::new_test(0, 0),
+            BlockReference::new_test(1, 0),
+            BlockReference::new_test(2, 0),
+        ];
+        let round_1_blocks = vec![
+            make_mysticeti_block(&signers, 1, 1, round_1_refs.clone()),
+            make_mysticeti_block(&signers, 2, 1, round_1_refs.clone()),
+            make_mysticeti_block(&signers, 3, 1, round_1_refs.clone()),
+        ];
+        let round_2_refs: Vec<_> = round_1_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        let round_2_blocks = vec![
+            make_mysticeti_block(&signers, 1, 2, round_2_refs.clone()),
+            make_mysticeti_block(&signers, 2, 2, round_2_refs.clone()),
+            make_mysticeti_block(&signers, 3, 2, round_2_refs.clone()),
+        ];
+        let round_3_refs: Vec<_> = round_2_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        let round_3_blocks = vec![
+            make_mysticeti_block(&signers, 1, 3, round_3_refs.clone()),
+            make_mysticeti_block(&signers, 2, 3, round_3_refs),
+        ];
+
+        core.add_blocks(
+            round_1_blocks
+                .into_iter()
+                .map(|block| (block, None))
+                .collect(),
+            DataSource::BlockBundleStreaming,
+        );
+        core.add_blocks(
+            round_2_blocks
+                .into_iter()
+                .map(|block| (block, None))
+                .collect(),
+            DataSource::BlockBundleStreaming,
+        );
+        core.add_blocks(
+            round_3_blocks
+                .into_iter()
+                .map(|block| (block, None))
+                .collect(),
+            DataSource::BlockBundleStreaming,
+        );
+        assert_eq!(core.dag_state().proposal_round(), 3);
+        assert_eq!(core.last_proposed(), 0);
+
+        let mut syncer = Syncer::new(
+            core,
+            TestSignals::default(),
+            NoopCommitObserver,
+            metrics,
+            None,
+            None,
+        );
+        syncer.connected_authorities.extend([1, 2, 3]);
+        syncer.subscribed_by_authorities.extend([1, 2, 3]);
+        syncer.recompute_subscriber_stake();
+        syncer
+    }
+
     fn make_mysticeti_block(
         signers: &[Signer],
         authority: AuthorityIndex,
@@ -608,5 +727,21 @@ mod tests {
         assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
         assert_eq!(syncer.core.last_proposed(), 2);
         assert!(!syncer.forced_block_rounds.contains(&2));
+    }
+
+    #[test]
+    fn local_block_creation_signals_round_advance() {
+        let mut syncer = open_test_syncer_where_local_block_advances_round();
+
+        assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
+        assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
+        assert_eq!(syncer.core.last_proposed(), 2);
+        assert!(syncer.signals.threshold_round_advances.is_empty());
+
+        assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
+        assert_eq!(syncer.core.last_proposed(), 3);
+        assert_eq!(syncer.core.dag_state().proposal_round(), 4);
+        assert_eq!(syncer.signals.threshold_round_advances, vec![4]);
+        assert_eq!(syncer.signals.new_block_ready_count, 3);
     }
 }

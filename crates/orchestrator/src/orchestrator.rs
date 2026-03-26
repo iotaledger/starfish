@@ -724,10 +724,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .nodes_metrics_command(nodes.clone(), parameters);
 
         // Derive the Pushgateway URL for pull-from-gateway collection.
-        let pushgateway_url: Option<String> = self
-            .settings
-            .external_pushgateway_url()
-            .or_else(|| {
+        let pushgateway_url: Option<String> =
+            self.settings.external_pushgateway_url().or_else(|| {
                 monitoring_instance.map(|inst| {
                     format!(
                         "http://{}:{}",
@@ -870,9 +868,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        let cmd = format!(
-            "du -sb {pattern} 2>/dev/null | awk '{{s+=$1}} END {{print s+0}}'"
-        );
+        let cmd = format!("du -sb {pattern} 2>/dev/null | awk '{{s+=$1}} END {{print s+0}}'");
         let commands: Vec<_> = nodes
             .iter()
             .map(|node| (node.clone(), cmd.clone()))

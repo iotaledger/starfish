@@ -52,6 +52,8 @@ use crate::{
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
+const RANDOM_REQUEST_PEER_COUNT: usize = 5;
+const MISSING_PARENTS_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -64,6 +66,71 @@ async fn send_network_message_reliably(
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
+}
+
+fn select_random_peers<R>(
+    mut candidates: Vec<AuthorityIndex>,
+    max_peers: usize,
+    rng: &mut R,
+) -> Vec<AuthorityIndex>
+where
+    R: rand::Rng + ?Sized,
+{
+    candidates.shuffle(rng);
+    candidates.truncate(candidates.len().min(max_peers));
+    candidates
+}
+
+fn select_random_peer_senders<H, C>(
+    inner: &Arc<NetworkSyncerInner<H, C>>,
+    max_peers: usize,
+) -> Vec<(AuthorityIndex, mpsc::Sender<NetworkMessage>)>
+where
+    H: BlockHandler,
+    C: CommitObserver,
+{
+    let peer_senders = inner.peer_senders.read();
+    let candidates = select_random_peers(
+        peer_senders.keys().copied().collect(),
+        max_peers,
+        &mut rand::thread_rng(),
+    );
+    candidates
+        .into_iter()
+        .filter_map(|authority| {
+            peer_senders
+                .get(&authority)
+                .map(|sender| (authority, sender.clone()))
+        })
+        .collect()
+}
+
+fn eligible_missing_parent_refs(
+    missing_refs: &[BlockReference],
+    first_seen: &mut AHashMap<BlockReference, Instant>,
+    last_requested: &mut AHashMap<BlockReference, Instant>,
+    now: Instant,
+    retry_interval: Duration,
+) -> Vec<BlockReference> {
+    let pending: AHashSet<_> = missing_refs.iter().copied().collect();
+    first_seen.retain(|block_ref, _| pending.contains(block_ref));
+    last_requested.retain(|block_ref, _| pending.contains(block_ref));
+
+    missing_refs
+        .iter()
+        .filter_map(|block_ref| {
+            let first = first_seen.entry(*block_ref).or_insert(now);
+            if now.duration_since(*first) < retry_interval {
+                return None;
+            }
+            if let Some(last) = last_requested.get(block_ref) {
+                if now.duration_since(*last) < retry_interval {
+                    return None;
+                }
+            }
+            Some(*block_ref)
+        })
+        .collect()
 }
 
 struct FilterForBlocks {
@@ -722,7 +789,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, source={}, {} new blocks without transactions {:?}",
+            "To be processed after verification from {:?}, source={}, {} new \
+             blocks without transactions {:?}",
             self.peer,
             source,
             new_data_blocks.len(),
@@ -761,7 +829,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if !missing_parents.is_empty() {
                 let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                 tracing::debug!(
-                    "Make request missing parents of header/shard blocks {:?} from peer {:?} after source={}",
+                    "Make request missing parents of header/shard blocks {:?} \
+                     from peer {:?} after source={}",
                     missing_parents,
                     self.peer,
                     source
@@ -872,7 +941,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         tracing::debug!(
-            "To be processed after verification from {:?}, source={}, {} blocks with transactions {:?}",
+            "To be processed after verification from {:?}, source={}, {} \
+             blocks with transactions {:?}",
             self.peer,
             source,
             verified_data_blocks.len(),
@@ -917,7 +987,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             if !missing_parents.is_empty() {
                 let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
                 tracing::debug!(
-                    "Make request missing parents of blocks {:?} from peer {:?} after source={}",
+                    "Make request missing parents of blocks {:?} from peer \
+                     {:?} after source={}",
                     missing_parents,
                     self.peer,
                     source
@@ -968,7 +1039,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .count();
             let unavailable = block_references.len().saturating_sub(available);
             tracing::debug!(
-                "MissingParentsRequest stats for peer {:?}: requested={}, available={}, unavailable={}, serving_allowed={}",
+                "MissingParentsRequest stats for peer {:?}: requested={}, \
+                 available={}, unavailable={}, serving_allowed={}",
                 self.peer,
                 block_references.len(),
                 available,
@@ -1074,7 +1146,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             })
             .collect();
         tracing::debug!(
-            "UnprovableCertificateRequest from peer {:?} for leader {}: known_voters={}, serving_blocks={}",
+            "UnprovableCertificateRequest from peer {:?} for leader {}: \
+             known_voters={}, serving_blocks={}",
             self.peer,
             leader_ref,
             known_voters.count_ones(),
@@ -1562,6 +1635,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_service.clone(),
             sf_service.clone(),
         ));
+        let missing_parent_pull_task = handle.spawn(Self::missing_parent_pull_task(
+            inner.clone(),
+            metrics.clone(),
+        ));
         let cert_pull_task = if inner.dag_state.consensus_protocol.is_bluestreak() {
             Some(handle.spawn(Self::unprovable_cert_pull_task(inner.clone())))
         } else {
@@ -1596,7 +1673,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         join_all(
             connections
                 .into_values()
-                .chain([leader_timeout_task, commit_timeout_task, cleanup_task].into_iter())
+                .chain(
+                    [
+                        leader_timeout_task,
+                        commit_timeout_task,
+                        cleanup_task,
+                        missing_parent_pull_task,
+                    ]
+                    .into_iter(),
+                )
                 .chain(soft_block_timeout_task)
                 .chain(cert_pull_task),
         )
@@ -1696,9 +1781,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut armed_round = inner.dag_state.proposal_round().saturating_sub(1);
         loop {
             while inner.dag_state.proposal_round() <= armed_round {
-                let notified = inner.threshold_clock_notify.notified();
+                let threshold_round_advanced = inner.threshold_clock_notify.notified();
+                let own_block_created = inner.block_ready_notify.notified();
                 select! {
-                    _notified = notified => {}
+                    _notified = threshold_round_advanced => {}
+                    _notified = own_block_created => {}
                     _stopped = inner.stopped() => {
                         return None;
                     }
@@ -1791,6 +1878,63 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
+    /// Periodically re-requests block-manager parents that are still missing,
+    /// fanning requests out to a few random peers instead of only the original
+    /// sender.
+    async fn missing_parent_pull_task(
+        inner: Arc<NetworkSyncerInner<H, C>>,
+        metrics: Arc<Metrics>,
+    ) -> Option<()> {
+        let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
+        let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
+
+        loop {
+            select! {
+                _ = sleep(MISSING_PARENTS_RETRY_INTERVAL) => {}
+                _ = inner.stopped() => { return None; }
+            }
+
+            let missing_refs = inner.syncer.missing_parent_references().await;
+            let now = Instant::now();
+            let eligible_refs = eligible_missing_parent_refs(
+                &missing_refs,
+                &mut first_seen,
+                &mut last_requested,
+                now,
+                MISSING_PARENTS_RETRY_INTERVAL,
+            );
+            if eligible_refs.is_empty() {
+                continue;
+            }
+
+            let senders = select_random_peer_senders(&inner, RANDOM_REQUEST_PEER_COUNT);
+            if senders.is_empty() {
+                continue;
+            }
+
+            tracing::debug!(
+                "Retry missing parents {:?} from {} random peers",
+                eligible_refs,
+                senders.len()
+            );
+            for (peer, sender) in &senders {
+                metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&peer.to_string()])
+                    .inc();
+                send_network_message_reliably(
+                    sender,
+                    NetworkMessage::MissingParentsRequest(eligible_refs.clone()),
+                )
+                .await;
+            }
+
+            for block_ref in eligible_refs {
+                last_requested.insert(block_ref, now);
+            }
+        }
+    }
+
     /// Periodically scans for stalled Bluestreak unprovable certificates and
     /// requests missing voting blocks from random peers.
     async fn unprovable_cert_pull_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
@@ -1825,24 +1969,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
 
-                // Pick up to 5 random connected peers.
-                let senders: Vec<_> = {
-                    let peer_senders = inner.peer_senders.read();
-                    let mut candidates: Vec<AuthorityIndex> =
-                        peer_senders.keys().copied().collect();
-                    if candidates.is_empty() {
-                        continue;
-                    }
-                    candidates.shuffle(&mut rand::thread_rng());
-                    let n = candidates.len().min(5);
-                    candidates[..n]
-                        .iter()
-                        .filter_map(|a| peer_senders.get(a).map(|s| (*a, s.clone())))
-                        .collect()
-                };
+                let senders = select_random_peer_senders(&inner, RANDOM_REQUEST_PEER_COUNT);
+                if senders.is_empty() {
+                    continue;
+                }
 
                 tracing::debug!(
-                    "Request unprovable certificate support for leader {} from {} peers (known_voters={})",
+                    "Request unprovable certificate support for leader {} \
+                     from {} peers (known_voters={})",
                     leader_ref,
                     senders.len(),
                     known_voters.count_ones()
@@ -1936,6 +2070,8 @@ impl SyncerSignals for NetworkSyncSignals {
 
 #[cfg(test)]
 mod tests {
+    use rand::{SeedableRng, rngs::StdRng};
+
     use super::*;
     use crate::{
         crypto::SignatureBytes,
@@ -1978,5 +2114,88 @@ mod tests {
 
         assert!(ck.knows_header(&ack_ref));
         assert!(ck.knows_shard(&ack_ref));
+    }
+
+    #[test]
+    fn missing_parent_retry_waits_and_retries_after_interval() {
+        let missing = BlockReference::new_test(3, 7);
+        let now = Instant::now();
+        let mut first_seen = AHashMap::new();
+        let mut last_requested = AHashMap::new();
+
+        assert!(
+            eligible_missing_parent_refs(
+                &[missing],
+                &mut first_seen,
+                &mut last_requested,
+                now,
+                MISSING_PARENTS_RETRY_INTERVAL,
+            )
+            .is_empty()
+        );
+        assert_eq!(first_seen.get(&missing), Some(&now));
+
+        let eligible = eligible_missing_parent_refs(
+            &[missing],
+            &mut first_seen,
+            &mut last_requested,
+            now + MISSING_PARENTS_RETRY_INTERVAL,
+            MISSING_PARENTS_RETRY_INTERVAL,
+        );
+        assert_eq!(eligible, vec![missing]);
+
+        last_requested.insert(missing, now + MISSING_PARENTS_RETRY_INTERVAL);
+        assert!(
+            eligible_missing_parent_refs(
+                &[missing],
+                &mut first_seen,
+                &mut last_requested,
+                now + MISSING_PARENTS_RETRY_INTERVAL + Duration::from_millis(100),
+                MISSING_PARENTS_RETRY_INTERVAL,
+            )
+            .is_empty()
+        );
+
+        let eligible = eligible_missing_parent_refs(
+            &[missing],
+            &mut first_seen,
+            &mut last_requested,
+            now + MISSING_PARENTS_RETRY_INTERVAL * 2,
+            MISSING_PARENTS_RETRY_INTERVAL,
+        );
+        assert_eq!(eligible, vec![missing]);
+    }
+
+    #[test]
+    fn missing_parent_retry_prunes_resolved_refs() {
+        let missing = BlockReference::new_test(1, 9);
+        let now = Instant::now();
+        let mut first_seen = AHashMap::from_iter([(missing, now)]);
+        let mut last_requested = AHashMap::from_iter([(missing, now)]);
+
+        assert!(
+            eligible_missing_parent_refs(
+                &[],
+                &mut first_seen,
+                &mut last_requested,
+                now + MISSING_PARENTS_RETRY_INTERVAL,
+                MISSING_PARENTS_RETRY_INTERVAL,
+            )
+            .is_empty()
+        );
+        assert!(first_seen.is_empty());
+        assert!(last_requested.is_empty());
+    }
+
+    #[test]
+    fn random_peer_selection_is_capped() {
+        let candidates: Vec<AuthorityIndex> = (0..10).collect();
+        let mut rng = StdRng::seed_from_u64(7);
+        let selected = select_random_peers(candidates.clone(), RANDOM_REQUEST_PEER_COUNT, &mut rng);
+        let unique: AHashSet<_> = selected.iter().copied().collect();
+
+        assert_eq!(selected.len(), RANDOM_REQUEST_PEER_COUNT);
+        assert_eq!(unique.len(), selected.len());
+        assert!(selected.iter().all(|peer| candidates.contains(peer)));
     }
 }

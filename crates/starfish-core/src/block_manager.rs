@@ -174,6 +174,17 @@ impl BlockManager {
         &self.missing
     }
 
+    pub fn missing_block_references(&self) -> Vec<BlockReference> {
+        let mut missing: Vec<_> = self
+            .missing
+            .iter()
+            .flat_map(|missing_set| missing_set.iter().copied())
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        missing
+    }
+
     pub fn pending_blocks_count(&self) -> usize {
         self.blocks_pending.len()
     }

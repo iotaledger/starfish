@@ -232,8 +232,9 @@ impl Measurement {
 
         let mut result = HashMap::new();
         for (instance, samples) in by_instance {
-            let Some(idx) =
-                instance.strip_prefix("node-").and_then(|s| s.parse::<usize>().ok())
+            let Some(idx) = instance
+                .strip_prefix("node-")
+                .and_then(|s| s.parse::<usize>().ok())
             else {
                 continue;
             };
@@ -850,18 +851,12 @@ bytes_sent_total{instance="node-1"} 300
         let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(report);
 
         assert_eq!(measurements.len(), 2);
-        assert_eq!(
-            measurements[&0]["bytes_sent_total"].count,
-            100
-        );
+        assert_eq!(measurements[&0]["bytes_sent_total"].count, 100);
         assert_eq!(
             measurements[&0]["bytes_sent_total"].timestamp,
             Duration::from_secs(10)
         );
-        assert_eq!(
-            measurements[&1]["bytes_sent_total"].count,
-            300
-        );
+        assert_eq!(measurements[&1]["bytes_sent_total"].count, 300);
         assert_eq!(
             measurements[&1]["bytes_sent_total"].timestamp,
             Duration::from_secs(20)

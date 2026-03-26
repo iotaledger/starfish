@@ -395,7 +395,10 @@ groups:
             "    honor_labels: true",
             &format!("    scrape_interval: {scrape_secs}s"),
             "    static_configs:",
-            &format!("      - targets: ['localhost:{}']", Pushgateway::DEFAULT_PORT),
+            &format!(
+                "      - targets: ['localhost:{}']",
+                Pushgateway::DEFAULT_PORT
+            ),
         ]
         .join("\n")
     }
