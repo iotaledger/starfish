@@ -879,6 +879,7 @@ impl<H: BlockHandler> Core<H> {
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
         let mut block_references = vec![own_previous];
         let protocol = self.dag_state.consensus_protocol;
+        let is_round_leader = self.committee.elect_leader(clock_round) == self.authority;
         if protocol.uses_bls() {
             if let Some(leader_ref) = voted_leader_ref {
                 if leader_ref != own_previous {
@@ -886,7 +887,17 @@ impl<H: BlockHandler> Core<H> {
                 }
             }
         }
-        block_references.extend(block_references_without_own.iter().cloned());
+        if protocol.uses_bls() && !is_round_leader {
+            let prev_round = clock_round.saturating_sub(1);
+            let prev_round_leader = self.committee.elect_leader(prev_round);
+            block_references.extend(block_references_without_own.iter().copied().filter(
+                |reference| {
+                    reference.round != prev_round || reference.authority != prev_round_leader
+                },
+            ));
+        } else {
+            block_references.extend(block_references_without_own.iter().cloned());
+        }
         let mut seen_references = AHashSet::new();
         block_references.retain(|reference| seen_references.insert(*reference));
 
@@ -1697,5 +1708,73 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0], *own_round_1.reference());
         assert_eq!(refs[1], *leader_round_1.reference());
+    }
+
+    #[test]
+    fn mysticeti_bls_non_leader_prefers_voted_leader_over_pending_equivocation() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("mysticeti-bls"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "mysticeti-bls".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        let own_round_1 = core
+            .try_new_block("new_blocks")
+            .expect("round-1 block should be creatable");
+        let signers = Signer::new_for_test(committee.len());
+        let bls_signers = BlsSigner::new_for_test(committee.len());
+        let voted_leader =
+            make_mysticeti_bls_round_1_block(committee.as_ref(), &signers, &bls_signers, 1);
+        let pending_equivocation = BlockReference::new_test(1, 1);
+
+        assert_ne!(
+            *voted_leader.reference(),
+            pending_equivocation,
+            "test requires a distinct equivocated leader ref"
+        );
+
+        let round_2 = core.build_block(
+            &[pending_equivocation],
+            Some(*voted_leader.reference()),
+            &[],
+            &None,
+            &[],
+            2,
+            0,
+            Some(make_test_round_certificate(&bls_signers, 1)),
+            None,
+        );
+
+        let refs = round_2.block_references();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], *own_round_1.reference());
+        assert_eq!(refs[1], *voted_leader.reference());
+        assert!(!refs.contains(&pending_equivocation));
     }
 }
