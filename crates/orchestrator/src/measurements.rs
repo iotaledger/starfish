@@ -181,6 +181,12 @@ impl Measurement {
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
+                x if x == "dag_highest_round" => match sample.value {
+                    prometheus_parse::Value::Gauge(value) => {
+                        measurement.scalar = value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
                 _ => {
                     measurements.remove(&sample.metric);
                 }
@@ -360,6 +366,22 @@ impl MeasurementsCollection {
             .unwrap_or_default()
     }
 
+    fn latest_measurements_with_scraper_ids(&self, label: &str) -> Vec<(ScraperId, &Measurement)> {
+        self.data
+            .get(label)
+            .map(|data| {
+                data.keys()
+                    .sorted()
+                    .filter_map(|key| {
+                        data.get(key)
+                            .and_then(|samples| samples.last())
+                            .map(|measurement| (*key, measurement))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get the maximum result of a function applied to the measurements.
     fn max_result<T: Default + Ord>(&self, label: &str, function: impl Fn(&Measurement) -> T) -> T {
         self.latest_measurements(label)
@@ -462,6 +484,13 @@ impl MeasurementsCollection {
         self.aggregate_rate("block_committed_latency")
     }
 
+    fn highest_dag_round_by_scraper(&self) -> HashMap<ScraperId, f64> {
+        self.latest_measurements_with_scraper_ids("dag_highest_round")
+            .into_iter()
+            .map(|(scraper_id, measurement)| (scraper_id, measurement.scalar))
+            .collect()
+    }
+
     fn total_bandwidth_samples(&self) -> Vec<f64> {
         self.aggregate_bandwidth("bytes_sent_total")
     }
@@ -485,6 +514,8 @@ impl MeasurementsCollection {
         let tps = self.tps();
         let bps = self.bps();
         let bandwidth_samples = self.total_bandwidth_samples();
+        let db_size_samples = self.db_size_samples();
+        let highest_dag_rounds = self.highest_dag_round_by_scraper();
         let transaction_size = self.parameters.client_parameters.transaction_size.max(1) as f64;
         let efficiency_samples: Vec<_> = bandwidth_samples
             .iter()
@@ -496,9 +527,29 @@ impl MeasurementsCollection {
                 }
             })
             .collect();
-        let bandwidth_per_round_samples: Vec<_> = bandwidth_samples
+        let bandwidth_per_round_samples: Vec<_> = self
+            .latest_measurements_with_scraper_ids("bytes_sent_total")
             .iter()
-            .map(|bytes_per_sec| if bps == 0.0 { 0.0 } else { bytes_per_sec / bps })
+            .map(|(scraper_id, measurement)| {
+                let highest_dag_round = highest_dag_rounds.get(scraper_id).copied().unwrap_or(0.0);
+                if highest_dag_round == 0.0 {
+                    0.0
+                } else {
+                    measurement.scalar / highest_dag_round
+                }
+            })
+            .collect();
+        let db_size_per_round_samples: Vec<_> = db_size_samples
+            .iter()
+            .enumerate()
+            .map(|(scraper_id, db_size)| {
+                let highest_dag_round = highest_dag_rounds.get(&scraper_id).copied().unwrap_or(0.0);
+                if highest_dag_round == 0.0 {
+                    0.0
+                } else {
+                    db_size / highest_dag_round
+                }
+            })
             .collect();
 
         BenchmarkRunSummary {
@@ -522,7 +573,7 @@ impl MeasurementsCollection {
             bandwidth_efficiency: Self::percentile_summary(&efficiency_samples),
             bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
             cpu_cores: Self::percentile_summary(&self.cpu_samples()),
-            db_size_bytes: Self::percentile_summary(&self.db_size_samples()),
+            db_size_per_round_bytes: Self::percentile_summary(&db_size_per_round_samples),
         }
     }
 
@@ -602,12 +653,12 @@ impl MeasurementsCollection {
             )
         ]);
         table.add_row(row![
-            b->"DB size:",
+            b->"DB size / round:",
             format!(
-                "p25={:.0} B, p50={:.0} B, p75={:.0} B",
-                summary.db_size_bytes.p25,
-                summary.db_size_bytes.p50,
-                summary.db_size_bytes.p75
+                "p25={:.2} B, p50={:.2} B, p75={:.2} B",
+                summary.db_size_per_round_bytes.p25,
+                summary.db_size_per_round_bytes.p50,
+                summary.db_size_per_round_bytes.p75
             )
         ]);
 
@@ -808,12 +859,17 @@ bytes_received_total 14000000
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 320
+# HELP dag_highest_round Highest round in the in-memory DAG
+# TYPE dag_highest_round gauge
+dag_highest_round 1000
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
         let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
-        for (label, measurement) in measurements {
-            aggregator.add(0, label, measurement);
+        for scraper_id in 0..3 {
+            for (label, measurement) in measurements.clone() {
+                aggregator.add(scraper_id, label, measurement);
+            }
         }
         aggregator.set_db_sizes(vec![10_000, 20_000, 30_000]);
 
@@ -830,9 +886,9 @@ process_cpu_seconds_total 320
         assert_eq!(summary.tps, 200.0);
         assert_eq!(summary.bps, 5.0);
         assert_eq!(summary.bandwidth_per_round_bytes.p50, 6_000.0);
-        assert_eq!(summary.db_size_bytes.p25, 15_000.0);
-        assert_eq!(summary.db_size_bytes.p50, 20_000.0);
-        assert_eq!(summary.db_size_bytes.p75, 25_000.0);
+        assert_eq!(summary.db_size_per_round_bytes.p25, 15.0);
+        assert_eq!(summary.db_size_per_round_bytes.p50, 20.0);
+        assert_eq!(summary.db_size_per_round_bytes.p75, 25.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
     }

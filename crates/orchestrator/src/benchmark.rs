@@ -70,7 +70,7 @@ pub struct BenchmarkRunSummary {
     pub bandwidth_efficiency: PercentileSummary,
     pub bandwidth_per_round_bytes: PercentileSummary,
     pub cpu_cores: PercentileSummary,
-    pub db_size_bytes: PercentileSummary,
+    pub db_size_per_round_bytes: PercentileSummary,
 }
 
 impl BenchmarkRunSummary {
@@ -86,7 +86,8 @@ impl BenchmarkRunSummary {
          bandwidth_per_round_p25_bytes,bandwidth_per_round_p50_bytes,\
          bandwidth_per_round_p75_bytes,\
          cpu_p25_cores,cpu_p50_cores,cpu_p75_cores,\
-         db_size_p25_bytes,db_size_p50_bytes,db_size_p75_bytes"
+         db_size_per_round_p25_bytes,db_size_per_round_p50_bytes,\
+         db_size_per_round_p75_bytes"
     }
 
     pub fn csv_record(&self) -> String {
@@ -113,9 +114,9 @@ impl BenchmarkRunSummary {
             format!("{:.6}", self.cpu_cores.p25),
             format!("{:.6}", self.cpu_cores.p50),
             format!("{:.6}", self.cpu_cores.p75),
-            format!("{:.0}", self.db_size_bytes.p25),
-            format!("{:.0}", self.db_size_bytes.p50),
-            format!("{:.0}", self.db_size_bytes.p75),
+            format!("{:.3}", self.db_size_per_round_bytes.p25),
+            format!("{:.3}", self.db_size_per_round_bytes.p50),
+            format!("{:.3}", self.db_size_per_round_bytes.p75),
         ]
         .join(",")
     }
