@@ -170,6 +170,12 @@ pub enum NetworkMessage {
         leader_ref: BlockReference,
         known_voters: AuthoritySet,
     },
+    /// Compressed-ref protocols: request blocks at a specific round that
+    /// the requester doesn't yet have.
+    RoundGapRequest {
+        round: RoundNumber,
+        known_authorities: AuthoritySet,
+    },
 }
 
 impl NetworkMessage {
@@ -188,6 +194,7 @@ impl NetworkMessage {
             Self::SailfishTimeout(_) => "sailfish_timeout",
             Self::SailfishNoVote(_) => "sailfish_no_vote",
             Self::UnprovableCertificateRequest { .. } => "unprovable_cert_request",
+            Self::RoundGapRequest { .. } => "round_gap_request",
         }
     }
 }

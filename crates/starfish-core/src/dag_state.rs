@@ -75,6 +75,9 @@ pub enum DataSource {
     Recover,
     /// Response to UnprovableCertificateRequest (Bluestreak voting blocks).
     UnprovableCertificateResponse,
+    /// Response to RoundGapRequest (blocks the requester was missing at a
+    /// round).
+    RoundGapResponse,
 }
 
 impl DataSource {
@@ -88,6 +91,7 @@ impl DataSource {
             Self::OwnBlock => "own_block",
             Self::Recover => "recover",
             Self::UnprovableCertificateResponse => "unprovable_certificate_response",
+            Self::RoundGapResponse => "round_gap_response",
         }
     }
 }

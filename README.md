@@ -25,7 +25,7 @@ injection.
 | Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
 | Starfish-BLS | `starfish-bls` | 6.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
 
-Transaction data cost: O(Mn²) for full-block protocols, O(Mn) for
+Transaction data cost is O(Mn) in the happy case for all protocols, but it gets to O(Mn²) for full-block protocols while stays O(Mn) for
 encoded (Reed-Solomon) protocols, where M is the total payload per
 round.
 

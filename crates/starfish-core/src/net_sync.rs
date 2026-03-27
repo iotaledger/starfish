@@ -52,8 +52,6 @@ use crate::{
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
-const RANDOM_REQUEST_PEER_COUNT: usize = 5;
-const MISSING_PARENTS_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -490,6 +488,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             } => {
                 return self
                     .handle_unprovable_cert_request(leader_ref, known_voters)
+                    .await;
+            }
+            NetworkMessage::RoundGapRequest {
+                round,
+                known_authorities,
+            } => {
+                return self
+                    .handle_round_gap_request(round, known_authorities)
                     .await;
             }
         }
@@ -1164,6 +1170,41 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .is_some()
     }
 
+    /// Respond with blocks at the requested round that the requester doesn't
+    /// yet have. Returns `true` to continue, `false` to break the connection
+    /// loop.
+    async fn handle_round_gap_request(
+        &mut self,
+        round: RoundNumber,
+        known_authorities: AuthoritySet,
+    ) -> bool {
+        if !self.consensus_protocol.uses_compressed_refs() {
+            return true;
+        }
+        let blocks = self.inner.dag_state.get_blocks_by_round(round);
+        let missing: Vec<_> = blocks
+            .into_iter()
+            .filter(|b| !known_authorities.contains(b.authority()))
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+        tracing::debug!(
+            "RoundGapRequest from peer {:?} for round {}: \
+             known_authorities={}, serving_blocks={}",
+            self.peer,
+            round,
+            known_authorities.count_ones(),
+            missing.len()
+        );
+        let batch = BlockBatch::full_only(DataSource::RoundGapResponse, missing);
+        self.sender
+            .send(NetworkMessage::Batch(Box::new(batch)))
+            .await
+            .ok()
+            .is_some()
+    }
+
     async fn shutdown(self) {
         self.disseminator.shutdown().await;
         self.data_requester.shutdown().await;
@@ -1644,6 +1685,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         } else {
             None
         };
+        let round_gap_pull_task =
+            if inner.dag_state.consensus_protocol.uses_compressed_refs() {
+                Some(handle.spawn(Self::round_gap_pull_task(inner.clone())))
+            } else {
+                None
+            };
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {
@@ -1683,7 +1730,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     .into_iter(),
                 )
                 .chain(soft_block_timeout_task)
-                .chain(cert_pull_task),
+                .chain(cert_pull_task)
+                .chain(round_gap_pull_task),
         )
         .await;
         Arc::try_unwrap(block_fetcher)
@@ -1883,12 +1931,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
+        const SCAN_INTERVAL: Duration = Duration::from_millis(500);
+        const PEER_COUNT: usize = 2;
+
         let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
         let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
 
         loop {
             select! {
-                _ = sleep(MISSING_PARENTS_RETRY_INTERVAL) => {}
+                _ = sleep(SCAN_INTERVAL) => {}
                 _ = inner.stopped() => { return None; }
             }
 
@@ -1899,13 +1950,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 &mut first_seen,
                 &mut last_requested,
                 now,
-                MISSING_PARENTS_RETRY_INTERVAL,
+                SCAN_INTERVAL,
             );
             if eligible_refs.is_empty() {
                 continue;
             }
 
-            let senders = select_random_peer_senders(&inner, RANDOM_REQUEST_PEER_COUNT);
+            let senders = select_random_peer_senders(&inner, PEER_COUNT);
             if senders.is_empty() {
                 continue;
             }
@@ -1936,7 +1987,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     /// Periodically scans for stalled Bluestreak unprovable certificates and
     /// requests missing voting blocks from random peers.
     async fn unprovable_cert_pull_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
-        const SCAN_INTERVAL: Duration = Duration::from_millis(200);
+        const SCAN_INTERVAL: Duration = Duration::from_millis(100);
+        const PEER_COUNT: usize = 2;
 
         let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
         let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
@@ -1967,7 +2019,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                 }
 
-                let senders = select_random_peer_senders(&inner, RANDOM_REQUEST_PEER_COUNT);
+                let senders = select_random_peer_senders(&inner, PEER_COUNT);
                 if senders.is_empty() {
                     continue;
                 }
@@ -1988,6 +2040,70 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
 
                 last_requested.insert(*leader_ref, now);
+            }
+        }
+    }
+
+    /// Periodically checks whether the node's proposal round lags behind
+    /// the highest observed DAG round. When the gap persists for two
+    /// consecutive ticks, requests missing blocks at `highest_round - 1`
+    /// from 2 random peers.
+    async fn round_gap_pull_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
+        const SCAN_INTERVAL: Duration = Duration::from_millis(100);
+        const PEER_COUNT: usize = 2;
+
+        let mut gap_detected = false;
+
+        loop {
+            select! {
+                _ = sleep(SCAN_INTERVAL) => {}
+                _ = inner.stopped() => { return None; }
+            }
+
+            let highest_round = inner.dag_state.highest_round();
+            let proposal_round = inner.dag_state.proposal_round();
+
+            if proposal_round < highest_round {
+                if !gap_detected {
+                    gap_detected = true;
+                    continue;
+                }
+
+                let senders = select_random_peer_senders(&inner, PEER_COUNT);
+                if senders.is_empty() {
+                    continue;
+                }
+
+                let target_round = highest_round - 1;
+                let blocks = inner.dag_state.get_blocks_by_round_cached(target_round);
+                let mut known_authorities = AuthoritySet::default();
+                for b in blocks.iter() {
+                    known_authorities.insert(b.authority());
+                }
+
+                tracing::debug!(
+                    "Round gap detected: proposal_round={}, highest_round={}, \
+                     requesting round {} from {} peers (known={})",
+                    proposal_round,
+                    highest_round,
+                    target_round,
+                    senders.len(),
+                    known_authorities.count_ones()
+                );
+
+                for (_peer, sender) in &senders {
+                    let msg = NetworkMessage::RoundGapRequest {
+                        round: target_round,
+                        known_authorities,
+                    };
+                    let _ = sender.send(msg).await;
+                }
+
+                // Reset so the two-tick gate must re-activate before the
+                // next request.
+                gap_detected = false;
+            } else {
+                gap_detected = false;
             }
         }
     }
@@ -2116,6 +2232,8 @@ mod tests {
 
     #[test]
     fn missing_parent_retry_waits_and_retries_after_interval() {
+        const INTERVAL: Duration = Duration::from_millis(500);
+
         let missing = BlockReference::new_test(3, 7);
         let now = Instant::now();
         let mut first_seen = AHashMap::new();
@@ -2127,7 +2245,7 @@ mod tests {
                 &mut first_seen,
                 &mut last_requested,
                 now,
-                MISSING_PARENTS_RETRY_INTERVAL,
+                INTERVAL,
             )
             .is_empty()
         );
@@ -2137,19 +2255,19 @@ mod tests {
             &[missing],
             &mut first_seen,
             &mut last_requested,
-            now + MISSING_PARENTS_RETRY_INTERVAL,
-            MISSING_PARENTS_RETRY_INTERVAL,
+            now + INTERVAL,
+            INTERVAL,
         );
         assert_eq!(eligible, vec![missing]);
 
-        last_requested.insert(missing, now + MISSING_PARENTS_RETRY_INTERVAL);
+        last_requested.insert(missing, now + INTERVAL);
         assert!(
             eligible_missing_parent_refs(
                 &[missing],
                 &mut first_seen,
                 &mut last_requested,
-                now + MISSING_PARENTS_RETRY_INTERVAL + Duration::from_millis(100),
-                MISSING_PARENTS_RETRY_INTERVAL,
+                now + INTERVAL + Duration::from_millis(100),
+                INTERVAL,
             )
             .is_empty()
         );
@@ -2158,14 +2276,16 @@ mod tests {
             &[missing],
             &mut first_seen,
             &mut last_requested,
-            now + MISSING_PARENTS_RETRY_INTERVAL * 2,
-            MISSING_PARENTS_RETRY_INTERVAL,
+            now + INTERVAL * 2,
+            INTERVAL,
         );
         assert_eq!(eligible, vec![missing]);
     }
 
     #[test]
     fn missing_parent_retry_prunes_resolved_refs() {
+        const INTERVAL: Duration = Duration::from_millis(500);
+
         let missing = BlockReference::new_test(1, 9);
         let now = Instant::now();
         let mut first_seen = AHashMap::from_iter([(missing, now)]);
@@ -2176,8 +2296,8 @@ mod tests {
                 &[],
                 &mut first_seen,
                 &mut last_requested,
-                now + MISSING_PARENTS_RETRY_INTERVAL,
-                MISSING_PARENTS_RETRY_INTERVAL,
+                now + INTERVAL,
+                INTERVAL,
             )
             .is_empty()
         );
@@ -2189,10 +2309,10 @@ mod tests {
     fn random_peer_selection_is_capped() {
         let candidates: Vec<AuthorityIndex> = (0..10).collect();
         let mut rng = StdRng::seed_from_u64(7);
-        let selected = select_random_peers(candidates.clone(), RANDOM_REQUEST_PEER_COUNT, &mut rng);
+        let selected = select_random_peers(candidates.clone(), 5, &mut rng);
         let unique: AHashSet<_> = selected.iter().copied().collect();
 
-        assert_eq!(selected.len(), RANDOM_REQUEST_PEER_COUNT);
+        assert_eq!(selected.len(), 5);
         assert_eq!(unique.len(), selected.len());
         assert!(selected.iter().all(|peer| candidates.contains(peer)));
     }
