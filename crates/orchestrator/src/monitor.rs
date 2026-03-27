@@ -176,7 +176,6 @@ impl Monitor {
 pub struct Prometheus;
 
 impl Prometheus {
-    const MIN_SCRAPE_INTERVAL_SECS: u64 = 5;
     const VALIDATOR_SAMPLE_LIMIT: usize = 50_000;
     const NODE_EXPORTER_SAMPLE_LIMIT: usize = 20_000;
     /// The default prometheus configuration path.
@@ -188,6 +187,12 @@ impl Prometheus {
     const RECORDING_RULES_PATH: &'static str = "/etc/prometheus/recording_rules.yml";
     /// The default prometheus port.
     pub const DEFAULT_PORT: u16 = 9090;
+
+    /// Compute the metrics interval that scales with committee size.
+    /// Delegates to the canonical implementation in `starfish_core`.
+    pub fn scaled_metrics_interval(node_count: usize) -> Duration {
+        starfish_core::prometheus::scaled_metrics_interval(node_count)
+    }
 
     fn ensure_runtime_flags_command() -> &'static str {
         "sudo sh -c 'file=/etc/default/prometheus; touch \"$file\"; \
@@ -232,7 +237,7 @@ impl Prometheus {
                 Self::parse_scrape_target(&format!("node-{i}"), &nodes_metrics_path)
             })
             .collect();
-        let scrape_interval = parameters.settings.scrape_interval;
+        let scrape_interval = Self::scaled_metrics_interval(parameters.nodes);
         let mut config = vec![Self::global_configuration(scrape_interval)];
 
         if let Some(metrics_path) = targets.first().map(|target| target.metrics_path.as_str()) {
@@ -316,7 +321,7 @@ groups:
     fn scrape_interval_secs(scrape_interval: Duration) -> u64 {
         scrape_interval
             .as_secs()
-            .max(Self::MIN_SCRAPE_INTERVAL_SECS)
+            .max(starfish_core::prometheus::MIN_METRICS_INTERVAL_SECS)
     }
 
     fn scrape_timeout_secs(scrape_interval_secs: u64) -> u64 {

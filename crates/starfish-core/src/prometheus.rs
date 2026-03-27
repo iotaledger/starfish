@@ -13,6 +13,16 @@ use crate::runtime::{Handle, JoinHandle};
 
 pub const METRICS_ROUTE: &str = "/metrics";
 
+/// Minimum metrics scrape/push interval in seconds.
+pub const MIN_METRICS_INTERVAL_SECS: u64 = 5;
+
+/// Compute a metrics interval that scales with the number of nodes, keeping the
+/// aggregate request rate roughly constant (~10 req/s). Both the orchestrator
+/// scrape config and the per-validator push task should use this function.
+pub fn scaled_metrics_interval(node_count: usize) -> Duration {
+    Duration::from_secs((node_count as u64 / 10).max(MIN_METRICS_INTERVAL_SECS))
+}
+
 pub fn start_prometheus_server(
     address: SocketAddr,
     registry: &Registry,
@@ -41,8 +51,8 @@ async fn metrics(registry: Extension<Registry>) -> (StatusCode, String) {
 }
 
 /// Spawn a background task that periodically pushes metrics to a Prometheus
-/// Pushgateway. The push interval is 15 s for large committees (> 100
-/// validators) and 5 s for smaller ones.
+/// Pushgateway. The push interval scales with committee size to keep the
+/// request rate on the gateway roughly constant.
 pub fn start_metrics_push_task(
     pushgateway_url: String,
     instance_label: String,
@@ -50,11 +60,7 @@ pub fn start_metrics_push_task(
     committee_size: usize,
 ) -> JoinHandle<()> {
     let registry = registry.clone();
-    let push_interval = if committee_size > 100 {
-        Duration::from_secs(15)
-    } else {
-        Duration::from_secs(5)
-    };
+    let push_interval = scaled_metrics_interval(committee_size);
 
     Handle::current().spawn(async move {
         let url = format!(

@@ -833,7 +833,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         });
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
-        let mut metrics_interval = time::interval(self.settings.scrape_interval);
+        let scrape_interval = crate::monitor::Prometheus::scaled_metrics_interval(parameters.nodes);
+        let mut metrics_interval = time::interval(scrape_interval);
         metrics_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         metrics_interval.tick().await; // The first tick returns immediately.
 

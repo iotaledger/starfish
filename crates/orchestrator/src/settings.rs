@@ -162,10 +162,6 @@ pub struct Settings {
     /// Whether to use NVMe drives for data storage (if available).
     #[serde(default = "defaults::default_use_nvme")]
     pub nvme: bool,
-    /// The interval between measurements collection.
-    #[serde(default = "defaults::default_scrape_interval")]
-    #[serde_as(as = "DurationSeconds")]
-    pub scrape_interval: Duration,
     /// Whether to downloading and analyze the client and node log files.
     #[serde(default = "defaults::default_log_processing")]
     pub log_processing: bool,
@@ -238,10 +234,6 @@ mod defaults {
 
     pub fn default_use_nvme() -> bool {
         true
-    }
-
-    pub fn default_scrape_interval() -> Duration {
-        Duration::from_secs(15)
     }
 
     pub fn default_log_processing() -> bool {

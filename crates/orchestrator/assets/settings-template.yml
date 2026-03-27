@@ -20,10 +20,6 @@ repository:
 # Override the scrape-address policy when the monitoring host can reach the
 # validator private network directly.
 # monitoring_scrape_public_ip: false
-# Scrape cadence shared by benchmark measurements and Prometheus monitoring.
-# The monitoring stack enforces a minimum of 5 seconds and keeps node-exporter
-# on a slower cadence to reduce load on large committees.
-# scrape_interval: 15
 # Pre-built binary (optional). Skips source compilation on remote machines.
 # URL downloads via curl; local path SCPs to all machines.
 # pre_built_binary: "https://github.com/iotaledger/starfish/releases/download/nightly/starfish-linux-amd64"
