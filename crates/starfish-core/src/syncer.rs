@@ -68,7 +68,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
 
 pub trait SyncerSignals: Send + Sync {
     fn new_block_ready(&mut self);
-    fn threshold_clock_round_advanced(&mut self, round: RoundNumber);
+    fn proposal_round_advanced(&mut self, round: RoundNumber);
 }
 
 pub trait CommitObserver: Send + Sync {
@@ -126,7 +126,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
-        let previous_threshold_round = self.core.dag_state().proposal_round();
+        let previous_rounds = self.capture_rounds();
         // todo: when block is updated we might return false here and it can make
         // committing longer
         let (
@@ -143,7 +143,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.send_bls_message(BlsServiceMessage::ProcessBlocks(processed_blocks.clone()));
         }
         self.maybe_update_proposal_wait();
-        self.maybe_signal_threshold_round_advance(previous_threshold_round);
+        self.maybe_signal_proposal_round_advance(previous_rounds);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block(BlockCreationReason::NewBlocks);
@@ -161,7 +161,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         headers: Vec<Data<VerifiedBlock>>,
         source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let previous_threshold_round = self.core.dag_state().proposal_round();
+        let previous_rounds = self.capture_rounds();
         let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers, source);
         if !processed_blocks.is_empty() {
@@ -171,7 +171,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
         }
         self.maybe_update_proposal_wait();
-        self.maybe_signal_threshold_round_advance(previous_threshold_round);
+        self.maybe_signal_proposal_round_advance(previous_rounds);
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block(BlockCreationReason::NewHeaders);
@@ -195,10 +195,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// DagState on the core thread. Retries block creation and sequencing
     /// when any clean vertex is new.
     pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
-        let previous_threshold_round = self.core.dag_state().proposal_round();
+        let previous_rounds = self.capture_rounds();
         if self.core.dag_state().mark_vertices_clean(&certified_refs) {
             self.maybe_update_proposal_wait();
-            self.maybe_signal_threshold_round_advance(previous_threshold_round);
+            self.maybe_signal_proposal_round_advance(previous_rounds);
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
@@ -225,10 +225,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// Fresh certificates can unblock both block production and sequencing, so
     /// retry both paths immediately when DAG state changed.
     pub fn apply_certificate_events(&mut self, events: Vec<CertificateEvent>) {
-        let previous_proposal_round = self.core.dag_state().proposal_round();
+        let previous_rounds = self.capture_rounds();
         if apply_certificate_events(self.core.dag_state(), events) {
             self.maybe_update_proposal_wait();
-            self.maybe_signal_threshold_round_advance(previous_proposal_round);
+            self.maybe_signal_proposal_round_advance(previous_rounds);
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
@@ -302,7 +302,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
 
     fn create_new_block(&mut self, reason: BlockCreationReason) -> bool {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
-        let previous_proposal_round = self.core.dag_state().proposal_round();
+        let previous_rounds = self.capture_rounds();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
@@ -342,7 +342,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     signature: sig,
                 }));
             }
-            self.maybe_signal_threshold_round_advance(previous_proposal_round);
+            self.maybe_signal_proposal_round_advance(previous_rounds);
             self.signals.new_block_ready();
             self.forced_block_rounds.remove(&block.round());
             return true;
@@ -385,11 +385,20 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
-    fn maybe_signal_threshold_round_advance(&mut self, previous_threshold_round: RoundNumber) {
-        let current_threshold_round = self.core.dag_state().proposal_round();
-        if current_threshold_round > previous_threshold_round {
-            self.signals
-                .threshold_clock_round_advanced(current_threshold_round);
+    fn capture_rounds(&self) -> (RoundNumber, RoundNumber) {
+        (
+            self.core.dag_state().threshold_clock_round(),
+            self.core.dag_state().proposal_round(),
+        )
+    }
+
+    fn maybe_signal_proposal_round_advance(&mut self, previous_rounds: (RoundNumber, RoundNumber)) {
+        let (previous_threshold_round, previous_proposal_round) = previous_rounds;
+        let current_threshold_round = self.core.dag_state().threshold_clock_round();
+        let current_proposal_round = self.core.dag_state().proposal_round();
+        debug_assert!(current_threshold_round >= previous_threshold_round);
+        if current_proposal_round > previous_proposal_round {
+            self.signals.proposal_round_advanced(current_proposal_round);
         }
     }
 
@@ -436,7 +445,7 @@ impl SyncerSignals for bool {
         *self = true;
     }
 
-    fn threshold_clock_round_advanced(&mut self, _round: RoundNumber) {
+    fn proposal_round_advanced(&mut self, _round: RoundNumber) {
         *self = true;
     }
 }
@@ -493,7 +502,7 @@ mod tests {
     #[derive(Default)]
     struct TestSignals {
         new_block_ready_count: usize,
-        threshold_round_advances: Vec<RoundNumber>,
+        proposal_round_advances: Vec<RoundNumber>,
     }
 
     impl SyncerSignals for TestSignals {
@@ -501,8 +510,8 @@ mod tests {
             self.new_block_ready_count += 1;
         }
 
-        fn threshold_clock_round_advanced(&mut self, round: RoundNumber) {
-            self.threshold_round_advances.push(round);
+        fn proposal_round_advanced(&mut self, round: RoundNumber) {
+            self.proposal_round_advances.push(round);
         }
     }
 
@@ -736,12 +745,12 @@ mod tests {
         assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
         assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
         assert_eq!(syncer.core.last_proposed(), 2);
-        assert!(syncer.signals.threshold_round_advances.is_empty());
+        assert!(syncer.signals.proposal_round_advances.is_empty());
 
         assert!(syncer.try_new_block(BlockCreationReason::NewBlocks));
         assert_eq!(syncer.core.last_proposed(), 3);
         assert_eq!(syncer.core.dag_state().proposal_round(), 4);
-        assert_eq!(syncer.signals.threshold_round_advances, vec![4]);
+        assert_eq!(syncer.signals.proposal_round_advances, vec![4]);
         assert_eq!(syncer.signals.new_block_ready_count, 3);
     }
 }

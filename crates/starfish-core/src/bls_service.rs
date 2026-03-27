@@ -167,7 +167,7 @@ pub fn start_bls_service(
     partial_sig_broadcast: Option<mpsc::UnboundedSender<PartialSig>>,
     dag_state: DagState,
     block_ready_notify: Arc<Notify>,
-    threshold_clock_notify: Arc<Notify>,
+    proposal_round_notify: Arc<Notify>,
 ) {
     let has_bls_signer = bls_signer.is_some();
     tokio::spawn(run_bls_service(
@@ -185,7 +185,7 @@ pub fn start_bls_service(
             sender,
             dag_state,
             block_ready_notify,
-            threshold_clock_notify,
+            proposal_round_notify,
         ));
     }
 }
@@ -464,9 +464,9 @@ async fn run_round_presign_signal_task(
     sender: mpsc::UnboundedSender<BlsServiceMessage>,
     dag_state: DagState,
     block_ready_notify: Arc<Notify>,
-    threshold_clock_notify: Arc<Notify>,
+    proposal_round_notify: Arc<Notify>,
 ) {
-    let bootstrap_round = dag_state.threshold_clock_round().max(
+    let bootstrap_round = dag_state.proposal_round().max(
         dag_state
             .last_own_block_ref()
             .map(|reference| reference.round + 1)
@@ -493,8 +493,8 @@ async fn run_round_presign_signal_task(
                     break;
                 }
             }
-            _ = threshold_clock_notify.notified() => {
-                let round = dag_state.threshold_clock_round();
+            _ = proposal_round_notify.notified() => {
+                let round = dag_state.proposal_round();
                 if round == 0 {
                     continue;
                 }

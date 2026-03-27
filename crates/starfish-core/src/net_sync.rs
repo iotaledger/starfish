@@ -1184,14 +1184,14 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
 
 pub(crate) struct NetworkSyncSignals {
     block_ready_notify: Arc<Notify>,
-    threshold_clock_notify: Arc<Notify>,
+    proposal_round_notify: Arc<Notify>,
 }
 
 pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     syncer: CoreThreadDispatcher<H, NetworkSyncSignals, C>,
     pub dag_state: DagState,
     pub block_ready_notify: Arc<Notify>,
-    pub threshold_clock_notify: Arc<Notify>,
+    pub proposal_round_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
     pub dissemination_mode: DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
@@ -1222,7 +1222,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
     ) -> Self {
         let handle = Handle::current();
         let block_ready_notify = Arc::new(Notify::new());
-        let threshold_clock_notify = Arc::new(Notify::new());
+        let proposal_round_notify = Arc::new(Notify::new());
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
@@ -1260,7 +1260,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             core,
             NetworkSyncSignals {
                 block_ready_notify: block_ready_notify.clone(),
-                threshold_clock_notify: threshold_clock_notify.clone(),
+                proposal_round_notify: proposal_round_notify.clone(),
             },
             commit_observer,
             metrics.clone(),
@@ -1308,7 +1308,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             block_ready_notify,
             dag_state: dag_state.clone(),
             syncer,
-            threshold_clock_notify,
+            proposal_round_notify,
             committee,
             dissemination_mode,
             causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
@@ -1426,7 +1426,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 bls_broadcast_tx,
                 dag_state.clone(),
                 inner.block_ready_notify.clone(),
-                inner.threshold_clock_notify.clone(),
+                inner.proposal_round_notify.clone(),
             );
             let bls_handle = BlsServiceHandle::new(bls_tx);
             let event_inner = inner.clone();
@@ -1781,11 +1781,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut armed_round = inner.dag_state.proposal_round().saturating_sub(1);
         loop {
             while inner.dag_state.proposal_round() <= armed_round {
-                let threshold_round_advanced = inner.threshold_clock_notify.notified();
-                let own_block_created = inner.block_ready_notify.notified();
+                let proposal_round_advanced = inner.proposal_round_notify.notified();
                 select! {
-                    _notified = threshold_round_advanced => {}
-                    _notified = own_block_created => {}
+                    _notified = proposal_round_advanced => {}
                     _stopped = inner.stopped() => {
                         return None;
                     }
@@ -1823,7 +1821,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut armed_round = inner.dag_state.threshold_clock_round();
         loop {
             while inner.dag_state.threshold_clock_round() <= armed_round {
-                let notified = inner.threshold_clock_notify.notified();
+                let notified = inner.proposal_round_notify.notified();
                 select! {
                     _notified = notified => {}
                     _stopped = inner.stopped() => {
@@ -1833,7 +1831,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             }
 
             armed_round = inner.dag_state.threshold_clock_round();
-            let notified = inner.threshold_clock_notify.notified();
+            let notified = inner.proposal_round_notify.notified();
             select! {
                 _sleep = sleep(soft_timeout) => {
                     tracing::debug!(
@@ -2063,8 +2061,8 @@ impl SyncerSignals for NetworkSyncSignals {
         self.block_ready_notify.notify_waiters();
     }
 
-    fn threshold_clock_round_advanced(&mut self, _round: RoundNumber) {
-        self.threshold_clock_notify.notify_waiters();
+    fn proposal_round_advanced(&mut self, _round: RoundNumber) {
+        self.proposal_round_notify.notify_waiters();
     }
 }
 
@@ -2079,16 +2077,16 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn threshold_clock_signal_notifies_waiters() {
+    async fn proposal_round_signal_notifies_waiters() {
         let block_ready_notify = Arc::new(Notify::new());
-        let threshold_clock_notify = Arc::new(Notify::new());
+        let proposal_round_notify = Arc::new(Notify::new());
         let mut signals = NetworkSyncSignals {
             block_ready_notify,
-            threshold_clock_notify: threshold_clock_notify.clone(),
+            proposal_round_notify: proposal_round_notify.clone(),
         };
 
-        let wait = threshold_clock_notify.notified();
-        signals.threshold_clock_round_advanced(5);
+        let wait = proposal_round_notify.notified();
+        signals.proposal_round_advanced(5);
         wait.await;
     }
 

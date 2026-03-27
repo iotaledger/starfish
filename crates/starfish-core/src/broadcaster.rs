@@ -700,11 +700,11 @@ where
         let sample_timeout = broadcaster_parameters.sample_timeout;
         loop {
             let block_notified = inner.block_ready_notify.notified();
-            let threshold_clock_notified = inner.threshold_clock_notify.notified();
+            let proposal_round_notified = inner.proposal_round_notify.notified();
             let trigger = select! {
                 _ = sleep(sample_timeout) => "timeout",
                 _ = block_notified => "new block",
-                _ = threshold_clock_notified => "threshold clock",
+                _ = proposal_round_notified => "proposal round",
             };
             let timer = metrics
                 .utilization_timer
