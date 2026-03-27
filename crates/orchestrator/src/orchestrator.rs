@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Read,
     path::PathBuf,
@@ -151,6 +151,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     const NODE_BOOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
     const MIN_NODE_BOOT_TIMEOUT: Duration = Duration::from_secs(120);
     const MAX_NODE_BOOT_LOG_SAMPLES: usize = 3;
+    /// Maximum fraction of validators that may fail readiness and still allow
+    /// the benchmark to proceed. The stalled instances are marked inactive.
+    const MAX_TOLERATED_BOOT_FAILURE_RATIO: f64 = 0.03;
 
     fn mark_instances_inactive(&mut self, instances: &[Instance]) {
         for failed in instances {
@@ -259,6 +262,20 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Self::MIN_NODE_BOOT_TIMEOUT.max(Duration::from_secs((node_count as u64 / 2).max(120)))
     }
 
+    /// Derive the Pushgateway URL from settings or from the monitoring
+    /// instance allocated by the orchestrator.
+    fn pushgateway_url(&self, monitoring_instance: Option<&Instance>) -> Option<String> {
+        self.settings.external_pushgateway_url().or_else(|| {
+            monitoring_instance.map(|inst| {
+                format!(
+                    "http://{}:{}",
+                    inst.main_ip,
+                    crate::monitor::Pushgateway::DEFAULT_PORT,
+                )
+            })
+        })
+    }
+
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
         let samples: Vec<_> = instances
             .iter()
@@ -308,57 +325,118 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         &mut self,
         instances: Vec<Instance>,
         parameters: &BenchmarkParameters,
+        pushgateway_url: Option<&str>,
     ) -> TestbedResult<()> {
         let total = instances.len();
         let timeout = Self::node_boot_timeout(total);
-        let mut pending: HashMap<_, _> = self
-            .protocol_commands
-            .nodes_metrics_command(instances, parameters)
-            .into_iter()
-            .map(|(instance, command)| (instance.id.clone(), (instance, command)))
-            .collect();
+        let max_failures = (total as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize;
+        let mut pending_indices: HashSet<usize> = (0..total).collect();
+
+        // Keep a lookup vec so we can recover Instance for stalled indices
+        // after the polling loop (which may consume `instances` in the SSH
+        // fallback path).
+        let all_instances = instances.clone();
+
         let start = Instant::now();
         display::status(format!("ready 0/{total}"));
 
-        while !pending.is_empty() {
-            let probes: Vec<_> = pending.values().cloned().collect();
-            let ready = self
-                .probe_instances_best_effort(probes, CommandContext::default())
-                .await;
-            for instance in ready {
-                pending.remove(&instance.id);
+        if let Some(gw_url) = pushgateway_url {
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Failed to build HTTP client for Pushgateway readiness");
+
+            loop {
+                time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
+
+                if let Ok(resp) = client.get(format!("{gw_url}/metrics")).send().await {
+                    if let Ok(text) = resp.text().await {
+                        let reported = Measurement::from_pushgateway_response::<P>(&text);
+                        for idx in reported.keys() {
+                            pending_indices.remove(idx);
+                        }
+                    }
+                }
+
+                let completed = total - pending_indices.len();
+                display::status(format!(
+                    "ready {completed}/{total} {}s",
+                    start.elapsed().as_secs()
+                ));
+
+                if pending_indices.is_empty() {
+                    return Ok(());
+                }
+                if start.elapsed() >= timeout {
+                    break;
+                }
             }
+        } else {
+            let mut pending: HashMap<_, _> = self
+                .protocol_commands
+                .nodes_metrics_command(instances, parameters)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (instance, command))| (instance.id.clone(), (i, instance, command)))
+                .collect();
 
-            let completed = total - pending.len();
-            display::status(format!(
-                "ready {completed}/{total} {}s",
-                start.elapsed().as_secs()
-            ));
-
-            if pending.is_empty() {
-                return Ok(());
-            }
-
-            if start.elapsed() >= timeout {
-                let stalled: Vec<_> = pending
+            loop {
+                let probes: Vec<_> = pending
                     .values()
-                    .map(|(instance, _)| instance.clone())
+                    .map(|(_, inst, cmd)| (inst.clone(), cmd.clone()))
                     .collect();
-                let sample_logs = self.sample_node_startup_logs(&stalled).await;
-                return Err(TestbedError::NodeBootError(format!(
-                    "{} of {} validators did not expose metrics within {}s.\n\
-                     Startup log samples:\n{}",
-                    stalled.len(),
-                    total,
-                    timeout.as_secs(),
-                    sample_logs
-                )));
-            }
+                let ready = self
+                    .probe_instances_best_effort(probes, CommandContext::default())
+                    .await;
+                for instance in ready {
+                    if let Some((idx, ..)) = pending.remove(&instance.id) {
+                        pending_indices.remove(&idx);
+                    }
+                }
 
-            time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
+                let completed = total - pending_indices.len();
+                display::status(format!(
+                    "ready {completed}/{total} {}s",
+                    start.elapsed().as_secs()
+                ));
+
+                if pending_indices.is_empty() {
+                    return Ok(());
+                }
+                if start.elapsed() >= timeout {
+                    break;
+                }
+
+                time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
+            }
         }
 
-        Ok(())
+        let stalled: Vec<_> = pending_indices
+            .iter()
+            .filter_map(|&i| all_instances.get(i).cloned())
+            .collect();
+
+        if stalled.len() <= max_failures {
+            display::warn(format!(
+                "{} of {} validators did not start in time — marking inactive \
+                 and continuing",
+                stalled.len(),
+                total,
+            ));
+            self.mark_instances_inactive(&stalled);
+            return Ok(());
+        }
+
+        let sample_logs = self.sample_node_startup_logs(&stalled).await;
+        Err(TestbedError::NodeBootError(format!(
+            "{} of {} validators did not expose metrics within {}s.\n\
+             Startup log samples:\n{}",
+            stalled.len(),
+            total,
+            timeout.as_secs(),
+            sample_logs
+        )))
     }
 
     fn log_download_ssh_manager(&self) -> SshConnectionManager {
@@ -594,8 +672,31 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::warn("Cleanup could not reach any active instance; continuing");
         }
 
+        self.wipe_pushgateway_metrics().await;
+
         display::done();
         Ok(())
+    }
+
+    /// Delete all metrics from the Pushgateway so that data from a finished
+    /// (or aborted) benchmark does not leak into the next run or readiness
+    /// check.
+    async fn wipe_pushgateway_metrics(&self) {
+        let url = match self.pushgateway_url(None) {
+            Some(u) => u,
+            None => return,
+        };
+        let Ok(client) = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(5))
+            .build()
+        else {
+            return;
+        };
+        let _ = client
+            .delete(format!("{url}/metrics/job/starfish"))
+            .send()
+            .await;
     }
 
     /// Return the SSH manager for the monitoring server. Uses a custom
@@ -683,9 +784,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .execute_per_instance(targets, context)
             .await?;
 
-        // Wait until all nodes are reachable.
-        // Moved to `wait_for_nodes_ready` to accumulate partial readiness and
-        // fail with diagnostics instead of spinning forever.
         Ok(())
     }
 
@@ -693,9 +791,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn run_nodes(&mut self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         display::action("\nDeploying validators");
 
-        let (nodes, _) = self.select_instances(parameters)?;
+        let (nodes, monitoring_instance) = self.select_instances(parameters)?;
+        let gw_url = self.pushgateway_url(monitoring_instance.as_ref());
         self.boot_nodes(nodes.clone(), parameters).await?;
-        self.wait_for_nodes_ready(nodes, parameters).await?;
+        self.wait_for_nodes_ready(nodes, parameters, gw_url.as_deref())
+            .await?;
 
         display::done();
         Ok(())
@@ -723,17 +823,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .protocol_commands
             .nodes_metrics_command(nodes.clone(), parameters);
 
-        // Derive the Pushgateway URL for pull-from-gateway collection.
-        let pushgateway_url: Option<String> =
-            self.settings.external_pushgateway_url().or_else(|| {
-                monitoring_instance.map(|inst| {
-                    format!(
-                        "http://{}:{}",
-                        inst.main_ip,
-                        crate::monitor::Pushgateway::DEFAULT_PORT,
-                    )
-                })
-            });
+        let pushgateway_url = self.pushgateway_url(monitoring_instance.as_ref());
         let http_client = pushgateway_url.as_ref().map(|_| {
             reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
