@@ -3,17 +3,17 @@
 #----------------------------------------------------------------------
 # Configuration Parameters
 #----------------------------------------------------------------------
-# Recommend < physical cores. Hard limit is 256
 NUM_NODES=${NUM_NODES:-10}
 DESIRED_TPS=${DESIRED_TPS:-1000}
 # Options: starfish, starfish-speed, starfish-bls,
-#          cordial-miners, mysticeti, bluestreak
-CONSENSUS=${CONSENSUS:-starfish}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-3}
+#          cordial-miners, mysticeti, sailfish-pp,
+#          bluestreak, mysticeti-bls
+CONSENSUS=${CONSENSUS:-bluestreak}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, equivocating-chains-bomb, random-drop
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-random-drop}
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}
 TEST_TIME=${TEST_TIME:-3000}
 # Optional: set to use uniform latency (ms)
 # instead of AWS RTT table
@@ -37,7 +37,7 @@ if [ -z "${COMPRESS_NETWORK+x}" ]; then
 fi
 # Set to 1 to overlay 10s latency on the f farthest peers
 #ADVERSARIAL_LATENCY=1
-DATA_DIR="scripts/data"
+DATA_DIR="local-dryrun/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-starfish-dryrun}
 COMPOSE_NETWORK_NAME="${COMPOSE_PROJECT_NAME}_starfish-net"

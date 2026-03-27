@@ -1,115 +1,158 @@
-# Starfish
+# DAG-based BFT protocols
 
 [![rustc](https://img.shields.io/badge/rustc-1.85+-blue?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![license](https://img.shields.io/badge/license-Apache-blue.svg?style=flat-square)](LICENSE)
 
 ## Overview
 
-The code in this repository is a prototype of Starfish,
-a partially synchronous BFT protocol in which validators employ an uncertified DAG.
-Starfish uses Reed-Solomon encoding for transaction data. This allows to amortize the transaction communication costs and achieve better communication complexity under high load and Byzantine environment.
-The theoretical description of Starfish is available
-at https://eprint.iacr.org/2025/567.
+This repository is a benchmarking framework for DAG-based BFT
+consensus protocols in the partially synchronous model, implemented
+in Rust.
+It includes 8 protocol implementations with configurable
+dissemination strategies, storage backends, and Byzantine fault
+injection.
 
-Three versions of Starfish are available in this repository:
+## Protocols
 
-- **`starfish`**: Theory-aligned version
-  - By default uses Push dissemination strategy for headers and shards
-  - Better latency guarantees with Byzantine nodes
+| Protocol | CLI name | Latency | DAG | Tx data | Default dissemination | Metadata (happy) | Metadata (worst) | Reference |
+|---|---|---|---|---|---|---|---|---|
+| Mysticeti | `mysticeti` | 4.5δ | Uncertified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2310.14821](https://arxiv.org/abs/2310.14821) |
+| Mysticeti-BLS | `mysticeti-bls` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
+| Bluestreak | `bluestreak` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | -- |
+| Starfish-Speed | `starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | -- |
+| Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
+| Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |
+| Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
+| Starfish-BLS | `starfish-bls` | 6.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
 
-- **`starfish-speed`**: Strong-vote optimistic variant
-  - Uses strong votes for optimistic transaction sequencing
-  - Lower latency when validators have same acknowledgments as a leader
+Transaction data cost: O(Mn²) for full-block protocols, O(Mn) for
+encoded (Reed-Solomon) protocols, where M is the total payload per
+round.
 
-- **`starfish-bls`**: BLS-optimized variant
-  - Uses BLS aggregate signatures to reduce communication complexity for header metadata
-  - Embeds compact aggregate certificates (round, leader, data availability) in block headers
-  - Async BLS verification service offloads signature processing from the critical path
+\* Practical instantiation of Starfish-L and Mysticeti-L with BLS aggregate
+signatures.
 
-The repository also supports other partially synchronous DAG-based consensus protocols:
+**Mysticeti** uses bandwidth-efficient pull-based dissemination:
+validators push their own blocks and request missing ancestors.
+**Cordial Miners** pushes the full unknown block history to peers;
+tolerant to Byzantine attacks but less scalable.
+**Mysticeti-BLS** extends Mysticeti with BLS aggregate signatures
+and compressed block references.
+**Bluestreak** uses compressed block references and unprovable
+certificate tracking, similar in architecture to Mysticeti-BLS, but with cheaper certification.
+**Starfish** uses push dissemination for headers and Reed-Solomon encoded shards with
+acknowledgment references between validators.
+**Starfish-Speed** adds strong-vote optimistic sequencing for lower
+latency when validators share the leader's acknowledgments.
+**Sailfish++** is a certified DAG protocol using signature-free
+optimistic reliable broadcast (RBC) for vertex certification,
+achieving 2-round optimistic commit latency.
+**Starfish-BLS** embeds compact BLS aggregate certificates (round,
+leader, data availability) in block headers, with async verification
+offloaded from the critical path.
 
-- **`sailfish++`**: Implementation based on [SFSailfish](https://arxiv.org/abs/2505.02761) ("Optimistic, Signature-Free Reliable Broadcast and Its Applications", CCS'25).
-A certified DAG protocol using signature-free optimistic reliable broadcast (RBC) for vertex certification.
-Achieves 2-round optimistic commit latency with authentication derived from TCP channels rather than cryptographic signatures.
-- **`mysticeti`**: Implementation of [Mysticeti](https://www.cs.cornell.edu/~babel/papers/mysticeti.pdf).
-Validators use a bandwidth efficient pull-based block dissemination strategy:
-they push their own blocks and request the peers about missing ancestors only.
-- **`cordial-miners`**: Implementation of [Cordial Miners](https://arxiv.org/pdf/2205.09174).
-Validators use a push-based block dissemination strategy,
-pushing all unknown history of blocks to their peers.
-Due to the push strategy, Cordial Miners can tolerate Byzantine attacks,
-but it is overall a less scalable solution.
+## Dissemination Modes
 
-### Protocol Comparison
+Every protocol can run with any of three dissemination strategies
+(override with `--dissemination-mode`):
 
-| Feature | Starfish | Starfish-Speed | Starfish-BLS | Sailfish++ | Mysticeti | Cordial Miners |
-|---|---|---|---|---|---|---|
-| DAG type | Uncertified | Uncertified | Uncertified | Certified (RBC) | Uncertified | Uncertified |
-| Commit latency (rounds) | 3 | 3 (opt: 2) | 3 | 2 | 3 | 3 |
-| Transaction encoding | Reed-Solomon | Reed-Solomon | Reed-Solomon | Full blocks | Full blocks | Full blocks |
-| Dissemination default | Push-causal | Push-causal | Push-causal | Pull | Pull | Push-causal |
-| Certification mechanism | None | None | BLS aggregate sigs | Signature-free RBC | None | None |
-| Acknowledgment references | Yes | Yes | Yes (DAC) | No | No | No |
+- **Pull** -- push own blocks only; request missing ancestors on
+  demand
+- **Push-causal** -- push blocks together with their causal history
+- **Push-useful** -- push only blocks the receiver hasn't seen yet
+  (uses cordial knowledge tracking; nodes hint peers about which
+  authorities could be useful for them). Consumes less bandwidth
+  than push-causal, but push-causal has benefits when nodes
+  experience network issues. Used in production in
+  [iotaledger/iota](https://github.com/iotaledger/iota/tree/develop/crates/starfish)
 
-## Key Features of Starfish
+Use `protocol-default` to select each protocol's native strategy
+(see table above).
 
-- Starfish is a Byzantine Fault Tolerant protocol capable of tolerating up to 1/3 of Byzantine nodes in a partially synchronous network.
-- It supports four configurable block dissemination modes:
-  - `protocol-default` — uses the protocol's native strategy
-    (pull for Mysticeti, push-causal for Starfish/CordialMiners)
-  - `pull` — push own blocks only; request missing ancestors
-  - `push-causal` — push blocks with their causal history
-  - `push-useful` — push blocks likely unknown to the receiver
-- It incorporates Reed-Solomon coding for transaction data
-  to amortize communication costs
-- It provides a linear amortized communication complexity for a large enough transaction load
-- It achieves high throughput (~200-300K tx/sec for 10-100 validators) and subsecond end-to-end latency for up to 150K tx/sec
+## Configuration
 
-## Byzantine strategies
+**Storage backends**: RocksDB (default) or
+[Tidehunter](https://github.com/MystenLabs/tidehunter)
+(`--storage-backend tidehunter`, requires the `tidehunter` feature).
+Both are configured for benchmark performance.
 
-The testbed implements several Byzantine behaviors to evaluate consensus robustness.
-The number of Byzantine nodes can be set using `--num-byzantine-nodes`
-and has to be less than 1/3 of the total number of validators.
-The Byzantine strategies include:
+**Transaction modes**: `all-zero` (timestamp + counter + zero
+padding) or `random` (timestamp + random bytes)
+(`--transaction-mode`).
 
-- `timeout-leader`: Byzantine validators time out when elected as leader to slow down consensus
-- `leader-withholding`: Byzantine leaders withhold block proposals and send it to only a few other validators to delay the commit rule
-- `chain-bomb`: Attackers attempt to disrupt the network by flooding some validators with their generated chains of blocks
-- `equivocating-two-chains`: Byzantine validators create two equivocating blocks
-and disseminate them to half of network, not allowing to directly skip their proposals
-- `equivocating-chains`: Malicious validators create equivocating blocks and disseminate them to the respected validators
-- `equivocating-chains-bomb`: Byzantine validator create chains of equivocating blocks
-and send the chain just before the respected validator is elected as a leader.
-Recommend to use 1 Byzantine validator as they are not coordinated
-- `random-drop`: Byzantine validators randomly drop outgoing messages with probability `1/n` where `n` is the committee size
+**Network compression**: lz4 compression is enabled by default
+(`--compress-network`).
+
+**Committee size**: up to 512 validators. To support larger
+committees, increase `MAX_COMMITTEE_SIZE`.
+
+## Byzantine Strategies
+
+The testbed implements several Byzantine behaviors to evaluate
+consensus robustness. These strategies target uncertified DAG
+protocols; certified DAGs (Sailfish++) are not affected.
+The number of Byzantine nodes can be set using
+`--num-byzantine-nodes` and has to be less than 1/3 of the total
+number of validators. The Byzantine strategies include:
+
+- `timeout-leader`: Byzantine validators time out when elected as
+  leader to slow down consensus
+- `leader-withholding`: Byzantine leaders withhold block proposals
+  and send them to only a few other validators to delay the commit
+  rule
+- `chain-bomb`: Attackers attempt to disrupt the network by flooding
+  some validators with their generated chains of blocks
+- `equivocating-two-chains`: Byzantine validators create two
+  equivocating blocks and disseminate them to half of the network
+- `equivocating-chains`: Malicious validators create equivocating
+  blocks and disseminate them to the respective validators
+- `equivocating-chains-bomb`: Byzantine validators create chains of
+  equivocating blocks and send them just before the respective
+  validator is elected as a leader (recommend 1 Byzantine validator
+  as they are not coordinated)
+- `random-drop`: Byzantine validators randomly drop outgoing
+  messages with probability `1/n` where `n` is the committee size
 
 ## Implementation Details
 
-Starfish is implemented in Rust, building upon the [Mysticeti testbed](https://github.com/asonnino/mysticeti/tree/paper). The implementation includes:
+The framework is implemented in Rust, building upon the
+[Mysticeti testbed](https://github.com/asonnino/mysticeti/tree/paper).
+The implementation includes:
 
-- **Networking**: [tokio](https://tokio.rs) for asynchronous programming with direct TCP socket communication (no RPC frameworks)
+- **Networking**: Every validator maintains a direct persistent TCP
+  connection to every other validator (full mesh). Messages are
+  serialized with [bincode](https://docs.rs/bincode/) and exchanged
+  over these connections without RPC frameworks.
+  Asynchronous I/O is handled by [tokio](https://tokio.rs)
 - **Cryptography**:
-  - [ed25519-consensus](https://docs.rs/ed25519-consensus/) for digital signatures
-  - [blake3](https://docs.rs/blake3/) for high-performance cryptographic hashing
-- **Data Handling**:
-  - [bincode](https://docs.rs/bincode/) for efficient serialization of protocol messages
-  - [RocksDB](https://rocksdb.org/) for persistent storage of consensus data (replacing Mysticeti's WAL storage)
-- **Transaction Encoding**: [Reed-Solomon-SIMD](https://crates.io/crates/reed-solomon-simd) implementing:
-  - Erasure codes over field `F_{2^16}`
-  - Fast-Fourier transform-based decoding
-  - SIMD instruction optimization for larger shards
+  - [ed25519-consensus](https://docs.rs/ed25519-consensus/) for
+    digital signatures
+  - [blst](https://docs.rs/blst/) for BLS aggregate signatures
+    (Starfish-BLS, Mysticeti-BLS)
+  - [blake3](https://docs.rs/blake3/) for high-performance
+    cryptographic hashing
+- **Storage**: [RocksDB](https://rocksdb.org/) (default) or
+  [Tidehunter](https://github.com/MystenLabs/tidehunter) for
+  persistent storage of consensus data
+- **Transaction Encoding** (Starfish family only):
+  [Reed-Solomon-SIMD](https://crates.io/crates/reed-solomon-simd)
+  implementing erasure codes over F_{2^16} with FFT-based decoding
+  and SIMD optimization
 
-Like other consensus testbed, our prototype focuses solely on consensus performance measurement without execution or ledger storage components.
+Like other consensus testbeds, this prototype focuses solely on
+consensus performance measurement without execution or ledger
+storage components.
 
 ## Requirements
 
 ### Dependencies
 
-Starfish requires the following core dependencies:
+The framework requires the following core dependencies:
 
 - **Rust 1.85+**: For building and running the project
 - **Build essentials**: `build-essential`, `libssl-dev`, `pkg-config`
-- **Clang tools**: `clang`, `libclang-dev` (for compiling RocksDB and other native dependencies)
+- **Clang tools**: `clang`, `libclang-dev` (for compiling RocksDB
+  and other native dependencies)
 
 ### Mac
 
@@ -144,7 +187,8 @@ sudo apt-get install -y \
     libclang-dev
 ```
 
-For more advanced usage scenarios (distributed testing, metrics visualization, etc.), additional tools may be required.
+For more advanced usage scenarios (distributed testing, metrics
+visualization, etc.), additional tools may be required.
 
 ## Quick Start
 
@@ -155,12 +199,12 @@ cd ./starfish
 cargo build --release
 ```
 
-### Run local benchmark and output the basic metrics
+### Run local benchmark
 
 ```bash
 cargo run --release --bin starfish -- local-benchmark \
         --committee-size 7 \
-        --load 10000 \
+        --load 1000 \
         --consensus starfish \
         --num-byzantine-nodes 0 \
         --byzantine-strategy chain-bomb \
@@ -168,80 +212,33 @@ cargo run --release --bin starfish -- local-benchmark \
         --duration-secs 100
 ```
 
-Additional local-benchmark flags:
+Additional flags: `--dissemination-mode`, `--adversarial-latency`,
+`--uniform-latency-ms`.
 
-- `--dissemination-mode <MODE>` — override dissemination strategy
-  (`protocol-default`, `pull`, `push-causal`, `push-useful`)
-- `--adversarial-latency` — overlay 10s latency on f farthest peers
-- `--uniform-latency-ms <FLOAT>` — uniform latency instead of
-  AWS RTT table
+### Local dryrun with monitoring and dashboard
 
-### Local dryrun with monitoring
-
-The dryrun script launches a Docker-based local testbed with Prometheus and Grafana:
+The dryrun script launches a Docker-based local testbed with
+Prometheus and Grafana:
 
 ```bash
-./scripts/dryrun.sh
+./local-dryrun/dryrun.sh
 ```
-
-Configuration via environment variables:
 
 ```bash
-NUM_VALIDATORS=10 DESIRED_TPS=1000 CONSENSUS=starfish-speed \
-  NUM_BYZANTINE_NODES=2 BYZANTINE_STRATEGY=random-drop \
-  TEST_TIME=3000 ./scripts/dryrun.sh
+NUM_NODES=10 CONSENSUS=starfish DESIRED_TPS=1000 \
+  ./local-dryrun/dryrun.sh
 ```
 
-| Variable | Default | Description |
-|---|---|---|
-| `NUM_VALIDATORS` | 10 | Number of validators (recommend < physical cores, max 256) |
-| `DESIRED_TPS` | 1000 | Target transactions per second |
-| `CONSENSUS` | starfish-speed | Protocol: `starfish`, `starfish-speed`, `starfish-bls`, `sailfish-pp`, `cordial-miners`, `mysticeti` |
-| `NUM_BYZANTINE_NODES` | 0 | Must be < `NUM_VALIDATORS / 3` |
-| `BYZANTINE_STRATEGY` | random-drop | See [Byzantine strategies](#byzantine-strategies) |
-| `TEST_TIME` | 3000 | Duration in seconds |
-| `DISSEMINATION_MODE` | push-causal | `protocol-default`, `pull`, `push-causal`, `push-useful` |
-| `STORAGE_BACKEND` | rocksdb | `rocksdb` or `tidehunter` |
-| `TRANSACTION_MODE` | all_zero | `all_zero` or `random` |
-| `ADVERSARIAL_LATENCY` | _(unset)_ | Set to `1` to overlay 10s latency on f farthest peers |
-| `UNIFORM_LATENCY_MS` | _(unset)_ | Uniform network latency in ms; overrides AWS RTT table |
-| `CLEAN_MONITORING` | 0 | Set to 1 to wipe Prometheus/Grafana data between runs |
-| `REMOVE_VOLUMES` | 1 | Set to 0 to preserve RocksDB volumes between runs |
-| `PROMETHEUS_PORT` | 9091 | Host port for Prometheus UI |
-| `GRAFANA_PORT` | 3001 | Host port for Grafana UI |
-
-Grafana is available at `http://localhost:3001` (admin/admin). Ctrl+C stops validators but preserves the monitoring stack.
-
-### Docker
-
-Build locally:
-
-```bash
-docker build -t starfish .
-```
-
-Or pull the latest image from GHCR:
-
-```bash
-docker pull ghcr.io/iotaledger/starfish:latest
-```
-
-Run a local benchmark via Docker:
-
-```bash
-docker run --rm starfish local-benchmark \
-    --committee-size 7 --load 10000 --consensus starfish \
-    --duration-secs 60
-```
-
-Pre-built Linux binaries are published as
-[nightly releases](https://github.com/iotaledger/starfish/releases/tag/nightly)
-(extracted from the Docker image).
+Grafana is available at `http://localhost:3001` (admin/admin).
+See [local-dryrun/README.md](./local-dryrun/README.md) for the
+full parameter reference.
 
 ### Distributed Testing using Orchestrator
 
-To run tests on a geo-distributed network, look at instructions in [crates/orchestrator/readme.md](./crates/orchestrator/readme.md).
+To run tests on a geo-distributed network, look at instructions in
+[crates/orchestrator/README.md](crates/orchestrator/README.md).
 
 ## License
 
 [Apache 2.0](LICENSE)
+
