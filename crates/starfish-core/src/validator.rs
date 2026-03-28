@@ -31,7 +31,6 @@ use crate::{
 pub struct Validator {
     network_broadcaster: NetworkSyncer<RealBlockHandler, RealCommitHandler>,
     metrics_handle: JoinHandle<Result<(), std::io::Error>>,
-    push_handle: Option<JoinHandle<()>>,
     metrics: Arc<Metrics>,
     reporter: Arc<MetricReporter>,
 }
@@ -45,9 +44,6 @@ impl Validator {
         parameters: Parameters,
         byzantine_strategy: String,
         consensus: String,
-        pushgateway_url: Option<String>,
-        testbed_id: Option<String>,
-        benchmark_run_id: Option<String>,
     ) -> Result<Self> {
         // Network and metrics setup remains the same
         let network_address = public_config
@@ -92,17 +88,6 @@ impl Validator {
         reporter.clone().start();
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
-
-        let push_handle = pushgateway_url.map(|url| {
-            prometheus::start_metrics_push_task(
-                url,
-                format!("node-{authority}"),
-                testbed_id.clone(),
-                benchmark_run_id.clone(),
-                &registry,
-                committee.len(),
-            )
-        });
 
         // Apply timeouts from Parameters to the consensus config.
         let mut public_config = public_config;
@@ -194,7 +179,6 @@ impl Validator {
         Ok(Self {
             network_broadcaster,
             metrics_handle,
-            push_handle,
             metrics,
             reporter,
         })
@@ -222,9 +206,6 @@ impl Validator {
     pub async fn stop(self) {
         self.network_broadcaster.shutdown().await;
         self.metrics_handle.abort();
-        if let Some(handle) = self.push_handle {
-            handle.abort();
-        }
         // Give time for background Worker tasks to detect channel closures and exit,
         // and for TCP sockets to fully release.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -298,9 +279,6 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
-                None,
-                None,
-                None,
             )
             .await
             .unwrap();
@@ -371,9 +349,6 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
-                None,
-                None,
-                None,
             )
             .await
             .unwrap();
@@ -406,9 +381,6 @@ mod smoke_tests {
             parameters,
             "honest".to_string(),
             consensus.to_string(),
-            None,
-            None,
-            None,
         )
         .await
         .unwrap();
@@ -470,9 +442,6 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
-                None,
-                None,
-                None,
             )
             .await
             .unwrap();
@@ -617,9 +586,6 @@ mod smoke_tests {
             parameters.clone(),
             "honest".to_string(),
             consensus.to_string(),
-            None,
-            None,
-            None,
         )
         .await
         .unwrap()
@@ -659,9 +625,6 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
-                None,
-                None,
-                None,
             )
             .await
             .unwrap();

@@ -6,7 +6,7 @@ use std::{
     fmt::{Debug, Display},
     net::IpAddr,
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -90,8 +90,6 @@ impl ProtocolParameters for StarfishParameters {}
 
 pub struct StarfishProtocol {
     working_dir: PathBuf,
-    pushgateway_url: Option<String>,
-    testbed_id: String,
 }
 
 impl ProtocolCommands for StarfishProtocol {
@@ -121,22 +119,8 @@ impl ProtocolCommands for StarfishProtocol {
         let node_parameters = parameters.node_parameters.clone();
         let node_parameters_string = serde_yaml::to_string(&node_parameters).unwrap();
         let node_parameters_path = self.working_dir.join("node-parameters.yaml");
-        let upload_node_parameters = format!(
-            "echo -e '{node_parameters_string}' > {}",
-            node_parameters_path.display()
-        );
-
-        let upload_parameters = (0..parameters.nodes)
-            .map(|authority| {
-                let mut params = parameters.client_parameters.clone();
-                params.load =
-                    Self::split_authority_load(parameters.load, parameters.nodes, authority);
-                let params_string = serde_yaml::to_string(&params).unwrap();
-                let params_path = self.authority_parameters_path(authority as AuthorityIndex);
-                format!("echo -e '{params_string}' > {}", params_path.display())
-            })
-            .collect::<Vec<_>>()
-            .join(" && ");
+        let upload_node_parameters =
+            Self::write_remote_file_command(&node_parameters_path, &node_parameters_string);
 
         let genesis = [
             &format!("./{BINARY_PATH}/starfish"),
@@ -149,13 +133,7 @@ impl ProtocolCommands for StarfishProtocol {
         ]
         .join(" ");
 
-        [
-            "source $HOME/.cargo/env",
-            &upload_node_parameters,
-            &upload_parameters,
-            &genesis,
-        ]
-        .join(" && ")
+        ["source $HOME/.cargo/env", &upload_node_parameters, &genesis].join(" && ")
     }
 
     fn node_command<I>(
@@ -183,6 +161,12 @@ impl ProtocolCommands for StarfishProtocol {
                     byzantine_strategy.clone_from(&parameters.byzantine_strategy);
                 }
                 let consensus_protocol = parameters.consensus_protocol.clone();
+                let mut client_parameters = parameters.client_parameters.clone();
+                client_parameters.load =
+                    Self::split_authority_load(parameters.load, parameters.nodes, i);
+                let client_parameters_string = serde_yaml::to_string(&client_parameters).unwrap();
+                let upload_parameters =
+                    Self::write_remote_file_command(&parameters_path, &client_parameters_string);
 
                 // Build base command
                 let mut command_parts = vec![
@@ -199,14 +183,6 @@ impl ProtocolCommands for StarfishProtocol {
                 // Add byzantine strategy if needed
                 if byzantine_strategy != "honest" {
                     command_parts.push(format!("--byzantine-strategy {}", byzantine_strategy));
-                }
-
-                // Add pushgateway URL for push-based metrics collection
-                if let Some(ref url) = self.pushgateway_url {
-                    command_parts.push(format!("--pushgateway-url {url}"));
-                    command_parts.push(format!("--testbed-id {}", self.testbed_id));
-                    command_parts
-                        .push(format!("--benchmark-run-id {}", parameters.benchmark_run_id));
                 }
 
                 // Add tracing if enabled
@@ -226,7 +202,7 @@ impl ProtocolCommands for StarfishProtocol {
                 }
 
                 let run = command_parts.join(" ");
-                let command = ["source $HOME/.cargo/env", &run].join(" && ");
+                let command = ["source $HOME/.cargo/env", &upload_parameters, &run].join(" && ");
                 (instance, command)
             })
             .collect()
@@ -269,17 +245,32 @@ impl ProtocolMetrics for StarfishProtocol {
 
 impl StarfishProtocol {
     /// Make a new instance of the Mysticeti protocol commands generator.
-    pub fn new(settings: &Settings, pushgateway_url: Option<String>) -> Self {
+    pub fn new(settings: &Settings) -> Self {
         Self {
             working_dir: settings.working_dir.clone(),
-            pushgateway_url,
-            testbed_id: settings.testbed_id.clone(),
         }
     }
 
     fn authority_parameters_path(&self, authority: AuthorityIndex) -> PathBuf {
         self.working_dir
             .join(format!("parameters-{authority}.yaml"))
+    }
+
+    fn write_remote_file_command(path: &Path, contents: &str) -> String {
+        let mut delimiter = "STARFISH_REMOTE_FILE_EOF".to_string();
+        while contents.contains(&delimiter) {
+            delimiter.push('_');
+        }
+
+        let mut file_contents = contents.to_string();
+        if !file_contents.ends_with('\n') {
+            file_contents.push('\n');
+        }
+
+        format!(
+            "(cat <<'{delimiter}' > {}\n{file_contents}{delimiter}\n)",
+            path.display()
+        )
     }
 
     fn split_authority_load(total_load: usize, nodes: usize, authority: usize) -> usize {

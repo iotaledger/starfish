@@ -4,9 +4,9 @@
 
 //! Orchestrator entry point.
 
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{collections::HashSet, fs, path::PathBuf, process::Command, time::Duration};
 
-use benchmark::{BenchmarkParameters, LatencyThroughputSweepPlan};
+use benchmark::{BenchmarkParameters, CommitteeScalingPlan, LatencyThroughputSweepPlan};
 use clap::Parser;
 use client::{Instance, ServerProviderClient, aws::AwsClient, vultr::VultrClient};
 use eyre::Context;
@@ -119,15 +119,15 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Consensus to deploy. Available options:
+        /// Protocols to benchmark in order. Available options:
         /// starfish | starfish-speed | starfish-bls | mysticeti |
         /// cordial-miners | bluestreak
-        #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
-        consensus: String,
-
-        /// Protocols to benchmark in order. When specified, the orchestrator
-        /// runs each listed protocol.
-        #[clap(long, value_name = "STRING", num_args = 1.., global = true)]
+        #[clap(
+            long,
+            value_name = "STRING",
+            num_args = 1..,
+            required = true
+        )]
         protocols: Vec<String>,
 
         /// Automatically destroy the testbed after a successful benchmark or
@@ -194,12 +194,13 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Default protocol if `--protocols` is not provided.
-        #[clap(long, value_name = "STRING", default_value = "starfish", global = true)]
-        consensus: String,
-
         /// Protocols to benchmark in order.
-        #[clap(long, value_name = "STRING", num_args = 1.., global = true)]
+        #[clap(
+            long,
+            value_name = "STRING",
+            num_args = 1..,
+            required = true
+        )]
         protocols: Vec<String>,
 
         /// Initial load for latency-throughput sweep mode.
@@ -229,6 +230,83 @@ pub enum Operation {
         /// sweep mode.
         #[clap(long, value_name = "INT", default_value_t = 12, global = true)]
         sweep_max_points: usize,
+
+        /// Automatically destroy the testbed after a successful sweep.
+        #[clap(long, action, default_value_t = false, global = true)]
+        destroy_testbed_after: bool,
+
+        /// Flag indicating whether nodes use log traces or not.
+        #[clap(long, action, default_value_t = false, global = true)]
+        enable_tracing: bool,
+
+        /// Storage backend for the DAG. Overrides the value from the
+        /// parameters file. Available options: rocksdb | tidehunter
+        #[clap(long, value_name = "STRING", global = true)]
+        storage_backend: Option<String>,
+
+        /// Transaction payload mode. Overrides the value from the
+        /// parameters file. Available options: all_zero | random
+        #[clap(long, value_name = "STRING", default_value = "random", global = true)]
+        transaction_mode: Option<String>,
+
+        /// Dissemination mode override. Overrides the value from the
+        /// node parameters file. Available options:
+        /// protocol-default | pull | push-causal | push-useful
+        #[clap(long, value_name = "STRING", global = true)]
+        dissemination_mode: Option<String>,
+
+        /// Enable lz4 network compression. Auto-enabled for random
+        /// transaction mode unless explicitly set to false via
+        /// --no-compress-network.
+        #[clap(long, global = true)]
+        compress_network: Option<bool>,
+
+        /// Number of parallel threads for BLS batch verification (default: 5).
+        #[clap(long, value_name = "INT", global = true)]
+        bls_workers: Option<usize>,
+    },
+    /// Benchmark multiple committee sizes at zero load for a fixed set of
+    /// protocols. This mode requires a single-region testbed and always uses
+    /// internal IPs with synthetic latency enabled.
+    BenchmarkCommitteeSweep {
+        /// Committee sizes to benchmark. Values are sorted and deduplicated
+        /// before execution.
+        #[clap(long, value_name = "INT", num_args = 1.., required = true)]
+        committee_sizes: Vec<usize>,
+
+        /// Protocols to benchmark in order.
+        #[clap(
+            long,
+            value_name = "STRING",
+            num_args = 1..,
+            required = true
+        )]
+        protocols: Vec<String>,
+
+        /// Keep this many extra validator instances active in reserve so the
+        /// sweep can tolerate spot interruptions without reallocating.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        spare_instances: usize,
+
+        /// The number of byzantine nodes to deploy.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        byzantine_nodes: usize,
+
+        /// The Byzantine strategy to deploy on byzantine nodes.
+        #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
+        byzantine_strategy: String,
+
+        /// Overlay 10s latency on the f farthest peers (circular distance).
+        #[clap(long, action, default_value_t = false, global = true)]
+        adversarial_latency: bool,
+
+        /// Whether to skip testbed updates before running benchmarks.
+        #[clap(long, action, default_value_t = false, global = true)]
+        skip_testbed_update: bool,
+
+        /// Whether to skip testbed configuration before running benchmarks.
+        #[clap(long, action, default_value_t = false, global = true)]
+        skip_testbed_configuration: bool,
 
         /// Automatically destroy the testbed after a successful sweep.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -405,6 +483,22 @@ fn maybe_auto_detect_prebuilt_binary(settings: &mut Settings) {
 fn required_benchmark_instances(settings: &Settings, committee: usize) -> usize {
     let cloud_monitoring = usize::from(settings.monitoring && !settings.is_external_monitoring());
     committee + cloud_monitoring
+}
+
+fn required_benchmark_instances_with_spares(
+    settings: &Settings,
+    committee: usize,
+    spare_instances: usize,
+) -> usize {
+    required_benchmark_instances(settings, committee).saturating_add(spare_instances)
+}
+
+fn join_usize_list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn load_benchmark_configs(
@@ -700,7 +794,6 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
-            consensus: consensus_protocol,
             protocols,
             destroy_testbed_after,
             adversarial_latency,
@@ -736,11 +829,6 @@ async fn run<C: ServerProviderClient>(
                 bls_workers,
             )?;
 
-            let protocols = if protocols.is_empty() {
-                vec![consensus_protocol]
-            } else {
-                protocols
-            };
             let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
@@ -760,15 +848,8 @@ async fn run<C: ServerProviderClient>(
                     "multi-region (public IPs, real latency)"
                 },
             );
-            display::config("Consensus", protocols.join(", "));
-            display::config(
-                "Load (tx/s)",
-                loads
-                    .iter()
-                    .map(|l| l.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
+            display::config("Protocols", protocols.join(", "));
+            display::config("Load (tx/s)", join_usize_list(&loads));
             display::config(
                 "Byzantine nodes",
                 format!("{byzantine_nodes} ({byzantine_strategy})"),
@@ -787,49 +868,20 @@ async fn run<C: ServerProviderClient>(
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
-            let base_parameters = BenchmarkParameters::new(
+            let set_of_benchmark_parameters = BenchmarkParameters::new_from_protocols_and_loads(
                 settings.clone(),
                 node_parameters,
                 client_parameters,
                 committee,
                 use_internal_ip_addresses,
-                *loads.first().unwrap_or(&0),
-                protocols
-                    .first()
-                    .cloned()
-                    .expect("protocol list is non-empty"),
+                protocols,
+                loads,
                 byzantine_nodes,
                 byzantine_strategy,
                 enable_tracing,
             );
-
-            let set_of_benchmark_parameters = if protocols.len() == 1 {
-                BenchmarkParameters::new_from_loads(
-                    base_parameters.settings.clone(),
-                    base_parameters.node_parameters.clone(),
-                    base_parameters.client_parameters.clone(),
-                    base_parameters.nodes,
-                    base_parameters.use_internal_ip_address,
-                    loads,
-                    protocols[0].clone(),
-                    base_parameters.byzantine_nodes,
-                    base_parameters.byzantine_strategy.clone(),
-                    base_parameters.enable_tracing,
-                )
-            } else {
-                BenchmarkParameters::new_from_protocols_and_loads(
-                    base_parameters.settings.clone(),
-                    base_parameters.node_parameters.clone(),
-                    base_parameters.client_parameters.clone(),
-                    base_parameters.nodes,
-                    base_parameters.use_internal_ip_address,
-                    protocols,
-                    loads,
-                    base_parameters.byzantine_nodes,
-                    base_parameters.byzantine_strategy.clone(),
-                    base_parameters.enable_tracing,
-                )
-            };
+            let suite_results_dir =
+                Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark");
 
             let benchmark_result: eyre::Result<()> = async {
                 let username = testbed.username();
@@ -847,14 +899,14 @@ async fn run<C: ServerProviderClient>(
                     .await
                     .wrap_err("Failed to load testbed setup commands")?;
 
-                let pushgateway_url = settings.external_pushgateway_url();
-                let protocol_commands = Protocol::new(&settings, pushgateway_url);
+                let protocol_commands = Protocol::new(&settings);
                 Orchestrator::new(
                     settings,
                     instances,
                     setup_commands,
                     protocol_commands,
                     ssh_manager,
+                    suite_results_dir,
                 )
                 .skip_testbed_update(skip_testbed_update)
                 .skip_testbed_configuration(skip_testbed_configuration)
@@ -877,7 +929,6 @@ async fn run<C: ServerProviderClient>(
             committee,
             byzantine_nodes,
             byzantine_strategy,
-            consensus: consensus_protocol,
             protocols,
             sweep_initial_load,
             sweep_latency_goal_ms,
@@ -916,11 +967,6 @@ async fn run<C: ServerProviderClient>(
                 bls_workers,
             )?;
 
-            let protocols = if protocols.is_empty() {
-                vec![consensus_protocol]
-            } else {
-                protocols
-            };
             let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
@@ -940,7 +986,7 @@ async fn run<C: ServerProviderClient>(
                     "multi-region (public IPs, real latency)"
                 },
             );
-            display::config("Consensus", protocols.join(", "));
+            display::config("Protocols", protocols.join(", "));
             display::config(
                 "Sweep",
                 format!(
@@ -997,6 +1043,8 @@ async fn run<C: ServerProviderClient>(
                 sweep_max_points,
             )
             .wrap_err("Invalid latency-throughput sweep configuration")?;
+            let suite_results_dir =
+                Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark-sweep");
 
             let sweep_result: eyre::Result<()> = async {
                 testbed
@@ -1019,14 +1067,14 @@ async fn run<C: ServerProviderClient>(
                     .await
                     .wrap_err("Failed to load testbed setup commands")?;
 
-                let pushgateway_url = settings.external_pushgateway_url();
-                let protocol_commands = Protocol::new(&settings, pushgateway_url);
+                let protocol_commands = Protocol::new(&settings);
                 Orchestrator::new(
                     settings,
                     instances,
                     setup_commands,
                     protocol_commands,
                     ssh_manager,
+                    suite_results_dir,
                 )
                 .skip_testbed_update(skip_testbed_update)
                 .skip_testbed_configuration(skip_testbed_configuration)
@@ -1041,6 +1089,235 @@ async fn run<C: ServerProviderClient>(
                 destroy_testbed_after,
                 sweep_result,
                 "Benchmark sweep",
+            )
+            .await?;
+        }
+
+        Operation::BenchmarkCommitteeSweep {
+            committee_sizes,
+            protocols,
+            spare_instances,
+            byzantine_nodes,
+            byzantine_strategy,
+            adversarial_latency,
+            skip_testbed_update,
+            skip_testbed_configuration,
+            destroy_testbed_after,
+            enable_tracing,
+            storage_backend,
+            transaction_mode,
+            dissemination_mode,
+            compress_network,
+            bls_workers,
+        } => {
+            let mut settings = settings;
+            maybe_auto_detect_prebuilt_binary(&mut settings);
+
+            eyre::ensure!(
+                single_region(&settings),
+                "Committee scaling sweep requires exactly one region so it can run \
+                 with internal IPs and synthetic latency",
+            );
+
+            let plan = CommitteeScalingPlan::new(protocols, committee_sizes, spare_instances)
+                .wrap_err("Invalid committee scaling configuration")?;
+            let mimic_extra_latency = true;
+            let use_internal_ip_addresses = true;
+            let initial_required_instances = required_benchmark_instances_with_spares(
+                &settings,
+                plan.committee_sizes[0],
+                plan.spare_instances,
+            );
+            let max_required_instances = required_benchmark_instances_with_spares(
+                &settings,
+                plan.max_committee_size(),
+                plan.spare_instances,
+            );
+            let (node_parameters, client_parameters) = load_benchmark_configs(
+                &settings,
+                mimic_extra_latency,
+                adversarial_latency,
+                &storage_backend,
+                &transaction_mode,
+                &dissemination_mode,
+                compress_network,
+                bls_workers,
+            )?;
+            let uses_bls = plan
+                .protocols
+                .iter()
+                .any(|protocol| protocol_uses_bls(protocol));
+
+            display::newline();
+            display::header("Benchmark committee sweep configuration");
+            display::config("Regions", settings.regions.join(", "));
+            display::config("Instance specs", &settings.specs);
+            let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
+            display::config(
+                "Instances",
+                format!(
+                    "grow from {initial_required_instances} to {max_required_instances} \
+                     (committee + {cloud_mon} monitoring + {} spare)",
+                    plan.spare_instances,
+                ),
+            );
+            display::config(
+                "Network mode",
+                "single-region (internal IPs, mimic latency)",
+            );
+            display::config("Protocols", plan.protocols.join(", "));
+            display::config("Committee sizes", join_usize_list(&plan.committee_sizes));
+            display::config("Load (tx/s)", "0");
+            display::config(
+                "Byzantine nodes",
+                format!("{byzantine_nodes} ({byzantine_strategy})"),
+            );
+            display::config("Dissemination mode", node_parameters.dissemination_mode);
+            display::config("Storage backend", &client_parameters.storage_backend);
+            display::config("Transaction mode", &client_parameters.transaction_mode);
+            display::config("Compress network", node_parameters.compress_network);
+            if uses_bls {
+                display::config(
+                    "BLS workers (BLS protocols only)",
+                    node_parameters.bls_verification_workers,
+                );
+            }
+            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config("Enable tracing", enable_tracing);
+            display::newline();
+
+            let set_of_benchmark_parameters =
+                BenchmarkParameters::new_from_protocols_and_committees(
+                    settings.clone(),
+                    node_parameters.clone(),
+                    client_parameters.clone(),
+                    plan.committee_sizes.clone(),
+                    use_internal_ip_addresses,
+                    plan.protocols.clone(),
+                    0,
+                    byzantine_nodes,
+                    byzantine_strategy.clone(),
+                    enable_tracing,
+                );
+            let suite_results_dir =
+                Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark-committee-sweep");
+
+            let benchmark_result: eyre::Result<()> = async {
+                let mut prepared_instance_ids = HashSet::new();
+
+                for committee in &plan.committee_sizes {
+                    let required_instances = required_benchmark_instances_with_spares(
+                        &settings,
+                        *committee,
+                        plan.spare_instances,
+                    );
+                    let committee_parameters: Vec<_> = set_of_benchmark_parameters
+                        .iter()
+                        .filter(|parameters| parameters.nodes == *committee)
+                        .cloned()
+                        .collect();
+
+                    display::header(format!("Committee size {committee}"));
+                    display::config(
+                        "Reserved instances",
+                        format!(
+                            "{required_instances} \
+                             ({} validators + {cloud_mon} monitoring + {} spare)",
+                            committee, plan.spare_instances,
+                        ),
+                    );
+                    display::newline();
+
+                    testbed
+                        .ensure_active_instances(required_instances)
+                        .await
+                        .wrap_err("Failed to ensure committee sweep capacity")?;
+
+                    let instances = testbed
+                        .select_active_instances(required_instances)
+                        .wrap_err("Failed to reserve instances for committee sweep")?;
+
+                    if skip_testbed_update {
+                        let bootstrap_instances: Vec<_> = instances
+                            .iter()
+                            .filter(|instance| !prepared_instance_ids.contains(&instance.id))
+                            .cloned()
+                            .collect();
+
+                        if !bootstrap_instances.is_empty() {
+                            let username = testbed.username();
+                            let private_key_file = settings.ssh_private_key_file.clone();
+                            let ssh_manager =
+                                SshConnectionManager::new(username.into(), private_key_file)
+                                    .with_timeout(settings.ssh_timeout)
+                                    .with_retries(settings.ssh_retries);
+                            let setup_commands = testbed
+                                .setup_commands()
+                                .await
+                                .wrap_err("Failed to load testbed setup commands")?;
+                            let protocol_commands = Protocol::new(&settings);
+                            let bootstrap_results_dir = suite_results_dir.join("bootstrap");
+                            let bootstrap_orchestrator = Orchestrator::new(
+                                settings.clone(),
+                                bootstrap_instances.clone(),
+                                setup_commands,
+                                protocol_commands,
+                                ssh_manager,
+                                bootstrap_results_dir,
+                            );
+
+                            bootstrap_orchestrator.install().await.wrap_err(
+                                "Failed to install dependencies on newly allocated instances",
+                            )?;
+                            bootstrap_orchestrator
+                                .update()
+                                .await
+                                .wrap_err("Failed to update newly allocated instances")?;
+
+                            prepared_instance_ids.extend(
+                                bootstrap_instances.into_iter().map(|instance| instance.id),
+                            );
+                        }
+                    }
+
+                    let username = testbed.username();
+                    let private_key_file = settings.ssh_private_key_file.clone();
+                    let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+                        .with_timeout(settings.ssh_timeout)
+                        .with_retries(settings.ssh_retries);
+
+                    let setup_commands = testbed
+                        .setup_commands()
+                        .await
+                        .wrap_err("Failed to load testbed setup commands")?;
+
+                    let protocol_commands = Protocol::new(&settings);
+                    Orchestrator::new(
+                        settings.clone(),
+                        instances,
+                        setup_commands,
+                        protocol_commands,
+                        ssh_manager,
+                        suite_results_dir.clone(),
+                    )
+                    .skip_testbed_update(skip_testbed_update)
+                    .skip_testbed_configuration(skip_testbed_configuration)
+                    .run_benchmarks(committee_parameters)
+                    .await
+                    .wrap_err_with(|| {
+                        format!("Failed to run committee scaling sweep for committee {committee}")
+                    })?;
+                }
+
+                Ok(())
+            }
+            .await;
+
+            maybe_destroy_after_result(
+                &mut testbed,
+                destroy_testbed_after,
+                benchmark_result,
+                "Benchmark committee sweep",
             )
             .await?;
         }
@@ -1149,4 +1426,73 @@ async fn run<C: ServerProviderClient>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Operation, Opts};
+
+    #[test]
+    fn benchmark_requires_protocols() {
+        assert!(Opts::try_parse_from(["orchestrator", "benchmark"]).is_err());
+    }
+
+    #[test]
+    fn benchmark_parses_grouped_protocols_and_loads() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark",
+            "--protocols",
+            "starfish",
+            "mysticeti",
+            "--loads",
+            "0",
+            "200",
+        ])
+        .unwrap();
+
+        match opts.operation {
+            Operation::Benchmark {
+                protocols, loads, ..
+            } => {
+                assert_eq!(protocols, vec!["starfish", "mysticeti"]);
+                assert_eq!(loads, vec![0, 200]);
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn committee_sweep_parses_grouped_protocols_and_sizes() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark-committee-sweep",
+            "--protocols",
+            "starfish",
+            "mysticeti",
+            "--committee-sizes",
+            "4",
+            "10",
+            "16",
+            "--spare-instances",
+            "3",
+        ])
+        .unwrap();
+
+        match opts.operation {
+            Operation::BenchmarkCommitteeSweep {
+                protocols,
+                committee_sizes,
+                spare_instances,
+                ..
+            } => {
+                assert_eq!(protocols, vec!["starfish", "mysticeti"]);
+                assert_eq!(committee_sizes, vec![4, 10, 16]);
+                assert_eq!(spare_instances, 3);
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
+    }
 }

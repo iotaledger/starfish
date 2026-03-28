@@ -69,6 +69,12 @@ pub enum SshError {
         code: i32,
         message: String,
     },
+
+    #[error("SSH task for {address} failed: {message}")]
+    TaskError {
+        address: SocketAddr,
+        message: String,
+    },
 }
 
 pub type MonitorResult<T> = Result<T, MonitorError>;

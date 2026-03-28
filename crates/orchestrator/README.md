@@ -121,7 +121,7 @@ For example, the following command benchmarks a committee of `10` validators
 running `Starfish` consensus protocol under a constant load of 1000 tx/s:
 
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 1000
+cargo run --bin orchestrator -- benchmark --protocols starfish --committee 10 --loads 1000
 ```
 
 In a network of 10 validators, each with a corresponding load generator,
@@ -134,7 +134,7 @@ There are 5 options for consensus protocols: `starfish`, `starfish-speed`, `star
 To run with Byzantine validators:
 
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus mysticeti --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy chain-bomb
+cargo run --bin orchestrator -- benchmark --protocols mysticeti --committee 4 --loads 200 --byzantine-nodes 1 --byzantine-strategy chain-bomb
 ```
 
 In a network of 4 validators, each with a corresponding load generator,
@@ -143,16 +143,13 @@ One node is Byzantine and follows `Chain-Bomb` Byzantine strategies.
 The available options for Byzantine strategies are
 `chain-bomb`, `equivocating-chains`, `equivocating-two-chains`, `equivocating-chains-bomb`, `timeout-leader`, `leader-withholding`, `random-drop`.
 
-In case of running in a single region AWS VPC, it's possible to use
-internal IP addresses to avoid unnecessary costs for data transfer
-between validators. This option can be enabled by adding
-the `--use-internal-ip-addresses` flag to the `benchmark` command.
-In addition, since the latencies within one region are very small,
-one can _mimic_ extra latencies matching some geo-distributed setup
-using the flag `--mimic-extra-latency`. So, the command could be
+When `settings.yml` lists a single region, orchestrator automatically
+uses internal IP addresses and enables synthetic latency to mimic a
+geo-distributed deployment while keeping traffic inside the VPC. For
+example:
 
 ```bash
-cargo run --bin orchestrator -- benchmark --consensus starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb --mimic-extra-latency --use-internal-ip-addresses
+cargo run --bin orchestrator -- benchmark --protocols starfish --committee 10 --loads 20000 --byzantine-nodes 1 --byzantine-strategy equivocating-chains-bomb
 ```
 
 Additional benchmark flags:
@@ -162,7 +159,7 @@ Additional benchmark flags:
 | `--dissemination-mode` | _(protocol default)_ | `protocol-default`, `pull`, `push-causal`, `push-useful` |
 | `--storage-backend` | _(unset)_ | `rocksdb` or `tidehunter` |
 | `--transaction-mode` | _(unset)_ | `all_zero` or `random` |
-| `--protocols` | _(unset)_ | Run multiple protocols in sequence |
+| `--protocols` | _(required)_ | Run one or more protocols in sequence |
 | `--enable-tracing` | false | Enable detailed log traces |
 | `--adversarial-latency` | false | Overlay 10s latency on f farthest peers |
 | `--skip-testbed-update` | false | Skip pulling latest code on remotes |
@@ -181,7 +178,7 @@ are collected.
 
 ```bash
 cargo run --bin orchestrator -- benchmark-sweep \
-    --consensus starfish --committee 10
+    --protocols starfish --committee 10
 ```
 
 Use `--protocols` to sweep multiple protocols in one run:
@@ -203,8 +200,42 @@ Sweep-specific flags:
 | `--sweep-fine-multiplier` | 1.25 | Fine-phase load multiplier |
 | `--sweep-max-points` | 12 | Max measurements per protocol |
 
-All common benchmark flags (`--mimic-extra-latency`,
-`--adversarial-latency`, `--dissemination-mode`, etc.) are also
+All common benchmark flags (`--adversarial-latency`,
+`--dissemination-mode`, etc.) are also accepted.
+
+### Committee scaling sweep
+
+The `benchmark-committee-sweep` subcommand benchmarks a fixed set of
+protocols across increasing committee sizes at zero transaction load.
+This mode is intended for single-region deployments and always uses
+internal IPs with synthetic latency enabled.
+
+It starts from the smallest requested committee size, runs all selected
+protocols there, then grows capacity step-by-step for the next committee
+size. Optional spare validator instances can be kept active at each step
+to absorb spot interruptions.
+
+```bash
+cargo run --bin orchestrator -- benchmark-committee-sweep \
+    --protocols starfish mysticeti bluestreak cordial-miners \
+    --committee-sizes 4 10 16 24 \
+    --spare-instances 2
+```
+
+Committee sizes are sorted and deduplicated before execution. Protocol
+order is preserved exactly as specified on the command line. The sweep
+runs with `0` load for every protocol/committee pair.
+
+Committee-sweep-specific flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--committee-sizes` | _(required)_ | Committee sizes to benchmark |
+| `--protocols` | _(required)_ | Protocols to benchmark in order |
+| `--spare-instances` | 0 | Optional extra validator instances kept active in reserve |
+
+All common benchmark flags (`--adversarial-latency`,
+`--dissemination-mode`, `--skip-testbed-update`, etc.) are also
 accepted.
 
 ## Step 6. Summarize results

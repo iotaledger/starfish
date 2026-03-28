@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     fs,
     io::BufRead,
@@ -175,11 +175,32 @@ impl Measurement {
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
+                x if x == "block_sync_requests_sent" => match sample.value {
+                    prometheus_parse::Value::Counter(value) => {
+                        measurement.scalar += value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
                 x if x == "process_cpu_seconds_total" => match sample.value {
                     prometheus_parse::Value::Counter(value) => {
                         measurement.scalar = value;
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
+                },
+                x if x == "proposed_header_size_bytes" => match histogram_bucket {
+                    "count" => {
+                        measurement.count = match sample.value {
+                            prometheus_parse::Value::Gauge(value) => value as usize,
+                            _ => panic!("Unexpected scraped value: '{x}'"),
+                        }
+                    }
+                    "sum" => {
+                        measurement.scalar = match sample.value {
+                            prometheus_parse::Value::Gauge(value) => value,
+                            _ => panic!("Unexpected scraped value: '{x}'"),
+                        }
+                    }
+                    _ => {}
                 },
                 x if x == "dag_highest_round" => match sample.value {
                     prometheus_parse::Value::Gauge(value) => {
@@ -214,115 +235,6 @@ impl Measurement {
     #[cfg(test)]
     pub fn average_latency(&self) -> Duration {
         self.sum.checked_div(self.count as u32).unwrap_or_default()
-    }
-
-    /// Parse metrics from a Pushgateway combined response, grouping by
-    /// the `instance` label to produce per-validator measurements.
-    pub fn from_pushgateway_response<M: ProtocolMetrics>(
-        text: &str,
-        expected_testbed_id: Option<&str>,
-        expected_benchmark_run_id: Option<&str>,
-    ) -> HashMap<usize, HashMap<Label, Self>> {
-        let br = std::io::BufReader::new(text.as_bytes());
-        let parsed = Scrape::parse(br.lines()).unwrap();
-        let expected_testbed_id =
-            expected_testbed_id.map(starfish_core::prometheus::sanitize_pushgateway_label_value);
-        let expected_benchmark_run_id = expected_benchmark_run_id
-            .map(starfish_core::prometheus::sanitize_pushgateway_label_value);
-
-        // Group samples by instance (e.g. "node-0", "node-1").
-        let mut by_instance: HashMap<String, Vec<&prometheus_parse::Sample>> = HashMap::new();
-        for sample in &parsed.samples {
-            if let Some(expected_testbed_id) = &expected_testbed_id {
-                let Some(actual_testbed_id) = sample.labels.get("testbed") else {
-                    continue;
-                };
-                if actual_testbed_id != expected_testbed_id {
-                    continue;
-                }
-            }
-            if let Some(expected_benchmark_run_id) = &expected_benchmark_run_id {
-                let Some(actual_benchmark_run_id) = sample.labels.get("benchmark_run") else {
-                    continue;
-                };
-                if actual_benchmark_run_id != expected_benchmark_run_id {
-                    continue;
-                }
-            }
-
-            let instance = sample
-                .labels
-                .get("instance")
-                .or_else(|| sample.labels.get("exported_instance"))
-                .map(str::to_owned)
-                .unwrap_or_default();
-            by_instance.entry(instance).or_default().push(sample);
-        }
-
-        let mut result = HashMap::new();
-        for (instance, samples) in by_instance {
-            let Some(idx) = instance
-                .strip_prefix("node-")
-                .and_then(|s| s.parse::<usize>().ok())
-            else {
-                continue;
-            };
-
-            // Reconstruct per-validator Prometheus text for the existing parser.
-            let mut lines = Vec::new();
-            let mut emitted_types = HashSet::new();
-            for sample in &samples {
-                let metric_type = match sample.value {
-                    prometheus_parse::Value::Counter(_) => "counter",
-                    prometheus_parse::Value::Gauge(_) => "gauge",
-                    prometheus_parse::Value::Untyped(_) => "untyped",
-                    _ => continue,
-                };
-                if emitted_types.insert(sample.metric.clone()) {
-                    lines.push(format!("# TYPE {} {metric_type}", sample.metric));
-                }
-
-                let labels_str: String = sample
-                    .labels
-                    .iter()
-                    .filter(|(k, _)| {
-                        !matches!(
-                            k.as_str(),
-                            "instance"
-                                | "exported_instance"
-                                | "exported_job"
-                                | "job"
-                                | "push_time_seconds"
-                                | "testbed"
-                                | "benchmark_run"
-                        )
-                    })
-                    .map(|(k, v)| format!("{k}=\"{v}\""))
-                    .collect::<Vec<_>>()
-                    .join(",");
-
-                let value = match sample.value {
-                    prometheus_parse::Value::Counter(v)
-                    | prometheus_parse::Value::Gauge(v)
-                    | prometheus_parse::Value::Untyped(v) => v,
-                    _ => continue,
-                };
-
-                if labels_str.is_empty() {
-                    lines.push(format!("{} {value}", sample.metric));
-                } else {
-                    lines.push(format!("{}{{{labels_str}}} {value}", sample.metric));
-                }
-            }
-
-            let text = lines.join("\n");
-            let measurements = Self::from_prometheus::<M>(&text);
-            if !measurements.is_empty() {
-                result.insert(idx, measurements);
-            }
-        }
-
-        result
     }
 }
 
@@ -534,6 +446,36 @@ impl MeasurementsCollection {
         self.db_sizes.iter().map(|size| *size as f64).collect()
     }
 
+    fn average_latest_scalar(&self, label: &str) -> f64 {
+        let values: Vec<_> = self
+            .latest_measurements(label)
+            .into_iter()
+            .map(|measurement| measurement.scalar)
+            .collect();
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f64>() / values.len() as f64
+        }
+    }
+
+    fn average_latest_weighted_scalar(&self, label: &str) -> f64 {
+        let measurements = self.latest_measurements(label);
+        let total_sum: f64 = measurements
+            .iter()
+            .map(|measurement| measurement.scalar)
+            .sum();
+        let total_count: usize = measurements
+            .iter()
+            .map(|measurement| measurement.count)
+            .sum();
+        if total_count == 0 {
+            0.0
+        } else {
+            total_sum / total_count as f64
+        }
+    }
+
     pub fn benchmark_run_summary(&self) -> BenchmarkRunSummary {
         let duration_secs = self.benchmark_duration().as_secs_f64();
         let tps = self.tps();
@@ -599,6 +541,9 @@ impl MeasurementsCollection {
             bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
             cpu_cores: Self::percentile_summary(&self.cpu_samples()),
             db_size_per_round_bytes: Self::percentile_summary(&db_size_per_round_samples),
+            block_sync_requests_sent_avg: self.average_latest_scalar("block_sync_requests_sent"),
+            block_header_size_avg_bytes: self
+                .average_latest_weighted_scalar("proposed_header_size_bytes"),
         }
     }
 
@@ -606,7 +551,12 @@ impl MeasurementsCollection {
     pub fn save<P: AsRef<Path>>(&self, path: P) {
         let json = serde_json::to_string_pretty(self).expect("Cannot serialize metrics");
         let mut file = PathBuf::from(path.as_ref());
-        file.push(format!("measurements-{:?}.json", self.parameters));
+        let file_name = if self.parameters.benchmark_run_id.is_empty() {
+            format!("measurements-{:?}.json", self.parameters)
+        } else {
+            format!("measurements-{}.json", self.parameters.benchmark_run_id)
+        };
+        file.push(file_name);
         fs::write(file, json).unwrap();
     }
 
@@ -685,6 +635,14 @@ impl MeasurementsCollection {
                 summary.db_size_per_round_bytes.p50,
                 summary.db_size_per_round_bytes.p75
             )
+        ]);
+        table.add_row(row![
+            b->"Block sync requests / node:",
+            format!("{:.2} requests", summary.block_sync_requests_sent_avg)
+        ]);
+        table.add_row(row![
+            b->"Block header size avg:",
+            format!("{:.2} B", summary.block_header_size_avg_bytes)
         ]);
 
         display::newline();
@@ -884,6 +842,14 @@ bytes_received_total 14000000
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 320
+# HELP block_sync_requests_sent Number of block sync requests sent per authority
+# TYPE block_sync_requests_sent counter
+block_sync_requests_sent{authority="0"} 40
+block_sync_requests_sent{authority="1"} 20
+# HELP proposed_header_size_bytes proposed_header_size_bytes
+# TYPE proposed_header_size_bytes gauge
+proposed_header_size_bytes{v="count"} 10
+proposed_header_size_bytes{v="sum"} 6400
 # HELP dag_highest_round Highest round in the in-memory DAG
 # TYPE dag_highest_round gauge
 dag_highest_round 1000
@@ -914,85 +880,10 @@ dag_highest_round 1000
         assert_eq!(summary.db_size_per_round_bytes.p25, 15.0);
         assert_eq!(summary.db_size_per_round_bytes.p50, 20.0);
         assert_eq!(summary.db_size_per_round_bytes.p75, 25.0);
+        assert_eq!(summary.block_sync_requests_sent_avg, 60.0);
+        assert_eq!(summary.block_header_size_avg_bytes, 640.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
-    }
-
-    #[test]
-    fn pushgateway_parse_groups_metrics_by_instance() {
-        let report = r#"
-# TYPE benchmark_duration counter
-benchmark_duration{instance="node-0"} 10
-benchmark_duration{instance="node-1"} 20
-# TYPE bytes_sent_total counter
-bytes_sent_total{instance="node-0"} 100
-bytes_sent_total{instance="node-1"} 300
-        "#;
-
-        let measurements =
-            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, None, None);
-
-        assert_eq!(measurements.len(), 2);
-        assert_eq!(measurements[&0]["bytes_sent_total"].count, 100);
-        assert_eq!(
-            measurements[&0]["bytes_sent_total"].timestamp,
-            Duration::from_secs(10)
-        );
-        assert_eq!(measurements[&1]["bytes_sent_total"].count, 300);
-        assert_eq!(
-            measurements[&1]["bytes_sent_total"].timestamp,
-            Duration::from_secs(20)
-        );
-    }
-
-    #[test]
-    fn pushgateway_parse_filters_by_testbed() {
-        let report = r#"
-# TYPE benchmark_duration counter
-benchmark_duration{instance="node-0",testbed="alpha"} 10
-benchmark_duration{instance="node-0",testbed="beta"} 20
-# TYPE bytes_sent_total counter
-bytes_sent_total{instance="node-0",testbed="alpha"} 100
-bytes_sent_total{instance="node-0",testbed="beta"} 300
-        "#;
-
-        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(
-            report,
-            Some("beta"),
-            None,
-        );
-
-        assert_eq!(measurements.len(), 1);
-        assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);
-        assert_eq!(
-            measurements[&0]["bytes_sent_total"].timestamp,
-            Duration::from_secs(20)
-        );
-    }
-
-    #[test]
-    fn pushgateway_parse_filters_by_testbed_and_benchmark_run() {
-        let report = r#"
-# TYPE benchmark_duration counter
-benchmark_duration{instance="node-0",testbed="alpha",benchmark_run="run-1"} 10
-benchmark_duration{instance="node-0",testbed="alpha",benchmark_run="run-2"} 20
-# TYPE bytes_sent_total counter
-bytes_sent_total{instance="node-0",testbed="alpha",benchmark_run="run-1"} 100
-bytes_sent_total{instance="node-0",testbed="alpha",benchmark_run="run-2"} 300
-        "#;
-
-        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(
-            report,
-            Some("alpha"),
-            Some("run-2"),
-        );
-
-        assert_eq!(measurements.len(), 1);
-        assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);
-        assert_eq!(
-            measurements[&0]["bytes_sent_total"].timestamp,
-            Duration::from_secs(20)
-        );
     }
 
     #[test]

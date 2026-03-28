@@ -190,7 +190,10 @@ impl SshConnectionManager {
         if total <= 1 {
             return try_join_all(handles)
                 .await
-                .unwrap()
+                .map_err(|error| SshError::TaskError {
+                    address: SocketAddr::from(([0, 0, 0, 0], 0)),
+                    message: error.to_string(),
+                })?
                 .into_iter()
                 .collect::<SshResult<_>>();
         }
@@ -202,7 +205,10 @@ impl SshConnectionManager {
         display::status(format!("{completed}/{total}"));
 
         while let Some(join_result) = futures.next().await {
-            let result = join_result.unwrap()?;
+            let result = join_result.map_err(|error| SshError::TaskError {
+                address: SocketAddr::from(([0, 0, 0, 0], 0)),
+                message: error.to_string(),
+            })??;
             results.push(result);
             completed += 1;
             let elapsed = start.elapsed().as_secs();
@@ -243,11 +249,14 @@ impl SshConnectionManager {
                             }
                         };
                         let cmd = command.clone();
-                        match Handle::current()
+                        let result = Handle::current()
                             .spawn_blocking(move || connection.execute(cmd))
                             .await
-                            .unwrap()
-                        {
+                            .map_err(|error| SshError::TaskError {
+                                address,
+                                message: error.to_string(),
+                            });
+                        match result? {
                             Ok(result) => return Ok(result),
                             Err(e) => {
                                 if !is_retryable_ssh_error(&e) {
@@ -360,11 +369,14 @@ impl SshConnectionManager {
                         };
                         let d = data.clone();
                         let r = remote.clone();
-                        match Handle::current()
+                        let result = Handle::current()
                             .spawn_blocking(move || connection.upload_bytes(&d, &r))
                             .await
-                            .unwrap()
-                        {
+                            .map_err(|error| SshError::TaskError {
+                                address,
+                                message: error.to_string(),
+                            });
+                        match result? {
                             Ok(()) => return Ok(()),
                             Err(e) => {
                                 error = Some(e);
@@ -379,7 +391,10 @@ impl SshConnectionManager {
 
         try_join_all(handles)
             .await
-            .unwrap()
+            .map_err(|error| SshError::TaskError {
+                address: SocketAddr::from(([0, 0, 0, 0], 0)),
+                message: error.to_string(),
+            })?
             .into_iter()
             .collect::<SshResult<Vec<_>>>()?;
         Ok(())

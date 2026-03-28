@@ -63,11 +63,6 @@ impl Monitor {
         commands.extend(Prometheus::install_commands().into_iter().map(String::from));
         commands.extend(Grafana::install_commands().into_iter().map(String::from));
         commands.extend(NodeExporter::install_commands());
-        commands.extend(
-            Pushgateway::install_commands()
-                .into_iter()
-                .map(String::from),
-        );
         commands
     }
 
@@ -822,20 +817,6 @@ impl NodeExporter {
             "WantedBy=multi-user.target",
         ]
         .join("\n")
-    }
-}
-
-pub struct Pushgateway;
-
-impl Pushgateway {
-    pub const DEFAULT_PORT: u16 = 9091;
-
-    pub fn install_commands() -> Vec<&'static str> {
-        vec![
-            "sudo apt-get -y install prometheus-pushgateway",
-            "sudo systemctl enable prometheus-pushgateway",
-            "sudo systemctl start prometheus-pushgateway",
-        ]
     }
 }
 

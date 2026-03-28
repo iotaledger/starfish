@@ -43,6 +43,8 @@ pub struct Orchestrator<P> {
     protocol_commands: P,
     /// Handle ssh connections to instances.
     ssh_manager: SshConnectionManager,
+    /// Directory where this benchmark suite writes its results.
+    suite_results_dir: PathBuf,
     /// Skip the testbed update. Setting this value to true is dangerous and may
     /// lead to unexpected behavior.
     skip_testbed_update: bool,
@@ -59,6 +61,7 @@ impl<P> Orchestrator<P> {
         instance_setup_commands: Vec<String>,
         protocol_commands: P,
         ssh_manager: SshConnectionManager,
+        suite_results_dir: PathBuf,
     ) -> Self {
         Self {
             settings,
@@ -66,9 +69,22 @@ impl<P> Orchestrator<P> {
             instance_setup_commands,
             protocol_commands,
             ssh_manager,
+            suite_results_dir,
             skip_testbed_update: false,
             skip_testbed_configuration: false,
         }
+    }
+
+    pub fn suite_results_dir(settings: &Settings, suite_kind: &str) -> PathBuf {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let commit = &settings.repository.commit;
+        settings
+            .results_dir
+            .join(format!("results-{commit}"))
+            .join(format!("{suite_kind}-{timestamp_ms}"))
     }
 
     /// Skip the testbed update.
@@ -176,9 +192,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     /// Maximum fraction of validators that may fail readiness and still allow
     /// the benchmark to proceed. The stalled instances are marked inactive.
     const MAX_TOLERATED_BOOT_FAILURE_RATIO: f64 = 0.03;
-    /// How long to wait for the Pushgateway to report at least one validator
-    /// before falling back to per-node SSH+curl probing.
-    const PUSHGATEWAY_READINESS_GRACE: Duration = Duration::from_secs(20);
 
     fn mark_instances_inactive(&mut self, instances: &[Instance]) {
         for failed in instances {
@@ -287,31 +300,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Self::MIN_NODE_BOOT_TIMEOUT.max(Duration::from_secs((node_count as u64 / 2).max(120)))
     }
 
-    /// Derive the Pushgateway URL from settings or from the monitoring
-    /// instance allocated by the orchestrator.
-    fn pushgateway_url(&self, monitoring_instance: Option<&Instance>) -> Option<String> {
-        self.settings.external_pushgateway_url().or_else(|| {
-            monitoring_instance.map(|inst| {
-                format!(
-                    "http://{}:{}",
-                    inst.main_ip,
-                    crate::monitor::Pushgateway::DEFAULT_PORT,
-                )
-            })
-        })
-    }
-
-    fn pushgateway_testbed_id(&self) -> &str {
-        &self.settings.testbed_id
-    }
-
-    fn pushgateway_benchmark_run_id<'a>(
-        &self,
-        parameters: &'a BenchmarkParameters,
-    ) -> Option<&'a str> {
-        (!parameters.benchmark_run_id.is_empty()).then_some(parameters.benchmark_run_id.as_str())
-    }
-
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
         let samples: Vec<_> = instances
             .iter()
@@ -361,7 +349,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         &mut self,
         instances: Vec<Instance>,
         parameters: &BenchmarkParameters,
-        pushgateway_url: Option<&str>,
     ) -> TestbedResult<()> {
         let total = instances.len();
         let timeout = Self::node_boot_timeout(total);
@@ -376,63 +363,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let start = Instant::now();
         display::status(format!("ready 0/{total}"));
 
-        // Phase 1: Try Pushgateway polling if a URL is provided.
-        if let Some(gw_url) = pushgateway_url {
-            let client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to build HTTP client for Pushgateway readiness");
-
-            let mut pushgateway_made_progress = false;
-
-            loop {
-                time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
-
-                if let Ok(resp) = client.get(format!("{gw_url}/metrics")).send().await {
-                    if let Ok(text) = resp.text().await {
-                        let reported = Measurement::from_pushgateway_response::<P>(
-                            &text,
-                            Some(self.pushgateway_testbed_id()),
-                            self.pushgateway_benchmark_run_id(parameters),
-                        );
-                        if !reported.is_empty() {
-                            pushgateway_made_progress = true;
-                        }
-                        for idx in reported.keys() {
-                            pending_indices.remove(idx);
-                        }
-                    }
-                }
-
-                let completed = total - pending_indices.len();
-                display::status(format!(
-                    "ready {completed}/{total} {}s",
-                    start.elapsed().as_secs()
-                ));
-
-                if pending_indices.is_empty() {
-                    return Ok(());
-                }
-                if start.elapsed() >= timeout {
-                    break;
-                }
-                if !pushgateway_made_progress
-                    && start.elapsed() >= Self::PUSHGATEWAY_READINESS_GRACE
-                {
-                    display::warn(
-                        "Pushgateway showed no readiness progress; \
-                         falling back to SSH+curl probing",
-                    );
-                    break;
-                }
-            }
-        }
-
-        // Phase 2: SSH+curl probing for any validators still pending.
-        // Runs when pushgateway_url was None or Pushgateway failed to
-        // resolve all validators.
-        if !pending_indices.is_empty() && start.elapsed() < timeout {
+        if start.elapsed() < timeout {
             // Preserve the original authority ordering. `nodes_metrics_command`
             // derives per-node ports from iterator position, so iterating the
             // `HashSet` directly can mismatch instances to metrics ports.
@@ -722,7 +653,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn cleanup(
         &mut self,
         delete_logs: bool,
-        parameters: Option<&BenchmarkParameters>,
+        _parameters: Option<&BenchmarkParameters>,
     ) -> TestbedResult<()> {
         display::action("Cleaning up testbed");
 
@@ -751,32 +682,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::warn("Cleanup could not reach any active instance; continuing");
         }
 
-        self.wipe_pushgateway_metrics(parameters).await;
-
         display::done();
         Ok(())
-    }
-
-    /// Delete Pushgateway metrics from either the whole testbed namespace or a
-    /// single benchmark-run namespace so stale samples do not leak into the
-    /// next readiness check or metrics collection pass.
-    async fn wipe_pushgateway_metrics(&self, parameters: Option<&BenchmarkParameters>) {
-        let url = match self.pushgateway_url(None) {
-            Some(u) => u,
-            None => return,
-        };
-        let Ok(client) = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(5))
-            .build()
-        else {
-            return;
-        };
-        let delete_path = starfish_core::prometheus::pushgateway_delete_path(
-            Some(self.pushgateway_testbed_id()),
-            parameters.and_then(|parameters| self.pushgateway_benchmark_run_id(parameters)),
-        );
-        let _ = client.delete(format!("{url}{delete_path}")).send().await;
     }
 
     /// Return the SSH manager for the monitoring server. Uses a custom
@@ -871,11 +778,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     pub async fn run_nodes(&mut self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         display::action("\nDeploying validators");
 
-        let (nodes, monitoring_instance) = self.select_instances(parameters)?;
-        let gw_url = self.pushgateway_url(monitoring_instance.as_ref());
+        let (nodes, _) = self.select_instances(parameters)?;
         self.boot_nodes(nodes.clone(), parameters).await?;
-        self.wait_for_nodes_ready(nodes, parameters, gw_url.as_deref())
-            .await?;
+        self.wait_for_nodes_ready(nodes, parameters).await?;
 
         display::done();
         Ok(())
@@ -891,7 +796,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             self.settings.benchmark_duration.as_secs()
         ));
 
-        let (nodes, monitoring_instance) = self.select_instances(parameters)?;
+        let (nodes, _) = self.select_instances(parameters)?;
         let mut killed_nodes: Vec<Instance> = Vec::new();
 
         let node_indices: HashMap<_, _> = nodes
@@ -902,15 +807,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let metrics_commands = self
             .protocol_commands
             .nodes_metrics_command(nodes.clone(), parameters);
-
-        let pushgateway_url = self.pushgateway_url(monitoring_instance.as_ref());
-        let http_client = pushgateway_url.as_ref().map(|_| {
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to build HTTP client for Pushgateway")
-        });
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let scrape_interval = crate::monitor::Prometheus::scaled_metrics_interval(parameters.nodes);
@@ -932,70 +828,33 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     let elapsed = start.elapsed().as_secs_f64().ceil() as u64;
                     display::status(format!("{elapsed}s"));
 
-                    // Try Pushgateway first (single HTTP GET), fall back to SSH+curl.
-                    let mut got_pushgateway = false;
-                    if let (Some(url), Some(client)) = (&pushgateway_url, &http_client) {
-                        match client.get(format!("{url}/metrics")).send().await {
-                            Ok(resp) => match resp.text().await {
-                                Ok(text) => {
-                                    let per_validator = Measurement::from_pushgateway_response::<P>(
-                                        &text,
-                                        Some(self.pushgateway_testbed_id()),
-                                        self.pushgateway_benchmark_run_id(parameters),
-                                    );
-                                    got_pushgateway = !per_validator.is_empty();
-                                    for (i, measurements) in per_validator {
-                                        for (label, measurement) in measurements {
-                                            aggregator.add(i, label, measurement);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    display::warn(
-                                        format!("Pushgateway response read failed: {e}"),
-                                    );
-                                }
-                            },
-                            Err(e) => {
-                                display::warn(format!("Pushgateway request failed: {e}"));
-                            }
+                    let mut instances = metrics_commands.clone();
+                    instances.retain(|(instance, _)| !killed_nodes.contains(instance));
+
+                    let stdio = self
+                        .execute_per_instance_best_effort(
+                            instances,
+                            CommandContext::default(),
+                            "Metrics scrape",
+                        )
+                        .await;
+                    if stdio.is_empty() {
+                        display::warn(
+                            "All metrics scrapes failed for this \
+                             interval; continuing benchmark",
+                        );
+                    }
+
+                    for (instance, (stdout, _stderr)) in &stdio {
+                        let Some(i) = node_indices.get(&instance.id).copied() else {
+                            continue;
+                        };
+                        for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                            aggregator.add(i, label, measurement);
                         }
                     }
 
-                    // Fall back to SSH+curl when Pushgateway is unavailable.
-                    if !got_pushgateway {
-                        let mut instances = metrics_commands.clone();
-                        instances.retain(|(instance, _)| !killed_nodes.contains(instance));
-
-                        let stdio = self
-                            .execute_per_instance_best_effort(
-                                instances,
-                                CommandContext::default(),
-                                "Metrics scrape",
-                            )
-                            .await;
-                        if stdio.is_empty() {
-                            display::warn(
-                                "All metrics scrapes failed for this \
-                                 interval; continuing benchmark",
-                            );
-                        }
-
-                        for (instance, (stdout, _stderr)) in &stdio {
-                            let Some(i) = node_indices.get(&instance.id).copied() else {
-                                continue;
-                            };
-                            for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
-                                aggregator.add(i, label, measurement);
-                            }
-                        }
-                    }
-
-                    let results_directory = &self.settings.results_dir;
-                    let commit = &self.settings.repository.commit;
-                    let path: PathBuf = results_directory.join(format!("results-{commit}"));
-                    fs::create_dir_all(&path).expect("Failed to create log directory");
-                    aggregator.save(path);
+                    aggregator.save(&self.suite_results_dir);
 
                     let benchmark_duration = parameters.settings.benchmark_duration.as_secs();
                     if elapsed > benchmark_duration {
@@ -1154,6 +1013,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         } else {
             display::config("Commit", format!("'{}'", &self.settings.repository.commit));
         }
+        fs::create_dir_all(&self.suite_results_dir).expect("Failed to create results directory");
+        display::config("Results directory", self.suite_results_dir.display());
         display::newline();
 
         // Cleanup the testbed (in case the previous run was not completed).
@@ -1217,12 +1078,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     fn save_sweep_report(&self, report: &LatencyThroughputSweepReport, stem: &str) {
-        let commit = &self.settings.repository.commit;
-        let path = self
-            .settings
-            .results_dir
-            .join(format!("results-{commit}"))
-            .join("sweeps");
+        let path = self.suite_results_dir.join("sweeps");
         fs::create_dir_all(&path).expect("Failed to create sweep results directory");
 
         let json = serde_json::to_string_pretty(report).expect("Cannot serialize sweep report");

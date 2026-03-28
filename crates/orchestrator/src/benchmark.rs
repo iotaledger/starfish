@@ -18,14 +18,14 @@ pub type BenchmarkParameters = BenchmarkParametersGeneric<NodeParameters, Client
 
 static BENCHMARK_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn next_benchmark_run_id(consensus_protocol: &str, load: usize) -> String {
+fn next_benchmark_run_id(consensus_protocol: &str, nodes: usize, load: usize) -> String {
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let sequence = BENCHMARK_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let protocol = consensus_protocol.replace('/', "_");
-    format!("{protocol}-load-{load}-{timestamp_ms}-{sequence}")
+    format!("{protocol}-committee-{nodes}-load-{load}-{timestamp_ms}-{sequence}")
 }
 
 /// The benchmark parameters for a run. These parameters are stored along with
@@ -42,8 +42,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub nodes: usize,
     /// The total load (tx/s) to submit to the system.
     pub load: usize,
-    /// Unique identifier for this benchmark run, used to isolate Pushgateway
-    /// metrics between sequential runs on the same testbed.
+    /// Unique identifier for this benchmark run, used to keep sequential runs
+    /// and their saved artifacts distinct.
     #[serde(default)]
     pub benchmark_run_id: String,
     /// Flag indicating whether nodes should advertise their
@@ -88,6 +88,8 @@ pub struct BenchmarkRunSummary {
     pub bandwidth_per_round_bytes: PercentileSummary,
     pub cpu_cores: PercentileSummary,
     pub db_size_per_round_bytes: PercentileSummary,
+    pub block_sync_requests_sent_avg: f64,
+    pub block_header_size_avg_bytes: f64,
 }
 
 impl BenchmarkRunSummary {
@@ -104,7 +106,8 @@ impl BenchmarkRunSummary {
          bandwidth_per_round_p75_bytes,\
          cpu_p25_cores,cpu_p50_cores,cpu_p75_cores,\
          db_size_per_round_p25_bytes,db_size_per_round_p50_bytes,\
-         db_size_per_round_p75_bytes"
+         db_size_per_round_p75_bytes,\
+         block_sync_requests_sent_avg,block_header_size_avg_bytes"
     }
 
     pub fn csv_record(&self) -> String {
@@ -134,6 +137,8 @@ impl BenchmarkRunSummary {
             format!("{:.3}", self.db_size_per_round_bytes.p25),
             format!("{:.3}", self.db_size_per_round_bytes.p50),
             format!("{:.3}", self.db_size_per_round_bytes.p75),
+            format!("{:.3}", self.block_sync_requests_sent_avg),
+            format!("{:.3}", self.block_header_size_avg_bytes),
         ]
         .join(",")
     }
@@ -222,6 +227,50 @@ impl LatencyThroughputSweepPlan {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CommitteeScalingPlan {
+    pub protocols: Vec<String>,
+    pub committee_sizes: Vec<usize>,
+    pub spare_instances: usize,
+}
+
+impl CommitteeScalingPlan {
+    pub fn new(
+        protocols: Vec<String>,
+        mut committee_sizes: Vec<usize>,
+        spare_instances: usize,
+    ) -> eyre::Result<Self> {
+        ensure!(
+            !protocols.is_empty(),
+            "Committee scaling sweep requires at least one protocol",
+        );
+        ensure!(
+            !committee_sizes.is_empty(),
+            "Committee scaling sweep requires at least one committee size",
+        );
+        ensure!(
+            committee_sizes.iter().all(|size| *size > 0),
+            "Committee sizes must be greater than zero",
+        );
+
+        committee_sizes.sort_unstable();
+        committee_sizes.dedup();
+
+        Ok(Self {
+            protocols,
+            committee_sizes,
+            spare_instances,
+        })
+    }
+
+    pub fn max_committee_size(&self) -> usize {
+        self.committee_sizes
+            .last()
+            .copied()
+            .expect("committee scaling plan is non-empty")
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LatencyThroughputSweepReport {
     pub generated_at_unix_secs: u64,
     pub plan: LatencyThroughputSweepPlan,
@@ -290,7 +339,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         byzantine_strategy: String,
         enable_tracing: bool,
     ) -> Self {
-        let benchmark_run_id = next_benchmark_run_id(&consensus_protocol, load);
+        let benchmark_run_id = next_benchmark_run_id(&consensus_protocol, nodes, load);
         Self {
             settings,
             node_parameters,
@@ -304,34 +353,6 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             byzantine_strategy,
             enable_tracing,
         }
-    }
-
-    /// Make a new benchmark parameters.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_from_loads(
-        settings: Settings,
-        node_parameters: N,
-        client_parameters: C,
-        nodes: usize,
-        use_internal_ip_address: bool,
-        loads: Vec<usize>,
-        consensus_protocol: String,
-        byzantine_nodes: usize,
-        byzantine_strategy: String,
-        enable_tracing: bool,
-    ) -> Vec<Self> {
-        Self::new_from_protocols_and_loads(
-            settings,
-            node_parameters,
-            client_parameters,
-            nodes,
-            use_internal_ip_address,
-            vec![consensus_protocol],
-            loads,
-            byzantine_nodes,
-            byzantine_strategy,
-            enable_tracing,
-        )
     }
 
     /// Make benchmark parameters for multiple protocols and loads.
@@ -357,6 +378,48 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
                     let client_parameters = client_parameters.clone();
                     let byzantine_strategy = byzantine_strategy.clone();
                     move |load| {
+                        Self::new(
+                            settings.clone(),
+                            node_parameters.clone(),
+                            client_parameters.clone(),
+                            nodes,
+                            use_internal_ip_address,
+                            load,
+                            consensus_protocol.clone(),
+                            byzantine_nodes,
+                            byzantine_strategy.clone(),
+                            enable_tracing,
+                        )
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Make benchmark parameters for multiple protocols and committee sizes at
+    /// a fixed load.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_from_protocols_and_committees(
+        settings: Settings,
+        node_parameters: N,
+        client_parameters: C,
+        committee_sizes: Vec<usize>,
+        use_internal_ip_address: bool,
+        protocols: Vec<String>,
+        load: usize,
+        byzantine_nodes: usize,
+        byzantine_strategy: String,
+        enable_tracing: bool,
+    ) -> Vec<Self> {
+        protocols
+            .into_iter()
+            .flat_map(|consensus_protocol| {
+                committee_sizes.iter().copied().map({
+                    let settings = settings.clone();
+                    let node_parameters = node_parameters.clone();
+                    let client_parameters = client_parameters.clone();
+                    let byzantine_strategy = byzantine_strategy.clone();
+                    move |nodes| {
                         Self::new(
                             settings.clone(),
                             node_parameters.clone(),
@@ -413,7 +476,12 @@ pub mod test {
 
     use serde::{Deserialize, Serialize};
 
-    use super::{LatencyThroughputSweepPlan, ProtocolParameters};
+    use crate::settings::Settings;
+
+    use super::{
+        BenchmarkParametersGeneric, CommitteeScalingPlan, LatencyThroughputSweepPlan,
+        ProtocolParameters,
+    };
 
     /// Mock benchmark type for unit tests.
     #[allow(dead_code)]
@@ -438,6 +506,8 @@ pub mod test {
 
     impl ProtocolParameters for TestNodeConfig {}
 
+    type TestBenchmarkParameters = BenchmarkParametersGeneric<TestNodeConfig, TestNodeConfig>;
+
     #[test]
     fn latency_throughput_sweep_switches_to_fine_grained_steps() {
         let plan = LatencyThroughputSweepPlan::new(
@@ -454,5 +524,56 @@ pub mod test {
         assert_eq!(plan.next_load(2_000, 750.0), Some(8_000));
         assert_eq!(plan.next_load(8_000, 1_250.0), Some(10_000));
         assert_eq!(plan.next_load(10_000, 2_000.0), None);
+    }
+
+    #[test]
+    fn committee_scaling_plan_sorts_and_deduplicates_committee_sizes() {
+        let plan = CommitteeScalingPlan::new(
+            vec!["starfish".into(), "mysticeti".into()],
+            vec![16, 4, 10, 4],
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(plan.committee_sizes, vec![4, 10, 16]);
+        assert_eq!(plan.max_committee_size(), 16);
+        assert_eq!(plan.spare_instances, 2);
+    }
+
+    #[test]
+    fn protocol_committee_generation_preserves_protocol_order() {
+        let parameters = TestBenchmarkParameters::new_from_protocols_and_committees(
+            Settings::new_for_test(),
+            TestNodeConfig,
+            TestNodeConfig,
+            vec![4, 10],
+            true,
+            vec!["starfish".into(), "mysticeti".into()],
+            0,
+            0,
+            "timeout".into(),
+            false,
+        );
+
+        let generated: Vec<_> = parameters
+            .into_iter()
+            .map(|parameter| {
+                (
+                    parameter.consensus_protocol,
+                    parameter.nodes,
+                    parameter.load,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            generated,
+            vec![
+                ("starfish".into(), 4, 0),
+                ("starfish".into(), 10, 0),
+                ("mysticeti".into(), 4, 0),
+                ("mysticeti".into(), 10, 0),
+            ]
+        );
     }
 }
