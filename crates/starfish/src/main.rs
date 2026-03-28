@@ -73,6 +73,9 @@ enum Operation {
         /// Optional testbed identifier used to namespace Pushgateway metrics.
         #[clap(long, value_name = "STRING")]
         testbed_id: Option<String>,
+        /// Optional benchmark run identifier used to namespace Pushgateway metrics.
+        #[clap(long, value_name = "STRING")]
+        benchmark_run_id: Option<String>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -123,6 +126,9 @@ enum Operation {
         /// Optional testbed identifier used to namespace Pushgateway metrics.
         #[clap(long, value_name = "STRING")]
         testbed_id: Option<String>,
+        /// Optional benchmark run identifier used to namespace Pushgateway metrics.
+        #[clap(long, value_name = "STRING")]
+        benchmark_run_id: Option<String>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -178,6 +184,7 @@ async fn main() -> Result<()> {
             consensus: consensus_protocol,
             pushgateway_url,
             testbed_id,
+            benchmark_run_id,
         } => {
             run(
                 authority,
@@ -189,6 +196,7 @@ async fn main() -> Result<()> {
                 consensus_protocol,
                 pushgateway_url,
                 testbed_id,
+                benchmark_run_id,
             )
             .await?
         }
@@ -210,6 +218,7 @@ async fn main() -> Result<()> {
             bls_workers,
             pushgateway_url,
             testbed_id,
+            benchmark_run_id,
         } => {
             dryrun(
                 authority,
@@ -229,6 +238,7 @@ async fn main() -> Result<()> {
                 bls_workers,
                 pushgateway_url,
                 testbed_id,
+                benchmark_run_id,
             )
             .await?
         }
@@ -431,6 +441,7 @@ async fn local_benchmark(
                 consensus_protocol.clone(),
                 None,
                 None,
+                None,
             )
             .await?
         } else {
@@ -442,6 +453,7 @@ async fn local_benchmark(
                 parameters.clone(),
                 "honest".to_string(),
                 consensus_protocol.clone(),
+                None,
                 None,
                 None,
             )
@@ -514,6 +526,7 @@ async fn run(
     consensus_protocol: String,
     pushgateway_url: Option<String>,
     testbed_id: Option<String>,
+    benchmark_run_id: Option<String>,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
@@ -542,6 +555,7 @@ async fn run(
         consensus_protocol,
         pushgateway_url,
         testbed_id,
+        benchmark_run_id,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;
@@ -568,6 +582,7 @@ async fn dryrun(
     bls_workers: Option<usize>,
     pushgateway_url: Option<String>,
     testbed_id: Option<String>,
+    benchmark_run_id: Option<String>,
 ) -> Result<()> {
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
@@ -644,6 +659,7 @@ async fn dryrun(
         consensus_protocol,
         pushgateway_url,
         testbed_id,
+        benchmark_run_id,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;

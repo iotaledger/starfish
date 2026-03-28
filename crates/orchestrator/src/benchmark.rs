@@ -4,7 +4,8 @@
 
 use std::{
     fmt::{Debug, Display},
-    time::Duration,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use eyre::ensure;
@@ -14,6 +15,18 @@ use crate::{ClientParameters, NodeParameters, protocol::ProtocolParameters, sett
 
 /// Shortcut avoiding to use the generic version of the benchmark parameters.
 pub type BenchmarkParameters = BenchmarkParametersGeneric<NodeParameters, ClientParameters>;
+
+static BENCHMARK_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_benchmark_run_id(consensus_protocol: &str, load: usize) -> String {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = BENCHMARK_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let protocol = consensus_protocol.replace('/', "_");
+    format!("{protocol}-load-{load}-{timestamp_ms}-{sequence}")
+}
 
 /// The benchmark parameters for a run. These parameters are stored along with
 /// the performance data and should be used to reproduce the results.
@@ -29,6 +42,10 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub nodes: usize,
     /// The total load (tx/s) to submit to the system.
     pub load: usize,
+    /// Unique identifier for this benchmark run, used to isolate Pushgateway
+    /// metrics between sequential runs on the same testbed.
+    #[serde(default)]
+    pub benchmark_run_id: String,
     /// Flag indicating whether nodes should advertise their
     /// internal or public IP address for inter-node
     /// communication. When running the simulation in multiple
@@ -273,6 +290,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
         byzantine_strategy: String,
         enable_tracing: bool,
     ) -> Self {
+        let benchmark_run_id = next_benchmark_run_id(&consensus_protocol, load);
         Self {
             settings,
             node_parameters,
@@ -280,6 +298,7 @@ impl<N: ProtocolParameters, C: ProtocolParameters> BenchmarkParametersGeneric<N,
             use_internal_ip_address,
             nodes,
             load,
+            benchmark_run_id,
             consensus_protocol,
             byzantine_nodes,
             byzantine_strategy,

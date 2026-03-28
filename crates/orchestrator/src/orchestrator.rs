@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::time::{self, Instant};
@@ -87,6 +88,27 @@ impl<P> Orchestrator<P> {
         }
         self.skip_testbed_configuration = skip_testbed_configuration;
         self
+    }
+
+    async fn prebuilt_binary_updated_at(source: &str) -> Option<String> {
+        if source.starts_with("http://") || source.starts_with("https://") {
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(8))
+                .build()
+                .ok()?;
+            let response = client.head(source).send().await.ok()?;
+            let header = response
+                .headers()
+                .get(reqwest::header::LAST_MODIFIED)?
+                .to_str()
+                .ok()?;
+            return Some(header.to_string());
+        }
+
+        let modified = fs::metadata(source).ok()?.modified().ok()?;
+        let modified: DateTime<Utc> = modified.into();
+        Some(modified.format("%Y-%m-%d %H:%M:%S UTC").to_string())
     }
 
     /// Returns the node and monitoring instances for the benchmark.
@@ -283,6 +305,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         &self.settings.testbed_id
     }
 
+    fn pushgateway_benchmark_run_id<'a>(
+        &self,
+        parameters: &'a BenchmarkParameters,
+    ) -> Option<&'a str> {
+        (!parameters.benchmark_run_id.is_empty()).then_some(parameters.benchmark_run_id.as_str())
+    }
+
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
         let samples: Vec<_> = instances
             .iter()
@@ -365,6 +394,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         let reported = Measurement::from_pushgateway_response::<P>(
                             &text,
                             Some(self.pushgateway_testbed_id()),
+                            self.pushgateway_benchmark_run_id(parameters),
                         );
                         if !reported.is_empty() {
                             pushgateway_made_progress = true;
@@ -689,7 +719,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Cleanup all instances and optionally delete their log files.
-    pub async fn cleanup(&mut self, delete_logs: bool) -> TestbedResult<()> {
+    pub async fn cleanup(
+        &mut self,
+        delete_logs: bool,
+        parameters: Option<&BenchmarkParameters>,
+    ) -> TestbedResult<()> {
         display::action("Cleaning up testbed");
 
         // Kill all tmux servers and delete the nodes dbs. Optionally clear logs.
@@ -717,16 +751,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             display::warn("Cleanup could not reach any active instance; continuing");
         }
 
-        self.wipe_pushgateway_metrics().await;
+        self.wipe_pushgateway_metrics(parameters).await;
 
         display::done();
         Ok(())
     }
 
-    /// Delete all metrics from the Pushgateway so that data from a finished
-    /// (or aborted) benchmark does not leak into the next run or readiness
-    /// check.
-    async fn wipe_pushgateway_metrics(&self) {
+    /// Delete Pushgateway metrics from either the whole testbed namespace or a
+    /// single benchmark-run namespace so stale samples do not leak into the
+    /// next readiness check or metrics collection pass.
+    async fn wipe_pushgateway_metrics(&self, parameters: Option<&BenchmarkParameters>) {
         let url = match self.pushgateway_url(None) {
             Some(u) => u,
             None => return,
@@ -738,8 +772,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         else {
             return;
         };
-        let delete_path =
-            starfish_core::prometheus::pushgateway_delete_path(Some(self.pushgateway_testbed_id()));
+        let delete_path = starfish_core::prometheus::pushgateway_delete_path(
+            Some(self.pushgateway_testbed_id()),
+            parameters.and_then(|parameters| self.pushgateway_benchmark_run_id(parameters)),
+        );
         let _ = client.delete(format!("{url}{delete_path}")).send().await;
     }
 
@@ -905,6 +941,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                     let per_validator = Measurement::from_pushgateway_response::<P>(
                                         &text,
                                         Some(self.pushgateway_testbed_id()),
+                                        self.pushgateway_benchmark_run_id(parameters),
                                     );
                                     got_pushgateway = !per_validator.is_empty();
                                     for (i, measurements) in per_validator {
@@ -1111,13 +1148,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         display::header("Preparing testbed");
         if let Some(binary) = &self.settings.pre_built_binary {
             display::config("Pre-built binary", binary);
+            if let Some(updated_at) = Self::prebuilt_binary_updated_at(binary).await {
+                display::config("Pre-built updated", updated_at);
+            }
         } else {
             display::config("Commit", format!("'{}'", &self.settings.repository.commit));
         }
         display::newline();
 
         // Cleanup the testbed (in case the previous run was not completed).
-        self.cleanup(true).await?;
+        self.cleanup(true, None).await?;
 
         // Update the software on all instances.
         if !self.skip_testbed_update {
@@ -1138,7 +1178,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<Option<MeasurementsCollection>> {
         // Cleanup the testbed (in case the previous run was not completed).
-        self.cleanup(true).await?;
+        self.cleanup(true, Some(parameters)).await?;
         let (selected_nodes, _) = self.select_instances(parameters)?;
         // Start the instance monitoring tools.
         self.start_monitoring(parameters).await?;
@@ -1163,7 +1203,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         aggregator.set_db_sizes(db_sizes);
 
         // Kill the nodes (without deleting the log files).
-        self.cleanup(false).await?;
+        self.cleanup(false, Some(parameters)).await?;
 
         // Download the log files.
         if self.settings.log_processing {

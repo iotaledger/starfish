@@ -199,6 +199,8 @@ impl ProtocolCommands for StarfishProtocol {
                 if let Some(ref url) = self.pushgateway_url {
                     command_parts.push(format!("--pushgateway-url {url}"));
                     command_parts.push(format!("--testbed-id {}", self.testbed_id));
+                    command_parts
+                        .push(format!("--benchmark-run-id {}", parameters.benchmark_run_id));
                 }
 
                 // Add tracing if enabled

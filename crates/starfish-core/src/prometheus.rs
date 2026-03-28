@@ -27,22 +27,37 @@ pub fn sanitize_pushgateway_label_value(value: &str) -> String {
     value.replace('/', "_")
 }
 
-pub fn pushgateway_metrics_grouping_path(instance_label: &str, testbed_id: Option<&str>) -> String {
+pub fn pushgateway_metrics_grouping_path(
+    instance_label: &str,
+    testbed_id: Option<&str>,
+    benchmark_run_id: Option<&str>,
+) -> String {
     let mut path = String::from("/metrics/job/starfish");
     if let Some(testbed_id) = testbed_id {
         path.push_str("/testbed/");
         path.push_str(&sanitize_pushgateway_label_value(testbed_id));
+    }
+    if let Some(benchmark_run_id) = benchmark_run_id {
+        path.push_str("/benchmark_run/");
+        path.push_str(&sanitize_pushgateway_label_value(benchmark_run_id));
     }
     path.push_str("/instance/");
     path.push_str(&sanitize_pushgateway_label_value(instance_label));
     path
 }
 
-pub fn pushgateway_delete_path(testbed_id: Option<&str>) -> String {
+pub fn pushgateway_delete_path(
+    testbed_id: Option<&str>,
+    benchmark_run_id: Option<&str>,
+) -> String {
     let mut path = String::from("/metrics/job/starfish");
     if let Some(testbed_id) = testbed_id {
         path.push_str("/testbed/");
         path.push_str(&sanitize_pushgateway_label_value(testbed_id));
+    }
+    if let Some(benchmark_run_id) = benchmark_run_id {
+        path.push_str("/benchmark_run/");
+        path.push_str(&sanitize_pushgateway_label_value(benchmark_run_id));
     }
     path
 }
@@ -81,6 +96,7 @@ pub fn start_metrics_push_task(
     pushgateway_url: String,
     instance_label: String,
     testbed_id: Option<String>,
+    benchmark_run_id: Option<String>,
     registry: &Registry,
     committee_size: usize,
 ) -> JoinHandle<()> {
@@ -91,7 +107,11 @@ pub fn start_metrics_push_task(
         let url = format!(
             "{}{}",
             pushgateway_url.trim_end_matches('/'),
-            pushgateway_metrics_grouping_path(&instance_label, testbed_id.as_deref())
+            pushgateway_metrics_grouping_path(
+                &instance_label,
+                testbed_id.as_deref(),
+                benchmark_run_id.as_deref(),
+            )
         );
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
@@ -125,4 +145,25 @@ pub fn start_metrics_push_task(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pushgateway_delete_path, pushgateway_metrics_grouping_path};
+
+    #[test]
+    fn pushgateway_paths_include_testbed_and_benchmark_run() {
+        assert_eq!(
+            pushgateway_metrics_grouping_path("node-2", Some("bench/a"), Some("mysticeti/load-5")),
+            "/metrics/job/starfish/testbed/bench_a/benchmark_run/mysticeti_load-5/instance/node-2"
+        );
+    }
+
+    #[test]
+    fn pushgateway_delete_path_can_target_single_benchmark_run() {
+        assert_eq!(
+            pushgateway_delete_path(Some("bench/a"), Some("mysticeti/load-5")),
+            "/metrics/job/starfish/testbed/bench_a/benchmark_run/mysticeti_load-5"
+        );
+    }
 }

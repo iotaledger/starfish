@@ -47,6 +47,7 @@ impl Validator {
         consensus: String,
         pushgateway_url: Option<String>,
         testbed_id: Option<String>,
+        benchmark_run_id: Option<String>,
     ) -> Result<Self> {
         // Network and metrics setup remains the same
         let network_address = public_config
@@ -97,6 +98,7 @@ impl Validator {
                 url,
                 format!("node-{authority}"),
                 testbed_id.clone(),
+                benchmark_run_id.clone(),
                 &registry,
                 committee.len(),
             )
@@ -298,6 +300,7 @@ mod smoke_tests {
                 consensus.to_string(),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -370,6 +373,7 @@ mod smoke_tests {
                 consensus.to_string(),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -402,6 +406,7 @@ mod smoke_tests {
             parameters,
             "honest".to_string(),
             consensus.to_string(),
+            None,
             None,
             None,
         )
@@ -465,6 +470,7 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
+                None,
                 None,
                 None,
             )
@@ -613,6 +619,7 @@ mod smoke_tests {
             consensus.to_string(),
             None,
             None,
+            None,
         )
         .await
         .unwrap()
@@ -652,6 +659,7 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
+                None,
                 None,
                 None,
             )

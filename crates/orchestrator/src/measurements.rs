@@ -221,11 +221,14 @@ impl Measurement {
     pub fn from_pushgateway_response<M: ProtocolMetrics>(
         text: &str,
         expected_testbed_id: Option<&str>,
+        expected_benchmark_run_id: Option<&str>,
     ) -> HashMap<usize, HashMap<Label, Self>> {
         let br = std::io::BufReader::new(text.as_bytes());
         let parsed = Scrape::parse(br.lines()).unwrap();
         let expected_testbed_id =
             expected_testbed_id.map(starfish_core::prometheus::sanitize_pushgateway_label_value);
+        let expected_benchmark_run_id = expected_benchmark_run_id
+            .map(starfish_core::prometheus::sanitize_pushgateway_label_value);
 
         // Group samples by instance (e.g. "node-0", "node-1").
         let mut by_instance: HashMap<String, Vec<&prometheus_parse::Sample>> = HashMap::new();
@@ -235,6 +238,14 @@ impl Measurement {
                     continue;
                 };
                 if actual_testbed_id != expected_testbed_id {
+                    continue;
+                }
+            }
+            if let Some(expected_benchmark_run_id) = &expected_benchmark_run_id {
+                let Some(actual_benchmark_run_id) = sample.labels.get("benchmark_run") else {
+                    continue;
+                };
+                if actual_benchmark_run_id != expected_benchmark_run_id {
                     continue;
                 }
             }
@@ -283,6 +294,7 @@ impl Measurement {
                                 | "job"
                                 | "push_time_seconds"
                                 | "testbed"
+                                | "benchmark_run"
                         )
                     })
                     .map(|(k, v)| format!("{k}=\"{v}\""))
@@ -918,7 +930,7 @@ bytes_sent_total{instance="node-1"} 300
         "#;
 
         let measurements =
-            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, None);
+            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, None, None);
 
         assert_eq!(measurements.len(), 2);
         assert_eq!(measurements[&0]["bytes_sent_total"].count, 100);
@@ -945,7 +957,36 @@ bytes_sent_total{instance="node-0",testbed="beta"} 300
         "#;
 
         let measurements =
-            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, Some("beta"));
+            Measurement::from_pushgateway_response::<TestProtocolMetrics>(
+                report,
+                Some("beta"),
+                None,
+            );
+
+        assert_eq!(measurements.len(), 1);
+        assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);
+        assert_eq!(
+            measurements[&0]["bytes_sent_total"].timestamp,
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn pushgateway_parse_filters_by_testbed_and_benchmark_run() {
+        let report = r#"
+# TYPE benchmark_duration counter
+benchmark_duration{instance="node-0",testbed="alpha",benchmark_run="run-1"} 10
+benchmark_duration{instance="node-0",testbed="alpha",benchmark_run="run-2"} 20
+# TYPE bytes_sent_total counter
+bytes_sent_total{instance="node-0",testbed="alpha",benchmark_run="run-1"} 100
+bytes_sent_total{instance="node-0",testbed="alpha",benchmark_run="run-2"} 300
+        "#;
+
+        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(
+            report,
+            Some("alpha"),
+            Some("run-2"),
+        );
 
         assert_eq!(measurements.len(), 1);
         assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);
