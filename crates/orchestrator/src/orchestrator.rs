@@ -364,8 +364,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         display::status(format!("ready 0/{total}"));
 
         if start.elapsed() < timeout {
-            // Preserve the original authority ordering. `nodes_metrics_command`
-            // derives per-node ports from iterator position, so iterating the
+            // Preserve the original authority ordering. The protocol derives
+            // per-node ports from iterator position, so iterating the
             // `HashSet` directly can mismatch instances to metrics ports.
             let remaining: Vec<Instance> = all_instances
                 .iter()
@@ -376,7 +376,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
             let mut pending: HashMap<_, _> = self
                 .protocol_commands
-                .nodes_metrics_command(remaining, parameters)
+                .nodes_readiness_command(remaining, parameters)
                 .into_iter()
                 .map(|(instance, command)| {
                     let idx = all_instances
@@ -807,6 +807,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let metrics_commands = self
             .protocol_commands
             .nodes_metrics_command(nodes.clone(), parameters);
+        let final_metrics_commands = self
+            .protocol_commands
+            .nodes_final_metrics_command(nodes.clone(), parameters);
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         let scrape_interval = crate::monitor::Prometheus::scaled_metrics_interval(parameters.nodes);
@@ -879,6 +882,48 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         display::config("Testbed update", action);
                     }
                 }
+            }
+        }
+
+        let mut final_instances = final_metrics_commands;
+        final_instances.retain(|(instance, _)| !killed_nodes.contains(instance));
+        if !final_instances.is_empty() {
+            let expected_nodes = final_instances.len();
+            let stdio = self
+                .execute_per_instance_best_effort(
+                    final_instances.clone(),
+                    CommandContext::default(),
+                    "Final metrics scrape",
+                )
+                .await;
+
+            if stdio.is_empty() {
+                display::warn(
+                    "Final metrics scrape failed for all reachable nodes; \
+                     reporting the last successful samples",
+                );
+            } else {
+                let successful_ids: HashSet<_> = stdio
+                    .iter()
+                    .map(|(instance, _)| instance.id.clone())
+                    .collect();
+                let missed = expected_nodes.saturating_sub(successful_ids.len());
+                if missed != 0 {
+                    display::warn(format!(
+                        "Final metrics scrape missed {missed} of {expected_nodes} nodes; \
+                         reporting partial results",
+                    ));
+                }
+
+                for (instance, (stdout, _stderr)) in &stdio {
+                    let Some(i) = node_indices.get(&instance.id).copied() else {
+                        continue;
+                    };
+                    for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                        aggregator.add(i, label, measurement);
+                    }
+                }
+                aggregator.save(&self.suite_results_dir);
             }
         }
 

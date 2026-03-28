@@ -17,6 +17,8 @@ pub mod starfish;
 pub const BINARY_PATH: &str = "target/release";
 const METRICS_CURL_CONNECT_TIMEOUT_SECS: u64 = 1;
 const METRICS_CURL_MAX_TIME_SECS: u64 = 3;
+const FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
+const FINAL_METRICS_CURL_MAX_TIME_SECS: u64 = 15;
 
 pub trait ProtocolParameters:
     Default + Clone + Serialize + DeserializeOwned + Debug + Display
@@ -92,7 +94,58 @@ pub trait ProtocolMetrics {
                 (
                     instance,
                     format!(
-                        "curl --silent --show-error --fail --connect-timeout \
+                        "curl --silent --show-error --fail --compressed --connect-timeout \
+                         {METRICS_CURL_CONNECT_TIMEOUT_SECS} --max-time \
+                         {METRICS_CURL_MAX_TIME_SECS} {path}"
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// A more tolerant scrape used for the last benchmark snapshot so partial
+    /// slow responders do not prevent reporting the data that is already
+    /// available.
+    fn nodes_final_metrics_command<I>(
+        &self,
+        instances: I,
+        parameters: &BenchmarkParameters,
+    ) -> Vec<(Instance, String)>
+    where
+        I: IntoIterator<Item = Instance>,
+    {
+        self.nodes_metrics_path(instances, parameters)
+            .into_iter()
+            .map(|(instance, path)| {
+                (
+                    instance,
+                    format!(
+                        "curl --silent --show-error --fail --compressed --connect-timeout \
+                         {FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS} --max-time \
+                         {FINAL_METRICS_CURL_MAX_TIME_SECS} {path}"
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// A cheaper readiness probe that only checks whether the metrics endpoint
+    /// responds successfully, without downloading the body.
+    fn nodes_readiness_command<I>(
+        &self,
+        instances: I,
+        parameters: &BenchmarkParameters,
+    ) -> Vec<(Instance, String)>
+    where
+        I: IntoIterator<Item = Instance>,
+    {
+        self.nodes_metrics_path(instances, parameters)
+            .into_iter()
+            .map(|(instance, path)| {
+                (
+                    instance,
+                    format!(
+                        "curl -sf -o /dev/null --compressed --connect-timeout \
                          {METRICS_CURL_CONNECT_TIMEOUT_SECS} --max-time \
                          {METRICS_CURL_MAX_TIME_SECS} {path}"
                     ),
@@ -132,6 +185,7 @@ pub mod test_protocol_metrics {
 #[cfg(test)]
 mod tests {
     use super::{
+        FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS, FINAL_METRICS_CURL_MAX_TIME_SECS,
         METRICS_CURL_CONNECT_TIMEOUT_SECS, METRICS_CURL_MAX_TIME_SECS, ProtocolMetrics,
         test_protocol_metrics::TestProtocolMetrics,
     };
@@ -147,11 +201,47 @@ mod tests {
             .unwrap()
             .1;
 
-        assert!(command.contains("--silent --show-error --fail"));
+        assert!(command.contains("--silent --show-error --fail --compressed"));
         assert!(command.contains(&format!(
             "--connect-timeout {METRICS_CURL_CONNECT_TIMEOUT_SECS}"
         )));
         assert!(command.contains(&format!("--max-time {METRICS_CURL_MAX_TIME_SECS}")));
+        assert!(command.ends_with("localhost:8000/metrics"));
+    }
+
+    #[test]
+    fn readiness_commands_use_lightweight_curl() {
+        let instance = Instance::new_for_test("1".into());
+        let parameters = BenchmarkParameters::new_for_tests();
+        let command = TestProtocolMetrics
+            .nodes_readiness_command(vec![instance], &parameters)
+            .pop()
+            .unwrap()
+            .1;
+
+        assert!(command.contains("curl -sf -o /dev/null --compressed"));
+        assert!(command.contains(&format!(
+            "--connect-timeout {METRICS_CURL_CONNECT_TIMEOUT_SECS}"
+        )));
+        assert!(command.contains(&format!("--max-time {METRICS_CURL_MAX_TIME_SECS}")));
+        assert!(command.ends_with("localhost:8000/metrics"));
+    }
+
+    #[test]
+    fn final_metrics_commands_use_relaxed_curl() {
+        let instance = Instance::new_for_test("1".into());
+        let parameters = BenchmarkParameters::new_for_tests();
+        let command = TestProtocolMetrics
+            .nodes_final_metrics_command(vec![instance], &parameters)
+            .pop()
+            .unwrap()
+            .1;
+
+        assert!(command.contains("--silent --show-error --fail --compressed"));
+        assert!(command.contains(&format!(
+            "--connect-timeout {FINAL_METRICS_CURL_CONNECT_TIMEOUT_SECS}"
+        )));
+        assert!(command.contains(&format!("--max-time {FINAL_METRICS_CURL_MAX_TIME_SECS}")));
         assert!(command.ends_with("localhost:8000/metrics"));
     }
 }
