@@ -46,6 +46,7 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
         pushgateway_url: Option<String>,
+        testbed_id: Option<String>,
     ) -> Result<Self> {
         // Network and metrics setup remains the same
         let network_address = public_config
@@ -95,6 +96,7 @@ impl Validator {
             prometheus::start_metrics_push_task(
                 url,
                 format!("node-{authority}"),
+                testbed_id.clone(),
                 &registry,
                 committee.len(),
             )
@@ -295,6 +297,7 @@ mod smoke_tests {
                 "honest".to_string(),
                 consensus.to_string(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -366,6 +369,7 @@ mod smoke_tests {
                 "honest".to_string(),
                 consensus.to_string(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -398,6 +402,7 @@ mod smoke_tests {
             parameters,
             "honest".to_string(),
             consensus.to_string(),
+            None,
             None,
         )
         .await
@@ -460,6 +465,7 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
+                None,
                 None,
             )
             .await
@@ -606,6 +612,7 @@ mod smoke_tests {
             "honest".to_string(),
             consensus.to_string(),
             None,
+            None,
         )
         .await
         .unwrap()
@@ -645,6 +652,7 @@ mod smoke_tests {
                 parameters.clone(),
                 "honest".to_string(),
                 consensus.to_string(),
+                None,
                 None,
             )
             .await

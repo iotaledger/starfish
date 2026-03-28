@@ -6640,15 +6640,16 @@
           "type": "prometheus",
           "uid": "Fixed-UID-testbed"
         },
-        "definition": "label_values(committee_size, node)",
+        "definition": "query_result(max by (node) (count_over_time(committee_size[5m])))",
         "includeAll": true,
         "multi": true,
         "name": "node",
         "label": "Node",
         "query": {
           "qryType": 1,
-          "query": "label_values(committee_size, node)"
+          "query": "query_result(max by (node) (count_over_time(committee_size[5m])))"
         },
+        "regex": "/node=\"([^\"]+)\"/",
         "refresh": 2,
         "type": "query"
       }

@@ -23,6 +23,30 @@ pub fn scaled_metrics_interval(node_count: usize) -> Duration {
     Duration::from_secs((node_count as u64 / 10).max(MIN_METRICS_INTERVAL_SECS))
 }
 
+pub fn sanitize_pushgateway_label_value(value: &str) -> String {
+    value.replace('/', "_")
+}
+
+pub fn pushgateway_metrics_grouping_path(instance_label: &str, testbed_id: Option<&str>) -> String {
+    let mut path = String::from("/metrics/job/starfish");
+    if let Some(testbed_id) = testbed_id {
+        path.push_str("/testbed/");
+        path.push_str(&sanitize_pushgateway_label_value(testbed_id));
+    }
+    path.push_str("/instance/");
+    path.push_str(&sanitize_pushgateway_label_value(instance_label));
+    path
+}
+
+pub fn pushgateway_delete_path(testbed_id: Option<&str>) -> String {
+    let mut path = String::from("/metrics/job/starfish");
+    if let Some(testbed_id) = testbed_id {
+        path.push_str("/testbed/");
+        path.push_str(&sanitize_pushgateway_label_value(testbed_id));
+    }
+    path
+}
+
 pub fn start_prometheus_server(
     address: SocketAddr,
     registry: &Registry,
@@ -56,6 +80,7 @@ async fn metrics(registry: Extension<Registry>) -> (StatusCode, String) {
 pub fn start_metrics_push_task(
     pushgateway_url: String,
     instance_label: String,
+    testbed_id: Option<String>,
     registry: &Registry,
     committee_size: usize,
 ) -> JoinHandle<()> {
@@ -64,8 +89,9 @@ pub fn start_metrics_push_task(
 
     Handle::current().spawn(async move {
         let url = format!(
-            "{}/metrics/job/starfish/instance/{instance_label}",
-            pushgateway_url.trim_end_matches('/')
+            "{}{}",
+            pushgateway_url.trim_end_matches('/'),
+            pushgateway_metrics_grouping_path(&instance_label, testbed_id.as_deref())
         );
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))

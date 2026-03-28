@@ -250,7 +250,6 @@ impl Prometheus {
                 &targets,
                 Self::node_exporter_scrape_interval(scrape_interval),
             ));
-            config.push(Self::pushgateway_scrape_configuration(scrape_interval));
         }
 
         config.join("\n")
@@ -391,21 +390,6 @@ groups:
                 .collect::<Vec<_>>(),
         );
         config.join("\n")
-    }
-
-    fn pushgateway_scrape_configuration(scrape_interval: Duration) -> String {
-        let scrape_secs = Self::scrape_interval_secs(scrape_interval);
-        [
-            "  - job_name: pushgateway",
-            "    honor_labels: true",
-            &format!("    scrape_interval: {scrape_secs}s"),
-            "    static_configs:",
-            &format!(
-                "      - targets: ['localhost:{}']",
-                Pushgateway::DEFAULT_PORT
-            ),
-        ]
-        .join("\n")
     }
 
     /// Parse one prometheus scrape target emitted by the protocol.

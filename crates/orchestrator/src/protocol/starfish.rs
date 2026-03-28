@@ -91,6 +91,7 @@ impl ProtocolParameters for StarfishParameters {}
 pub struct StarfishProtocol {
     working_dir: PathBuf,
     pushgateway_url: Option<String>,
+    testbed_id: String,
 }
 
 impl ProtocolCommands for StarfishProtocol {
@@ -197,6 +198,7 @@ impl ProtocolCommands for StarfishProtocol {
                 // Add pushgateway URL for push-based metrics collection
                 if let Some(ref url) = self.pushgateway_url {
                     command_parts.push(format!("--pushgateway-url {url}"));
+                    command_parts.push(format!("--testbed-id {}", self.testbed_id));
                 }
 
                 // Add tracing if enabled
@@ -263,6 +265,7 @@ impl StarfishProtocol {
         Self {
             working_dir: settings.working_dir.clone(),
             pushgateway_url,
+            testbed_id: settings.testbed_id.clone(),
         }
     }
 }

@@ -70,6 +70,9 @@ enum Operation {
         /// Pushgateway URL for push-based metrics collection.
         #[clap(long, value_name = "URL")]
         pushgateway_url: Option<String>,
+        /// Optional testbed identifier used to namespace Pushgateway metrics.
+        #[clap(long, value_name = "STRING")]
+        testbed_id: Option<String>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -117,6 +120,9 @@ enum Operation {
         /// Pushgateway URL for push-based metrics collection.
         #[clap(long, value_name = "URL")]
         pushgateway_url: Option<String>,
+        /// Optional testbed identifier used to namespace Pushgateway metrics.
+        #[clap(long, value_name = "STRING")]
+        testbed_id: Option<String>,
     },
     // Deploy all validators
     LocalBenchmark {
@@ -171,6 +177,7 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             consensus: consensus_protocol,
             pushgateway_url,
+            testbed_id,
         } => {
             run(
                 authority,
@@ -181,6 +188,7 @@ async fn main() -> Result<()> {
                 byzantine_strategy,
                 consensus_protocol,
                 pushgateway_url,
+                testbed_id,
             )
             .await?
         }
@@ -201,6 +209,7 @@ async fn main() -> Result<()> {
             compress_network,
             bls_workers,
             pushgateway_url,
+            testbed_id,
         } => {
             dryrun(
                 authority,
@@ -219,6 +228,7 @@ async fn main() -> Result<()> {
                 compress_network,
                 bls_workers,
                 pushgateway_url,
+                testbed_id,
             )
             .await?
         }
@@ -420,6 +430,7 @@ async fn local_benchmark(
                 byzantine_strategy.clone(),
                 consensus_protocol.clone(),
                 None,
+                None,
             )
             .await?
         } else {
@@ -431,6 +442,7 @@ async fn local_benchmark(
                 parameters.clone(),
                 "honest".to_string(),
                 consensus_protocol.clone(),
+                None,
                 None,
             )
             .await?
@@ -501,6 +513,7 @@ async fn run(
     byzantine_strategy: String,
     consensus_protocol: String,
     pushgateway_url: Option<String>,
+    testbed_id: Option<String>,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
@@ -528,6 +541,7 @@ async fn run(
         byzantine_strategy,
         consensus_protocol,
         pushgateway_url,
+        testbed_id,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;
@@ -553,6 +567,7 @@ async fn dryrun(
     compress_network: bool,
     bls_workers: Option<usize>,
     pushgateway_url: Option<String>,
+    testbed_id: Option<String>,
 ) -> Result<()> {
     tracing::warn!("Starting node {authority} in dryrun mode (committee size: {committee_size})");
     let ips: Vec<IpAddr> = match base_ip {
@@ -628,6 +643,7 @@ async fn dryrun(
         byzantine_strategy,
         consensus_protocol,
         pushgateway_url,
+        testbed_id,
     )
     .await?;
     let (network_result, _metrics_result) = validator.await_completion().await;

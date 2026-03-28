@@ -220,13 +220,25 @@ impl Measurement {
     /// the `instance` label to produce per-validator measurements.
     pub fn from_pushgateway_response<M: ProtocolMetrics>(
         text: &str,
+        expected_testbed_id: Option<&str>,
     ) -> HashMap<usize, HashMap<Label, Self>> {
         let br = std::io::BufReader::new(text.as_bytes());
         let parsed = Scrape::parse(br.lines()).unwrap();
+        let expected_testbed_id =
+            expected_testbed_id.map(starfish_core::prometheus::sanitize_pushgateway_label_value);
 
         // Group samples by instance (e.g. "node-0", "node-1").
         let mut by_instance: HashMap<String, Vec<&prometheus_parse::Sample>> = HashMap::new();
         for sample in &parsed.samples {
+            if let Some(expected_testbed_id) = &expected_testbed_id {
+                let Some(actual_testbed_id) = sample.labels.get("testbed") else {
+                    continue;
+                };
+                if actual_testbed_id != expected_testbed_id {
+                    continue;
+                }
+            }
+
             let instance = sample
                 .labels
                 .get("instance")
@@ -270,6 +282,7 @@ impl Measurement {
                                 | "exported_job"
                                 | "job"
                                 | "push_time_seconds"
+                                | "testbed"
                         )
                     })
                     .map(|(k, v)| format!("{k}=\"{v}\""))
@@ -904,7 +917,8 @@ bytes_sent_total{instance="node-0"} 100
 bytes_sent_total{instance="node-1"} 300
         "#;
 
-        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(report);
+        let measurements =
+            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, None);
 
         assert_eq!(measurements.len(), 2);
         assert_eq!(measurements[&0]["bytes_sent_total"].count, 100);
@@ -915,6 +929,28 @@ bytes_sent_total{instance="node-1"} 300
         assert_eq!(measurements[&1]["bytes_sent_total"].count, 300);
         assert_eq!(
             measurements[&1]["bytes_sent_total"].timestamp,
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn pushgateway_parse_filters_by_testbed() {
+        let report = r#"
+# TYPE benchmark_duration counter
+benchmark_duration{instance="node-0",testbed="alpha"} 10
+benchmark_duration{instance="node-0",testbed="beta"} 20
+# TYPE bytes_sent_total counter
+bytes_sent_total{instance="node-0",testbed="alpha"} 100
+bytes_sent_total{instance="node-0",testbed="beta"} 300
+        "#;
+
+        let measurements =
+            Measurement::from_pushgateway_response::<TestProtocolMetrics>(report, Some("beta"));
+
+        assert_eq!(measurements.len(), 1);
+        assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);
+        assert_eq!(
+            measurements[&0]["bytes_sent_total"].timestamp,
             Duration::from_secs(20)
         );
     }
