@@ -126,11 +126,17 @@ impl ProtocolCommands for StarfishProtocol {
             node_parameters_path.display()
         );
 
-        let mut params = parameters.client_parameters.clone();
-        params.load = parameters.load / parameters.nodes;
-        let params_string = serde_yaml::to_string(&params).unwrap();
-        let params_path = self.working_dir.join(Parameters::DEFAULT_FILENAME);
-        let upload_parameters = format!("echo -e '{params_string}' > {}", params_path.display());
+        let upload_parameters = (0..parameters.nodes)
+            .map(|authority| {
+                let mut params = parameters.client_parameters.clone();
+                params.load =
+                    Self::split_authority_load(parameters.load, parameters.nodes, authority);
+                let params_string = serde_yaml::to_string(&params).unwrap();
+                let params_path = self.authority_parameters_path(authority as AuthorityIndex);
+                format!("echo -e '{params_string}' > {}", params_path.display())
+            })
+            .collect::<Vec<_>>()
+            .join(" && ");
 
         let genesis = [
             &format!("./{BINARY_PATH}/starfish"),
@@ -170,7 +176,7 @@ impl ProtocolCommands for StarfishProtocol {
                 let private_config_path = self
                     .working_dir
                     .join(format!("private-config-{authority}.yaml"));
-                let parameters_path = self.working_dir.join(Parameters::DEFAULT_FILENAME);
+                let parameters_path = self.authority_parameters_path(authority);
                 let byzantine_nodes = parameters.byzantine_nodes;
                 let mut byzantine_strategy = "honest".to_string();
                 if i % 3 == 0 && i / 3 < byzantine_nodes {
@@ -269,5 +275,45 @@ impl StarfishProtocol {
             pushgateway_url,
             testbed_id: settings.testbed_id.clone(),
         }
+    }
+
+    fn authority_parameters_path(&self, authority: AuthorityIndex) -> PathBuf {
+        self.working_dir
+            .join(format!("parameters-{authority}.yaml"))
+    }
+
+    fn split_authority_load(total_load: usize, nodes: usize, authority: usize) -> usize {
+        if nodes == 0 {
+            return 0;
+        }
+
+        let base = total_load / nodes;
+        let remainder = total_load % nodes;
+        base + usize::from(authority < remainder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StarfishProtocol;
+
+    #[test]
+    fn split_authority_load_preserves_total_load() {
+        let nodes = 4;
+        let loads: Vec<_> = (0..nodes)
+            .map(|authority| StarfishProtocol::split_authority_load(101, nodes, authority))
+            .collect();
+
+        assert_eq!(loads, vec![26, 25, 25, 25]);
+        assert_eq!(loads.iter().sum::<usize>(), 101);
+    }
+
+    #[test]
+    fn split_authority_load_handles_zero_load() {
+        let loads: Vec<_> = (0..4)
+            .map(|authority| StarfishProtocol::split_authority_load(0, 4, authority))
+            .collect();
+
+        assert_eq!(loads, vec![0, 0, 0, 0]);
     }
 }

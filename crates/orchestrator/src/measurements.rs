@@ -956,12 +956,11 @@ bytes_sent_total{instance="node-0",testbed="alpha"} 100
 bytes_sent_total{instance="node-0",testbed="beta"} 300
         "#;
 
-        let measurements =
-            Measurement::from_pushgateway_response::<TestProtocolMetrics>(
-                report,
-                Some("beta"),
-                None,
-            );
+        let measurements = Measurement::from_pushgateway_response::<TestProtocolMetrics>(
+            report,
+            Some("beta"),
+            None,
+        );
 
         assert_eq!(measurements.len(), 1);
         assert_eq!(measurements[&0]["bytes_sent_total"].count, 300);

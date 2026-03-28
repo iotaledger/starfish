@@ -30,9 +30,10 @@ local-dryrun/data/
 *.tex
 *.txt
 
-# But track local-dryrun contents
+# But track local-dryrun sources, not generated data
 !local-dryrun/
-!local-dryrun/**
+!local-dryrun/README.md
+!local-dryrun/dryrun.sh
 
 # Benchmark results
 results/

@@ -4,12 +4,12 @@
 # Configuration Parameters
 #----------------------------------------------------------------------
 NUM_NODES=${NUM_NODES:-10}
-DESIRED_TPS=${DESIRED_TPS:-1000}
+DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
-CONSENSUS=${CONSENSUS:-bluestreak}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-1}
+CONSENSUS=${CONSENSUS:-starfish}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, equivocating-chains-bomb, random-drop
@@ -603,7 +603,7 @@ if [ "${ADVERSARIAL_LATENCY:-0}" = 1 ]; then
 fi
 if (( NUM_BYZANTINE_NODES > 0 )); then
     printf "  %-18s ${YELLOW}%s${RESET}\n" \
-        "Byzantine strat.:" "$BYZANTINE_STRATEGY"
+        "Byzantine strategy:" "$BYZANTINE_STRATEGY"
 fi
 echo -e "${GREEN}─────────────────────────────────────${RESET}"
 

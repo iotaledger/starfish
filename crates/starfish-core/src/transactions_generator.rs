@@ -28,6 +28,13 @@ impl TransactionGenerator {
     const TARGET_BLOCK_INTERVAL: Duration =
         Duration::from_millis((1000 / Self::BATCHES_IN_SECOND) as u64);
 
+    fn transactions_for_interval(load: usize, carry: &mut usize) -> usize {
+        *carry += load;
+        let transactions = *carry / Self::BATCHES_IN_SECOND;
+        *carry %= Self::BATCHES_IN_SECOND;
+        transactions
+    }
+
     pub fn start(
         sender: mpsc::Sender<Vec<Transaction>>,
         seed: AuthorityIndex,
@@ -50,8 +57,7 @@ impl TransactionGenerator {
 
     pub async fn run(mut self) {
         let load = self.parameters.load;
-
-        let transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
+        let max_transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
         // For every 10 validators, add 2 seconds to the initial default delay
         // used for establishing connections between validators
         let initial_delay_plus_extra_delay = self.parameters.initial_delay
@@ -60,13 +66,13 @@ impl TransactionGenerator {
             );
         tracing::info!(
             "Starting tx generator. After {} sec, \
-            generating {transactions_per_block_interval} \
-            transactions every {} ms",
+            targeting {load} tx/s \
+            (up to {max_transactions_per_block_interval} transactions every {} ms)",
             initial_delay_plus_extra_delay.as_secs(),
             Self::TARGET_BLOCK_INTERVAL.as_millis()
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
-        let target_block_size = min(max_block_size, transactions_per_block_interval);
+        let target_block_size = min(max_block_size, max_transactions_per_block_interval);
 
         let tx_size = self.parameters.transaction_size;
         let mode = &self.parameters.transaction_mode;
@@ -78,6 +84,7 @@ impl TransactionGenerator {
         let mut counter: u64 = 0;
         let mut tx_to_report = 0;
         let mut random: u64 = self.rng.gen();
+        let mut load_carry = 0;
         // Pre-allocated payload buffer reused in AllZero mode.
         let zeros = vec![0u8; tx_size - 8 - 8];
 
@@ -87,6 +94,8 @@ impl TransactionGenerator {
         loop {
             interval.tick().await;
             let timestamp = (timestamp_utc().as_millis() as u64).to_le_bytes();
+            let transactions_per_block_interval =
+                Self::transactions_for_interval(load, &mut load_carry);
 
             let mut block = Vec::with_capacity(target_block_size);
             let mut block_size = 0;
@@ -140,5 +149,23 @@ impl TransactionGenerator {
             .try_into()
             .expect("Transactions should be at least 8 bytes");
         Duration::from_millis(u64::from_le_bytes(bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TransactionGenerator;
+
+    #[test]
+    fn transactions_for_interval_matches_target_rate() {
+        for load in [0, 1, 7, 19, 20, 21, 25, 99, 100, 101] {
+            let mut carry = 0;
+            let mut generated = 0;
+            for _ in 0..TransactionGenerator::BATCHES_IN_SECOND {
+                generated += TransactionGenerator::transactions_for_interval(load, &mut carry);
+            }
+            assert_eq!(generated, load, "load={load}");
+            assert_eq!(carry, 0, "load={load}");
+        }
     }
 }

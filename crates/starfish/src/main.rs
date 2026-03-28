@@ -73,7 +73,8 @@ enum Operation {
         /// Optional testbed identifier used to namespace Pushgateway metrics.
         #[clap(long, value_name = "STRING")]
         testbed_id: Option<String>,
-        /// Optional benchmark run identifier used to namespace Pushgateway metrics.
+        /// Optional benchmark run identifier used to namespace Pushgateway
+        /// metrics.
         #[clap(long, value_name = "STRING")]
         benchmark_run_id: Option<String>,
     },
@@ -126,7 +127,8 @@ enum Operation {
         /// Optional testbed identifier used to namespace Pushgateway metrics.
         #[clap(long, value_name = "STRING")]
         testbed_id: Option<String>,
-        /// Optional benchmark run identifier used to namespace Pushgateway metrics.
+        /// Optional benchmark run identifier used to namespace Pushgateway
+        /// metrics.
         #[clap(long, value_name = "STRING")]
         benchmark_run_id: Option<String>,
     },

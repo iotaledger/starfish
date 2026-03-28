@@ -46,10 +46,7 @@ pub fn pushgateway_metrics_grouping_path(
     path
 }
 
-pub fn pushgateway_delete_path(
-    testbed_id: Option<&str>,
-    benchmark_run_id: Option<&str>,
-) -> String {
+pub fn pushgateway_delete_path(testbed_id: Option<&str>, benchmark_run_id: Option<&str>) -> String {
     let mut path = String::from("/metrics/job/starfish");
     if let Some(testbed_id) = testbed_id {
         path.push_str("/testbed/");

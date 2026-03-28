@@ -1685,12 +1685,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         } else {
             None
         };
-        let round_gap_pull_task =
-            if inner.dag_state.consensus_protocol.uses_compressed_refs() {
-                Some(handle.spawn(Self::round_gap_pull_task(inner.clone())))
-            } else {
-                None
-            };
+        let round_gap_pull_task = if inner.dag_state.consensus_protocol.uses_compressed_refs() {
+            Some(handle.spawn(Self::round_gap_pull_task(inner.clone())))
+        } else {
+            None
+        };
         let filter_for_blocks = Arc::new(FilterForBlocks::new());
         let filter_for_shards = Arc::new(FilterForShards::new(inner.committee.info_length()));
         while let Some(connection) = inner.recv_or_stopped(network.connection_receiver()).await {

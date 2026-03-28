@@ -96,7 +96,13 @@ pub enum Operation {
         /// a separate benchmark run. Setting a load to zero will not
         /// deploy any benchmark clients (useful to boot testbeds
         /// designed to run with external clients and load generators).
-        #[clap(long, value_name = "[INT]", default_value = "200", global = true)]
+        #[clap(
+            long,
+            value_name = "INT",
+            default_value = "200",
+            num_args = 1..,
+            global = true
+        )]
         loads: Vec<usize>,
 
         /// Whether to skip testbed updates before running benchmarks. This is a
@@ -121,7 +127,7 @@ pub enum Operation {
 
         /// Protocols to benchmark in order. When specified, the orchestrator
         /// runs each listed protocol.
-        #[clap(long, value_name = "[STRING]", global = true)]
+        #[clap(long, value_name = "STRING", num_args = 1.., global = true)]
         protocols: Vec<String>,
 
         /// Automatically destroy the testbed after a successful benchmark or
@@ -193,7 +199,7 @@ pub enum Operation {
         consensus: String,
 
         /// Protocols to benchmark in order.
-        #[clap(long, value_name = "[STRING]", global = true)]
+        #[clap(long, value_name = "STRING", num_args = 1.., global = true)]
         protocols: Vec<String>,
 
         /// Initial load for latency-throughput sweep mode.
@@ -465,6 +471,13 @@ fn parse_dissemination_mode(mode: &str) -> eyre::Result<DisseminationMode> {
     }
 }
 
+fn protocol_uses_bls(protocol: &str) -> bool {
+    matches!(
+        protocol,
+        "starfish-bls" | "starfish-l" | "mysticeti-bls" | "mysticeti-l"
+    )
+}
+
 /// Returns `true` when the settings file lists at most one region,
 /// indicating a single-VPC deployment where internal IPs and synthetic
 /// latency should be used.
@@ -728,6 +741,7 @@ async fn run<C: ServerProviderClient>(
             } else {
                 protocols
             };
+            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
             display::header("Benchmark configuration");
@@ -763,7 +777,12 @@ async fn run<C: ServerProviderClient>(
             display::config("Storage backend", &client_parameters.storage_backend);
             display::config("Transaction mode", &client_parameters.transaction_mode);
             display::config("Compress network", node_parameters.compress_network);
-            display::config("BLS workers", node_parameters.bls_verification_workers);
+            if uses_bls {
+                display::config(
+                    "BLS workers (BLS protocols only)",
+                    node_parameters.bls_verification_workers,
+                );
+            }
             display::config("Adversarial latency", node_parameters.adversarial_latency);
             display::config("Enable tracing", enable_tracing);
             display::newline();
@@ -902,6 +921,7 @@ async fn run<C: ServerProviderClient>(
             } else {
                 protocols
             };
+            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
             display::header("Benchmark sweep configuration");
@@ -936,7 +956,12 @@ async fn run<C: ServerProviderClient>(
             display::config("Storage backend", &client_parameters.storage_backend);
             display::config("Transaction mode", &client_parameters.transaction_mode);
             display::config("Compress network", node_parameters.compress_network);
-            display::config("BLS workers", node_parameters.bls_verification_workers);
+            if uses_bls {
+                display::config(
+                    "BLS workers (BLS protocols only)",
+                    node_parameters.bls_verification_workers,
+                );
+            }
             display::config("Adversarial latency", node_parameters.adversarial_latency);
             display::config("Enable tracing", enable_tracing);
             display::newline();
