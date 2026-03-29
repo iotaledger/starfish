@@ -446,19 +446,6 @@ impl MeasurementsCollection {
         self.db_sizes.iter().map(|size| *size as f64).collect()
     }
 
-    fn average_latest_scalar(&self, label: &str) -> f64 {
-        let values: Vec<_> = self
-            .latest_measurements(label)
-            .into_iter()
-            .map(|measurement| measurement.scalar)
-            .collect();
-        if values.is_empty() {
-            0.0
-        } else {
-            values.iter().sum::<f64>() / values.len() as f64
-        }
-    }
-
     fn average_latest_weighted_scalar(&self, label: &str) -> f64 {
         let measurements = self.latest_measurements(label);
         let total_sum: f64 = measurements
@@ -473,6 +460,23 @@ impl MeasurementsCollection {
             0.0
         } else {
             total_sum / total_count as f64
+        }
+    }
+
+    fn average_latest_scalar_per_round(&self, label: &str) -> f64 {
+        let highest_dag_rounds = self.highest_dag_round_by_scraper();
+        let values: Vec<_> = self
+            .latest_measurements_with_scraper_ids(label)
+            .into_iter()
+            .filter_map(|(scraper_id, measurement)| {
+                let highest_dag_round = highest_dag_rounds.get(&scraper_id).copied().unwrap_or(0.0);
+                (highest_dag_round > 0.0).then_some(measurement.scalar / highest_dag_round)
+            })
+            .collect();
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f64>() / values.len() as f64
         }
     }
 
@@ -541,7 +545,8 @@ impl MeasurementsCollection {
             bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
             cpu_cores: Self::percentile_summary(&self.cpu_samples()),
             db_size_per_round_bytes: Self::percentile_summary(&db_size_per_round_samples),
-            block_sync_requests_sent_avg: self.average_latest_scalar("block_sync_requests_sent"),
+            block_sync_requests_sent_per_round_avg: self
+                .average_latest_scalar_per_round("block_sync_requests_sent"),
             block_header_size_avg_bytes: self
                 .average_latest_weighted_scalar("proposed_header_size_bytes"),
         }
@@ -637,8 +642,8 @@ impl MeasurementsCollection {
             )
         ]);
         table.add_row(row![
-            b->"Block sync requests / node:",
-            format!("{:.2} requests", summary.block_sync_requests_sent_avg)
+            b->"Block sync requests / round / node:",
+            format!("{:.3} requests", summary.block_sync_requests_sent_per_round_avg)
         ]);
         table.add_row(row![
             b->"Block header size avg:",
@@ -880,7 +885,7 @@ dag_highest_round 1000
         assert_eq!(summary.db_size_per_round_bytes.p25, 15.0);
         assert_eq!(summary.db_size_per_round_bytes.p50, 20.0);
         assert_eq!(summary.db_size_per_round_bytes.p75, 25.0);
-        assert_eq!(summary.block_sync_requests_sent_avg, 60.0);
+        assert_eq!(summary.block_sync_requests_sent_per_round_avg, 0.06);
         assert_eq!(summary.block_header_size_avg_bytes, 640.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);

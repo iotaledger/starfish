@@ -52,6 +52,8 @@ use crate::{
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
+const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
+const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -63,6 +65,32 @@ async fn send_network_message_reliably(
             let _ = sender.send(message).await;
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+async fn broadcast_sailfish_cert_messages(
+    senders: &[mpsc::Sender<NetworkMessage>],
+    cert_messages: &[crate::types::CertMessage],
+) {
+    if cert_messages.is_empty() {
+        return;
+    }
+
+    if cert_messages.len() == 1 {
+        let cert_message = cert_messages[0].clone();
+        for sender in senders {
+            send_network_message_reliably(
+                sender,
+                NetworkMessage::CertMessage(cert_message.clone()),
+            )
+            .await;
+        }
+        return;
+    }
+
+    let cert_batch = cert_messages.to_vec();
+    for sender in senders {
+        send_network_message_reliably(sender, NetworkMessage::CertBatch(cert_batch.clone())).await;
     }
 }
 
@@ -464,6 +492,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 );
                 if let Some(ref sf) = self.sailfish_service {
                     sf.send(SailfishServiceMessage::CertMessage(message));
+                }
+            }
+            NetworkMessage::CertBatch(messages) => {
+                tracing::debug!(
+                    "Received Sailfish cert batch from peer {} with {} messages",
+                    self.peer_id,
+                    messages.len(),
+                );
+                for message in messages {
+                    if message.sender != self.peer_id {
+                        tracing::debug!(
+                            "Rejected CertBatch message: sender {} != peer {}",
+                            message.sender,
+                            self.peer_id,
+                        );
+                        continue;
+                    }
+                    if let Some(ref sf) = self.sailfish_service {
+                        sf.send(SailfishServiceMessage::CertMessage(message));
+                    }
                 }
             }
             NetworkMessage::SailfishTimeout(msg) => {
@@ -1498,87 +1546,123 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             // Event bridge: certification events -> core thread + network broadcast
             let event_inner = inner.clone();
             let event_task = handle.spawn(async move {
-                while let Some(events) = event_rx.recv().await {
-                    tracing::debug!("Sailfish event bridge: {} events", events.len(),);
-                    let certified_refs: Vec<_> = events
-                        .iter()
-                        .filter_map(|event| match event {
-                            SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
-                            _ => None,
-                        })
-                        .collect();
-                    if !certified_refs.is_empty() {
-                        tracing::info!(
-                            "Applying {} Sailfish certificates: {:?}",
-                            certified_refs.len(),
-                            certified_refs,
-                        );
-                        event_inner
-                            .syncer
-                            .apply_sailfish_certificates(certified_refs)
-                            .await;
-                    }
-                    // Apply timeout/novote certs to dag state
-                    for event in &events {
-                        match event {
-                            SailfishCertEvent::TimeoutReady(cert) => {
-                                event_inner.syncer.apply_timeout_cert(cert.clone()).await;
+                let mut cert_flush_interval =
+                    tokio::time::interval(SAILFISH_CERT_BATCH_FLUSH_INTERVAL);
+                cert_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                cert_flush_interval.tick().await;
+                let mut pending_cert_messages = Vec::new();
+
+                loop {
+                    select! {
+                        maybe_events = event_rx.recv() => {
+                            let Some(events) = maybe_events else {
+                                break;
+                            };
+
+                            tracing::debug!("Sailfish event bridge: {} events", events.len(),);
+                            let certified_refs: Vec<_> = events
+                                .iter()
+                                .filter_map(|event| match event {
+                                    SailfishCertEvent::Certified(block_ref) => Some(*block_ref),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !certified_refs.is_empty() {
+                                tracing::info!(
+                                    "Applying {} Sailfish certificates: {:?}",
+                                    certified_refs.len(),
+                                    certified_refs,
+                                );
+                                event_inner
+                                    .syncer
+                                    .apply_sailfish_certificates(certified_refs)
+                                    .await;
                             }
-                            SailfishCertEvent::NoVoteReady(cert) => {
-                                event_inner.syncer.apply_novote_cert(cert.clone()).await;
+                            // Apply timeout/novote certs to dag state
+                            for event in &events {
+                                match event {
+                                    SailfishCertEvent::TimeoutReady(cert) => {
+                                        event_inner.syncer.apply_timeout_cert(cert.clone()).await;
+                                    }
+                                    SailfishCertEvent::NoVoteReady(cert) => {
+                                        event_inner.syncer.apply_novote_cert(cert.clone()).await;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            _ => {}
+                            // Broadcast Vote/Ready/Timeout/NoVote messages
+                            {
+                                let senders: Vec<_> =
+                                    event_inner.peer_senders.read().values().cloned().collect();
+                                tracing::debug!(
+                                    "Sailfish broadcast: {} peers, {} events",
+                                    senders.len(),
+                                    events.len(),
+                                );
+                                for event in &events {
+                                    match event {
+                                        SailfishCertEvent::Broadcast(message) => {
+                                            pending_cert_messages.push(message.clone());
+                                        }
+                                        SailfishCertEvent::BroadcastTimeout(msg) => {
+                                            if !pending_cert_messages.is_empty() {
+                                                broadcast_sailfish_cert_messages(
+                                                    &senders,
+                                                    &pending_cert_messages,
+                                                )
+                                                .await;
+                                                pending_cert_messages.clear();
+                                            }
+                                            for sender in &senders {
+                                                send_network_message_reliably(
+                                                    sender,
+                                                    NetworkMessage::SailfishTimeout(msg.clone()),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        SailfishCertEvent::SendNoVote(msg) => {
+                                            // Route no-vote only to the next-round leader.
+                                            let next_leader =
+                                                event_inner.committee.elect_leader(msg.round + 1);
+                                            let leader_tx = event_inner
+                                                .peer_senders
+                                                .read()
+                                                .get(&next_leader)
+                                                .cloned();
+                                            if let Some(sender) = leader_tx {
+                                                send_network_message_reliably(
+                                                    &sender,
+                                                    NetworkMessage::SailfishNoVote(msg.clone()),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        SailfishCertEvent::Certified(_)
+                                        | SailfishCertEvent::TimeoutReady(_)
+                                        | SailfishCertEvent::NoVoteReady(_) => {}
+                                    }
+                                }
+
+                                if pending_cert_messages.len() >= SAILFISH_CERT_BATCH_MAX_LEN {
+                                    broadcast_sailfish_cert_messages(&senders, &pending_cert_messages)
+                                        .await;
+                                    pending_cert_messages.clear();
+                                }
+                            }
+                        }
+                        _ = cert_flush_interval.tick(), if !pending_cert_messages.is_empty() => {
+                            let senders: Vec<_> =
+                                event_inner.peer_senders.read().values().cloned().collect();
+                            broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
+                            pending_cert_messages.clear();
                         }
                     }
-                    // Broadcast Vote/Ready/Timeout/NoVote messages
-                    {
-                        let senders: Vec<_> =
-                            event_inner.peer_senders.read().values().cloned().collect();
-                        tracing::debug!(
-                            "Sailfish broadcast: {} peers, {} events",
-                            senders.len(),
-                            events.len(),
-                        );
-                        for event in &events {
-                            match event {
-                                SailfishCertEvent::Broadcast(message) => {
-                                    for sender in &senders {
-                                        send_network_message_reliably(
-                                            sender,
-                                            NetworkMessage::CertMessage(message.clone()),
-                                        )
-                                        .await;
-                                    }
-                                }
-                                SailfishCertEvent::BroadcastTimeout(msg) => {
-                                    for sender in &senders {
-                                        send_network_message_reliably(
-                                            sender,
-                                            NetworkMessage::SailfishTimeout(msg.clone()),
-                                        )
-                                        .await;
-                                    }
-                                }
-                                SailfishCertEvent::SendNoVote(msg) => {
-                                    // Route no-vote only to the next-round leader.
-                                    let next_leader =
-                                        event_inner.committee.elect_leader(msg.round + 1);
-                                    let leader_tx =
-                                        event_inner.peer_senders.read().get(&next_leader).cloned();
-                                    if let Some(sender) = leader_tx {
-                                        send_network_message_reliably(
-                                            &sender,
-                                            NetworkMessage::SailfishNoVote(msg.clone()),
-                                        )
-                                        .await;
-                                    }
-                                }
-                                SailfishCertEvent::Certified(_)
-                                | SailfishCertEvent::TimeoutReady(_)
-                                | SailfishCertEvent::NoVoteReady(_) => {}
-                            }
-                        }
-                    }
+                }
+
+                if !pending_cert_messages.is_empty() {
+                    let senders: Vec<_> = event_inner.peer_senders.read().values().cloned().collect();
+                    broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
                 }
             });
             (Some(sf_handle), Some(event_task))

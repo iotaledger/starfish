@@ -159,6 +159,8 @@ pub enum NetworkMessage {
     PartialSig(PartialSig),
     /// SailfishPlusPlus: Optimistic RBC message with phase metadata.
     CertMessage(CertMessage),
+    /// SailfishPlusPlus: Batched optimistic RBC messages.
+    CertBatch(Vec<CertMessage>),
     /// SailfishPlusPlus: Signed timeout message for round advancement.
     SailfishTimeout(SailfishTimeoutMsg),
     /// SailfishPlusPlus: Signed no-vote message for leader skip proof.
@@ -191,6 +193,7 @@ impl NetworkMessage {
                 CertMessageKind::Vote => "cert_vote",
                 CertMessageKind::Ready => "cert_ready",
             },
+            Self::CertBatch(_) => "cert_batch",
             Self::SailfishTimeout(_) => "sailfish_timeout",
             Self::SailfishNoVote(_) => "sailfish_no_vote",
             Self::UnprovableCertificateRequest { .. } => "unprovable_cert_request",
