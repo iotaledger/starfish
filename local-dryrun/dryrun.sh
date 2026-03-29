@@ -8,7 +8,7 @@ DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
-CONSENSUS=${CONSENSUS:-starfish}
+CONSENSUS=${CONSENSUS:-mysticeti-bls}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,

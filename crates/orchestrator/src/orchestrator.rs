@@ -319,6 +319,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         (node_count as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize
     }
 
+    fn apt_get_noninteractive(args: &str) -> String {
+        format!("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get {args}")
+    }
+
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
         let samples: Vec<_> = instances
             .iter()
@@ -527,11 +531,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Pre-built binary mode: minimal runtime dependencies only.
             // Directory at $HOME/{repo_name} to match protocol commands (cd {repo_name}).
             vec![
-                "sudo apt-get update".into(),
-                "sudo apt-get -y upgrade".into(),
-                "sudo apt-get -y autoremove".into(),
-                "sudo apt-get -y remove needrestart".into(),
-                "sudo apt-get -y install sysstat iftop libssl3 ca-certificates curl".into(),
+                Self::apt_get_noninteractive("update"),
+                Self::apt_get_noninteractive("-y remove needrestart"),
+                Self::apt_get_noninteractive("-y upgrade"),
+                Self::apt_get_noninteractive("-y autoremove"),
+                Self::apt_get_noninteractive("-y install sysstat libssl3 ca-certificates curl"),
                 format!("mkdir -p $HOME/{repo_name}/target/release"),
                 // Create empty cargo env so `source $HOME/.cargo/env` in protocol
                 // commands is a harmless no-op.
@@ -540,15 +544,17 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         } else {
             // Build from source: full toolchain and dependencies.
             vec![
-                "sudo apt-get update".into(),
-                "sudo apt-get -y upgrade".into(),
-                "sudo apt-get -y autoremove".into(),
-                "sudo apt-get -y remove needrestart".into(),
-                "sudo apt-get -y install build-essential \
-                sysstat iftop libssl-dev clang libclang-dev \
-                libclang1 llvm"
-                    .into(),
-                "sudo apt-get -y install linux-tools-common linux-tools-generic pkg-config".into(),
+                Self::apt_get_noninteractive("update"),
+                Self::apt_get_noninteractive("-y remove needrestart"),
+                Self::apt_get_noninteractive("-y upgrade"),
+                Self::apt_get_noninteractive("-y autoremove"),
+                Self::apt_get_noninteractive(
+                    "-y install build-essential sysstat libssl-dev clang libclang-dev \
+                    libclang1 llvm",
+                ),
+                Self::apt_get_noninteractive(
+                    "-y install linux-tools-common linux-tools-generic pkg-config",
+                ),
                 "curl --proto \"=https\" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y".into(),
                 "echo \"source $HOME/.cargo/env\" | tee -a ~/.bashrc".into(),
                 "source $HOME/.cargo/env".into(),

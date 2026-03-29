@@ -59,7 +59,7 @@ impl Display for AwsClient {
 
 impl AwsClient {
     const UBUNTU_NAME_PATTERN: &'static str =
-        "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*";
+        "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*";
     const CANONICAL_OWNER_ID: &'static str = "099720109477";
     const DEFAULT_EBS_SIZE_GB: i32 = 500; // Default size of the EBS volume in GB.
 
@@ -198,7 +198,7 @@ impl AwsClient {
     async fn find_image_id(&self, client: &aws_sdk_ec2::Client) -> CloudProviderResult<String> {
         // Use a more general filter that doesn't depend on specific build dates
         let filters = [
-            // Filter for Ubuntu 22.04 LTS
+            // Filter for Ubuntu 24.04 LTS
             FilterBuilder::default()
                 .name("name")
                 .values(Self::UBUNTU_NAME_PATTERN)
@@ -229,7 +229,7 @@ impl AwsClient {
 
         // Select the newest image
         let image = images.first().ok_or_else(|| {
-            CloudProviderError::RequestError("Cannot find Ubuntu 22.04 image".into())
+            CloudProviderError::RequestError("Cannot find Ubuntu 24.04 image".into())
         })?;
 
         image

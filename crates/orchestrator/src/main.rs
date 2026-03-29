@@ -231,6 +231,21 @@ pub enum Operation {
         #[clap(long, value_name = "INT", default_value_t = 12, global = true)]
         sweep_max_points: usize,
 
+        /// Start of the focus zone. When the load would jump past this
+        /// value, it is clamped here and subsequent increases use the
+        /// additive --sweep-focus-step instead.
+        #[clap(long, value_name = "INT", global = true)]
+        sweep_focus_start: Option<usize>,
+
+        /// End of the focus zone. Once the load reaches this value, the
+        /// normal multiplicative strategy resumes.
+        #[clap(long, value_name = "INT", global = true)]
+        sweep_focus_end: Option<usize>,
+
+        /// Additive load step inside the focus zone (tx/s).
+        #[clap(long, value_name = "INT", global = true)]
+        sweep_focus_step: Option<usize>,
+
         /// Automatically destroy the testbed after a successful sweep.
         #[clap(long, action, default_value_t = false, global = true)]
         destroy_testbed_after: bool,
@@ -986,6 +1001,9 @@ async fn run<C: ServerProviderClient>(
             sweep_coarse_multiplier,
             sweep_fine_multiplier,
             sweep_max_points,
+            sweep_focus_start,
+            sweep_focus_end,
+            sweep_focus_step,
             destroy_testbed_after,
             adversarial_latency,
             skip_testbed_update,
@@ -1044,6 +1062,14 @@ async fn run<C: ServerProviderClient>(
                      max {sweep_max_points} points"
                 ),
             );
+            if let (Some(start), Some(end), Some(step)) =
+                (sweep_focus_start, sweep_focus_end, sweep_focus_step)
+            {
+                display::config(
+                    "Focus zone",
+                    format!("{start}..{end} tx/s, step {step} tx/s"),
+                );
+            }
             display::config(
                 "Byzantine nodes",
                 format!("{byzantine_nodes} ({byzantine_strategy})"),
@@ -1094,6 +1120,9 @@ async fn run<C: ServerProviderClient>(
                 sweep_coarse_multiplier,
                 sweep_fine_multiplier,
                 sweep_max_points,
+                sweep_focus_start,
+                sweep_focus_end,
+                sweep_focus_step,
             )
             .wrap_err("Invalid latency-throughput sweep configuration")?;
             let suite_results_dir =

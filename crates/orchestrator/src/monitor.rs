@@ -60,8 +60,8 @@ impl Monitor {
     /// Dependencies to install.
     pub fn dependencies() -> Vec<String> {
         let mut commands: Vec<String> = Vec::new();
-        commands.extend(Prometheus::install_commands().into_iter().map(String::from));
-        commands.extend(Grafana::install_commands().into_iter().map(String::from));
+        commands.extend(Prometheus::install_commands());
+        commands.extend(Grafana::install_commands());
         commands.extend(NodeExporter::install_commands());
         commands
     }
@@ -167,6 +167,10 @@ impl Monitor {
     }
 }
 
+fn apt_get_noninteractive(args: &str) -> String {
+    format!("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get {args}")
+}
+
 /// Generate the commands to setup prometheus on the given instances.
 pub struct Prometheus;
 
@@ -207,14 +211,14 @@ impl Prometheus {
     }
 
     /// The commands to install prometheus.
-    pub fn install_commands() -> Vec<&'static str> {
+    pub fn install_commands() -> Vec<String> {
         vec![
-            "sudo apt-get -y install prometheus",
-            "sudo chmod 777 -R /var/lib/prometheus/ /etc/prometheus/",
+            apt_get_noninteractive("-y install prometheus"),
+            "sudo chmod 777 -R /var/lib/prometheus/ /etc/prometheus/".into(),
             // Preserve unrelated distro defaults while ensuring Prometheus has
             // the flags needed for fast config reloads and larger retained TSDBs.
-            Self::ensure_runtime_flags_command(),
-            "sudo service prometheus restart",
+            Self::ensure_runtime_flags_command().to_string(),
+            "sudo service prometheus restart".into(),
         ]
     }
 
@@ -423,18 +427,21 @@ impl Grafana {
     pub const DASHBOARD_UID: &'static str = "bdd54ee7-84de-4018-8bb7-92af2defc041";
 
     /// The commands to install grafana.
-    pub fn install_commands() -> Vec<&'static str> {
+    pub fn install_commands() -> Vec<String> {
         vec![
-            "sudo apt-get install -y apt-transport-https software-properties-common wget",
-            "sudo wget -q -O /etc/apt/keyrings/grafana.key https://apt.grafana.com/gpg.key",
-            "(sudo rm /etc/apt/sources.list.d/grafana.list || true)",
+            apt_get_noninteractive(
+                "-y install apt-transport-https software-properties-common wget",
+            ),
+            "sudo wget -q -O /etc/apt/keyrings/grafana.key https://apt.grafana.com/gpg.key".into(),
+            "(sudo rm /etc/apt/sources.list.d/grafana.list || true)".into(),
             "echo \
                 \"deb [signed-by=/etc/apt/keyrings/grafana.key] \
                 https://apt.grafana.com stable main\" \
-                | sudo tee -a /etc/apt/sources.list.d/grafana.list",
-            "sudo apt-get update",
-            "sudo apt-get install -y grafana",
-            "sudo chmod 777 -R /etc/grafana/",
+                | sudo tee -a /etc/apt/sources.list.d/grafana.list"
+                .into(),
+            apt_get_noninteractive("update"),
+            apt_get_noninteractive("-y install grafana"),
+            "sudo chmod 777 -R /etc/grafana/".into(),
         ]
     }
 

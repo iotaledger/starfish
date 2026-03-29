@@ -160,6 +160,15 @@ pub struct LatencyThroughputSweepPlan {
     pub coarse_load_multiplier: f64,
     pub fine_load_multiplier: f64,
     pub max_points_per_protocol: usize,
+    /// When set, the sweep clamps the load to this value instead of jumping
+    /// past it, then uses additive `focus_load_step` increments until
+    /// `focus_load_end`.
+    #[serde(default)]
+    pub focus_load_start: Option<usize>,
+    #[serde(default)]
+    pub focus_load_end: Option<usize>,
+    #[serde(default)]
+    pub focus_load_step: Option<usize>,
 }
 
 impl LatencyThroughputSweepPlan {
@@ -172,6 +181,9 @@ impl LatencyThroughputSweepPlan {
         coarse_load_multiplier: f64,
         fine_load_multiplier: f64,
         max_points_per_protocol: usize,
+        focus_load_start: Option<usize>,
+        focus_load_end: Option<usize>,
+        focus_load_step: Option<usize>,
     ) -> eyre::Result<Self> {
         ensure!(
             !protocols.is_empty(),
@@ -203,6 +215,28 @@ impl LatencyThroughputSweepPlan {
             "Sweep needs at least one point per protocol",
         );
 
+        let focus_fields = [
+            focus_load_start.is_some(),
+            focus_load_end.is_some(),
+            focus_load_step.is_some(),
+        ];
+        let focus_set = focus_fields.iter().filter(|v| **v).count();
+        ensure!(
+            focus_set == 0 || focus_set == 3,
+            "Focus zone requires all three of --sweep-focus-start, \
+             --sweep-focus-end, and --sweep-focus-step",
+        );
+        if let (Some(start), Some(end), Some(step)) =
+            (focus_load_start, focus_load_end, focus_load_step)
+        {
+            ensure!(start < end, "Focus start must be less than focus end");
+            ensure!(step > 0, "Focus step must be greater than zero");
+            ensure!(
+                step <= end - start,
+                "Focus step must not exceed the focus range",
+            );
+        }
+
         Ok(Self {
             protocols,
             initial_load,
@@ -211,6 +245,9 @@ impl LatencyThroughputSweepPlan {
             coarse_load_multiplier,
             fine_load_multiplier,
             max_points_per_protocol,
+            focus_load_start,
+            focus_load_end,
+            focus_load_step,
         })
     }
 
@@ -223,12 +260,31 @@ impl LatencyThroughputSweepPlan {
             return None;
         }
 
+        // Inside focus zone: additive steps.
+        if let (Some(start), Some(end), Some(step)) = (
+            self.focus_load_start,
+            self.focus_load_end,
+            self.focus_load_step,
+        ) {
+            if current_load >= start && current_load < end {
+                return Some((current_load + step).min(end));
+            }
+        }
+
         let multiplier = if observed_latency_ms >= self.refine_latency_ms as f64 {
             self.fine_load_multiplier
         } else {
             self.coarse_load_multiplier
         };
         let next = ((current_load as f64) * multiplier).ceil() as usize;
+
+        // Clamp to focus zone start if the jump would overshoot it.
+        if let Some(start) = self.focus_load_start {
+            if current_load < start && next > start {
+                return Some(start);
+            }
+        }
+
         Some(next.max(current_load.saturating_add(1)))
     }
 }
@@ -525,12 +581,47 @@ pub mod test {
             4.0,
             1.25,
             10,
+            None,
+            None,
+            None,
         )
         .unwrap();
 
         assert_eq!(plan.next_load(2_000, 750.0), Some(8_000));
         assert_eq!(plan.next_load(8_000, 1_250.0), Some(10_000));
         assert_eq!(plan.next_load(10_000, 2_000.0), None);
+    }
+
+    #[test]
+    fn focus_zone_clamps_and_steps() {
+        let plan = LatencyThroughputSweepPlan::new(
+            vec!["starfish".into()],
+            2_000,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+            4.0,
+            1.25,
+            20,
+            Some(200_000),
+            Some(280_000),
+            Some(20_000),
+        )
+        .unwrap();
+
+        // Coarse jump from 50k would be 200k → clamped to focus start.
+        assert_eq!(plan.next_load(50_000, 100.0), Some(200_000));
+
+        // Inside focus zone: additive 20k steps.
+        assert_eq!(plan.next_load(200_000, 500.0), Some(220_000));
+        assert_eq!(plan.next_load(220_000, 600.0), Some(240_000));
+        assert_eq!(plan.next_load(240_000, 700.0), Some(260_000));
+        assert_eq!(plan.next_load(260_000, 800.0), Some(280_000));
+
+        // At focus_end, normal multiplier resumes (coarse: 280k * 4 = 1_120k).
+        assert_eq!(plan.next_load(280_000, 900.0), Some(1_120_000));
+
+        // Latency goal still stops the sweep inside the focus zone.
+        assert_eq!(plan.next_load(240_000, 5_000.0), None);
     }
 
     #[test]

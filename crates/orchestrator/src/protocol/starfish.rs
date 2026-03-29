@@ -94,7 +94,7 @@ pub struct StarfishProtocol {
 
 impl ProtocolCommands for StarfishProtocol {
     fn protocol_dependencies(&self) -> Vec<&'static str> {
-        vec!["sudo apt -y install libfontconfig1-dev"]
+        Vec::new()
     }
 
     fn db_directories(&self) -> Vec<std::path::PathBuf> {
