@@ -187,7 +187,7 @@ impl<P> Orchestrator<P> {
 
 impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     const NODE_BOOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-    const MIN_NODE_BOOT_TIMEOUT: Duration = Duration::from_secs(120);
+    const NODE_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
     const MAX_NODE_BOOT_LOG_SAMPLES: usize = 3;
     /// Maximum fraction of validators that may fail readiness and still allow
     /// the benchmark to proceed. The stalled instances are marked inactive.
@@ -296,8 +296,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         successes
     }
 
-    fn node_boot_timeout(node_count: usize) -> Duration {
-        Self::MIN_NODE_BOOT_TIMEOUT.max(Duration::from_secs((node_count as u64 / 2).max(120)))
+    fn node_boot_timeout(_node_count: usize) -> Duration {
+        Self::NODE_BOOT_TIMEOUT
     }
 
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
@@ -408,6 +408,21 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 ));
 
                 if pending_indices.is_empty() {
+                    return Ok(());
+                }
+                if pending_indices.len() <= max_failures {
+                    let stalled: Vec<_> = pending_indices
+                        .iter()
+                        .filter_map(|&i| all_instances.get(i).cloned())
+                        .collect();
+                    display::warn(format!(
+                        "{} of {} validators did not expose metrics during readiness checks \
+                         but are within the tolerated failure budget — marking inactive \
+                         and continuing",
+                        stalled.len(),
+                        total,
+                    ));
+                    self.mark_instances_inactive(&stalled);
                     return Ok(());
                 }
                 if start.elapsed() >= timeout {
@@ -774,6 +789,27 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(())
     }
 
+    /// Stop the validators without deleting logs or storage so post-run
+    /// inspection can proceed against a quiescent state.
+    async fn stop_nodes(&mut self, instances: &[Instance]) {
+        display::action("Stopping validators");
+
+        let command = "(tmux kill-session -t node || true)";
+        let targets = instances
+            .iter()
+            .cloned()
+            .map(|instance| (instance, command.to_string()))
+            .collect();
+        let stopped = self
+            .execute_per_instance_best_effort(targets, CommandContext::default(), "Stop")
+            .await;
+        if stopped.is_empty() {
+            display::warn("Stop could not reach any selected validator; continuing");
+        }
+
+        display::done();
+    }
+
     /// Deploy the nodes.
     pub async fn run_nodes(&mut self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
         display::action("\nDeploying validators");
@@ -1104,12 +1140,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // Wait for the benchmark to terminate. Then save the results.
         let mut aggregator = self.run(parameters).await?;
 
+        // Stop validators before post-processing so DB sizing and log access
+        // are not competing with live validator activity.
+        self.stop_nodes(&selected_nodes).await;
+
         // Measure database sizes before cleanup deletes the storage.
         let db_sizes = self.measure_db_sizes(&selected_nodes).await;
         aggregator.set_db_sizes(db_sizes);
-
-        // Kill the nodes (without deleting the log files).
-        self.cleanup(false, Some(parameters)).await?;
 
         // Download the log files.
         if self.settings.log_processing {
@@ -1118,6 +1155,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 .await?;
             error_counter.print_summary();
         }
+
+        // Clear remaining processes and remove storage, but keep logs for
+        // debugging or later cleanup.
+        self.cleanup(false, Some(parameters)).await?;
 
         Ok(Some(aggregator))
     }
@@ -1243,15 +1284,15 @@ mod tests {
     fn node_boot_timeout_has_sane_floor() {
         assert_eq!(
             Orchestrator::<StarfishProtocol>::node_boot_timeout(10),
-            std::time::Duration::from_secs(120)
+            std::time::Duration::from_secs(60)
         );
     }
 
     #[test]
-    fn node_boot_timeout_scales_for_large_committees() {
+    fn node_boot_timeout_is_constant_for_large_committees() {
         assert_eq!(
             Orchestrator::<StarfishProtocol>::node_boot_timeout(400),
-            std::time::Duration::from_secs(200)
+            std::time::Duration::from_secs(60)
         );
     }
 }
