@@ -90,6 +90,10 @@ pub struct BenchmarkRunSummary {
     pub db_size_per_round_bytes: PercentileSummary,
     pub block_sync_requests_sent_per_round_avg: f64,
     pub block_header_size_avg_bytes: f64,
+    #[serde(default)]
+    pub ready_nodes_at_boot: usize,
+    #[serde(default)]
+    pub metrics_contributors: usize,
 }
 
 impl BenchmarkRunSummary {
@@ -107,7 +111,8 @@ impl BenchmarkRunSummary {
          cpu_p25_cores,cpu_p50_cores,cpu_p75_cores,\
          db_size_per_round_p25_bytes,db_size_per_round_p50_bytes,\
          db_size_per_round_p75_bytes,\
-         block_sync_requests_sent_per_round_avg,block_header_size_avg_bytes"
+         block_sync_requests_sent_per_round_avg,block_header_size_avg_bytes,\
+         ready_nodes_at_boot,metrics_contributors"
     }
 
     pub fn csv_record(&self) -> String {
@@ -139,6 +144,8 @@ impl BenchmarkRunSummary {
             format!("{:.3}", self.db_size_per_round_bytes.p75),
             format!("{:.3}", self.block_sync_requests_sent_per_round_avg),
             format!("{:.3}", self.block_header_size_avg_bytes),
+            self.ready_nodes_at_boot.to_string(),
+            self.metrics_contributors.to_string(),
         ]
         .join(",")
     }

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fmt::Debug,
     fs,
     io::BufRead,
@@ -250,6 +250,13 @@ pub struct MeasurementsCollection {
     /// Database sizes in bytes per validator, measured after the benchmark.
     #[serde(default)]
     pub db_sizes: Vec<u64>,
+    /// Number of validators that exposed metrics during readiness checks and
+    /// were treated as live from benchmark start.
+    #[serde(default)]
+    pub ready_nodes_at_boot: usize,
+    /// Validators that contributed at least one parsed measurement sample.
+    #[serde(default)]
+    observed_scrapers: BTreeSet<ScraperId>,
 }
 
 impl MeasurementsCollection {
@@ -257,11 +264,14 @@ impl MeasurementsCollection {
     pub fn new(mut parameters: BenchmarkParameters) -> Self {
         // Remove the access token from the parameters.
         parameters.settings.repository.remove_access_token();
+        let ready_nodes_at_boot = parameters.nodes;
 
         Self {
             parameters,
             data: HashMap::new(),
             db_sizes: Vec::new(),
+            ready_nodes_at_boot,
+            observed_scrapers: BTreeSet::new(),
         }
     }
 
@@ -274,6 +284,7 @@ impl MeasurementsCollection {
 
     /// Add a new measurement to the collection.
     pub fn add(&mut self, scraper_id: ScraperId, label: String, measurement: Measurement) {
+        self.observed_scrapers.insert(scraper_id);
         self.data
             .entry(label)
             .or_default()
@@ -284,6 +295,10 @@ impl MeasurementsCollection {
 
     pub fn set_db_sizes(&mut self, db_sizes: Vec<u64>) {
         self.db_sizes = db_sizes;
+    }
+
+    pub fn set_ready_nodes_at_boot(&mut self, ready_nodes_at_boot: usize) {
+        self.ready_nodes_at_boot = ready_nodes_at_boot.min(self.parameters.nodes);
     }
 
     /// Get all labels.
@@ -317,6 +332,26 @@ impl MeasurementsCollection {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn ready_nodes_at_boot(&self) -> usize {
+        if self.ready_nodes_at_boot == 0 {
+            self.parameters.nodes
+        } else {
+            self.ready_nodes_at_boot.min(self.parameters.nodes)
+        }
+    }
+
+    fn metrics_contributors(&self) -> usize {
+        if !self.observed_scrapers.is_empty() {
+            return self.observed_scrapers.len();
+        }
+
+        self.data
+            .values()
+            .flat_map(|samples| samples.keys().copied())
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 
     /// Get the maximum result of a function applied to the measurements.
@@ -549,6 +584,8 @@ impl MeasurementsCollection {
                 .average_latest_scalar_per_round("block_sync_requests_sent"),
             block_header_size_avg_bytes: self
                 .average_latest_weighted_scalar("proposed_header_size_bytes"),
+            ready_nodes_at_boot: self.ready_nodes_at_boot(),
+            metrics_contributors: self.metrics_contributors(),
         }
     }
 
@@ -577,6 +614,17 @@ impl MeasurementsCollection {
         table.add_row(row![bH2->""]);
         table.add_row(row![b->"Protocol:", self.parameters.consensus_protocol]);
         table.add_row(row![b->"Nodes:", self.parameters.nodes]);
+        table.add_row(row![
+            b->"Ready at boot:",
+            format!("{}/{} validators", summary.ready_nodes_at_boot, summary.committee)
+        ]);
+        table.add_row(row![
+            b->"Metrics coverage:",
+            format!(
+                "{}/{} validators",
+                summary.metrics_contributors, summary.committee
+            )
+        ]);
         table.add_row(row![b->"Byzantine strategy:", self.parameters.byzantine_strategy]);
         table.add_row(row![b->"Byzantine nodes:", self.parameters.byzantine_nodes]);
         table.add_row(
@@ -872,6 +920,8 @@ dag_highest_round 1000
         let summary = aggregator.benchmark_run_summary();
         assert_eq!(summary.protocol, "starfish");
         assert_eq!(summary.load, 500);
+        assert_eq!(summary.ready_nodes_at_boot, 4);
+        assert_eq!(summary.metrics_contributors, 3);
         assert_eq!(summary.transaction_latency_ms.p25, 500.0);
         assert_eq!(summary.transaction_latency_ms.p50, 750.0);
         assert_eq!(summary.transaction_latency_ms.p75, 1000.0);
@@ -889,6 +939,31 @@ dag_highest_round 1000
         assert_eq!(summary.block_header_size_avg_bytes, 640.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
+    }
+
+    #[test]
+    fn benchmark_run_summary_reports_ready_nodes_at_boot() {
+        let report = r#"
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration 120
+# HELP bytes_sent_total Total number of bytes sent
+# TYPE bytes_sent_total counter
+bytes_sent_total 1000
+        "#;
+
+        let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+        let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
+        aggregator.set_ready_nodes_at_boot(3);
+        for scraper_id in 0..2 {
+            for (label, measurement) in measurements.clone() {
+                aggregator.add(scraper_id, label, measurement);
+            }
+        }
+
+        let summary = aggregator.benchmark_run_summary();
+        assert_eq!(summary.ready_nodes_at_boot, 3);
+        assert_eq!(summary.metrics_contributors, 2);
     }
 
     #[test]

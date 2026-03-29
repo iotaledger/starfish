@@ -20,7 +20,7 @@ use crate::{
     client::{Instance, InstanceStatus},
     display, ensure,
     error::{SshError, TestbedError, TestbedResult},
-    faults::CrashRecoverySchedule,
+    faults::{CrashRecoverySchedule, FaultsType},
     logs::LogsAnalyzer,
     measurements::{Measurement, MeasurementsCollection},
     monitor::Monitor,
@@ -191,7 +191,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     const MAX_NODE_BOOT_LOG_SAMPLES: usize = 3;
     /// Maximum fraction of validators that may fail readiness and still allow
     /// the benchmark to proceed. The stalled instances are marked inactive.
-    const MAX_TOLERATED_BOOT_FAILURE_RATIO: f64 = 0.03;
+    const MAX_TOLERATED_BOOT_FAILURE_RATIO: f64 = 0.10;
 
     fn mark_instances_inactive(&mut self, instances: &[Instance]) {
         for failed in instances {
@@ -300,6 +300,25 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Self::NODE_BOOT_TIMEOUT
     }
 
+    fn clamp_faults_to_available_nodes(faults: FaultsType, available_nodes: usize) -> FaultsType {
+        match faults {
+            FaultsType::Permanent { faults } => FaultsType::Permanent {
+                faults: faults.min(available_nodes),
+            },
+            FaultsType::CrashRecovery {
+                max_faults,
+                interval,
+            } => FaultsType::CrashRecovery {
+                max_faults: max_faults.min(available_nodes),
+                interval,
+            },
+        }
+    }
+
+    fn max_tolerated_boot_failures(node_count: usize) -> usize {
+        (node_count as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize
+    }
+
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
         let samples: Vec<_> = instances
             .iter()
@@ -349,10 +368,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         &mut self,
         instances: Vec<Instance>,
         parameters: &BenchmarkParameters,
-    ) -> TestbedResult<()> {
+    ) -> TestbedResult<Vec<Instance>> {
         let total = instances.len();
         let timeout = Self::node_boot_timeout(total);
-        let max_failures = (total as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize;
+        let max_failures = Self::max_tolerated_boot_failures(total);
         let mut pending_indices: HashSet<usize> = (0..total).collect();
 
         // Keep a lookup vec so we can recover Instance for stalled indices
@@ -408,7 +427,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 ));
 
                 if pending_indices.is_empty() {
-                    return Ok(());
+                    return Ok(Vec::new());
                 }
                 if pending_indices.len() <= max_failures {
                     let stalled: Vec<_> = pending_indices
@@ -417,13 +436,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         .collect();
                     display::warn(format!(
                         "{} of {} validators did not expose metrics during readiness checks \
-                         but are within the tolerated failure budget — marking inactive \
-                         and continuing",
+                         but are within the tolerated failure budget — marking inactive, \
+                         keeping the original committee, and treating them as crashed from \
+                         startup",
                         stalled.len(),
                         total,
                     ));
                     self.mark_instances_inactive(&stalled);
-                    return Ok(());
+                    return Ok(stalled);
                 }
                 if start.elapsed() >= timeout {
                     break;
@@ -440,13 +460,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         if stalled.len() <= max_failures {
             display::warn(format!(
-                "{} of {} validators did not start in time — marking inactive \
-                 and continuing",
+                "{} of {} validators did not start in time — marking inactive, \
+                 keeping the original committee, and treating them as crashed from startup",
                 stalled.len(),
                 total,
             ));
             self.mark_instances_inactive(&stalled);
-            return Ok(());
+            return Ok(stalled);
         }
 
         let sample_logs = self.sample_node_startup_logs(&stalled).await;
@@ -637,8 +657,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Configure the instances with the appropriate configuration files.
-    pub async fn configure(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        let (nodes, _) = self.select_instances(parameters)?;
+    async fn configure_nodes(
+        &self,
+        nodes: Vec<Instance>,
+        parameters: &BenchmarkParameters,
+    ) -> TestbedResult<()> {
         display::action(format!("Configuring {} nodes", nodes.len()));
 
         let command = self
@@ -715,8 +738,12 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Reload prometheus and grafana.
-    pub async fn start_monitoring(&self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
-        let (nodes, instance) = self.select_instances(parameters)?;
+    async fn start_monitoring_nodes(
+        &self,
+        nodes: Vec<Instance>,
+        instance: Option<Instance>,
+        parameters: &BenchmarkParameters,
+    ) -> TestbedResult<()> {
         if let Some(instance) = instance {
             display::action("Configuring monitoring instance");
 
@@ -811,29 +838,31 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     }
 
     /// Deploy the nodes.
-    pub async fn run_nodes(&mut self, parameters: &BenchmarkParameters) -> TestbedResult<()> {
+    pub async fn run_nodes(
+        &mut self,
+        nodes: Vec<Instance>,
+        parameters: &BenchmarkParameters,
+    ) -> TestbedResult<HashSet<String>> {
         display::action("\nDeploying validators");
 
-        let (nodes, _) = self.select_instances(parameters)?;
         self.boot_nodes(nodes.clone(), parameters).await?;
-        self.wait_for_nodes_ready(nodes, parameters).await?;
+        let stalled = self.wait_for_nodes_ready(nodes, parameters).await?;
 
         display::done();
-        Ok(())
+        Ok(stalled.into_iter().map(|instance| instance.id).collect())
     }
 
     /// Collect metrics from the nodes.
     pub async fn run(
         &mut self,
+        nodes: Vec<Instance>,
+        mut killed_node_ids: HashSet<String>,
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<MeasurementsCollection> {
         display::action(format!(
             "Collecting metrics (at least {}s)",
             self.settings.benchmark_duration.as_secs()
         ));
-
-        let (nodes, _) = self.select_instances(parameters)?;
-        let mut killed_nodes: Vec<Instance> = Vec::new();
 
         let node_indices: HashMap<_, _> = nodes
             .iter()
@@ -848,14 +877,24 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .nodes_final_metrics_command(nodes.clone(), parameters);
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
+        aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
         let scrape_interval = crate::monitor::Prometheus::scaled_metrics_interval(parameters.nodes);
         let mut metrics_interval = time::interval(scrape_interval);
         metrics_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         metrics_interval.tick().await; // The first tick returns immediately.
 
-        let faults_type = parameters.settings.faults.clone();
-        let mut faults_schedule = CrashRecoverySchedule::new(faults_type, nodes.clone());
-        let mut faults_interval = time::interval(self.settings.faults.crash_interval());
+        let ready_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|node| !killed_node_ids.contains(&node.id))
+            .cloned()
+            .collect();
+        let faults_type = Self::clamp_faults_to_available_nodes(
+            parameters.settings.faults.clone(),
+            ready_nodes.len(),
+        );
+        let faults_interval_duration = faults_type.crash_interval();
+        let mut faults_schedule = CrashRecoverySchedule::new(faults_type, ready_nodes);
+        let mut faults_interval = time::interval(faults_interval_duration);
         faults_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         faults_interval.tick().await; // The first tick returns immediately.
 
@@ -868,7 +907,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     display::status(format!("{elapsed}s"));
 
                     let mut instances = metrics_commands.clone();
-                    instances.retain(|(instance, _)| !killed_nodes.contains(instance));
+                    instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
 
                     let stdio = self
                         .execute_per_instance_best_effort(
@@ -905,12 +944,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 _ = faults_interval.tick() => {
                     let action = faults_schedule.update();
                     if !action.kill.is_empty() {
-                        killed_nodes.extend(action.kill.clone());
+                        killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
                         self.ssh_manager.kill(action.kill.clone(), "node").await?;
                     }
                     if !action.boot.is_empty() {
                         // Monitor not yet supported for this
-                        killed_nodes.retain(|instance| !action.boot.contains(instance));
+                        for instance in &action.boot {
+                            killed_node_ids.remove(&instance.id);
+                        }
                         self.boot_nodes(action.boot.clone(), parameters).await?;
                     }
                     if !action.kill.is_empty() || !action.boot.is_empty() {
@@ -922,7 +963,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
 
         let mut final_instances = final_metrics_commands;
-        final_instances.retain(|(instance, _)| !killed_nodes.contains(instance));
+        final_instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
         if !final_instances.is_empty() {
             let expected_nodes = final_instances.len();
             let stdio = self
@@ -1121,24 +1162,28 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     ) -> TestbedResult<Option<MeasurementsCollection>> {
         // Cleanup the testbed (in case the previous run was not completed).
         self.cleanup(true, Some(parameters)).await?;
-        let (selected_nodes, _) = self.select_instances(parameters)?;
+        let (selected_nodes, monitoring_instance) = self.select_instances(parameters)?;
         // Start the instance monitoring tools.
-        self.start_monitoring(parameters).await?;
+        self.start_monitoring_nodes(selected_nodes.clone(), monitoring_instance, parameters)
+            .await?;
 
         // Reconfigure before each run because benchmark parameters such as
         // per-node load are written into the generated config files.
         if !self.skip_testbed_configuration {
-            self.configure(parameters).await?;
+            self.configure_nodes(selected_nodes.clone(), parameters)
+                .await?;
         }
 
         // Deploy the validators.
-        self.run_nodes(parameters).await?;
+        let stalled_node_ids = self.run_nodes(selected_nodes.clone(), parameters).await?;
         if parameters.settings.benchmark_duration.as_secs() == 0 {
             return Ok(None);
         }
 
         // Wait for the benchmark to terminate. Then save the results.
-        let mut aggregator = self.run(parameters).await?;
+        let mut aggregator = self
+            .run(selected_nodes.clone(), stalled_node_ids, parameters)
+            .await?;
 
         // Stop validators before post-processing so DB sizing and log access
         // are not competing with live validator activity.
@@ -1293,6 +1338,18 @@ mod tests {
         assert_eq!(
             Orchestrator::<StarfishProtocol>::node_boot_timeout(400),
             std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn max_tolerated_boot_failures_allows_ten_percent() {
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::max_tolerated_boot_failures(250),
+            25
+        );
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::max_tolerated_boot_failures(400),
+            40
         );
     }
 }
