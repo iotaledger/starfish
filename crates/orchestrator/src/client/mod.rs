@@ -155,6 +155,12 @@ pub trait ServerProviderClient: Display {
     /// Return provider-specific commands to setup the instance.
     async fn instance_setup_commands(&self) -> CloudProviderResult<Vec<String>>;
 
+    /// Return the default vCPU count for the configured instance type when the
+    /// cloud provider can expose it directly.
+    async fn instance_vcpus(&self) -> CloudProviderResult<Option<usize>> {
+        Ok(None)
+    }
+
     /// Run one-time per-region setup before batch instance creation (e.g.
     /// security groups, image ID caching). Default is a no-op.
     async fn prepare_deploy(&mut self) -> CloudProviderResult<()> {

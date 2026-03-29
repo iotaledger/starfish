@@ -572,6 +572,53 @@ fn protocol_uses_bls(protocol: &str) -> bool {
     )
 }
 
+#[derive(Default)]
+struct ResolvedBlsWorkers {
+    override_workers: Option<usize>,
+    source: Option<String>,
+}
+
+fn auto_bls_workers_for_vcpus(vcpus: usize) -> usize {
+    vcpus.saturating_sub(5).clamp(5, 50)
+}
+
+async fn resolve_bls_workers<C: ServerProviderClient>(
+    testbed: &Testbed<C>,
+    uses_bls: bool,
+    requested_workers: Option<usize>,
+) -> eyre::Result<ResolvedBlsWorkers> {
+    if let Some(workers) = requested_workers {
+        return Ok(ResolvedBlsWorkers {
+            override_workers: Some(workers),
+            source: uses_bls.then_some("manual".into()),
+        });
+    }
+
+    if !uses_bls {
+        return Ok(ResolvedBlsWorkers::default());
+    }
+
+    let Some(vcpus) = testbed
+        .instance_vcpus()
+        .await
+        .wrap_err("Failed to determine instance vCPU count for automatic BLS worker sizing")?
+    else {
+        return Ok(ResolvedBlsWorkers::default());
+    };
+
+    Ok(ResolvedBlsWorkers {
+        override_workers: Some(auto_bls_workers_for_vcpus(vcpus)),
+        source: Some(format!("auto from {vcpus} vCPU")),
+    })
+}
+
+fn format_bls_workers(workers: usize, source: Option<&str>) -> String {
+    match source {
+        Some(source) => format!("{workers} ({source})"),
+        None => workers.to_string(),
+    }
+}
+
 /// Returns `true` when the settings file lists at most one region,
 /// indicating a single-VPC deployment where internal IPs and synthetic
 /// latency should be used.
@@ -817,6 +864,8 @@ async fn run<C: ServerProviderClient>(
             let use_internal_ip_addresses = is_single_region;
 
             let required_instances = required_benchmark_instances(&settings, committee);
+            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
+            let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
 
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
@@ -826,10 +875,8 @@ async fn run<C: ServerProviderClient>(
                 &transaction_mode,
                 &dissemination_mode,
                 compress_network,
-                bls_workers,
+                resolved_bls_workers.override_workers,
             )?;
-
-            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
             display::header("Benchmark configuration");
@@ -861,7 +908,10 @@ async fn run<C: ServerProviderClient>(
             if uses_bls {
                 display::config(
                     "BLS workers (BLS protocols only)",
-                    node_parameters.bls_verification_workers,
+                    format_bls_workers(
+                        node_parameters.bls_verification_workers,
+                        resolved_bls_workers.source.as_deref(),
+                    ),
                 );
             }
             display::config("Adversarial latency", node_parameters.adversarial_latency);
@@ -956,6 +1006,8 @@ async fn run<C: ServerProviderClient>(
             let use_internal_ip_addresses = is_single_region;
 
             let required_instances = required_benchmark_instances(&settings, committee);
+            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
+            let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
                 mimic_extra_latency,
@@ -964,10 +1016,8 @@ async fn run<C: ServerProviderClient>(
                 &transaction_mode,
                 &dissemination_mode,
                 compress_network,
-                bls_workers,
+                resolved_bls_workers.override_workers,
             )?;
-
-            let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
             display::header("Benchmark sweep configuration");
@@ -1005,7 +1055,10 @@ async fn run<C: ServerProviderClient>(
             if uses_bls {
                 display::config(
                     "BLS workers (BLS protocols only)",
-                    node_parameters.bls_verification_workers,
+                    format_bls_workers(
+                        node_parameters.bls_verification_workers,
+                        resolved_bls_workers.source.as_deref(),
+                    ),
                 );
             }
             display::config("Adversarial latency", node_parameters.adversarial_latency);
@@ -1133,6 +1186,11 @@ async fn run<C: ServerProviderClient>(
                 plan.max_committee_size(),
                 plan.spare_instances,
             );
+            let uses_bls = plan
+                .protocols
+                .iter()
+                .any(|protocol| protocol_uses_bls(protocol));
+            let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
             let (node_parameters, client_parameters) = load_benchmark_configs(
                 &settings,
                 mimic_extra_latency,
@@ -1141,12 +1199,8 @@ async fn run<C: ServerProviderClient>(
                 &transaction_mode,
                 &dissemination_mode,
                 compress_network,
-                bls_workers,
+                resolved_bls_workers.override_workers,
             )?;
-            let uses_bls = plan
-                .protocols
-                .iter()
-                .any(|protocol| protocol_uses_bls(protocol));
 
             display::newline();
             display::header("Benchmark committee sweep configuration");
@@ -1179,7 +1233,10 @@ async fn run<C: ServerProviderClient>(
             if uses_bls {
                 display::config(
                     "BLS workers (BLS protocols only)",
-                    node_parameters.bls_verification_workers,
+                    format_bls_workers(
+                        node_parameters.bls_verification_workers,
+                        resolved_bls_workers.source.as_deref(),
+                    ),
                 );
             }
             display::config("Adversarial latency", node_parameters.adversarial_latency);
@@ -1432,7 +1489,7 @@ async fn run<C: ServerProviderClient>(
 mod tests {
     use clap::Parser;
 
-    use super::{Operation, Opts};
+    use super::{Operation, Opts, auto_bls_workers_for_vcpus};
 
     #[test]
     fn benchmark_requires_protocols() {
@@ -1494,5 +1551,13 @@ mod tests {
             }
             other => panic!("unexpected operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn auto_bls_workers_reserves_cores_and_caps_upper_bound() {
+        assert_eq!(auto_bls_workers_for_vcpus(4), 5);
+        assert_eq!(auto_bls_workers_for_vcpus(10), 5);
+        assert_eq!(auto_bls_workers_for_vcpus(16), 11);
+        assert_eq!(auto_bls_workers_for_vcpus(80), 50);
     }
 }

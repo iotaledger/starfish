@@ -69,6 +69,15 @@ impl<C: ServerProviderClient> Testbed<C> {
             .map_err(TestbedError::from)
     }
 
+    /// Return the provider-reported vCPU count for the configured instance
+    /// type when available.
+    pub async fn instance_vcpus(&self) -> TestbedResult<Option<usize>> {
+        self.client
+            .instance_vcpus()
+            .await
+            .map_err(TestbedError::from)
+    }
+
     /// Return the wall-clock age of the testbed based on the earliest instance
     /// creation timestamp.
     pub fn testbed_age(&self) -> Option<Duration> {

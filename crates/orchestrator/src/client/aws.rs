@@ -345,6 +345,32 @@ impl ServerProviderClient for AwsClient {
         Ok(instances)
     }
 
+    async fn instance_vcpus(&self) -> CloudProviderResult<Option<usize>> {
+        let client = match self
+            .settings
+            .regions
+            .first()
+            .and_then(|x| self.clients.get(x))
+        {
+            Some(client) => client,
+            None => return Ok(None),
+        };
+
+        let response = client
+            .describe_instance_types()
+            .instance_types(self.settings.specs.as_str().into())
+            .send()
+            .await?;
+
+        let Some(info) = response.instance_types().first() else {
+            return Ok(None);
+        };
+        let Some(vcpu_info) = info.v_cpu_info() else {
+            return Ok(None);
+        };
+        Ok(vcpu_info.default_v_cpus().map(|count| count as usize))
+    }
+
     async fn start_instances<'a, I>(&self, instances: I) -> CloudProviderResult<()>
     where
         I: Iterator<Item = &'a Instance> + Send,
