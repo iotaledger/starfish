@@ -349,6 +349,130 @@ impl LatencyThroughputSweepReport {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StabilitySample {
+    pub minute: usize,
+    pub elapsed_secs: u64,
+    #[serde(default)]
+    pub expected_live_nodes: usize,
+    #[serde(default)]
+    pub outage_active: bool,
+    pub metrics_contributors: usize,
+    pub storage_contributors: usize,
+    pub tps: f64,
+    pub bps: f64,
+    pub transaction_latency_p50_ms: f64,
+    pub transaction_latency_p75_ms: f64,
+    pub block_latency_p50_ms: f64,
+    pub block_latency_p75_ms: f64,
+    pub cpu_total_cores: f64,
+    pub cpu_p50_cores: f64,
+    pub cpu_p75_cores: f64,
+    pub bandwidth_sent_total_mib_per_s: f64,
+    pub bandwidth_received_total_mib_per_s: f64,
+    pub bandwidth_total_mib_per_s: f64,
+    pub bandwidth_per_node_p50_mib_per_s: f64,
+    pub bandwidth_per_node_p75_mib_per_s: f64,
+    pub resident_mem_total_bytes: f64,
+    pub resident_mem_p50_bytes: f64,
+    pub resident_mem_p75_bytes: f64,
+    pub virtual_mem_total_bytes: f64,
+    pub virtual_mem_p50_bytes: f64,
+    pub virtual_mem_p75_bytes: f64,
+    pub protocol_mem_total_bytes: f64,
+    pub protocol_mem_p50_bytes: f64,
+    pub protocol_mem_p75_bytes: f64,
+    pub storage_total_bytes: u64,
+    pub storage_p50_bytes: f64,
+    pub storage_p75_bytes: f64,
+}
+
+impl StabilitySample {
+    pub fn csv_header() -> &'static str {
+        "minute,elapsed_secs,expected_live_nodes,outage_active,\
+         metrics_contributors,storage_contributors,\
+         tps,bps,\
+         transaction_latency_p50_ms,transaction_latency_p75_ms,\
+         block_latency_p50_ms,block_latency_p75_ms,\
+         cpu_total_cores,cpu_p50_cores,cpu_p75_cores,\
+         bandwidth_sent_total_mib_per_s,bandwidth_received_total_mib_per_s,\
+         bandwidth_total_mib_per_s,bandwidth_per_node_p50_mib_per_s,\
+         bandwidth_per_node_p75_mib_per_s,\
+         resident_mem_total_bytes,resident_mem_p50_bytes,resident_mem_p75_bytes,\
+         virtual_mem_total_bytes,virtual_mem_p50_bytes,virtual_mem_p75_bytes,\
+         protocol_mem_total_bytes,protocol_mem_p50_bytes,protocol_mem_p75_bytes,\
+         storage_total_bytes,storage_p50_bytes,storage_p75_bytes"
+    }
+
+    pub fn csv_record(&self) -> String {
+        [
+            self.minute.to_string(),
+            self.elapsed_secs.to_string(),
+            self.expected_live_nodes.to_string(),
+            self.outage_active.to_string(),
+            self.metrics_contributors.to_string(),
+            self.storage_contributors.to_string(),
+            format!("{:.3}", self.tps),
+            format!("{:.3}", self.bps),
+            format!("{:.3}", self.transaction_latency_p50_ms),
+            format!("{:.3}", self.transaction_latency_p75_ms),
+            format!("{:.3}", self.block_latency_p50_ms),
+            format!("{:.3}", self.block_latency_p75_ms),
+            format!("{:.6}", self.cpu_total_cores),
+            format!("{:.6}", self.cpu_p50_cores),
+            format!("{:.6}", self.cpu_p75_cores),
+            format!("{:.6}", self.bandwidth_sent_total_mib_per_s),
+            format!("{:.6}", self.bandwidth_received_total_mib_per_s),
+            format!("{:.6}", self.bandwidth_total_mib_per_s),
+            format!("{:.6}", self.bandwidth_per_node_p50_mib_per_s),
+            format!("{:.6}", self.bandwidth_per_node_p75_mib_per_s),
+            format!("{:.3}", self.resident_mem_total_bytes),
+            format!("{:.3}", self.resident_mem_p50_bytes),
+            format!("{:.3}", self.resident_mem_p75_bytes),
+            format!("{:.3}", self.virtual_mem_total_bytes),
+            format!("{:.3}", self.virtual_mem_p50_bytes),
+            format!("{:.3}", self.virtual_mem_p75_bytes),
+            format!("{:.3}", self.protocol_mem_total_bytes),
+            format!("{:.3}", self.protocol_mem_p50_bytes),
+            format!("{:.3}", self.protocol_mem_p75_bytes),
+            self.storage_total_bytes.to_string(),
+            format!("{:.3}", self.storage_p50_bytes),
+            format!("{:.3}", self.storage_p75_bytes),
+        ]
+        .join(",")
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StabilityOutage {
+    pub start_secs: u64,
+    pub duration_secs: u64,
+    pub start_authority: usize,
+    pub count: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StabilityReport {
+    pub generated_at_unix_secs: u64,
+    pub protocol: String,
+    pub committee: usize,
+    pub load: usize,
+    pub duration_secs: u64,
+    pub sample_interval_secs: u64,
+    #[serde(default)]
+    pub outage: Option<StabilityOutage>,
+    pub points: Vec<StabilitySample>,
+}
+
+impl StabilityReport {
+    pub fn to_csv(&self) -> String {
+        std::iter::once(StabilitySample::csv_header().to_string())
+            .chain(self.points.iter().map(StabilitySample::csv_record))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 impl<N: Debug, C: Debug> Debug for BenchmarkParametersGeneric<N, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

@@ -187,6 +187,18 @@ impl Measurement {
                     }
                     _ => panic!("Unexpected scraped value: '{x}'"),
                 },
+                x if x == "process_resident_memory_bytes" => match sample.value {
+                    prometheus_parse::Value::Gauge(value) => {
+                        measurement.scalar = value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
+                x if x == "process_virtual_memory_bytes" => match sample.value {
+                    prometheus_parse::Value::Gauge(value) => {
+                        measurement.scalar = value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
+                },
                 x if x == "proposed_header_size_bytes" => match histogram_bucket {
                     "count" => {
                         measurement.count = match sample.value {
@@ -201,6 +213,12 @@ impl Measurement {
                         }
                     }
                     _ => {}
+                },
+                x if x == "global_in_memory_blocks_bytes" => match sample.value {
+                    prometheus_parse::Value::Gauge(value) => {
+                        measurement.scalar = value;
+                    }
+                    _ => panic!("Unexpected scraped value: '{x}'"),
                 },
                 x if x == "dag_highest_round" => match sample.value {
                     prometheus_parse::Value::Gauge(value) => {
@@ -235,6 +253,24 @@ impl Measurement {
     #[cfg(test)]
     pub fn average_latency(&self) -> Duration {
         self.sum.checked_div(self.count as u32).unwrap_or_default()
+    }
+
+    pub fn count_value(&self) -> usize {
+        self.count
+    }
+
+    pub fn scalar_value(&self) -> f64 {
+        self.scalar
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+
+    pub fn bucket_ms(&self, bucket: &str) -> Option<f64> {
+        self.buckets
+            .get(bucket)
+            .map(|duration| duration.as_secs_f64() * 1_000.0)
     }
 }
 
@@ -939,6 +975,47 @@ dag_highest_round 1000
         assert_eq!(summary.block_header_size_avg_bytes, 640.0);
         let expected_efficiency = 30_000.0 / (summary.tps * summary.transaction_size_bytes as f64);
         assert!((summary.bandwidth_efficiency.p50 - expected_efficiency).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prometheus_parse_includes_memory_gauges() {
+        let report = r#"
+# HELP benchmark_duration Duration of the benchmark
+# TYPE benchmark_duration counter
+benchmark_duration 60
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 123456
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 654321
+# HELP global_in_memory_blocks_bytes Total block bytes in memory
+# TYPE global_in_memory_blocks_bytes gauge
+global_in_memory_blocks_bytes 777
+        "#;
+
+        let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+        assert_eq!(
+            measurements
+                .get("process_resident_memory_bytes")
+                .expect("resident memory metric is parsed")
+                .scalar,
+            123456.0
+        );
+        assert_eq!(
+            measurements
+                .get("process_virtual_memory_bytes")
+                .expect("virtual memory metric is parsed")
+                .scalar,
+            654321.0
+        );
+        assert_eq!(
+            measurements
+                .get("global_in_memory_blocks_bytes")
+                .expect("protocol memory metric is parsed")
+                .scalar,
+            777.0
+        );
     }
 
     #[test]

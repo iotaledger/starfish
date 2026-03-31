@@ -16,7 +16,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::time::{self, Instant};
 
 use crate::{
-    benchmark::{BenchmarkParameters, LatencyThroughputSweepPlan, LatencyThroughputSweepReport},
+    benchmark::{
+        BenchmarkParameters, LatencyThroughputSweepPlan, LatencyThroughputSweepReport,
+        StabilityOutage, StabilityReport, StabilitySample,
+    },
     client::{Instance, InstanceStatus},
     display, ensure,
     error::{SshError, TestbedError, TestbedResult},
@@ -28,6 +31,63 @@ use crate::{
     settings::Settings,
     ssh::{CommandContext, CommandStatus, SshConnectionManager},
 };
+
+#[derive(Clone, Default)]
+struct StabilityCounterSample {
+    timestamp_secs: f64,
+    transaction_committed_count: Option<f64>,
+    sequenced_transactions_count: Option<f64>,
+    block_committed_count: Option<f64>,
+    cpu_seconds: Option<f64>,
+    bytes_sent: Option<f64>,
+    bytes_received: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OneShotOutagePhase {
+    Pending,
+    Down,
+    Completed,
+}
+
+struct OneShotOutageState {
+    config: StabilityOutage,
+    targets: Vec<Instance>,
+    phase: OneShotOutagePhase,
+    killed_by_outage: HashSet<String>,
+}
+
+impl OneShotOutageState {
+    fn new(config: StabilityOutage, targets: Vec<Instance>) -> Self {
+        Self {
+            config,
+            targets,
+            phase: OneShotOutagePhase::Pending,
+            killed_by_outage: HashSet::new(),
+        }
+    }
+
+    fn next_deadline(&self, run_start: Instant) -> Option<Instant> {
+        match self.phase {
+            OneShotOutagePhase::Pending => {
+                Some(run_start + Duration::from_secs(self.config.start_secs))
+            }
+            OneShotOutagePhase::Down => Some(
+                run_start
+                    + Duration::from_secs(
+                        self.config
+                            .start_secs
+                            .saturating_add(self.config.duration_secs),
+                    ),
+            ),
+            OneShotOutagePhase::Completed => None,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self.phase, OneShotOutagePhase::Down)
+    }
+}
 
 /// An orchestrator to deploy nodes and run benchmarks on a testbed.
 pub struct Orchestrator<P> {
@@ -321,6 +381,83 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
     fn apt_get_noninteractive(args: &str) -> String {
         format!("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get {args}")
+    }
+
+    fn percentile(values: &[f64], percentile: f64) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+
+        let last_index = sorted.len() - 1;
+        if last_index == 0 {
+            return sorted[0];
+        }
+
+        let position = percentile.clamp(0.0, 1.0) * last_index as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        if lower == upper {
+            return sorted[lower];
+        }
+
+        let weight = position - lower as f64;
+        sorted[lower] + (sorted[upper] - sorted[lower]) * weight
+    }
+
+    fn stability_counter_sample(
+        measurements: &HashMap<String, Measurement>,
+    ) -> StabilityCounterSample {
+        let timestamp_secs = measurements
+            .values()
+            .next()
+            .map(|measurement| measurement.timestamp().as_secs_f64())
+            .unwrap_or_default();
+
+        StabilityCounterSample {
+            timestamp_secs,
+            transaction_committed_count: measurements
+                .get("transaction_committed_latency")
+                .map(|measurement| measurement.count_value() as f64),
+            sequenced_transactions_count: measurements
+                .get("sequenced_transactions_total")
+                .map(|measurement| measurement.count_value() as f64),
+            block_committed_count: measurements
+                .get("block_committed_latency")
+                .map(|measurement| measurement.count_value() as f64),
+            cpu_seconds: measurements
+                .get("process_cpu_seconds_total")
+                .map(Measurement::scalar_value),
+            bytes_sent: measurements
+                .get("bytes_sent_total")
+                .map(Measurement::scalar_value),
+            bytes_received: measurements
+                .get("bytes_received_total")
+                .map(Measurement::scalar_value),
+        }
+    }
+
+    fn non_negative_delta(current: Option<f64>, previous: Option<f64>) -> Option<f64> {
+        match (current, previous) {
+            (Some(current), Some(previous)) if current >= previous => Some(current - previous),
+            _ => None,
+        }
+    }
+
+    fn scalar_metric(measurements: &HashMap<String, Measurement>, label: &str) -> Option<f64> {
+        measurements.get(label).map(Measurement::scalar_value)
+    }
+
+    fn latency_bucket_ms(
+        measurements: &HashMap<String, Measurement>,
+        label: &str,
+        bucket: &str,
+    ) -> Option<f64> {
+        measurements
+            .get(label)
+            .and_then(|measurement| measurement.bucket_ms(bucket))
     }
 
     async fn sample_node_startup_logs(&mut self, instances: &[Instance]) -> String {
@@ -1014,14 +1151,561 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(aggregator)
     }
 
-    /// Measure total database size on each node (in bytes).
-    async fn measure_db_sizes(&mut self, nodes: &[Instance]) -> Vec<u64> {
-        display::action("Measuring database sizes");
+    fn build_stability_sample(
+        minute: usize,
+        elapsed_secs: u64,
+        expected_live_nodes: usize,
+        outage_active: bool,
+        metrics_by_scraper: &HashMap<usize, HashMap<String, Measurement>>,
+        previous_counters: &mut HashMap<usize, StabilityCounterSample>,
+        db_sizes: &[Option<u64>],
+    ) -> StabilitySample {
+        let mut tx_rate_candidates = Vec::new();
+        let mut block_rate_candidates = Vec::new();
+        let mut cpu_samples = Vec::new();
+        let mut bandwidth_samples = Vec::new();
+        let mut bandwidth_sent_total = 0.0;
+        let mut bandwidth_received_total = 0.0;
+        let mut tx_latency_p50 = Vec::new();
+        let mut tx_latency_p75 = Vec::new();
+        let mut block_latency_p50 = Vec::new();
+        let mut block_latency_p75 = Vec::new();
+        let mut resident_mem = Vec::new();
+        let mut virtual_mem = Vec::new();
+        let mut protocol_mem = Vec::new();
 
+        for (scraper_id, measurements) in metrics_by_scraper {
+            if let Some(value) =
+                Self::latency_bucket_ms(measurements, "transaction_committed_latency", "p50")
+            {
+                tx_latency_p50.push(value);
+            }
+            if let Some(value) =
+                Self::latency_bucket_ms(measurements, "transaction_committed_latency", "p75")
+            {
+                tx_latency_p75.push(value);
+            }
+            if let Some(value) =
+                Self::latency_bucket_ms(measurements, "block_committed_latency", "p50")
+            {
+                block_latency_p50.push(value);
+            }
+            if let Some(value) =
+                Self::latency_bucket_ms(measurements, "block_committed_latency", "p75")
+            {
+                block_latency_p75.push(value);
+            }
+            if let Some(value) = Self::scalar_metric(measurements, "process_resident_memory_bytes")
+            {
+                resident_mem.push(value);
+            }
+            if let Some(value) = Self::scalar_metric(measurements, "process_virtual_memory_bytes") {
+                virtual_mem.push(value);
+            }
+            if let Some(value) = Self::scalar_metric(measurements, "global_in_memory_blocks_bytes")
+            {
+                protocol_mem.push(value);
+            }
+
+            let current = Self::stability_counter_sample(measurements);
+            if let Some(previous) = previous_counters.insert(*scraper_id, current.clone()) {
+                let dt = current.timestamp_secs - previous.timestamp_secs;
+                if dt > 0.0 {
+                    let current_tx = current
+                        .transaction_committed_count
+                        .or(current.sequenced_transactions_count);
+                    let previous_tx = previous
+                        .transaction_committed_count
+                        .or(previous.sequenced_transactions_count);
+                    if let Some(delta) = Self::non_negative_delta(current_tx, previous_tx) {
+                        tx_rate_candidates.push(delta / dt);
+                    }
+                    if let Some(delta) = Self::non_negative_delta(
+                        current.block_committed_count,
+                        previous.block_committed_count,
+                    ) {
+                        block_rate_candidates.push(delta / dt);
+                    }
+                    if let Some(delta) =
+                        Self::non_negative_delta(current.cpu_seconds, previous.cpu_seconds)
+                    {
+                        cpu_samples.push(delta / dt);
+                    }
+
+                    let sent_rate =
+                        Self::non_negative_delta(current.bytes_sent, previous.bytes_sent)
+                            .map(|delta| delta / dt / (1024.0 * 1024.0))
+                            .unwrap_or_default();
+                    let recv_rate =
+                        Self::non_negative_delta(current.bytes_received, previous.bytes_received)
+                            .map(|delta| delta / dt / (1024.0 * 1024.0))
+                            .unwrap_or_default();
+                    let total_rate = sent_rate + recv_rate;
+                    bandwidth_sent_total += sent_rate;
+                    bandwidth_received_total += recv_rate;
+                    bandwidth_samples.push(total_rate);
+                }
+            }
+        }
+
+        let storage_samples: Vec<f64> = db_sizes
+            .iter()
+            .filter_map(|size| size.map(|value| value as f64))
+            .collect();
+        let storage_total_bytes = db_sizes.iter().filter_map(|size| *size).sum::<u64>();
+
+        StabilitySample {
+            minute,
+            elapsed_secs,
+            expected_live_nodes,
+            outage_active,
+            metrics_contributors: metrics_by_scraper.len(),
+            storage_contributors: storage_samples.len(),
+            tps: tx_rate_candidates
+                .into_iter()
+                .max_by(f64::total_cmp)
+                .unwrap_or_default(),
+            bps: block_rate_candidates
+                .into_iter()
+                .max_by(f64::total_cmp)
+                .unwrap_or_default(),
+            transaction_latency_p50_ms: Self::percentile(&tx_latency_p50, 0.50),
+            transaction_latency_p75_ms: Self::percentile(&tx_latency_p75, 0.50),
+            block_latency_p50_ms: Self::percentile(&block_latency_p50, 0.50),
+            block_latency_p75_ms: Self::percentile(&block_latency_p75, 0.50),
+            cpu_total_cores: cpu_samples.iter().sum(),
+            cpu_p50_cores: Self::percentile(&cpu_samples, 0.50),
+            cpu_p75_cores: Self::percentile(&cpu_samples, 0.75),
+            bandwidth_sent_total_mib_per_s: bandwidth_sent_total,
+            bandwidth_received_total_mib_per_s: bandwidth_received_total,
+            bandwidth_total_mib_per_s: bandwidth_sent_total + bandwidth_received_total,
+            bandwidth_per_node_p50_mib_per_s: Self::percentile(&bandwidth_samples, 0.50),
+            bandwidth_per_node_p75_mib_per_s: Self::percentile(&bandwidth_samples, 0.75),
+            resident_mem_total_bytes: resident_mem.iter().sum(),
+            resident_mem_p50_bytes: Self::percentile(&resident_mem, 0.50),
+            resident_mem_p75_bytes: Self::percentile(&resident_mem, 0.75),
+            virtual_mem_total_bytes: virtual_mem.iter().sum(),
+            virtual_mem_p50_bytes: Self::percentile(&virtual_mem, 0.50),
+            virtual_mem_p75_bytes: Self::percentile(&virtual_mem, 0.75),
+            protocol_mem_total_bytes: protocol_mem.iter().sum(),
+            protocol_mem_p50_bytes: Self::percentile(&protocol_mem, 0.50),
+            protocol_mem_p75_bytes: Self::percentile(&protocol_mem, 0.75),
+            storage_total_bytes,
+            storage_p50_bytes: Self::percentile(&storage_samples, 0.50),
+            storage_p75_bytes: Self::percentile(&storage_samples, 0.75),
+        }
+    }
+
+    async fn run_stability(
+        &mut self,
+        nodes: Vec<Instance>,
+        mut killed_node_ids: HashSet<String>,
+        parameters: &BenchmarkParameters,
+        sample_interval: Duration,
+        outage: Option<StabilityOutage>,
+    ) -> TestbedResult<(MeasurementsCollection, StabilityReport)> {
+        display::action(format!(
+            "Collecting stability samples every {}s for {}s",
+            sample_interval.as_secs(),
+            self.settings.benchmark_duration.as_secs()
+        ));
+
+        let node_indices: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.id.clone(), i))
+            .collect();
+        let metrics_commands = self
+            .protocol_commands
+            .nodes_metrics_command(nodes.clone(), parameters);
+        let final_metrics_commands = self
+            .protocol_commands
+            .nodes_final_metrics_command(nodes.clone(), parameters);
+
+        let mut aggregator = MeasurementsCollection::new(parameters.clone());
+        aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
+
+        let ready_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|node| !killed_node_ids.contains(&node.id))
+            .cloned()
+            .collect();
+        let faults_type = Self::clamp_faults_to_available_nodes(
+            parameters.settings.faults.clone(),
+            ready_nodes.len(),
+        );
+        let faults_interval_duration = faults_type.crash_interval();
+        let mut faults_schedule = CrashRecoverySchedule::new(faults_type, ready_nodes);
+        let mut faults_interval = time::interval(faults_interval_duration);
+        faults_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        faults_interval.tick().await;
+
+        let mut sample_timer = time::interval(sample_interval);
+        sample_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        sample_timer.tick().await;
+
+        let generated_at_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut report = StabilityReport {
+            generated_at_unix_secs,
+            protocol: parameters.consensus_protocol.clone(),
+            committee: parameters.nodes,
+            load: parameters.load,
+            duration_secs: self.settings.benchmark_duration.as_secs(),
+            sample_interval_secs: sample_interval.as_secs(),
+            outage: outage.clone(),
+            points: Vec::new(),
+        };
+        let mut previous_counters = HashMap::new();
+        let mut baseline_instances = metrics_commands.clone();
+        baseline_instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+        let baseline_stdio = self
+            .execute_per_instance_best_effort(
+                baseline_instances,
+                CommandContext::default(),
+                "Stability baseline scrape",
+            )
+            .await;
+        for (instance, (stdout, _stderr)) in &baseline_stdio {
+            let Some(i) = node_indices.get(&instance.id).copied() else {
+                continue;
+            };
+            let parsed = Measurement::from_prometheus::<P>(stdout);
+            if parsed.is_empty() {
+                continue;
+            }
+            previous_counters.insert(i, Self::stability_counter_sample(&parsed));
+        }
+        let start = Instant::now();
+        let outage_targets = outage.as_ref().map(|config| {
+            nodes
+                .iter()
+                .skip(config.start_authority)
+                .take(config.count)
+                .cloned()
+                .collect()
+        });
+        let mut outage_state = outage
+            .map(|config| OneShotOutageState::new(config, outage_targets.unwrap_or_default()));
+
+        loop {
+            let next_outage_deadline = outage_state
+                .as_ref()
+                .and_then(|state| state.next_deadline(start));
+
+            if let Some(deadline) = next_outage_deadline {
+                tokio::select! {
+                    _ = sample_timer.tick() => {
+                        let elapsed_secs = start.elapsed().as_secs_f64().ceil() as u64;
+                        display::status(format!("{elapsed_secs}s"));
+
+                        let mut instances = metrics_commands.clone();
+                        instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+                        let stdio = self
+                            .execute_per_instance_best_effort(
+                                instances,
+                                CommandContext::default(),
+                                "Stability metrics scrape",
+                            )
+                            .await;
+                        if stdio.is_empty() {
+                            display::warn(
+                                "All stability metrics scrapes failed for this interval; continuing run",
+                            );
+                        }
+
+                        let mut metrics_by_scraper = HashMap::new();
+                        for (instance, (stdout, _stderr)) in &stdio {
+                            let Some(i) = node_indices.get(&instance.id).copied() else {
+                                continue;
+                            };
+                            let parsed = Measurement::from_prometheus::<P>(stdout);
+                            if parsed.is_empty() {
+                                continue;
+                            }
+                            for (label, measurement) in &parsed {
+                                aggregator.add(i, label.clone(), measurement.clone());
+                            }
+                            metrics_by_scraper.insert(i, parsed);
+                        }
+                        aggregator.save(&self.suite_results_dir);
+
+                        let active_nodes: Vec<_> = nodes
+                            .iter()
+                            .filter(|node| !killed_node_ids.contains(&node.id))
+                            .cloned()
+                            .collect();
+                        let active_db_sizes = self
+                            .measure_db_sizes_with_coverage(&active_nodes, "Stability DB size")
+                            .await;
+                        let mut db_sizes = vec![None; nodes.len()];
+                        for (node, size) in active_nodes.into_iter().zip(active_db_sizes) {
+                            if let Some(index) = node_indices.get(&node.id).copied() {
+                                db_sizes[index] = size;
+                            }
+                        }
+                        let sample = Self::build_stability_sample(
+                            report.points.len() + 1,
+                            elapsed_secs,
+                            nodes.len().saturating_sub(killed_node_ids.len()),
+                            outage_state
+                                .as_ref()
+                                .map(OneShotOutageState::is_active)
+                                .unwrap_or(false),
+                            &metrics_by_scraper,
+                            &mut previous_counters,
+                            &db_sizes,
+                        );
+                        aggregator.set_db_sizes(
+                            db_sizes
+                                .iter()
+                                .map(|size| size.unwrap_or(0))
+                                .collect(),
+                        );
+                        report.points.push(sample);
+                        self.save_stability_report(&report, &parameters.benchmark_run_id);
+
+                        if elapsed_secs >= self.settings.benchmark_duration.as_secs() {
+                            break;
+                        }
+                    },
+
+                    _ = faults_interval.tick() => {
+                        let action = faults_schedule.update();
+                        if !action.kill.is_empty() {
+                            killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
+                            for instance in &action.kill {
+                                if let Some(index) = node_indices.get(&instance.id).copied() {
+                                    previous_counters.remove(&index);
+                                }
+                            }
+                            self.ssh_manager.kill(action.kill.clone(), "node").await?;
+                        }
+                        if !action.boot.is_empty() {
+                            for instance in &action.boot {
+                                killed_node_ids.remove(&instance.id);
+                                if let Some(index) = node_indices.get(&instance.id).copied() {
+                                    previous_counters.remove(&index);
+                                }
+                            }
+                            self.boot_nodes(action.boot.clone(), parameters).await?;
+                        }
+                        if !action.kill.is_empty() || !action.boot.is_empty() {
+                            display::newline();
+                            display::config("Testbed update", action);
+                        }
+                    }
+
+                    _ = time::sleep_until(deadline) => {
+                        if let Some(state) = outage_state.as_mut() {
+                            match state.phase {
+                                OneShotOutagePhase::Pending => {
+                                    let to_kill: Vec<_> = state
+                                        .targets
+                                        .iter()
+                                        .filter(|instance| !killed_node_ids.contains(&instance.id))
+                                        .cloned()
+                                        .collect();
+                                    if to_kill.is_empty() {
+                                        display::warn("Scheduled outage started but all targeted validators were already down");
+                                    } else {
+                                        display::newline();
+                                        display::config(
+                                            "Scheduled outage",
+                                            format!(
+                                                "Stopping {} validators (authorities {}..={}) for {}s",
+                                                to_kill.len(),
+                                                state.config.start_authority,
+                                                state.config.start_authority + state.config.count.saturating_sub(1),
+                                                state.config.duration_secs,
+                                            ),
+                                        );
+                                        state.killed_by_outage = to_kill
+                                            .iter()
+                                            .map(|instance| instance.id.clone())
+                                            .collect();
+                                        for instance in &to_kill {
+                                            killed_node_ids.insert(instance.id.clone());
+                                            if let Some(index) = node_indices.get(&instance.id).copied() {
+                                                previous_counters.remove(&index);
+                                            }
+                                        }
+                                        self.ssh_manager.kill(to_kill, "node").await?;
+                                    }
+                                    state.phase = OneShotOutagePhase::Down;
+                                }
+                                OneShotOutagePhase::Down => {
+                                    let to_boot: Vec<_> = state
+                                        .targets
+                                        .iter()
+                                        .filter(|instance| state.killed_by_outage.contains(&instance.id))
+                                        .cloned()
+                                        .collect();
+                                    if !to_boot.is_empty() {
+                                        display::newline();
+                                        display::config(
+                                            "Scheduled outage",
+                                            format!(
+                                                "Recovering {} validators (authorities {}..={})",
+                                                to_boot.len(),
+                                                state.config.start_authority,
+                                                state.config.start_authority + state.config.count.saturating_sub(1),
+                                            ),
+                                        );
+                                        for instance in &to_boot {
+                                            killed_node_ids.remove(&instance.id);
+                                            if let Some(index) = node_indices.get(&instance.id).copied() {
+                                                previous_counters.remove(&index);
+                                            }
+                                        }
+                                        self.boot_nodes(to_boot, parameters).await?;
+                                    }
+                                    state.killed_by_outage.clear();
+                                    state.phase = OneShotOutagePhase::Completed;
+                                }
+                                OneShotOutagePhase::Completed => {}
+                            }
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                        _ = sample_timer.tick() => {
+                        let elapsed_secs = start.elapsed().as_secs_f64().ceil() as u64;
+                        display::status(format!("{elapsed_secs}s"));
+
+                        let mut instances = metrics_commands.clone();
+                        instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+                        let stdio = self
+                            .execute_per_instance_best_effort(
+                                instances,
+                                CommandContext::default(),
+                                "Stability metrics scrape",
+                            )
+                            .await;
+                        if stdio.is_empty() {
+                            display::warn(
+                                "All stability metrics scrapes failed for this interval; continuing run",
+                            );
+                        }
+
+                        let mut metrics_by_scraper = HashMap::new();
+                        for (instance, (stdout, _stderr)) in &stdio {
+                            let Some(i) = node_indices.get(&instance.id).copied() else {
+                                continue;
+                            };
+                            let parsed = Measurement::from_prometheus::<P>(stdout);
+                            if parsed.is_empty() {
+                                continue;
+                            }
+                            for (label, measurement) in &parsed {
+                                aggregator.add(i, label.clone(), measurement.clone());
+                            }
+                            metrics_by_scraper.insert(i, parsed);
+                        }
+                        aggregator.save(&self.suite_results_dir);
+
+                        let active_nodes: Vec<_> = nodes
+                            .iter()
+                            .filter(|node| !killed_node_ids.contains(&node.id))
+                            .cloned()
+                            .collect();
+                        let active_db_sizes = self
+                            .measure_db_sizes_with_coverage(&active_nodes, "Stability DB size")
+                            .await;
+                        let mut db_sizes = vec![None; nodes.len()];
+                        for (node, size) in active_nodes.into_iter().zip(active_db_sizes) {
+                            if let Some(index) = node_indices.get(&node.id).copied() {
+                                db_sizes[index] = size;
+                            }
+                        }
+                        let sample = Self::build_stability_sample(
+                            report.points.len() + 1,
+                            elapsed_secs,
+                            nodes.len().saturating_sub(killed_node_ids.len()),
+                            false,
+                            &metrics_by_scraper,
+                            &mut previous_counters,
+                            &db_sizes,
+                        );
+                        aggregator.set_db_sizes(
+                            db_sizes
+                                .iter()
+                                .map(|size| size.unwrap_or(0))
+                                .collect(),
+                        );
+                        report.points.push(sample);
+                        self.save_stability_report(&report, &parameters.benchmark_run_id);
+
+                        if elapsed_secs >= self.settings.benchmark_duration.as_secs() {
+                            break;
+                        }
+                    },
+
+                    _ = faults_interval.tick() => {
+                        let action = faults_schedule.update();
+                        if !action.kill.is_empty() {
+                            killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
+                            for instance in &action.kill {
+                                if let Some(index) = node_indices.get(&instance.id).copied() {
+                                    previous_counters.remove(&index);
+                                }
+                            }
+                            self.ssh_manager.kill(action.kill.clone(), "node").await?;
+                        }
+                        if !action.boot.is_empty() {
+                            for instance in &action.boot {
+                                killed_node_ids.remove(&instance.id);
+                                if let Some(index) = node_indices.get(&instance.id).copied() {
+                                    previous_counters.remove(&index);
+                                }
+                            }
+                            self.boot_nodes(action.boot.clone(), parameters).await?;
+                        }
+                        if !action.kill.is_empty() || !action.boot.is_empty() {
+                            display::newline();
+                            display::config("Testbed update", action);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut final_instances = final_metrics_commands;
+        final_instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+        if !final_instances.is_empty() {
+            let stdio = self
+                .execute_per_instance_best_effort(
+                    final_instances,
+                    CommandContext::default(),
+                    "Final stability metrics scrape",
+                )
+                .await;
+            for (instance, (stdout, _stderr)) in &stdio {
+                let Some(i) = node_indices.get(&instance.id).copied() else {
+                    continue;
+                };
+                for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                    aggregator.add(i, label, measurement);
+                }
+            }
+            aggregator.save(&self.suite_results_dir);
+        }
+
+        display::done();
+        Ok((aggregator, report))
+    }
+
+    async fn measure_db_sizes_with_coverage(
+        &mut self,
+        nodes: &[Instance],
+        stage: &str,
+    ) -> Vec<Option<u64>> {
         let db_dirs = self.protocol_commands.db_directories();
         if db_dirs.is_empty() {
-            display::done();
-            return vec![0; nodes.len()];
+            return vec![Some(0); nodes.len()];
         }
 
         let pattern = db_dirs
@@ -1036,7 +1720,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .collect();
 
         let stdio = self
-            .execute_per_instance_best_effort(commands, CommandContext::default(), "DB size")
+            .execute_per_instance_best_effort(commands, CommandContext::default(), stage)
             .await;
 
         let node_indices: HashMap<_, _> = nodes
@@ -1044,16 +1728,22 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .enumerate()
             .map(|(index, node)| (node.id.clone(), index))
             .collect();
-        let mut sizes = vec![0; nodes.len()];
+        let mut sizes = vec![None; nodes.len()];
         for (instance, (stdout, _)) in stdio {
             let Some(index) = node_indices.get(&instance.id).copied() else {
                 continue;
             };
-            sizes[index] = stdout.trim().parse::<u64>().unwrap_or(0);
+            sizes[index] = Some(stdout.trim().parse::<u64>().unwrap_or(0));
         }
-
-        display::done();
         sizes
+    }
+
+    /// Measure total database size on each node (in bytes).
+    async fn measure_db_sizes(&mut self, nodes: &[Instance]) -> Vec<u64> {
+        display::action("Measuring database sizes");
+        let sizes = self.measure_db_sizes_with_coverage(nodes, "DB size").await;
+        display::done();
+        sizes.into_iter().map(|size| size.unwrap_or(0)).collect()
     }
 
     /// Download the log files from the nodes.
@@ -1214,6 +1904,104 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         Ok(Some(aggregator))
     }
 
+    async fn run_stability_regime(
+        &mut self,
+        parameters: BenchmarkParameters,
+        sample_interval: Duration,
+        outage: Option<StabilityOutage>,
+        regime_label: &str,
+    ) -> TestbedResult<()> {
+        self.prepare_benchmark_suite().await?;
+
+        display::header(format!("Starting {regime_label}"));
+        display::config("Protocol", &parameters.consensus_protocol);
+        display::config("Load", format!("{} tx/s", parameters.load));
+        display::config(
+            "Duration",
+            format!("{}s", parameters.settings.benchmark_duration.as_secs()),
+        );
+        display::config("Sample interval", format!("{}s", sample_interval.as_secs()));
+        if let Some(outage) = &outage {
+            display::config(
+                "Outage",
+                format!(
+                    "authorities {}..={} for {}s at {}s",
+                    outage.start_authority,
+                    outage.start_authority + outage.count.saturating_sub(1),
+                    outage.duration_secs,
+                    outage.start_secs,
+                ),
+            );
+        }
+        display::newline();
+
+        self.cleanup(true, Some(&parameters)).await?;
+        let (selected_nodes, monitoring_instance) = self.select_instances(&parameters)?;
+        self.start_monitoring_nodes(selected_nodes.clone(), monitoring_instance, &parameters)
+            .await?;
+        if !self.skip_testbed_configuration {
+            self.configure_nodes(selected_nodes.clone(), &parameters)
+                .await?;
+        }
+
+        let stalled_node_ids = self.run_nodes(selected_nodes.clone(), &parameters).await?;
+        let (mut aggregator, report) = self
+            .run_stability(
+                selected_nodes.clone(),
+                stalled_node_ids,
+                &parameters,
+                sample_interval,
+                outage,
+            )
+            .await?;
+
+        self.stop_nodes(&selected_nodes).await;
+
+        let db_sizes = self.measure_db_sizes(&selected_nodes).await;
+        aggregator.set_db_sizes(db_sizes);
+
+        if self.settings.log_processing {
+            let error_counter = self
+                .download_logs_from_instances(&parameters, &selected_nodes)
+                .await?;
+            error_counter.print_summary();
+        }
+
+        self.cleanup(false, Some(&parameters)).await?;
+
+        aggregator.display_summary();
+        let report_path = self.save_stability_report(&report, &parameters.benchmark_run_id);
+        display::config("Stability report", report_path.display());
+        display::config("Stability points", report.points.len());
+        display::print_timeline();
+        display::header(format!("{regime_label} completed"));
+        Ok(())
+    }
+
+    pub async fn run_stability_benchmark(
+        &mut self,
+        parameters: BenchmarkParameters,
+        sample_interval: Duration,
+    ) -> TestbedResult<()> {
+        self.run_stability_regime(parameters, sample_interval, None, "Benchmark stability")
+            .await
+    }
+
+    pub async fn run_outage_benchmark(
+        &mut self,
+        parameters: BenchmarkParameters,
+        sample_interval: Duration,
+        outage: StabilityOutage,
+    ) -> TestbedResult<()> {
+        self.run_stability_regime(
+            parameters,
+            sample_interval,
+            Some(outage),
+            "Benchmark outage",
+        )
+        .await
+    }
+
     fn save_sweep_report(&self, report: &LatencyThroughputSweepReport, stem: &str) {
         let path = self.suite_results_dir.join("sweeps");
         fs::create_dir_all(&path).expect("Failed to create sweep results directory");
@@ -1222,6 +2010,18 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         fs::write(path.join(format!("{stem}.json")), json).expect("Failed to write sweep report");
         fs::write(path.join(format!("{stem}.csv")), report.to_csv())
             .expect("Failed to write sweep CSV report");
+    }
+
+    fn save_stability_report(&self, report: &StabilityReport, benchmark_run_id: &str) -> PathBuf {
+        let path = self.suite_results_dir.join("stability");
+        fs::create_dir_all(&path).expect("Failed to create stability results directory");
+
+        let json = serde_json::to_string_pretty(report).expect("Cannot serialize stability report");
+        let json_path = path.join(format!("stability-{benchmark_run_id}.json"));
+        let csv_path = path.join(format!("stability-{benchmark_run_id}.csv"));
+        fs::write(&json_path, json).expect("Failed to write stability JSON report");
+        fs::write(&csv_path, report.to_csv()).expect("Failed to write stability CSV report");
+        json_path
     }
 
     /// Run all the benchmarks specified by the benchmark generator.
