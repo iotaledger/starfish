@@ -451,6 +451,60 @@ pub struct StabilityOutage {
     pub count: usize,
 }
 
+impl StabilityOutage {
+    pub fn selection_stride(&self, committee: usize) -> usize {
+        if committee == 0 {
+            1
+        } else {
+            (committee / self.count.max(1)).max(1)
+        }
+    }
+
+    pub fn selected_authorities(&self, committee: usize) -> Vec<usize> {
+        if committee == 0 || self.count == 0 {
+            return Vec::new();
+        }
+
+        let cyclic_order: Vec<_> = (0..committee)
+            .map(|offset| (self.start_authority + offset) % committee)
+            .collect();
+        let stride = self.selection_stride(committee);
+
+        (0..self.count)
+            .filter_map(|index| cyclic_order.get(index.saturating_mul(stride)).copied())
+            .collect()
+    }
+
+    pub fn selected_authorities_label(&self, committee: usize) -> String {
+        let selected = self.selected_authorities(committee);
+        if selected.is_empty() {
+            return "0 validators".to_string();
+        }
+
+        let preview = selected
+            .iter()
+            .take(3)
+            .map(|authority| authority.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let ellipsis = if selected.len() > 3 { ",..." } else { "" };
+        format!(
+            "authorities {preview}{ellipsis} ({} total, stride {})",
+            selected.len(),
+            self.selection_stride(committee),
+        )
+    }
+
+    pub fn selection_description(&self, committee: usize) -> String {
+        format!(
+            "{} for {}s at {}s",
+            self.selected_authorities_label(committee),
+            self.duration_secs,
+            self.start_secs,
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StabilityReport {
     pub generated_at_unix_secs: u64,
@@ -667,7 +721,7 @@ pub mod test {
 
     use super::{
         BenchmarkParametersGeneric, CommitteeScalingPlan, LatencyThroughputSweepPlan,
-        ProtocolParameters,
+        ProtocolParameters, StabilityOutage,
     };
 
     /// Mock benchmark type for unit tests.
@@ -795,6 +849,25 @@ pub mod test {
                 ("starfish".into(), 10, 0),
                 ("mysticeti".into(), 4, 0),
                 ("mysticeti".into(), 10, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn stability_outage_selects_distributed_authorities() {
+        let outage = StabilityOutage {
+            start_secs: 120,
+            duration_secs: 60,
+            start_authority: 0,
+            count: 33,
+        };
+
+        assert_eq!(outage.selection_stride(100), 3);
+        assert_eq!(
+            outage.selected_authorities(100),
+            vec![
+                0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63,
+                66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96
             ]
         );
     }

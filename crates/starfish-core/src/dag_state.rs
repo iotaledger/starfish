@@ -1563,20 +1563,19 @@ impl DagState {
             return false;
         }
 
-        // BLS protocols: check round certificate, leader certificate for
-        // the leader two rounds back, and leader visibility.
+        // BLS protocols: check round certificate, leader certificate for the
+        // leader two rounds back, and leader visibility.
         if self.consensus_protocol.uses_bls() {
             // Round certificate for r-1 must exist.
             if leader_round > 0 && !inner.round_certificates.contains_key(&leader_round) {
                 return false;
             }
-            // Leader certificate for the leader of r-2 must exist.
             if leader_round >= 2 {
                 let prev_leader_auth = committee.elect_leader(leader_round - 1);
-                let has_cert = inner.leader_certificates[prev_leader_auth as usize]
+                let has_leader_cert = inner.leader_certificates[prev_leader_auth as usize]
                     .keys()
-                    .any(|r| r.round == leader_round - 1);
-                if !has_cert {
+                    .any(|reference| reference.round == leader_round - 1);
+                if !has_leader_cert {
                     return false;
                 }
             }
@@ -1593,30 +1592,43 @@ impl DagState {
                 }
             }
         } else {
-            // Non-BLS protocols: vote quorum for leader two rounds back.
+            // Non-BLS protocols: require either quorum support for the leader
+            // at r-2, or a proved skip.
             if leader_round >= 2 {
-                let prev_leader = committee.elect_leader(leader_round - 1);
-                let mut votes = StakeAggregator::<QuorumThreshold>::new();
-                let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
+                let prev_leader_round = leader_round - 1;
+                let prev_leader = committee.elect_leader(prev_leader_round);
                 let count_strong_votes =
                     !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
+                let mut votes = StakeAggregator::<QuorumThreshold>::new();
+                let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
+                let mut non_votes = StakeAggregator::<QuorumThreshold>::new();
 
                 for block in &blocks {
                     let votes_for_leader = block.block_references().iter().any(|reference| {
-                        reference.authority == prev_leader && reference.round == leader_round - 1
+                        reference.authority == prev_leader && reference.round == prev_leader_round
                     });
                     if votes_for_leader {
                         votes.add(block.authority(), committee);
+                    } else if !self.consensus_protocol.is_sailfish_pp() {
+                        non_votes.add(block.authority(), committee);
                     }
                     if count_strong_votes && block.is_strong_vote() {
                         strong_votes.add(block.authority(), committee);
                     }
                 }
 
-                if !votes.is_quorum(committee) {
-                    return false;
-                }
-                if count_strong_votes && !strong_votes.is_quorum(committee) {
+                if votes.is_quorum(committee) {
+                    if count_strong_votes && !strong_votes.is_quorum(committee) {
+                        return false;
+                    }
+                } else if self.consensus_protocol.is_sailfish_pp() {
+                    if !inner
+                        .sailfish_novote_certs
+                        .contains_key(&(prev_leader_round, prev_leader))
+                    {
+                        return false;
+                    }
+                } else if !non_votes.is_quorum(committee) {
                     return false;
                 }
             }
@@ -3583,7 +3595,7 @@ impl CommitData {
 }
 
 #[cfg(test)]
-mod tests {
+    mod tests {
     use prometheus::Registry;
     use tempfile::TempDir;
 
@@ -3602,7 +3614,7 @@ mod tests {
         metrics::Metrics,
         types::{
             AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, ProvableShard,
-            RoundNumber, VerifiedBlock,
+            RoundNumber, SailfishNoVoteCert, VerifiedBlock,
         },
     };
 
@@ -4138,6 +4150,119 @@ mod tests {
                 .starfish_speed_excluded_ack_authorities()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn starfish_ready_new_block_allows_skipped_previous_leader_slot() {
+        let dag_state = open_test_dag_state_for("starfish", 0);
+        let committee = dag_state.committee.clone();
+        let round_1_refs: Vec<_> = (0..committee.len() as AuthorityIndex)
+            .map(|authority| {
+                let block = make_full_block(
+                    authority,
+                    1,
+                    vec![BlockReference::new_test(authority, 0)],
+                    ConsensusProtocol::Starfish,
+                );
+                let block_ref = *block.reference();
+                dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+                block_ref
+            })
+            .collect();
+
+        for authority in [0, 2, 3] {
+            dag_state.insert_general_block(
+                make_full_block(
+                    authority,
+                    2,
+                    vec![round_1_refs[authority as usize]],
+                    ConsensusProtocol::Starfish,
+                ),
+                DataSource::BlockBundleStreaming,
+            );
+        }
+
+        assert!(dag_state.is_ready_for_new_block(3, &[2], false, 0, committee.as_ref()));
+    }
+
+    #[test]
+    fn starfish_speed_ready_new_block_skipped_slot_bypasses_strong_vote_quorum() {
+        let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
+        let committee = dag_state.committee.clone();
+        let round_1_refs: Vec<_> = (0..committee.len() as AuthorityIndex)
+            .map(|authority| {
+                let block = make_full_block(
+                    authority,
+                    1,
+                    vec![BlockReference::new_test(authority, 0)],
+                    ConsensusProtocol::StarfishSpeed,
+                );
+                let block_ref = *block.reference();
+                dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+                block_ref
+            })
+            .collect();
+
+        for authority in [0, 2, 3] {
+            dag_state.insert_general_block(
+                make_full_block(
+                    authority,
+                    2,
+                    vec![round_1_refs[authority as usize]],
+                    ConsensusProtocol::StarfishSpeed,
+                ),
+                DataSource::BlockBundleStreaming,
+            );
+        }
+
+        assert!(!dag_state.has_strong_votes_quorum_at_round(2, committee.as_ref()));
+        assert!(dag_state.is_ready_for_new_block(3, &[2], false, 0, committee.as_ref()));
+    }
+
+    #[test]
+    fn sailfish_ready_new_block_requires_novote_cert_for_skipped_slot() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let committee = dag_state.committee.clone();
+        let round_1_refs: Vec<_> = (0..committee.len() as AuthorityIndex)
+            .map(|authority| {
+                let block = make_full_block(
+                    authority,
+                    1,
+                    vec![BlockReference::new_test(authority, 0)],
+                    ConsensusProtocol::SailfishPlusPlus,
+                );
+                let block_ref = *block.reference();
+                dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+                block_ref
+            })
+            .collect();
+
+        let round_2_refs: Vec<_> = [0, 2, 3]
+            .into_iter()
+            .map(|authority| {
+                let block = make_full_block(
+                    authority,
+                    2,
+                    vec![round_1_refs[authority as usize]],
+                    ConsensusProtocol::SailfishPlusPlus,
+                );
+                let block_ref = *block.reference();
+                dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+                block_ref
+            })
+            .collect();
+        dag_state.mark_vertices_clean(&round_1_refs);
+        dag_state.mark_vertices_clean(&round_2_refs);
+
+        assert!(!dag_state.is_ready_for_new_block(3, &[2], false, 0, committee.as_ref()));
+
+        dag_state.add_novote_cert(SailfishNoVoteCert {
+            round: 1,
+            leader: committee.elect_leader(1),
+            signatures: Vec::new(),
+        });
+
+        assert!(dag_state.is_ready_for_new_block(3, &[2], false, 0, committee.as_ref()));
     }
 
     #[test]

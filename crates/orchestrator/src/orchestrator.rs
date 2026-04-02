@@ -1380,11 +1380,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
         let start = Instant::now();
         let outage_targets = outage.as_ref().map(|config| {
-            nodes
-                .iter()
-                .skip(config.start_authority)
-                .take(config.count)
-                .cloned()
+            config
+                .selected_authorities(nodes.len())
+                .into_iter()
+                .filter_map(|authority| nodes.get(authority).cloned())
                 .collect()
         });
         let mut outage_state = outage
@@ -1515,10 +1514,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                         display::config(
                                             "Scheduled outage",
                                             format!(
-                                                "Stopping {} validators (authorities {}..={}) for {}s",
-                                                to_kill.len(),
-                                                state.config.start_authority,
-                                                state.config.start_authority + state.config.count.saturating_sub(1),
+                                                "Stopping {} for {}s",
+                                                state.config.selected_authorities_label(nodes.len()),
                                                 state.config.duration_secs,
                                             ),
                                         );
@@ -1548,10 +1545,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                         display::config(
                                             "Scheduled outage",
                                             format!(
-                                                "Recovering {} validators (authorities {}..={})",
+                                                "Recovering {} validators from {}",
                                                 to_boot.len(),
-                                                state.config.start_authority,
-                                                state.config.start_authority + state.config.count.saturating_sub(1),
+                                                state.config.selected_authorities_label(nodes.len()),
                                             ),
                                         );
                                         for instance in &to_boot {
@@ -1922,16 +1918,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         );
         display::config("Sample interval", format!("{}s", sample_interval.as_secs()));
         if let Some(outage) = &outage {
-            display::config(
-                "Outage",
-                format!(
-                    "authorities {}..={} for {}s at {}s",
-                    outage.start_authority,
-                    outage.start_authority + outage.count.saturating_sub(1),
-                    outage.duration_secs,
-                    outage.start_secs,
-                ),
-            );
+            display::config("Outage", outage.selection_description(parameters.nodes));
         }
         display::newline();
 

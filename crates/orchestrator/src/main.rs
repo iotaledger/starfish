@@ -108,6 +108,10 @@ pub enum Operation {
         )]
         loads: Vec<usize>,
 
+        /// Keep this many extra validator instances active in reserve.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        spare_instances: usize,
+
         /// Whether to skip testbed updates before running benchmarks. This is a
         /// dangerous operation as it may lead to running benchmarks on
         /// outdated nodes. It is however useful when debugging in some
@@ -197,6 +201,10 @@ pub enum Operation {
         #[clap(long, value_name = "INT", default_value_t = 60, global = true)]
         sample_interval_secs: u64,
 
+        /// Keep this many extra validator instances active in reserve.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        spare_instances: usize,
+
         /// The number of byzantine nodes to deploy.
         #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
         byzantine_nodes: usize,
@@ -278,6 +286,10 @@ pub enum Operation {
         /// Save one outage sample this often, in seconds.
         #[clap(long, value_name = "INT", default_value_t = 10, global = true)]
         sample_interval_secs: u64,
+
+        /// Keep this many extra validator instances active in reserve.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        spare_instances: usize,
 
         /// Start the outage this many seconds after the benchmark begins.
         /// Defaults to the midpoint of the run.
@@ -387,6 +399,10 @@ pub enum Operation {
             required = true
         )]
         protocols: Vec<String>,
+
+        /// Keep this many extra validator instances active in reserve.
+        #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
+        spare_instances: usize,
 
         /// Initial load for latency-throughput sweep mode.
         #[clap(long, value_name = "INT", default_value_t = 2_000, global = true)]
@@ -696,6 +712,75 @@ fn required_benchmark_instances_with_spares(
     spare_instances: usize,
 ) -> usize {
     required_benchmark_instances(settings, committee).saturating_add(spare_instances)
+}
+
+async fn reserve_benchmark_instances<C: ServerProviderClient>(
+    testbed: &mut Testbed<C>,
+    settings: &Settings,
+    required_instances: usize,
+    skip_testbed_update: bool,
+    suite_results_dir: &std::path::Path,
+    ensure_context: &'static str,
+    reserve_context: &'static str,
+    install_context: &'static str,
+    update_context: &'static str,
+) -> eyre::Result<(SshConnectionManager, Vec<Instance>)> {
+    let known_instance_ids: HashSet<_> = testbed
+        .instances()
+        .into_iter()
+        .map(|instance| instance.id)
+        .collect();
+
+    testbed
+        .ensure_active_instances(required_instances)
+        .await
+        .wrap_err(ensure_context)?;
+
+    let username = testbed.username();
+    let private_key_file = settings.ssh_private_key_file.clone();
+    let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
+        .with_timeout(settings.ssh_timeout)
+        .with_retries(settings.ssh_retries);
+
+    let instances = testbed
+        .select_active_instances(required_instances)
+        .wrap_err(reserve_context)?;
+
+    if skip_testbed_update {
+        let bootstrap_instances: Vec<_> = instances
+            .iter()
+            .filter(|instance| !known_instance_ids.contains(&instance.id))
+            .cloned()
+            .collect();
+
+        if !bootstrap_instances.is_empty() {
+            let setup_commands = testbed
+                .setup_commands()
+                .await
+                .wrap_err("Failed to load testbed setup commands")?;
+            let protocol_commands = Protocol::new(settings);
+            let bootstrap_results_dir = suite_results_dir.join("bootstrap");
+            let bootstrap_orchestrator = Orchestrator::new(
+                settings.clone(),
+                bootstrap_instances,
+                setup_commands,
+                protocol_commands,
+                ssh_manager.clone(),
+                bootstrap_results_dir,
+            );
+
+            bootstrap_orchestrator
+                .install()
+                .await
+                .wrap_err(install_context)?;
+            bootstrap_orchestrator
+                .update()
+                .await
+                .wrap_err(update_context)?;
+        }
+    }
+
+    Ok((ssh_manager, instances))
 }
 
 fn join_usize_list(values: &[usize]) -> String {
@@ -1050,6 +1135,7 @@ async fn run<C: ServerProviderClient>(
             destroy_testbed_after,
             adversarial_latency,
             loads,
+            spare_instances,
             skip_testbed_update,
             skip_testbed_configuration,
             enable_tracing,
@@ -1068,7 +1154,8 @@ async fn run<C: ServerProviderClient>(
             let mimic_extra_latency = is_single_region;
             let use_internal_ip_addresses = is_single_region;
 
-            let required_instances = required_benchmark_instances(&settings, committee);
+            let required_instances =
+                required_benchmark_instances_with_spares(&settings, committee, spare_instances);
             let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
             let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
 
@@ -1090,7 +1177,10 @@ async fn run<C: ServerProviderClient>(
             let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
             display::config(
                 "Instances",
-                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+                format!(
+                    "{required_instances} ({committee} nodes + {cloud_mon} monitoring + \
+                     {spare_instances} spare)"
+                ),
             );
             display::config(
                 "Network mode",
@@ -1139,15 +1229,18 @@ async fn run<C: ServerProviderClient>(
                 Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark");
 
             let benchmark_result: eyre::Result<()> = async {
-                let username = testbed.username();
-                let private_key_file = settings.ssh_private_key_file.clone();
-                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
-                    .with_timeout(settings.ssh_timeout)
-                    .with_retries(settings.ssh_retries);
-
-                let instances = testbed
-                    .select_active_instances(required_instances)
-                    .wrap_err("Not enough active instances for benchmark")?;
+                let (ssh_manager, instances) = reserve_benchmark_instances(
+                    &mut testbed,
+                    &settings,
+                    required_instances,
+                    skip_testbed_update,
+                    &suite_results_dir,
+                    "Failed to ensure benchmark capacity",
+                    "Failed to reserve instances for benchmark",
+                    "Failed to install dependencies on newly allocated benchmark instances",
+                    "Failed to update newly allocated benchmark instances",
+                )
+                .await?;
 
                 let setup_commands = testbed
                     .setup_commands()
@@ -1186,6 +1279,7 @@ async fn run<C: ServerProviderClient>(
             load,
             duration_secs,
             sample_interval_secs,
+            spare_instances,
             byzantine_nodes,
             byzantine_strategy,
             adversarial_latency,
@@ -1217,7 +1311,8 @@ async fn run<C: ServerProviderClient>(
             let mimic_extra_latency = is_single_region;
             let use_internal_ip_addresses = is_single_region;
 
-            let required_instances = required_benchmark_instances(&settings, committee);
+            let required_instances =
+                required_benchmark_instances_with_spares(&settings, committee, spare_instances);
             let uses_bls = protocol_uses_bls(&protocol);
             let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
 
@@ -1239,7 +1334,10 @@ async fn run<C: ServerProviderClient>(
             let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
             display::config(
                 "Instances",
-                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+                format!(
+                    "{required_instances} ({committee} nodes + {cloud_mon} monitoring + \
+                     {spare_instances} spare)"
+                ),
             );
             display::config(
                 "Network mode",
@@ -1291,59 +1389,18 @@ async fn run<C: ServerProviderClient>(
                 Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark-stability");
 
             let benchmark_result: eyre::Result<()> = async {
-                let known_instance_ids: HashSet<_> = testbed
-                    .instances()
-                    .into_iter()
-                    .map(|instance| instance.id)
-                    .collect();
-
-                testbed
-                    .ensure_active_instances(required_instances)
-                    .await
-                    .wrap_err("Failed to ensure benchmark stability capacity")?;
-
-                let username = testbed.username();
-                let private_key_file = settings.ssh_private_key_file.clone();
-                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
-                    .with_timeout(settings.ssh_timeout)
-                    .with_retries(settings.ssh_retries);
-
-                let instances = testbed
-                    .select_active_instances(required_instances)
-                    .wrap_err("Failed to reserve instances for benchmark stability run")?;
-
-                if skip_testbed_update {
-                    let bootstrap_instances: Vec<_> = instances
-                        .iter()
-                        .filter(|instance| !known_instance_ids.contains(&instance.id))
-                        .cloned()
-                        .collect();
-
-                    if !bootstrap_instances.is_empty() {
-                        let bootstrap_setup_commands = testbed
-                            .setup_commands()
-                            .await
-                            .wrap_err("Failed to load testbed setup commands")?;
-                        let bootstrap_protocol_commands = Protocol::new(&settings);
-                        let bootstrap_results_dir = suite_results_dir.join("bootstrap");
-                        let bootstrap_orchestrator = Orchestrator::new(
-                            settings.clone(),
-                            bootstrap_instances,
-                            bootstrap_setup_commands,
-                            bootstrap_protocol_commands,
-                            ssh_manager.clone(),
-                            bootstrap_results_dir,
-                        );
-
-                        bootstrap_orchestrator.install().await.wrap_err(
-                            "Failed to install dependencies on newly allocated stability instances",
-                        )?;
-                        bootstrap_orchestrator
-                            .update()
-                            .await
-                            .wrap_err("Failed to update newly allocated stability instances")?;
-                    }
-                }
+                let (ssh_manager, instances) = reserve_benchmark_instances(
+                    &mut testbed,
+                    &settings,
+                    required_instances,
+                    skip_testbed_update,
+                    &suite_results_dir,
+                    "Failed to ensure benchmark stability capacity",
+                    "Failed to reserve instances for benchmark stability run",
+                    "Failed to install dependencies on newly allocated stability instances",
+                    "Failed to update newly allocated stability instances",
+                )
+                .await?;
 
                 let setup_commands = testbed
                     .setup_commands()
@@ -1382,6 +1439,7 @@ async fn run<C: ServerProviderClient>(
             load,
             duration_secs,
             sample_interval_secs,
+            spare_instances,
             outage_start_secs,
             outage_duration_secs,
             outage_start_authority,
@@ -1430,10 +1488,6 @@ async fn run<C: ServerProviderClient>(
                 "Outage count must be smaller than the committee",
             );
             eyre::ensure!(
-                outage_start_authority + outage_count <= committee,
-                "Outage authority range exceeds the committee",
-            );
-            eyre::ensure!(
                 outage_start_secs < duration_secs,
                 "Outage start must be within the benchmark duration",
             );
@@ -1452,7 +1506,8 @@ async fn run<C: ServerProviderClient>(
             let mimic_extra_latency = is_single_region;
             let use_internal_ip_addresses = is_single_region;
 
-            let required_instances = required_benchmark_instances(&settings, committee);
+            let required_instances =
+                required_benchmark_instances_with_spares(&settings, committee, spare_instances);
             let uses_bls = protocol_uses_bls(&protocol);
             let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
 
@@ -1474,7 +1529,10 @@ async fn run<C: ServerProviderClient>(
             let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
             display::config(
                 "Instances",
-                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+                format!(
+                    "{required_instances} ({committee} nodes + {cloud_mon} monitoring + \
+                     {spare_instances} spare)"
+                ),
             );
             display::config(
                 "Network mode",
@@ -1488,16 +1546,7 @@ async fn run<C: ServerProviderClient>(
             display::config("Load (tx/s)", load);
             display::config("Duration", format!("{duration_secs}s"));
             display::config("Sample interval", format!("{sample_interval_secs}s"));
-            display::config(
-                "Outage",
-                format!(
-                    "authorities {}..={} for {}s at {}s",
-                    outage.start_authority,
-                    outage.start_authority + outage.count.saturating_sub(1),
-                    outage.duration_secs,
-                    outage.start_secs,
-                ),
-            );
+            display::config("Outage", outage.selection_description(committee));
             display::config(
                 "Byzantine nodes",
                 format!("{byzantine_nodes} ({byzantine_strategy})"),
@@ -1536,59 +1585,18 @@ async fn run<C: ServerProviderClient>(
                 Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark-outage");
 
             let benchmark_result: eyre::Result<()> = async {
-                let known_instance_ids: HashSet<_> = testbed
-                    .instances()
-                    .into_iter()
-                    .map(|instance| instance.id)
-                    .collect();
-
-                testbed
-                    .ensure_active_instances(required_instances)
-                    .await
-                    .wrap_err("Failed to ensure benchmark outage capacity")?;
-
-                let username = testbed.username();
-                let private_key_file = settings.ssh_private_key_file.clone();
-                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
-                    .with_timeout(settings.ssh_timeout)
-                    .with_retries(settings.ssh_retries);
-
-                let instances = testbed
-                    .select_active_instances(required_instances)
-                    .wrap_err("Failed to reserve instances for benchmark outage run")?;
-
-                if skip_testbed_update {
-                    let bootstrap_instances: Vec<_> = instances
-                        .iter()
-                        .filter(|instance| !known_instance_ids.contains(&instance.id))
-                        .cloned()
-                        .collect();
-
-                    if !bootstrap_instances.is_empty() {
-                        let bootstrap_setup_commands = testbed
-                            .setup_commands()
-                            .await
-                            .wrap_err("Failed to load testbed setup commands")?;
-                        let bootstrap_protocol_commands = Protocol::new(&settings);
-                        let bootstrap_results_dir = suite_results_dir.join("bootstrap");
-                        let bootstrap_orchestrator = Orchestrator::new(
-                            settings.clone(),
-                            bootstrap_instances,
-                            bootstrap_setup_commands,
-                            bootstrap_protocol_commands,
-                            ssh_manager.clone(),
-                            bootstrap_results_dir,
-                        );
-
-                        bootstrap_orchestrator.install().await.wrap_err(
-                            "Failed to install dependencies on newly allocated outage instances",
-                        )?;
-                        bootstrap_orchestrator
-                            .update()
-                            .await
-                            .wrap_err("Failed to update newly allocated outage instances")?;
-                    }
-                }
+                let (ssh_manager, instances) = reserve_benchmark_instances(
+                    &mut testbed,
+                    &settings,
+                    required_instances,
+                    skip_testbed_update,
+                    &suite_results_dir,
+                    "Failed to ensure benchmark outage capacity",
+                    "Failed to reserve instances for benchmark outage run",
+                    "Failed to install dependencies on newly allocated outage instances",
+                    "Failed to update newly allocated outage instances",
+                )
+                .await?;
 
                 let setup_commands = testbed
                     .setup_commands()
@@ -1626,6 +1634,7 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             protocols,
+            spare_instances,
             sweep_initial_load,
             sweep_latency_goal_ms,
             sweep_refine_latency_ms,
@@ -1654,7 +1663,8 @@ async fn run<C: ServerProviderClient>(
             let mimic_extra_latency = is_single_region;
             let use_internal_ip_addresses = is_single_region;
 
-            let required_instances = required_benchmark_instances(&settings, committee);
+            let required_instances =
+                required_benchmark_instances_with_spares(&settings, committee, spare_instances);
             let uses_bls = protocols.iter().any(|protocol| protocol_uses_bls(protocol));
             let resolved_bls_workers = resolve_bls_workers(&testbed, uses_bls, bls_workers).await?;
             let (node_parameters, client_parameters) = load_benchmark_configs(
@@ -1675,7 +1685,10 @@ async fn run<C: ServerProviderClient>(
             let cloud_mon = usize::from(settings.monitoring && !settings.is_external_monitoring());
             display::config(
                 "Instances",
-                format!("{required_instances} ({committee} nodes + {cloud_mon} monitoring)"),
+                format!(
+                    "{required_instances} ({committee} nodes + {cloud_mon} monitoring + \
+                     {spare_instances} spare)"
+                ),
             );
             display::config(
                 "Network mode",
@@ -1760,20 +1773,18 @@ async fn run<C: ServerProviderClient>(
                 Orchestrator::<Protocol>::suite_results_dir(&settings, "benchmark-sweep");
 
             let sweep_result: eyre::Result<()> = async {
-                testbed
-                    .ensure_active_instances(required_instances)
-                    .await
-                    .wrap_err("Failed to ensure benchmark capacity")?;
-
-                let username = testbed.username();
-                let private_key_file = settings.ssh_private_key_file.clone();
-                let ssh_manager = SshConnectionManager::new(username.into(), private_key_file)
-                    .with_timeout(settings.ssh_timeout)
-                    .with_retries(settings.ssh_retries);
-
-                let instances = testbed
-                    .select_active_instances(required_instances)
-                    .wrap_err("Failed to reserve instances for benchmark sweep")?;
+                let (ssh_manager, instances) = reserve_benchmark_instances(
+                    &mut testbed,
+                    &settings,
+                    required_instances,
+                    skip_testbed_update,
+                    &suite_results_dir,
+                    "Failed to ensure benchmark sweep capacity",
+                    "Failed to reserve instances for benchmark sweep",
+                    "Failed to install dependencies on newly allocated benchmark sweep instances",
+                    "Failed to update newly allocated benchmark sweep instances",
+                )
+                .await?;
 
                 let setup_commands = testbed
                     .setup_commands()
@@ -2168,15 +2179,21 @@ mod tests {
             "--loads",
             "0",
             "200",
+            "--spare-instances",
+            "2",
         ])
         .unwrap();
 
         match opts.operation {
             Operation::Benchmark {
-                protocols, loads, ..
+                protocols,
+                loads,
+                spare_instances,
+                ..
             } => {
                 assert_eq!(protocols, vec!["starfish", "mysticeti"]);
                 assert_eq!(loads, vec![0, 200]);
+                assert_eq!(spare_instances, 2);
             }
             other => panic!("unexpected operation: {other:?}"),
         }
@@ -2229,6 +2246,8 @@ mod tests {
             "1800",
             "--sample-interval-secs",
             "120",
+            "--spare-instances",
+            "3",
         ])
         .unwrap();
 
@@ -2239,6 +2258,7 @@ mod tests {
                 load,
                 duration_secs,
                 sample_interval_secs,
+                spare_instances,
                 ..
             } => {
                 assert_eq!(committee, 16);
@@ -2246,6 +2266,7 @@ mod tests {
                 assert_eq!(load, 40_000);
                 assert_eq!(duration_secs, 1_800);
                 assert_eq!(sample_interval_secs, 120);
+                assert_eq!(spare_instances, 3);
             }
             other => panic!("unexpected operation: {other:?}"),
         }
@@ -2274,6 +2295,8 @@ mod tests {
             "0",
             "--outage-count",
             "33",
+            "--spare-instances",
+            "4",
         ])
         .unwrap();
 
@@ -2288,6 +2311,7 @@ mod tests {
                 outage_duration_secs,
                 outage_start_authority,
                 outage_count,
+                spare_instances,
                 ..
             } => {
                 assert_eq!(committee, 100);
@@ -2299,6 +2323,36 @@ mod tests {
                 assert_eq!(outage_duration_secs, 60);
                 assert_eq!(outage_start_authority, 0);
                 assert_eq!(outage_count, Some(33));
+                assert_eq!(spare_instances, 4);
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn benchmark_sweep_parses_spare_instances() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark-sweep",
+            "--committee",
+            "120",
+            "--protocols",
+            "starfish",
+            "--spare-instances",
+            "2",
+        ])
+        .unwrap();
+
+        match opts.operation {
+            Operation::BenchmarkSweep {
+                committee,
+                protocols,
+                spare_instances,
+                ..
+            } => {
+                assert_eq!(committee, 120);
+                assert_eq!(protocols, vec!["starfish"]);
+                assert_eq!(spare_instances, 2);
             }
             other => panic!("unexpected operation: {other:?}"),
         }
