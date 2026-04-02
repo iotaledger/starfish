@@ -86,33 +86,6 @@ padding) or `random` (timestamp + random bytes)
 **Committee size**: up to 512 validators. To support larger
 committees, increase `MAX_COMMITTEE_SIZE`.
 
-## Byzantine Strategies
-
-The testbed implements several Byzantine behaviors to evaluate
-consensus robustness. These strategies target uncertified DAG
-protocols; certified DAGs (Sailfish++) are not affected.
-The number of Byzantine nodes can be set using
-`--num-byzantine-nodes` and has to be less than 1/3 of the total
-number of validators. The Byzantine strategies include:
-
-- `timeout-leader`: Byzantine validators time out when elected as
-  leader to slow down consensus
-- `leader-withholding`: Byzantine leaders withhold block proposals
-  and send them to only a few other validators to delay the commit
-  rule
-- `chain-bomb`: Attackers attempt to disrupt the network by flooding
-  some validators with their generated chains of blocks
-- `equivocating-two-chains`: Byzantine validators create two
-  equivocating blocks and disseminate them to half of the network
-- `equivocating-chains`: Malicious validators create equivocating
-  blocks and disseminate them to the respective validators
-- `equivocating-chains-bomb`: Byzantine validators create chains of
-  equivocating blocks and send them just before the respective
-  validator is elected as a leader (recommend 1 Byzantine validator
-  as they are not coordinated)
-- `random-drop`: Byzantine validators randomly drop outgoing
-  messages with probability `1/n` where `n` is the committee size
-
 ## Implementation Details
 
 The framework is implemented in Rust, building upon the
@@ -206,8 +179,6 @@ cargo run --release --bin starfish -- local-benchmark \
         --committee-size 7 \
         --load 1000 \
         --consensus starfish \
-        --num-byzantine-nodes 0 \
-        --byzantine-strategy chain-bomb \
         --mimic-extra-latency \
         --duration-secs 100
 ```
