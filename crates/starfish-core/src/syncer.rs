@@ -753,4 +753,7 @@ mod tests {
         assert_eq!(syncer.signals.proposal_round_advances, vec![4]);
         assert_eq!(syncer.signals.new_block_ready_count, 3);
     }
+
+    // Bluestreak-specific behavior is tested in core; Syncer stays
+    // protocol-agnostic.
 }

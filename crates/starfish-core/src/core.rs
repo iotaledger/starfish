@@ -533,17 +533,17 @@ impl<H: BlockHandler> Core<H> {
         // Bluestreak prev-round leader can build with own-prev only.
         let bluestreak_prev_leader = protocol.is_bluestreak()
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
-        // For Bluestreak non-leaders, forced (leader-timeout) block creation is
-        // allowed to fall back to "own-prev only" when the previous-round
-        // leader block is missing locally. Without this, a delayed/slow
-        // previous leader can stall block production at large scale even after
-        // the timeout fires.
-        let bluestreak_timeout =
-            reason == "force_timeout" && protocol.is_bluestreak() && !is_current_leader;
-        let allows_minimal_refs = bls_non_leader || bluestreak_prev_leader || bluestreak_timeout;
-        if bluestreak_timeout && block_references.is_empty() && !bluestreak_prev_leader {
+        // For Bluestreak non-leaders, block creation may fall back to
+        // "own-prev only" when the previous-round leader block is missing
+        // locally. Unlike Mysticeti, Bluestreak compresses references down to
+        // the previous-round leader; if that leader isn't available/clean yet,
+        // we still want to keep producing blocks (this also matches the BLS
+        // non-leader behavior which always permits minimal refs).
+        let bluestreak_non_leader = protocol.is_bluestreak() && !is_current_leader;
+        let allows_minimal_refs = bls_non_leader || bluestreak_prev_leader || bluestreak_non_leader;
+        if bluestreak_non_leader && block_references.is_empty() && !bluestreak_prev_leader {
             tracing::debug!(
-                "Bluestreak: forcing block in round {} \
+                "Bluestreak: constructing block in round {} \
                  with only own-prev (missing clean prev-leader parent)",
                 clock_round
             );
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn bluestreak_force_timeout_allows_prev_only_when_prev_leader_missing() {
+    fn bluestreak_non_leader_can_build_with_prev_only_when_prev_leader_missing() {
         let authority = 0;
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
@@ -1610,17 +1610,11 @@ mod tests {
         );
         assert_eq!(core.dag_state().proposal_round(), 2);
 
-        // Normal block creation stalls because we cannot reference the
-        // previous-round leader (authority 1) from the pending frontier.
-        assert!(
-            core.try_new_block("new_blocks").is_none(),
-            "expected normal creation to stall without prev-leader ref"
-        );
-
-        // Forced creation after timeout should fall back to own-prev only.
+        // Block creation should fall back to own-prev only (no need to wait
+        // for the timeout).
         let round_2 = core
-            .try_new_block("force_timeout")
-            .expect("forced round-2 block should be creatable");
+            .try_new_block("new_blocks")
+            .expect("round-2 block should be creatable without prev-leader ref");
         assert_eq!(round_2.round(), 2);
         assert_eq!(core.last_proposed(), 2);
 
