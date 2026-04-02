@@ -449,6 +449,8 @@ pub struct StabilityOutage {
     pub duration_secs: u64,
     pub start_authority: usize,
     pub count: usize,
+    #[serde(default)]
+    pub keep_down: bool,
 }
 
 impl StabilityOutage {
@@ -496,11 +498,15 @@ impl StabilityOutage {
     }
 
     pub fn selection_description(&self, committee: usize) -> String {
+        let outage_window = if self.keep_down {
+            format!("starting at {}s and staying down", self.start_secs)
+        } else {
+            format!("for {}s at {}s", self.duration_secs, self.start_secs)
+        };
         format!(
-            "{} for {}s at {}s",
+            "{} {}",
             self.selected_authorities_label(committee),
-            self.duration_secs,
-            self.start_secs,
+            outage_window,
         )
     }
 }
@@ -860,6 +866,7 @@ pub mod test {
             duration_secs: 60,
             start_authority: 0,
             count: 33,
+            keep_down: false,
         };
 
         assert_eq!(outage.selection_stride(100), 3);

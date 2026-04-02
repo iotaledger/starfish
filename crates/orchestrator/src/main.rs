@@ -300,6 +300,11 @@ pub enum Operation {
         #[clap(long, value_name = "INT", default_value_t = 60, global = true)]
         outage_duration_secs: u64,
 
+        /// Keep the selected validators down after the outage starts instead
+        /// of booting them again when the outage window elapses.
+        #[clap(long, action, default_value_t = false, global = true)]
+        keep_down_after_outage: bool,
+
         /// First authority index to stop during the outage.
         #[clap(long, value_name = "INT", default_value_t = 0, global = true)]
         outage_start_authority: usize,
@@ -1442,6 +1447,7 @@ async fn run<C: ServerProviderClient>(
             spare_instances,
             outage_start_secs,
             outage_duration_secs,
+            keep_down_after_outage,
             outage_start_authority,
             outage_count,
             byzantine_nodes,
@@ -1500,6 +1506,7 @@ async fn run<C: ServerProviderClient>(
                 duration_secs: outage_duration_secs,
                 start_authority: outage_start_authority,
                 count: outage_count,
+                keep_down: keep_down_after_outage,
             };
 
             let is_single_region = single_region(&settings);
@@ -2291,6 +2298,7 @@ mod tests {
             "3600",
             "--outage-duration-secs",
             "60",
+            "--keep-down-after-outage",
             "--outage-start-authority",
             "0",
             "--outage-count",
@@ -2309,6 +2317,7 @@ mod tests {
                 sample_interval_secs,
                 outage_start_secs,
                 outage_duration_secs,
+                keep_down_after_outage,
                 outage_start_authority,
                 outage_count,
                 spare_instances,
@@ -2321,6 +2330,7 @@ mod tests {
                 assert_eq!(sample_interval_secs, 10);
                 assert_eq!(outage_start_secs, Some(3_600));
                 assert_eq!(outage_duration_secs, 60);
+                assert!(keep_down_after_outage);
                 assert_eq!(outage_start_authority, 0);
                 assert_eq!(outage_count, Some(33));
                 assert_eq!(spare_instances, 4);

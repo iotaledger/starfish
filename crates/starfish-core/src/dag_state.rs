@@ -3595,7 +3595,7 @@ impl CommitData {
 }
 
 #[cfg(test)]
-    mod tests {
+mod tests {
     use prometheus::Registry;
     use tempfile::TempDir;
 

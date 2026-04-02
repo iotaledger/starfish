@@ -72,6 +72,7 @@ impl OneShotOutageState {
             OneShotOutagePhase::Pending => {
                 Some(run_start + Duration::from_secs(self.config.start_secs))
             }
+            OneShotOutagePhase::Down if self.config.keep_down => None,
             OneShotOutagePhase::Down => Some(
                 run_start
                     + Duration::from_secs(
@@ -1513,11 +1514,22 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                         display::newline();
                                         display::config(
                                             "Scheduled outage",
-                                            format!(
-                                                "Stopping {} for {}s",
-                                                state.config.selected_authorities_label(nodes.len()),
-                                                state.config.duration_secs,
-                                            ),
+                                            if state.config.keep_down {
+                                                format!(
+                                                    "Stopping {} and keeping them down",
+                                                    state.config.selected_authorities_label(
+                                                        nodes.len()
+                                                    ),
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Stopping {} for {}s",
+                                                    state.config.selected_authorities_label(
+                                                        nodes.len()
+                                                    ),
+                                                    state.config.duration_secs,
+                                                )
+                                            },
                                         );
                                         state.killed_by_outage = to_kill
                                             .iter()
@@ -1621,7 +1633,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                             report.points.len() + 1,
                             elapsed_secs,
                             nodes.len().saturating_sub(killed_node_ids.len()),
-                            false,
+                            outage_state
+                                .as_ref()
+                                .map(OneShotOutageState::is_active)
+                                .unwrap_or(false),
                             &metrics_by_scraper,
                             &mut previous_counters,
                             &db_sizes,
