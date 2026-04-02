@@ -131,6 +131,28 @@ impl CrashRecoverySchedule {
             dead: 0,
         }
     }
+
+    fn distributed_indices(total: usize, count: usize) -> Vec<usize> {
+        if total == 0 || count == 0 {
+            return Vec::new();
+        }
+
+        let stride = (total / count.max(1)).max(1);
+        (0..count)
+            .filter_map(|index| {
+                let candidate = index.saturating_mul(stride);
+                (candidate < total).then_some(candidate)
+            })
+            .collect()
+    }
+
+    fn take_distributed_instances(instances: &[Instance], count: usize) -> Vec<Instance> {
+        Self::distributed_indices(instances.len(), count)
+            .into_iter()
+            .filter_map(|index| instances.get(index).cloned())
+            .collect()
+    }
+
     pub fn update(&mut self) -> CrashRecoveryAction {
         let mut instances = self.instances.clone();
 
@@ -139,7 +161,10 @@ impl CrashRecoverySchedule {
             FaultsType::Permanent { faults } => {
                 if self.dead == 0 {
                     self.dead = *faults;
-                    CrashRecoveryAction::kill(instances.drain(0..*faults))
+                    CrashRecoveryAction {
+                        boot: Vec::new(),
+                        kill: Self::take_distributed_instances(&instances, *faults),
+                    }
                 } else {
                     CrashRecoveryAction::no_op()
                 }
@@ -180,6 +205,53 @@ mod faults_tests {
 
     use super::{CrashRecoverySchedule, FaultsType};
     use crate::client::Instance;
+
+    #[test]
+    fn permanent_faults_are_distributed_across_committee() {
+        let instances = (0..100)
+            .map(|i| Instance::new_for_test(i.to_string()))
+            .collect();
+        let mut schedule =
+            CrashRecoverySchedule::new(FaultsType::Permanent { faults: 33 }, instances);
+
+        let action = schedule.update();
+        let killed: Vec<_> = action
+            .kill
+            .into_iter()
+            .map(|instance| instance.id)
+            .collect();
+
+        assert_eq!(
+            killed,
+            vec![
+                "0", "3", "6", "9", "12", "15", "18", "21", "24", "27", "30", "33", "36", "39",
+                "42", "45", "48", "51", "54", "57", "60", "63", "66", "69", "72", "75", "78", "81",
+                "84", "87", "90", "93", "96"
+            ]
+        );
+
+        let action = schedule.update();
+        assert!(action.kill.is_empty());
+        assert!(action.boot.is_empty());
+    }
+
+    #[test]
+    fn permanent_faults_use_stride_selection_for_partial_coverage() {
+        let instances = (0..10)
+            .map(|i| Instance::new_for_test(i.to_string()))
+            .collect();
+        let mut schedule =
+            CrashRecoverySchedule::new(FaultsType::Permanent { faults: 4 }, instances);
+
+        let action = schedule.update();
+        let killed: Vec<_> = action
+            .kill
+            .into_iter()
+            .map(|instance| instance.id)
+            .collect();
+
+        assert_eq!(killed, vec!["0", "2", "4", "6"]);
+    }
 
     #[test]
     fn crash_recovery_1_fault() {

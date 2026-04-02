@@ -376,6 +376,24 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
     }
 
+    fn startup_permanent_faults(faults: FaultsType, nodes: &[Instance]) -> Vec<Instance> {
+        match Self::clamp_faults_to_available_nodes(faults, nodes.len()) {
+            FaultsType::Permanent { faults } if faults > 0 => {
+                CrashRecoverySchedule::new(FaultsType::Permanent { faults }, nodes.to_vec())
+                    .update()
+                    .kill
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn runtime_faults_type(faults: FaultsType, available_nodes: usize) -> FaultsType {
+        match Self::clamp_faults_to_available_nodes(faults, available_nodes) {
+            FaultsType::Permanent { .. } => FaultsType::default(),
+            faults => faults,
+        }
+    }
+
     fn max_tolerated_boot_failures(node_count: usize) -> usize {
         (node_count as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize
     }
@@ -509,95 +527,71 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     async fn wait_for_nodes_ready(
         &mut self,
         instances: Vec<Instance>,
+        skipped_node_ids: &HashSet<String>,
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<Vec<Instance>> {
-        let total = instances.len();
+        let total = instances.len().saturating_sub(skipped_node_ids.len());
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+
         let timeout = Self::node_boot_timeout(total);
         let max_failures = Self::max_tolerated_boot_failures(total);
-        let mut pending_indices: HashSet<usize> = (0..total).collect();
-
-        // Keep a lookup vec so we can recover Instance for stalled indices
-        // after the polling loop (which may consume `instances` in the SSH
-        // fallback path).
-        let all_instances = instances.clone();
-
         let start = Instant::now();
         display::status(format!("ready 0/{total}"));
 
-        if start.elapsed() < timeout {
-            // Preserve the original authority ordering. The protocol derives
-            // per-node ports from iterator position, so iterating the
-            // `HashSet` directly can mismatch instances to metrics ports.
-            let remaining: Vec<Instance> = all_instances
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| pending_indices.contains(i))
-                .map(|(_, instance)| instance.clone())
+        let mut pending: HashMap<_, _> = self
+            .protocol_commands
+            .nodes_readiness_command(instances, parameters)
+            .into_iter()
+            .filter(|(instance, _)| !skipped_node_ids.contains(&instance.id))
+            .map(|(instance, command)| (instance.id.clone(), (instance, command)))
+            .collect();
+
+        while start.elapsed() < timeout {
+            let probes: Vec<_> = pending
+                .values()
+                .map(|(instance, command)| (instance.clone(), command.clone()))
                 .collect();
-
-            let mut pending: HashMap<_, _> = self
-                .protocol_commands
-                .nodes_readiness_command(remaining, parameters)
-                .into_iter()
-                .map(|(instance, command)| {
-                    let idx = all_instances
-                        .iter()
-                        .position(|inst| inst.id == instance.id)
-                        .unwrap();
-                    (instance.id.clone(), (idx, instance, command))
-                })
-                .collect();
-
-            loop {
-                let probes: Vec<_> = pending
-                    .values()
-                    .map(|(_, inst, cmd)| (inst.clone(), cmd.clone()))
-                    .collect();
-                let ready = self
-                    .probe_instances_best_effort(probes, CommandContext::default())
-                    .await;
-                for instance in ready {
-                    if let Some((idx, ..)) = pending.remove(&instance.id) {
-                        pending_indices.remove(&idx);
-                    }
-                }
-
-                let completed = total - pending_indices.len();
-                display::status(format!(
-                    "ready {completed}/{total} {}s",
-                    start.elapsed().as_secs()
-                ));
-
-                if pending_indices.is_empty() {
-                    return Ok(Vec::new());
-                }
-                if pending_indices.len() <= max_failures {
-                    let stalled: Vec<_> = pending_indices
-                        .iter()
-                        .filter_map(|&i| all_instances.get(i).cloned())
-                        .collect();
-                    display::warn(format!(
-                        "{} of {} validators did not expose metrics during readiness checks \
-                         but are within the tolerated failure budget — marking inactive, \
-                         keeping the original committee, and treating them as crashed from \
-                         startup",
-                        stalled.len(),
-                        total,
-                    ));
-                    self.mark_instances_inactive(&stalled);
-                    return Ok(stalled);
-                }
-                if start.elapsed() >= timeout {
-                    break;
-                }
-
-                time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
+            let ready = self
+                .probe_instances_best_effort(probes, CommandContext::default())
+                .await;
+            for instance in ready {
+                pending.remove(&instance.id);
             }
+
+            let completed = total - pending.len();
+            display::status(format!(
+                "ready {completed}/{total} {}s",
+                start.elapsed().as_secs()
+            ));
+
+            if pending.is_empty() {
+                return Ok(Vec::new());
+            }
+            if pending.len() <= max_failures {
+                let stalled: Vec<_> = pending
+                    .values()
+                    .map(|(instance, _)| instance.clone())
+                    .collect();
+                display::warn(format!(
+                    "{} of {} validators did not expose metrics during readiness checks \
+                     but are within the tolerated failure budget — marking inactive, \
+                     keeping the original committee, and treating them as crashed from \
+                     startup",
+                    stalled.len(),
+                    total,
+                ));
+                self.mark_instances_inactive(&stalled);
+                return Ok(stalled);
+            }
+
+            time::sleep(Self::NODE_BOOT_POLL_INTERVAL).await;
         }
 
-        let stalled: Vec<_> = pending_indices
-            .iter()
-            .filter_map(|&i| all_instances.get(i).cloned())
+        let stalled: Vec<_> = pending
+            .into_values()
+            .map(|(instance, _)| instance)
             .collect();
 
         if stalled.len() <= max_failures {
@@ -941,12 +935,17 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     async fn boot_nodes(
         &self,
         instances: Vec<Instance>,
+        skipped_node_ids: &HashSet<String>,
         parameters: &BenchmarkParameters,
     ) -> TestbedResult<()> {
         // Run one node per instance.
-        let targets = self
+        let mut targets = self
             .protocol_commands
             .node_command(instances.clone(), parameters);
+        targets.retain(|(instance, _)| !skipped_node_ids.contains(&instance.id));
+        if targets.is_empty() {
+            return Ok(());
+        }
 
         let repo = self.settings.repository_name();
         let context = CommandContext::new()
@@ -989,11 +988,30 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
     ) -> TestbedResult<HashSet<String>> {
         display::action("\nDeploying validators");
 
-        self.boot_nodes(nodes.clone(), parameters).await?;
-        let stalled = self.wait_for_nodes_ready(nodes, parameters).await?;
+        let startup_faulted =
+            Self::startup_permanent_faults(parameters.settings.faults.clone(), &nodes);
+        let startup_faulted_ids: HashSet<_> = startup_faulted
+            .iter()
+            .map(|instance| instance.id.clone())
+            .collect();
+        if !startup_faulted.is_empty() {
+            display::warn(format!(
+                "Leaving {} validators down from startup due to permanent faults",
+                startup_faulted.len()
+            ));
+        }
+
+        self.boot_nodes(nodes.clone(), &startup_faulted_ids, parameters)
+            .await?;
+        let stalled = self
+            .wait_for_nodes_ready(nodes, &startup_faulted_ids, parameters)
+            .await?;
 
         display::done();
-        Ok(stalled.into_iter().map(|instance| instance.id).collect())
+        Ok(startup_faulted_ids
+            .into_iter()
+            .chain(stalled.into_iter().map(|instance| instance.id))
+            .collect())
     }
 
     /// Collect metrics from the nodes.
@@ -1032,10 +1050,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .filter(|node| !killed_node_ids.contains(&node.id))
             .cloned()
             .collect();
-        let faults_type = Self::clamp_faults_to_available_nodes(
-            parameters.settings.faults.clone(),
-            ready_nodes.len(),
-        );
+        let faults_type =
+            Self::runtime_faults_type(parameters.settings.faults.clone(), ready_nodes.len());
         let faults_interval_duration = faults_type.crash_interval();
         let mut faults_schedule = CrashRecoverySchedule::new(faults_type, ready_nodes);
         let mut faults_interval = time::interval(faults_interval_duration);
@@ -1096,7 +1112,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                         for instance in &action.boot {
                             killed_node_ids.remove(&instance.id);
                         }
-                        self.boot_nodes(action.boot.clone(), parameters).await?;
+                        self.boot_nodes(action.boot.clone(), &HashSet::new(), parameters)
+                            .await?;
                     }
                     if !action.kill.is_empty() || !action.boot.is_empty() {
                         display::newline();
@@ -1331,10 +1348,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             .filter(|node| !killed_node_ids.contains(&node.id))
             .cloned()
             .collect();
-        let faults_type = Self::clamp_faults_to_available_nodes(
-            parameters.settings.faults.clone(),
-            ready_nodes.len(),
-        );
+        let faults_type =
+            Self::runtime_faults_type(parameters.settings.faults.clone(), ready_nodes.len());
         let faults_interval_duration = faults_type.crash_interval();
         let mut faults_schedule = CrashRecoverySchedule::new(faults_type, ready_nodes);
         let mut faults_interval = time::interval(faults_interval_duration);
@@ -1490,7 +1505,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                     previous_counters.remove(&index);
                                 }
                             }
-                            self.boot_nodes(action.boot.clone(), parameters).await?;
+                            self.boot_nodes(action.boot.clone(), &HashSet::new(), parameters)
+                                .await?;
                         }
                         if !action.kill.is_empty() || !action.boot.is_empty() {
                             display::newline();
@@ -1568,7 +1584,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                                 previous_counters.remove(&index);
                                             }
                                         }
-                                        self.boot_nodes(to_boot, parameters).await?;
+                                        self.boot_nodes(to_boot, &HashSet::new(), parameters)
+                                            .await?;
                                     }
                                     state.killed_by_outage.clear();
                                     state.phase = OneShotOutagePhase::Completed;
@@ -1673,7 +1690,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                     previous_counters.remove(&index);
                                 }
                             }
-                            self.boot_nodes(action.boot.clone(), parameters).await?;
+                            self.boot_nodes(action.boot.clone(), &HashSet::new(), parameters)
+                                .await?;
                         }
                         if !action.kill.is_empty() || !action.boot.is_empty() {
                             display::newline();
@@ -2132,6 +2150,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 mod tests {
     use super::Orchestrator;
     use crate::protocol::starfish::StarfishProtocol;
+    use crate::{client::Instance, faults::FaultsType};
 
     #[test]
     fn node_boot_timeout_has_sane_floor() {
@@ -2158,6 +2177,42 @@ mod tests {
         assert_eq!(
             Orchestrator::<StarfishProtocol>::max_tolerated_boot_failures(400),
             40
+        );
+    }
+
+    #[test]
+    fn startup_permanent_faults_are_left_down_from_boot() {
+        let nodes = (0..100)
+            .map(|i| Instance::new_for_test(i.to_string()))
+            .collect::<Vec<_>>();
+
+        let startup_faulted = Orchestrator::<StarfishProtocol>::startup_permanent_faults(
+            FaultsType::Permanent { faults: 33 },
+            &nodes,
+        );
+        let ids = startup_faulted
+            .into_iter()
+            .map(|instance| instance.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "0", "3", "6", "9", "12", "15", "18", "21", "24", "27", "30", "33", "36", "39",
+                "42", "45", "48", "51", "54", "57", "60", "63", "66", "69", "72", "75", "78", "81",
+                "84", "87", "90", "93", "96"
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_faults_disable_permanent_fault_timer_after_startup() {
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::runtime_faults_type(
+                FaultsType::Permanent { faults: 33 },
+                67,
+            ),
+            FaultsType::default()
         );
     }
 }
