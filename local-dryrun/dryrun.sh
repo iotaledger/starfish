@@ -4,11 +4,12 @@
 # Configuration Parameters
 #----------------------------------------------------------------------
 NUM_NODES=${NUM_NODES:-10}
+NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
-CONSENSUS=${CONSENSUS:-mysticeti-bls}
+CONSENSUS=${CONSENSUS:-starfish}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -230,6 +231,17 @@ if (( NUM_NODES < 1 || NUM_NODES > 256 )); then
         "${RED}NUM_NODES must be between 1 and 256 (got ${NUM_NODES})${RESET}"
     exit 1
 fi
+
+if (( NUM_CRASHED_NODES < 0 || NUM_CRASHED_NODES >= NUM_NODES )); then
+    echo -e \
+        "${RED}NUM_CRASHED_NODES must be between 0 and $((NUM_NODES - 1))" \
+        "(got ${NUM_CRASHED_NODES})${RESET}"
+    exit 1
+fi
+
+READY_NODES=$((NUM_NODES - NUM_CRASHED_NODES))
+STARTUP_CRASHED_FIRST=$READY_NODES
+STARTUP_CRASHED_LAST=$((NUM_NODES - 1))
 
 if ! LAST_NODE_IP=$(ipv4_add "$BASE_IP" $((NUM_NODES - 1))); then
     echo -e \
@@ -585,6 +597,7 @@ echo -e "${CYAN}Started at: $(date)${RESET}"
 echo -e "${GREEN}─── Configuration ───────────────────${RESET}"
 printf "  %-18s ${YELLOW}%s${RESET}\n" \
     "Nodes:" "$NUM_NODES" \
+    "Ready at boot:" "${READY_NODES}/${NUM_NODES}" \
     "Consensus:" "$CONSENSUS" \
     "Dissemination:" "$DISSEMINATION_MODE" \
     "Target TPS:" "$DESIRED_TPS ($TPS_PER_NODE/node)" \
@@ -605,12 +618,22 @@ if (( NUM_BYZANTINE_NODES > 0 )); then
     printf "  %-18s ${YELLOW}%s${RESET}\n" \
         "Byzantine strategy:" "$BYZANTINE_STRATEGY"
 fi
+if (( NUM_CRASHED_NODES > 0 )); then
+    printf "  %-18s ${YELLOW}%s${RESET}\n" \
+        "Startup-crashed:" \
+        "${NUM_CRASHED_NODES} (authorities ${STARTUP_CRASHED_FIRST}..${STARTUP_CRASHED_LAST})"
+fi
 echo -e "${GREEN}─────────────────────────────────────${RESET}"
 
 force_remove_stale_nodes
 force_remove_stale_network_endpoints
 
-docker_compose up -d || {
+STARTED_SERVICES=(prometheus grafana)
+for ((i=0; i<READY_NODES; i++)); do
+    STARTED_SERVICES+=("node-$i")
+done
+
+docker_compose up -d "${STARTED_SERVICES[@]}" || {
     echo -e "${RED}Failed to start services${RESET}"
     exit 1
 }
@@ -632,6 +655,13 @@ sleep "$TEST_TIME"
 # Save logs before cleanup
 echo -e "${CYAN}Saving node logs...${RESET}"
 for ((i=0; i<NUM_NODES; i++)); do
+    if (( i >= READY_NODES )); then
+        printf \
+            "node-%d was intentionally left down at startup (NUM_CRASHED_NODES=%d)\n" \
+            "$i" "$NUM_CRASHED_NODES" \
+            > "$DATA_DIR/node_${i}.log"
+        continue
+    fi
     docker_compose \
         logs "node-$i" \
         > "$DATA_DIR/node_${i}.log" 2>&1

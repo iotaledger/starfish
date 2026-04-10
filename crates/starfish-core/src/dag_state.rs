@@ -2760,6 +2760,23 @@ impl DagStateInner {
         let auth = reference.authority as usize;
         self.highest_round = max(self.highest_round, reference.round());
 
+        // Sailfish++: ingest control certificates carried inside blocks so that
+        // all validators learn timeout/no-vote certificates even though the
+        // underlying signed messages may be sent only to a subset of peers
+        // (e.g. no-votes are routed to the next leader).
+        if self.consensus_protocol.is_sailfish_pp() {
+            if let Some(tc) = block.sailfish_timeout_cert() {
+                self.sailfish_timeout_certs
+                    .entry(tc.round)
+                    .or_insert_with(|| tc.clone());
+            }
+            if let Some(nvc) = block.sailfish_no_vote_cert() {
+                self.sailfish_novote_certs
+                    .entry((nvc.round, nvc.leader))
+                    .or_insert_with(|| nvc.clone());
+            }
+        }
+
         self.add_own_index(reference, authority_index_start, authority_index_end);
         self.update_last_seen_by_authority(reference);
 
@@ -3614,7 +3631,7 @@ mod tests {
         metrics::Metrics,
         types::{
             AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, ProvableShard,
-            RoundNumber, SailfishNoVoteCert, VerifiedBlock,
+            RoundNumber, SailfishFields, SailfishNoVoteCert, VerifiedBlock,
         },
     };
 
@@ -4263,6 +4280,78 @@ mod tests {
         });
 
         assert!(dag_state.is_ready_for_new_block(3, &[2], false, 0, committee.as_ref()));
+    }
+
+    #[test]
+    fn sailfish_ingests_novote_certs_from_block_headers() {
+        let dag_state = open_test_dag_state_for("sailfish-pp", 0);
+        let committee = dag_state.committee.clone();
+
+        let round_1_refs: Vec<_> = (0..committee.len() as AuthorityIndex)
+            .map(|authority| {
+                let block = make_full_block(
+                    authority,
+                    1,
+                    vec![BlockReference::new_test(authority, 0)],
+                    ConsensusProtocol::SailfishPlusPlus,
+                );
+                let block_ref = *block.reference();
+                dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+                block_ref
+            })
+            .collect();
+
+        // Round 2: build blocks that do NOT vote for the round-1 leader, so
+        // entering round 3 requires an NVC for (round=1, leader=elect_leader(1)).
+        let prev_leader_round = 1;
+        let prev_leader = committee.elect_leader(prev_leader_round);
+        let leader_round = 2;
+        let leader = committee.elect_leader(leader_round);
+
+        let mut round_2_refs = Vec::new();
+        for authority in [0, 2, 3] {
+            let parents = vec![round_1_refs[authority as usize]];
+            let sailfish = if authority == leader {
+                Some(SailfishFields {
+                    timeout_cert: None,
+                    no_vote_cert: Some(SailfishNoVoteCert {
+                        round: prev_leader_round,
+                        leader: prev_leader,
+                        signatures: Vec::new(),
+                    }),
+                })
+            } else {
+                None
+            };
+            let mut block = VerifiedBlock::new(
+                authority,
+                leader_round,
+                parents,
+                Vec::new(),
+                0,
+                SignatureBytes::default(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                sailfish,
+            );
+            block.preserialize();
+            let block = Data::new(block);
+            let block_ref = *block.reference();
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+            round_2_refs.push(block_ref);
+        }
+
+        dag_state.mark_vertices_clean(&round_1_refs);
+        dag_state.mark_vertices_clean(&round_2_refs);
+
+        assert!(
+            dag_state.has_novote_cert(prev_leader_round, prev_leader),
+            "NVC embedded in a leader block should be ingested into DagState"
+        );
+
+        assert!(dag_state.is_ready_for_new_block(3, &[leader], false, 0, committee.as_ref()));
     }
 
     #[test]

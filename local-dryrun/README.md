@@ -27,6 +27,7 @@ NUM_NODES=10 DESIRED_TPS=1000 CONSENSUS=starfish \
 | Variable | Default | Description |
 |---|---|---|
 | `NUM_NODES` | `10` | Number of validators (1--256, recommend < physical cores) |
+| `NUM_CRASHED_NODES` | `0` | Number of highest-numbered authorities to leave down from startup |
 | `DESIRED_TPS` | `1000` | Target transactions per second (split evenly across nodes) |
 | `CONSENSUS` | `bluestreak` | Consensus protocol (see below) |
 | `TEST_TIME` | `3000` | Experiment duration in seconds |
@@ -101,6 +102,10 @@ NUM_NODES=7 CONSENSUS=mysticeti STORAGE_BACKEND=tidehunter \
 # Byzantine fault testing
 NUM_NODES=10 NUM_BYZANTINE_NODES=3 \
   BYZANTINE_STRATEGY=chain-bomb CONSENSUS=starfish-speed \
+  ./local-dryrun/dryrun.sh
+
+# Leave 3 validators crashed from startup
+NUM_NODES=10 NUM_CRASHED_NODES=3 CONSENSUS=starfish \
   ./local-dryrun/dryrun.sh
 
 # Uniform latency simulation
