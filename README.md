@@ -18,7 +18,7 @@ injection.
 |---|---|---|---|---|---|---|---|---|
 | Mysticeti | `mysticeti` | 4.5δ | Uncertified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2310.14821](https://arxiv.org/abs/2310.14821) |
 | Mysticeti-BLS | `mysticeti-bls` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
-| Bluestreak | `bluestreak` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | -- |
+| Bluestreak | `bluestreak` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [paper](papers/bluestreak.pdf) |
 | Starfish-Speed | `starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | -- |
 | Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
 | Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |

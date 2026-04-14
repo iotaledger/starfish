@@ -29,6 +29,7 @@ local-dryrun/data/
 *.pdf
 *.tex
 *.txt
+!papers/*.pdf
 
 # But track local-dryrun sources, not generated data
 !local-dryrun/
