@@ -17,11 +17,16 @@ use tokio::time::{self, Instant};
 
 use crate::{
     benchmark::{
-        BenchmarkParameters, LatencyThroughputSweepPlan, LatencyThroughputSweepReport,
-        StabilityOutage, StabilityReport, StabilitySample,
+        BenchmarkParameters,
+        LatencyThroughputSweepPlan,
+        LatencyThroughputSweepReport,
+        StabilityOutage,
+        StabilityReport,
+        StabilitySample,
     },
     client::{Instance, InstanceStatus},
-    display, ensure,
+    display,
+    ensure,
     error::{SshError, TestbedError, TestbedResult},
     faults::{CrashRecoverySchedule, FaultsType},
     logs::LogsAnalyzer,
@@ -2149,8 +2154,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 #[cfg(test)]
 mod tests {
     use super::Orchestrator;
-    use crate::protocol::starfish::StarfishProtocol;
-    use crate::{client::Instance, faults::FaultsType};
+    use crate::{client::Instance, faults::FaultsType, protocol::starfish::StarfishProtocol};
 
     #[test]
     fn node_boot_timeout_has_sane_floor() {

@@ -605,16 +605,16 @@ impl UniversalCommitterBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use prometheus::Registry;
     use tempfile::TempDir;
 
+    use super::*;
     use crate::{
         config::{DisseminationMode, StorageBackend},
         crypto::SignatureBytes,
         dag_state::DataSource,
         data::Data,
     };
-    use prometheus::Registry;
 
     fn open_test_dag_state_for(consensus: &str, authority: AuthorityIndex) -> DagState {
         let committee = Committee::new_for_benchmarks(4);

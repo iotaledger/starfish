@@ -15,7 +15,8 @@ use ahash::AHashSet;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     sync::{
-        Mutex, mpsc,
+        Mutex,
+        mpsc,
         mpsc::{Receiver, Sender},
     },
     task::JoinHandle,

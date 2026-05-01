@@ -8,14 +8,10 @@ use ahash::AHashSet;
 
 use crate::{
     core::{MetaTransaction, MetaTransaction::Include},
-    dag_state::CommitData,
-    store::Store,
-    types::VerifiedBlock,
-};
-use crate::{
-    dag_state::DagState,
+    dag_state::{CommitData, DagState},
     data::Data,
-    types::{BlockReference, RoundNumber},
+    store::Store,
+    types::{BlockReference, RoundNumber, VerifiedBlock},
 };
 
 pub struct RecoveredState {

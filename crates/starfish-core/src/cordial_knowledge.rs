@@ -14,8 +14,10 @@ use ahash::AHashSet;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::metrics::Metrics;
-use crate::types::{AuthorityIndex, AuthoritySet, BlockReference, RoundNumber};
+use crate::{
+    metrics::Metrics,
+    types::{AuthorityIndex, AuthoritySet, BlockReference, RoundNumber},
+};
 
 /// Maximum round gap beyond which a peer's data is no longer considered useful.
 /// Headers/shards from an authority whose latest useful round is more than this

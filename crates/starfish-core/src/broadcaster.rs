@@ -31,7 +31,11 @@ use crate::{
     runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockReference,
+        RoundNumber,
+        VerifiedBlock,
         format_authority_index,
     },
 };

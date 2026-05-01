@@ -9,7 +9,11 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     data::Data,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockReference,
+        RoundNumber,
+        VerifiedBlock,
         format_authority_round,
     },
 };

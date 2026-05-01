@@ -7,7 +7,10 @@
 use std::{collections::HashSet, fs, path::PathBuf, process::Command, time::Duration};
 
 use benchmark::{
-    BenchmarkParameters, CommitteeScalingPlan, LatencyThroughputSweepPlan, StabilityOutage,
+    BenchmarkParameters,
+    CommitteeScalingPlan,
+    LatencyThroughputSweepPlan,
+    StabilityOutage,
 };
 use clap::Parser;
 use client::{Instance, ServerProviderClient, aws::AwsClient, vultr::VultrClient};
@@ -19,9 +22,8 @@ use orchestrator::Orchestrator;
 use protocol::ProtocolParameters;
 use settings::{CloudProvider, Settings};
 use ssh::{CommandContext, SshConnectionManager};
-use testbed::Testbed;
-
 use starfish_core::config::DisseminationMode;
+use testbed::Testbed;
 
 mod benchmark;
 mod client;

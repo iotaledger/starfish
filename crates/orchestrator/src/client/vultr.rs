@@ -5,7 +5,6 @@
 use std::{fmt::Display, net::Ipv4Addr};
 
 use chrono::DateTime;
-
 use reqwest::{Client as NetworkClient, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

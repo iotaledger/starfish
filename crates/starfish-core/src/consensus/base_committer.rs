@@ -10,7 +10,11 @@ use crate::{
     dag_state::{ConsensusProtocol, DagState},
     data::Data,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockReference,
+        RoundNumber,
+        VerifiedBlock,
         format_authority_round,
     },
 };
