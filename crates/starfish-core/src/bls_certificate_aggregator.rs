@@ -15,7 +15,7 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     bls_batch_verifier::{BlsBatchVerifier, BlsVerificationTask},
     committee::{Committee, QuorumThreshold, StakeAggregator},
-    crypto::{self, BlsSignatureBytes, bls_aggregate, bls_aggregate_public_keys},
+    crypto::{self, BlsPublicKey, BlsSignatureBytes, bls_aggregate, bls_aggregate_public_keys},
     dag_state::DagState,
     data::Data,
     types::{AuthorityIndex, BlockReference, BlsAggregateCertificate, RoundNumber, VerifiedBlock},
@@ -79,30 +79,33 @@ pub(crate) enum TaskOrigin {
         round: RoundNumber,
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
-        source_block: Option<BlockReference>,
+        source_blocks: Vec<BlockReference>,
     },
     LeaderPartial {
         leader_ref: BlockReference,
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
-        source_block: Option<BlockReference>,
+        source_blocks: Vec<BlockReference>,
     },
     DacPartial {
         block_ref: BlockReference,
         signer: AuthorityIndex,
         sig: BlsSignatureBytes,
     },
-    AggRound(RoundNumber, BlsAggregateCertificate, Option<BlockReference>),
-    AggLeader(
-        BlockReference,
-        BlsAggregateCertificate,
-        Option<BlockReference>,
-    ),
-    AggDac(
-        BlockReference,
-        BlsAggregateCertificate,
-        Option<BlockReference>,
-    ),
+    AggRound(RoundNumber, BlsAggregateCertificate, Vec<BlockReference>),
+    AggLeader(BlockReference, BlsAggregateCertificate, Vec<BlockReference>),
+    AggDac(BlockReference, BlsAggregateCertificate, Vec<BlockReference>),
+}
+
+fn push_task_source(origin: &mut TaskOrigin, source: BlockReference) {
+    match origin {
+        TaskOrigin::RoundPartial { source_blocks, .. }
+        | TaskOrigin::LeaderPartial { source_blocks, .. } => source_blocks.push(source),
+        TaskOrigin::AggRound(_, _, sources)
+        | TaskOrigin::AggLeader(_, _, sources)
+        | TaskOrigin::AggDac(_, _, sources) => sources.push(source),
+        TaskOrigin::DacPartial { .. } => unreachable!("dedupe index must point to source origin"),
+    }
 }
 
 /// Number of parallel threads used for BLS batch verification.
@@ -133,6 +136,7 @@ pub struct BlsCertificateAggregator {
     dac_rejections: AHashSet<BlockReference>,
     /// Per-block BLS field verification tracking for dual-DAG pre-clean.
     block_verification: AHashMap<BlockReference, BlockVerificationTracker>,
+    aggregate_public_key_cache: AHashMap<crate::types::AuthoritySet, BlsPublicKey>,
 }
 
 impl BlsCertificateAggregator {
@@ -155,6 +159,7 @@ impl BlsCertificateAggregator {
             dac_certs: AHashMap::new(),
             dac_rejections: AHashSet::new(),
             block_verification: AHashMap::new(),
+            aggregate_public_key_cache: AHashMap::new(),
         }
     }
 
@@ -177,6 +182,8 @@ impl BlsCertificateAggregator {
     ) -> (Vec<BlsVerificationTask>, Vec<TaskOrigin>) {
         let mut tasks = Vec::new();
         let mut origins = Vec::new();
+        let mut seen_round_partials = AHashMap::new();
+        let mut seen_leader_partials = AHashMap::new();
 
         // 1. Block-header partials (round + leader).
         for block in blocks {
@@ -199,6 +206,10 @@ impl BlsCertificateAggregator {
                     {
                         // Already known — count as verified.
                         self.mark_block_field_verified(&source);
+                    } else if let Some(&origin_index) =
+                        seen_round_partials.get(&(round, signer, *sig))
+                    {
+                        push_task_source(&mut origins[origin_index], source);
                     } else if let Some(pk) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_round_message(round),
@@ -206,11 +217,12 @@ impl BlsCertificateAggregator {
                             public_key: pk,
                             block_index: origins.len(),
                         });
+                        seen_round_partials.insert((round, signer, *sig), origins.len());
                         origins.push(TaskOrigin::RoundPartial {
                             round,
                             signer,
                             sig: *sig,
-                            source_block: Some(source),
+                            source_blocks: vec![source],
                         });
                     }
                 }
@@ -228,6 +240,10 @@ impl BlsCertificateAggregator {
                             .is_some_and(|sigs| sigs.contains_key(&signer))
                     {
                         self.mark_block_field_verified(&source);
+                    } else if let Some(&origin_index) =
+                        seen_leader_partials.get(&(*leader_ref, signer, *sig))
+                    {
+                        push_task_source(&mut origins[origin_index], source);
                     } else if let Some(pk) = self.committee.get_bls_public_key(signer).cloned() {
                         tasks.push(BlsVerificationTask {
                             message: crypto::bls_leader_message(leader_ref),
@@ -235,11 +251,12 @@ impl BlsCertificateAggregator {
                             public_key: pk,
                             block_index: origins.len(),
                         });
+                        seen_leader_partials.insert((*leader_ref, signer, *sig), origins.len());
                         origins.push(TaskOrigin::LeaderPartial {
                             leader_ref: *leader_ref,
                             signer,
                             sig: *sig,
-                            source_block: Some(source),
+                            source_blocks: vec![source],
                         });
                     }
                 }
@@ -247,7 +264,8 @@ impl BlsCertificateAggregator {
         }
 
         // 2. Embedded round + leader aggregate certs.
-        let mut seen_leaders = AHashSet::new();
+        let mut seen_round_certs = AHashMap::new();
+        let mut seen_leader_certs = AHashMap::new();
         for block in blocks {
             let source = *block.reference();
             if let Some(cert) = block.header().bls_aggregate_round_signature() {
@@ -255,6 +273,10 @@ impl BlsCertificateAggregator {
                 if !cert.is_empty() && certified_round != 0 {
                     if self.round_certs.contains_key(&certified_round) {
                         self.mark_block_field_verified(&source);
+                    } else if let Some(&origin_index) =
+                        seen_round_certs.get(&(certified_round, *cert))
+                    {
+                        push_task_source(&mut origins[origin_index], source);
                     } else if let Some(task) = self.aggregate_same_message_task(
                         crypto::bls_round_message(certified_round),
                         cert,
@@ -263,7 +285,8 @@ impl BlsCertificateAggregator {
                             block_index: origins.len(),
                             ..task
                         });
-                        origins.push(TaskOrigin::AggRound(certified_round, *cert, Some(source)));
+                        seen_round_certs.insert((certified_round, *cert), origins.len());
+                        origins.push(TaskOrigin::AggRound(certified_round, *cert, vec![source]));
                     }
                 }
             }
@@ -271,7 +294,10 @@ impl BlsCertificateAggregator {
                 if !cert.is_empty() {
                     if self.leader_certs.contains_key(leader_ref) {
                         self.mark_block_field_verified(&source);
-                    } else if seen_leaders.insert(*leader_ref) {
+                    } else if let Some(&origin_index) = seen_leader_certs.get(&(*leader_ref, *cert))
+                    {
+                        push_task_source(&mut origins[origin_index], source);
+                    } else {
                         if let Some(task) = self.aggregate_same_message_task(
                             crypto::bls_leader_message(leader_ref),
                             cert,
@@ -280,7 +306,8 @@ impl BlsCertificateAggregator {
                                 block_index: origins.len(),
                                 ..task
                             });
-                            origins.push(TaskOrigin::AggLeader(*leader_ref, *cert, Some(source)));
+                            seen_leader_certs.insert((*leader_ref, *cert), origins.len());
+                            origins.push(TaskOrigin::AggLeader(*leader_ref, *cert, vec![source]));
                         }
                     }
                 }
@@ -301,6 +328,9 @@ impl BlsCertificateAggregator {
             {
                 continue;
             }
+            if seen_round_partials.contains_key(&(round, signer, sig)) {
+                continue;
+            }
             let Some(pk) = self.committee.get_bls_public_key(signer).cloned() else {
                 continue;
             };
@@ -310,11 +340,12 @@ impl BlsCertificateAggregator {
                 public_key: pk,
                 block_index: origins.len(),
             });
+            seen_round_partials.insert((round, signer, sig), origins.len());
             origins.push(TaskOrigin::RoundPartial {
                 round,
                 signer,
                 sig,
-                source_block: None,
+                source_blocks: Vec::new(),
             });
         }
 
@@ -332,6 +363,9 @@ impl BlsCertificateAggregator {
             {
                 continue;
             }
+            if seen_leader_partials.contains_key(&(leader_ref, signer, sig)) {
+                continue;
+            }
             let Some(pk) = self.committee.get_bls_public_key(signer).cloned() else {
                 continue;
             };
@@ -341,11 +375,12 @@ impl BlsCertificateAggregator {
                 public_key: pk,
                 block_index: origins.len(),
             });
+            seen_leader_partials.insert((leader_ref, signer, sig), origins.len());
             origins.push(TaskOrigin::LeaderPartial {
                 leader_ref,
                 signer,
                 sig,
-                source_block: None,
+                source_blocks: Vec::new(),
             });
         }
 
@@ -361,6 +396,7 @@ impl BlsCertificateAggregator {
     ) -> (Vec<BlsVerificationTask>, Vec<TaskOrigin>) {
         let mut tasks = Vec::new();
         let mut origins = Vec::new();
+        let mut seen_dac_certs = AHashMap::new();
 
         // 1. Embedded DAC aggregate certs from block acknowledgments.
         for block in blocks {
@@ -378,6 +414,10 @@ impl BlsCertificateAggregator {
                     self.mark_block_field_verified(&source);
                     continue;
                 }
+                if let Some(&origin_index) = seen_dac_certs.get(&(ack_ref, *cert)) {
+                    push_task_source(&mut origins[origin_index], source);
+                    continue;
+                }
                 let Some(task) =
                     self.aggregate_same_message_task(crypto::bls_dac_message(&ack_ref), cert)
                 else {
@@ -387,11 +427,13 @@ impl BlsCertificateAggregator {
                     block_index: origins.len(),
                     ..task
                 });
-                origins.push(TaskOrigin::AggDac(ack_ref, *cert, Some(source)));
+                seen_dac_certs.insert((ack_ref, *cert), origins.len());
+                origins.push(TaskOrigin::AggDac(ack_ref, *cert, vec![source]));
             }
         }
 
         // 2. Standalone DAC sigs (no source block).
+        let mut seen_dac_partials = AHashSet::new();
         for (block_ref, signer, sig) in dac_sigs {
             if self.dac_certs.contains_key(&block_ref)
                 || self.dac_rejections.contains(&block_ref)
@@ -404,6 +446,9 @@ impl BlsCertificateAggregator {
                     .get(&block_ref)
                     .is_some_and(|sigs| sigs.contains_key(&signer))
             {
+                continue;
+            }
+            if !seen_dac_partials.insert((block_ref, signer, sig)) {
                 continue;
             }
             let Some(pk) = self.committee.get_bls_public_key(signer).cloned() else {
@@ -444,38 +489,30 @@ impl BlsCertificateAggregator {
                     round,
                     signer,
                     sig,
-                    source_block,
+                    source_blocks,
                 } => {
                     if is_bad {
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_failed(&sb);
-                        }
+                        self.mark_block_fields_failed(&source_blocks);
                     } else {
                         if let Some(e) = self.add_round_partial(round, signer, sig) {
                             events.push(e);
                         }
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_verified(&sb);
-                        }
+                        self.mark_block_fields_verified(&source_blocks);
                     }
                 }
                 TaskOrigin::LeaderPartial {
                     leader_ref,
                     signer,
                     sig,
-                    source_block,
+                    source_blocks,
                 } => {
                     if is_bad {
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_failed(&sb);
-                        }
+                        self.mark_block_fields_failed(&source_blocks);
                     } else {
                         if let Some(e) = self.add_leader_partial(leader_ref, signer, sig) {
                             events.push(e);
                         }
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_verified(&sb);
-                        }
+                        self.mark_block_fields_verified(&source_blocks);
                     }
                 }
                 TaskOrigin::DacPartial {
@@ -489,48 +526,36 @@ impl BlsCertificateAggregator {
                         }
                     }
                 }
-                TaskOrigin::AggRound(round, cert, source_block) => {
+                TaskOrigin::AggRound(round, cert, source_blocks) => {
                     if is_bad {
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_failed(&sb);
-                        }
+                        self.mark_block_fields_failed(&source_blocks);
                     } else {
                         if self.round_certs.insert(round, cert).is_none() {
                             events.push(CertificateEvent::Round(round, cert));
                         }
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_verified(&sb);
-                        }
+                        self.mark_block_fields_verified(&source_blocks);
                     }
                 }
-                TaskOrigin::AggLeader(leader_ref, cert, source_block) => {
+                TaskOrigin::AggLeader(leader_ref, cert, source_blocks) => {
                     if is_bad {
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_failed(&sb);
-                        }
+                        self.mark_block_fields_failed(&source_blocks);
                     } else {
                         if self.leader_certs.insert(leader_ref, cert).is_none() {
                             events.push(CertificateEvent::Leader(leader_ref, cert));
                         }
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_verified(&sb);
-                        }
+                        self.mark_block_fields_verified(&source_blocks);
                     }
                 }
-                TaskOrigin::AggDac(block_ref, cert, source_block) => {
+                TaskOrigin::AggDac(block_ref, cert, source_blocks) => {
                     if is_bad {
                         if !valid_dacs.contains_key(&block_ref) {
                             rejected_dacs.insert(block_ref);
                         }
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_failed(&sb);
-                        }
+                        self.mark_block_fields_failed(&source_blocks);
                     } else {
                         rejected_dacs.remove(&block_ref);
                         valid_dacs.entry(block_ref).or_insert(cert);
-                        if let Some(sb) = source_block {
-                            self.mark_block_field_verified(&sb);
-                        }
+                        self.mark_block_fields_verified(&source_blocks);
                     }
                 }
             }
@@ -807,6 +832,18 @@ impl BlsCertificateAggregator {
     fn mark_block_field_failed(&mut self, block_ref: &BlockReference) {
         if let Some(tracker) = self.block_verification.get_mut(block_ref) {
             tracker.failed = true;
+        }
+    }
+
+    fn mark_block_fields_verified(&mut self, block_refs: &[BlockReference]) {
+        for block_ref in block_refs {
+            self.mark_block_field_verified(block_ref);
+        }
+    }
+
+    fn mark_block_fields_failed(&mut self, block_refs: &[BlockReference]) {
+        for block_ref in block_refs {
+            self.mark_block_field_failed(block_ref);
         }
     }
 
@@ -1163,18 +1200,31 @@ impl BlsCertificateAggregator {
     }
 
     fn aggregate_same_message_task(
-        &self,
+        &mut self,
         message: [u8; 32],
         cert: &BlsAggregateCertificate,
     ) -> Option<BlsVerificationTask> {
-        let pubkeys = crypto::bls_public_keys_for_signers(&self.committee, cert.signers())?;
-        let aggregate_public_key = bls_aggregate_public_keys(&pubkeys)?;
+        let aggregate_public_key = self.aggregate_public_key(cert.signers())?;
         Some(BlsVerificationTask {
             message,
             signature: *cert.signature(),
             public_key: aggregate_public_key,
             block_index: 0,
         })
+    }
+
+    fn aggregate_public_key(
+        &mut self,
+        signers: crate::types::AuthoritySet,
+    ) -> Option<BlsPublicKey> {
+        if let Some(public_key) = self.aggregate_public_key_cache.get(&signers) {
+            return Some(public_key.clone());
+        }
+        let pubkeys = crypto::bls_public_keys_for_signers(&self.committee, signers)?;
+        let aggregate_public_key = bls_aggregate_public_keys(&pubkeys)?;
+        self.aggregate_public_key_cache
+            .insert(signers, aggregate_public_key.clone());
+        Some(aggregate_public_key)
     }
 
     pub(crate) fn add_round_partial(

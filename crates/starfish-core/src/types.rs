@@ -117,7 +117,7 @@ pub struct AckFields {
 /// `certified_leader` pairs the leader ref with an aggregate certificate once
 /// quorum is reached. `acknowledgment_signatures`
 /// is parallel to the block's acknowledgment list.
-#[derive(Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct BlsAggregateCertificate {
     pub(crate) signature: BlsSignatureBytes,
     pub(crate) signers: AuthoritySet,

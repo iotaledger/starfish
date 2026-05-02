@@ -8,7 +8,11 @@
 //! [`ConnectionKnowledge`] trackers. Each connection task holds an
 //! `Arc<RwLock<ConnectionKnowledge>>` to read when building batches.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ahash::AHashSet;
 use parking_lot::RwLock;
@@ -24,6 +28,7 @@ const MAX_ROUND_GAP_FOR_USEFUL_PARTS: RoundNumber = 40;
 
 /// Channel capacity for the cordial knowledge actor.
 const CHANNEL_CAPACITY: usize = 100_000;
+const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -744,6 +749,7 @@ pub struct CordialKnowledge {
 impl CordialKnowledge {
     /// Run the actor loop. Blocks until the channel is closed.
     pub async fn run(mut self) {
+        let mut next_metrics_report = Instant::now();
         while let Some(msg) = self.receiver.recv().await {
             match msg {
                 CordialKnowledgeMessage::NewHeader(block_ref) => {
@@ -799,7 +805,11 @@ impl CordialKnowledge {
                     }
                 }
             }
-            self.report_metrics();
+            let now = Instant::now();
+            if now >= next_metrics_report {
+                self.report_metrics();
+                next_metrics_report = now + METRICS_REPORT_INTERVAL;
+            }
         }
     }
 
