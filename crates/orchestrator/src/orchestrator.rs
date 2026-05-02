@@ -750,10 +750,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     .run_background(id.into())
                     .with_execute_from_path(repo_name.into());
                 self.ssh_manager
-                    .execute(active.clone().into_iter(), command, context)
+                    .execute(active.clone(), command, context)
                     .await?;
                 self.ssh_manager
-                    .wait_for_command(active.into_iter(), id, CommandStatus::Terminated)
+                    .wait_for_command(active, id, CommandStatus::Terminated)
                     .await?;
             }
             Some(source) => {
@@ -761,7 +761,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 let local_path = PathBuf::from(source);
                 let remote_path: PathBuf = format!("{repo_name}/target/release/starfish").into();
                 self.ssh_manager
-                    .upload_to_all(active.into_iter(), &local_path, &remote_path)
+                    .upload_to_all(active, &local_path, &remote_path)
                     .await?;
             }
             None => {
@@ -782,10 +782,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     .run_background(id.into())
                     .with_execute_from_path(repo_name.into());
                 self.ssh_manager
-                    .execute(active.clone().into_iter(), command, context)
+                    .execute(active.clone(), command, context)
                     .await?;
                 self.ssh_manager
-                    .wait_for_command(active.into_iter(), id, CommandStatus::Terminated)
+                    .wait_for_command(active, id, CommandStatus::Terminated)
                     .await?;
             }
         }
@@ -2052,8 +2052,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         self.prepare_benchmark_suite().await?;
 
         // Run all benchmarks.
-        let mut i = 1;
-        for parameters in set_of_parameters {
+        for (i, parameters) in (1..).zip(set_of_parameters) {
             display::header(format!("Starting benchmark {i}"));
             display::config("Protocol", &parameters.consensus_protocol);
             display::config("Load", format!("{} tx/s", parameters.load));
@@ -2063,8 +2062,6 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 return Ok(());
             };
             aggregator.display_summary();
-
-            i += 1;
         }
 
         display::print_timeline();

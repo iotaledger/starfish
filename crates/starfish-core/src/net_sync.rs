@@ -1803,15 +1803,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         join_all(
             connections
                 .into_values()
-                .chain(
-                    [
-                        leader_timeout_task,
-                        commit_timeout_task,
-                        cleanup_task,
-                        missing_parent_pull_task,
-                    ]
-                    .into_iter(),
-                )
+                .chain([
+                    leader_timeout_task,
+                    commit_timeout_task,
+                    cleanup_task,
+                    missing_parent_pull_task,
+                ])
                 .chain(soft_block_timeout_task)
                 .chain(cert_pull_task)
                 .chain(round_gap_pull_task),

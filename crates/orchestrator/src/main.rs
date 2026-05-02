@@ -844,6 +844,17 @@ fn load_benchmark_configs(
         client_parameters.transaction_mode == starfish_core::config::TransactionMode::Random,
     );
 
+    // Stop the transaction generator a few seconds before the orchestrator
+    // tears down the testbed so validators can drain the in-flight queue and
+    // the final Prometheus scrape sees a quiescent system. Without this the
+    // last sampling window is contaminated by clients still pushing load
+    // while validators are killed asymmetrically by tmux.
+    const CLIENT_DRAIN: Duration = Duration::from_secs(5);
+    client_parameters.benchmark_duration = settings
+        .benchmark_duration
+        .checked_sub(CLIENT_DRAIN)
+        .or(Some(settings.benchmark_duration));
+
     Ok((node_parameters, client_parameters))
 }
 

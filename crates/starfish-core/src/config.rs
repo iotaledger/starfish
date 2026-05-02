@@ -183,12 +183,7 @@ impl NodePublicConfig {
         let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
         let benchmark_port_offset = ips.len() as u16;
         let mut identifiers = Vec::new();
-        for (i, ((ip, key), bls_key)) in ips
-            .into_iter()
-            .zip(keys.into_iter())
-            .zip(bls_keys.into_iter())
-            .enumerate()
-        {
+        for (i, ((ip, key), bls_key)) in ips.into_iter().zip(keys).zip(bls_keys).enumerate() {
             let public_key = key.public_key();
             let bls_public_key = bls_key.public_key();
             let network_port = Self::PORT_OFFSET_FOR_TESTS + i as u16;
@@ -389,6 +384,15 @@ pub struct Parameters {
     /// StarfishSpeed soft block-creation timeout (relaxed readiness).
     #[serde(default = "param_defaults::default_soft_block_timeout")]
     pub soft_block_timeout: Duration,
+    /// Stop the transaction generator after this much wall-clock time has
+    /// elapsed since the generator's first transaction. Measured *after* the
+    /// initial connection-setup delay, so this bounds only the active
+    /// generation window. `None` means run until the process is killed (the
+    /// historical behavior, suitable for production deployments). The
+    /// orchestrator sets this to `benchmark_duration - drain` so validators
+    /// have time to commit the in-flight queue before being torn down.
+    #[serde(default)]
+    pub benchmark_duration: Option<Duration>,
 }
 
 impl Parameters {
@@ -436,6 +440,7 @@ impl Default for Parameters {
             storage_backend: StorageBackend::default(),
             leader_timeout: param_defaults::default_leader_timeout(),
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
+            benchmark_duration: None,
         }
     }
 }

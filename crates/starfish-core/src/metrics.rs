@@ -5,7 +5,10 @@
 use std::{
     net::SocketAddr,
     ops::AddAssign,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -161,6 +164,12 @@ pub struct Metrics {
     pub ck_pending_shards: IntGauge,
     pub ck_peer_known_headers: IntGaugeVec,
     pub ck_peer_known_shards: IntGaugeVec,
+
+    /// When set, latency metrics stop accepting new observations. The
+    /// transaction generator flips this true once it has stopped submitting
+    /// load, so commits that arrive during the wind-down (clients drained,
+    /// validators about to be torn down) do not pollute cumulative quantiles.
+    pub metrics_frozen: Arc<AtomicBool>,
 }
 
 pub struct MetricReporter {
@@ -919,6 +928,7 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            metrics_frozen: Arc::new(AtomicBool::new(false)),
         };
 
         (Arc::new(metrics), Arc::new(reporter))
@@ -1176,6 +1186,12 @@ impl<T: Ord + AddAssign + DivUsize + Copy + Default + AsPrometheusMetric> VecHis
             .iter_mut()
             .for_each(|(hist, _)| hist.clear_receive_all());
     }
+
+    pub fn receive_all(&mut self) {
+        self.histograms
+            .iter_mut()
+            .for_each(|(hist, _)| hist.receive_all());
+    }
 }
 
 impl AsPrometheusMetric for Duration {
@@ -1211,19 +1227,31 @@ impl MetricReporter {
         self.global_in_memory_blocks_bytes
             .set(IN_MEMORY_BLOCKS_BYTES.load(Ordering::Relaxed) as i64);
 
-        // Clear and report all histograms
+        // Latency histograms accumulate across the whole run so reported
+        // quantiles reflect the entire benchmark, not just the most recent
+        // 10-second window (which would be dominated by warm-down noise).
         {
             let mut latency = self.transaction_committed_latency.lock();
-            latency.clear_receive_all();
+            latency.histogram.receive_all();
             latency.report();
         }
 
         {
             let mut block_latency = self.block_committed_latency.lock();
-            block_latency.clear_receive_all();
+            block_latency.histogram.receive_all();
             block_latency.report();
         }
 
+        {
+            let mut conn_latency = self.connection_latency.lock();
+            conn_latency.receive_all();
+            conn_latency.report();
+        }
+
+        // Size histograms remain windowed: the per-window distribution of
+        // block / header / transaction / bundle sizes is more informative
+        // than a cumulative one, because it tracks how sizes evolve over
+        // the run.
         {
             let mut block_size = self.proposed_block_size_bytes.lock();
             block_size.clear_receive_all();
@@ -1246,12 +1274,6 @@ impl MetricReporter {
             let mut bundle_size = self.block_bundle_size_bytes.lock();
             bundle_size.clear_receive_all();
             bundle_size.report();
-        }
-
-        {
-            let mut conn_latency = self.connection_latency.lock();
-            conn_latency.clear_receive_all();
-            conn_latency.report();
         }
     }
 

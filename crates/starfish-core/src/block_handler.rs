@@ -124,16 +124,22 @@ impl RealCommitHandler {
 
     fn transaction_observer(&self, block: Data<VerifiedBlock>) {
         let current_timestamp = runtime::timestamp_utc();
+        let metrics_frozen = self
+            .metrics
+            .metrics_frozen
+            .load(std::sync::atomic::Ordering::Relaxed);
         if let Some(vec) = block.transactions() {
             for transaction in vec {
                 let BaseTransaction::Share(transaction) = transaction;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                 let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
-                self.metrics.transaction_committed_latency.observe(latency);
-                self.metrics
-                    .transaction_committed_latency_squared_micros
-                    .inc_by(latency.as_micros().pow(2) as u64);
+                if !metrics_frozen {
+                    self.metrics.transaction_committed_latency.observe(latency);
+                    self.metrics
+                        .transaction_committed_latency_squared_micros
+                        .inc_by(latency.as_micros().pow(2) as u64);
+                }
 
                 self.metrics.sequenced_transactions_total.inc();
                 self.metrics
@@ -265,6 +271,10 @@ impl CommitObserver for RealCommitHandler {
             .commit_interpreter
             .handle_commit(dag_state, committed_leaders);
         let current_timestamp = runtime::timestamp_utc();
+        let metrics_frozen = self
+            .metrics
+            .metrics_frozen
+            .load(std::sync::atomic::Ordering::Relaxed);
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
             self.committed_count += 1;
@@ -303,15 +313,16 @@ impl CommitObserver for RealCommitHandler {
                     continue;
                 }
 
-                self.metrics.block_committed_latency.observe(block_latency);
+                if !metrics_frozen {
+                    self.metrics.block_committed_latency.observe(block_latency);
+                    self.metrics
+                        .block_committed_latency_squared_micros
+                        .inc_by(block_latency.as_micros().pow(2) as u64);
+                }
                 self.metrics
                     .committed_blocks
                     .with_label_values(&[&block.authority().to_string()])
                     .inc();
-
-                self.metrics
-                    .block_committed_latency_squared_micros
-                    .inc_by(block_latency.as_micros().pow(2) as u64);
 
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }

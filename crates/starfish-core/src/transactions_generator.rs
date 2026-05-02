@@ -2,7 +2,11 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cmp::min, sync::Arc, time::Duration};
+use std::{
+    cmp::min,
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
 
 use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc;
@@ -58,18 +62,24 @@ impl TransactionGenerator {
     pub async fn run(mut self) {
         let load = self.parameters.load;
         let max_transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
-        // For every 10 validators, add 2 seconds to the initial default delay
-        // used for establishing connections between validators
+        // Add a small extra delay proportional to committee size to give
+        // connections time to come up. Calibrated so n=100 lands at ~15s
+        // total when initial_delay is the 10s default.
         let initial_delay_plus_extra_delay = self.parameters.initial_delay
             + Duration::from_millis(
-                (self.node_public_config.identifiers.len() as f64 / 100.0 * 20000.0) as u64,
+                (self.node_public_config.identifiers.len() as f64 / 100.0 * 5000.0) as u64,
             );
+        let benchmark_duration = self.parameters.benchmark_duration;
         tracing::info!(
             "Starting tx generator. After {} sec, \
             targeting {load} tx/s \
-            (up to {max_transactions_per_block_interval} transactions every {} ms)",
+            (up to {max_transactions_per_block_interval} transactions every {} ms){}",
             initial_delay_plus_extra_delay.as_secs(),
-            Self::TARGET_BLOCK_INTERVAL.as_millis()
+            Self::TARGET_BLOCK_INTERVAL.as_millis(),
+            match benchmark_duration {
+                Some(d) => format!(", stopping after {} sec of generation", d.as_secs()),
+                None => String::new(),
+            },
         );
         let max_block_size = self.node_public_config.parameters.max_block_size;
         let target_block_size = min(max_block_size, max_transactions_per_block_interval);
@@ -90,8 +100,22 @@ impl TransactionGenerator {
 
         let mut interval = runtime::TimeInterval::new(Self::TARGET_BLOCK_INTERVAL);
         runtime::sleep(initial_delay_plus_extra_delay).await;
+        let generation_start = Instant::now();
 
         loop {
+            if let Some(limit) = benchmark_duration {
+                if generation_start.elapsed() >= limit {
+                    tracing::info!(
+                        "Tx generator reached benchmark duration ({} sec); \
+                         stopping submissions and freezing latency metrics.",
+                        limit.as_secs(),
+                    );
+                    // Freeze latency observations so commits arriving during
+                    // the wind-down do not pollute cumulative quantiles.
+                    self.metrics.metrics_frozen.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
             interval.tick().await;
             let timestamp = (timestamp_utc().as_millis() as u64).to_le_bytes();
             let transactions_per_block_interval =
