@@ -7,10 +7,24 @@
 //! in a single multi-pairing check. On failure, falls back to individual
 //! verification to identify bad signatures.
 
+use std::cell::RefCell;
+
 use blst::min_sig as bls;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::crypto::{BLS_DST, BlsPublicKey, BlsSignatureBytes};
+
+thread_local! {
+    /// Random scalar source for batch verification. Seeded once per worker
+    /// thread from the OS, then reused across all batches on that thread.
+    /// Avoids the per-batch `getrandom(2)` syscall cost from the previous
+    /// `SmallRng::from_entropy()`. Security note: scalars must be
+    /// unpredictable to an adversary at the moment they're used; a per-thread
+    /// `SmallRng` seeded from `OsRng` satisfies that — the adversary doesn't
+    /// see internal RNG state and can't influence which scalars are paired
+    /// with which signatures.
+    static BATCH_RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_entropy());
+}
 
 /// A single verification task within a batch.
 pub struct BlsVerificationTask {
@@ -51,8 +65,9 @@ impl BlsBatchVerifier {
             };
         }
 
-        // Batch verification via blst::Pairing with random scalars.
-        let mut rng = SmallRng::from_entropy();
+        // Batch verification via blst::Pairing with random scalars drawn
+        // from the per-thread RNG (cheaper than reseeding from /dev/urandom
+        // on every call).
         let mut pairing = blst::Pairing::new(false, BLS_DST);
 
         for task in tasks {
@@ -65,7 +80,7 @@ impl BlsBatchVerifier {
             };
 
             // Random 64-bit scalar for subgroup security.
-            let rand_bytes = rng.gen::<[u8; 8]>();
+            let rand_bytes = BATCH_RNG.with(|rng| rng.borrow_mut().gen::<[u8; 8]>());
 
             // Convert to affine types for blst::Pairing which uses `dyn Any`
             // downcasting (min_sig: pk=blst_p2_affine, sig=blst_p1_affine).
