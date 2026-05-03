@@ -49,7 +49,6 @@ pub struct Metrics {
 
     pub filtered_blocks_total: IntCounter,
     pub filtered_shards_total: IntCounter,
-    pub skipped_redundant_headers_total: IntCounter,
     pub processed_after_filtering_total: IntCounter,
     pub reconstructed_blocks_total: IntCounter,
     pub shard_reconstruction_jobs_total: IntCounter,
@@ -344,12 +343,6 @@ impl Metrics {
             filtered_shards_total: register_int_counter_with_registry!(
                 "filtered_shards_total",
                 "Total number of filtered standalone shards",
-                registry,
-            )
-            .unwrap(),
-            skipped_redundant_headers_total: register_int_counter_with_registry!(
-                "skipped_redundant_headers_total",
-                "Headers skipped because the accompanying full blocks landed cleanly",
                 registry,
             )
             .unwrap(),

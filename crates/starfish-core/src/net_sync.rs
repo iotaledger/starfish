@@ -404,6 +404,144 @@ fn spawn_standalone_shard_worker<H: BlockHandler + 'static, C: CommitObserver + 
     });
 }
 
+/// Spawn the per-connection worker task that drains header-only block
+/// batches, verifies them, and inserts them into the local DAG. Running off
+/// the connection's main loop keeps verify + `add_headers` work off the path
+/// that handles the next incoming network message.
+fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
+    mut rx: mpsc::UnboundedReceiver<(Vec<Data<VerifiedBlock>>, DataSource)>,
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    filter_for_blocks: Arc<FilterForBlocks>,
+    metrics: Arc<Metrics>,
+    sender: mpsc::Sender<NetworkMessage>,
+    bls_service: Option<BlsServiceHandle>,
+    consensus_protocol: ConsensusProtocol,
+    peer: String,
+    peer_id: AuthorityIndex,
+    own_id: AuthorityIndex,
+) {
+    tokio::spawn(async move {
+        let mut encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
+        while let Some((blocks, source)) = rx.recv().await {
+            let connection_knowledge = inner.cordial_knowledge.connection_knowledge(peer_id);
+            let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
+            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_digests);
+            let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
+
+            for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
+                if !is_needed {
+                    metrics.filtered_blocks_total.inc();
+                    continue;
+                }
+                let mut block: VerifiedBlock = (*data_block).clone();
+                tracing::debug!("Received {} from {}", block, peer);
+                match block.verify(
+                    &inner.committee,
+                    own_id as usize,
+                    peer_id as usize,
+                    &mut encoder,
+                    consensus_protocol,
+                ) {
+                    Ok(shard) => {
+                        debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Rejected incorrect block {} from {}: {:?}",
+                            block.reference(),
+                            peer,
+                            e
+                        );
+                        break;
+                    }
+                };
+                verified_blocks.push(block);
+            }
+
+            if let Some(ck) = connection_knowledge.as_ref() {
+                let refs: Vec<_> = verified_blocks.iter().map(|b| *b.reference()).collect();
+                let mut ck = ck.write();
+                ck.mark_headers_useful_from_peer(&refs);
+            }
+
+            let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
+            let is_new = filter_for_blocks.insert_and_report_new(&digests);
+            let mut new_data_blocks = Vec::new();
+            for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
+                if is_new {
+                    let mut storage_block = storage_block;
+                    storage_block.preserialize();
+                    debug_assert!(
+                        storage_block.serialized_header_bytes().is_some(),
+                        "header must be preserialized before entering core"
+                    );
+                    new_data_blocks.push(Data::new(storage_block));
+                }
+            }
+
+            tracing::debug!(
+                "To be processed after verification from {:?}, source={}, {} new \
+                 blocks without transactions {:?}",
+                peer,
+                source,
+                new_data_blocks.len(),
+                new_data_blocks
+            );
+            if new_data_blocks.is_empty() {
+                continue;
+            }
+
+            if let Some(ref bls) = bls_service {
+                bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()));
+            }
+            let header_refs = new_data_blocks
+                .iter()
+                .map(|block| *block.reference())
+                .collect();
+            inner
+                .cordial_knowledge
+                .send(CordialKnowledgeMessage::DagParts {
+                    headers: header_refs,
+                    shards: Vec::new(),
+                });
+            let useful_shard_refs: Vec<_> = new_data_blocks
+                .iter()
+                .map(|block| *block.reference())
+                .collect();
+            if !useful_shard_refs.is_empty() {
+                inner
+                    .cordial_knowledge
+                    .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
+                        useful_shard_refs,
+                    ));
+            }
+            let (missing_parents, processed_additional_refs) =
+                inner.syncer.add_headers(new_data_blocks, source).await;
+            if !missing_parents.is_empty() {
+                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
+                tracing::debug!(
+                    "Make request missing parents of header/shard blocks {:?} \
+                     from peer {:?} after source={}",
+                    missing_parents,
+                    peer,
+                    source
+                );
+                metrics
+                    .block_sync_requests_sent
+                    .with_label_values(&[&peer_id.to_string()])
+                    .inc();
+                sender
+                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
+                    .await
+                    .ok();
+            }
+            metrics
+                .used_additional_blocks_total
+                .inc_by(processed_additional_refs.len() as u64);
+        }
+    });
+}
+
 /// Per-connection state for `connection_task`. Groups the 15+ shared locals
 /// into a struct so the 400-line match body can be split into focused handlers.
 struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static> {
@@ -424,6 +562,11 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     /// returns immediately; the worker verifies merkle proofs and forwards
     /// to the global shard reconstructor.
     standalone_shard_tx: mpsc::UnboundedSender<Vec<ShardPayload>>,
+    /// Hand-off channel into the per-connection header worker task. The
+    /// main connection loop fires header-only block batches here and
+    /// returns immediately; the worker verifies, filters, and inserts
+    /// the headers into the DAG.
+    header_tx: mpsc::UnboundedSender<(Vec<Data<VerifiedBlock>>, DataSource)>,
     bls_service: Option<BlsServiceHandle>,
     sailfish_service: Option<SailfishServiceHandle>,
 }
@@ -479,6 +622,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             peer.clone(),
         );
 
+        let (header_tx, header_rx) = mpsc::unbounded_channel();
+        spawn_header_worker(
+            header_rx,
+            inner.clone(),
+            filter_for_blocks.clone(),
+            metrics.clone(),
+            connection.sender.clone(),
+            bls_service.clone(),
+            consensus_protocol,
+            peer.clone(),
+            peer_id,
+            own_id,
+        );
+
         Self {
             consensus_protocol,
             inner,
@@ -493,6 +650,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             own_id,
             sender: connection.sender.clone(),
             standalone_shard_tx,
+            header_tx,
             bls_service,
             sailfish_service,
         }
@@ -744,16 +902,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
 
-        // Process full blocks first. If they land cleanly (no missing
-        // parents), the headers shipped alongside them are causally
-        // redundant and we skip the verify/insert work entirely.
-        let missing_parents = self
-            .process_full_blocks(blocks_with_transactions, source)
+        // Process full blocks first.
+        self.process_full_blocks(blocks_with_transactions, source)
             .await;
 
         // Header-only blocks are only valid for Starfish erasure-coding
         // variants. SailfishPlusPlus and Mysticeti require full blocks;
-        // reject any headers a peer may have sent.
+        // reject any headers a peer may have sent. Hand the header batch
+        // off to the per-connection header worker so the main connection
+        // loop does not block on verify / DAG insertion.
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
@@ -761,17 +918,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishBls
         ) {
             blocks_without_transactions.extend(headers);
-            if !blocks_without_transactions.is_empty() && !missing_parents.is_empty() {
+            if !blocks_without_transactions.is_empty() {
                 let header_source = match source {
                     DataSource::BlockBundleStreaming => DataSource::BlockBundleStreamingHeader,
                     other => other,
                 };
-                self.process_block_headers(blocks_without_transactions, header_source)
-                    .await;
-            } else if !blocks_without_transactions.is_empty() {
-                self.metrics
-                    .skipped_redundant_headers_total
-                    .inc_by(blocks_without_transactions.len() as u64);
+                let _ = self
+                    .header_tx
+                    .send((blocks_without_transactions, header_source));
             }
         } else if !headers.is_empty() {
             tracing::warn!(
@@ -796,146 +950,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         drop(timer);
     }
 
-    async fn process_block_headers(
-        &mut self,
-        blocks: Vec<Data<VerifiedBlock>>,
-        source: DataSource,
-    ) {
-        let connection_knowledge = self
-            .inner
-            .cordial_knowledge
-            .connection_knowledge(self.peer_id);
-        let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
-        let needed_before_verify = self.filter_for_blocks.needed_headers(&incoming_digests);
-        let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
-
-        // --- verify loop (no per-block lock acquisition) ---
-        for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
-            if !is_needed {
-                self.metrics.filtered_blocks_total.inc();
-                continue;
-            }
-            let mut block: VerifiedBlock = (*data_block).clone();
-            tracing::debug!("Received {} from {}", block, self.peer);
-            // All blocks here have transaction_data == None, so verify()
-            // always returns Ok(None) for the shard.
-            match block.verify(
-                &self.inner.committee,
-                self.own_id as usize,
-                self.peer_id as usize,
-                &mut self.encoder,
-                self.consensus_protocol,
-            ) {
-                Ok(shard) => {
-                    debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Rejected incorrect block {} from {}: {:?}",
-                        block.reference(),
-                        self.peer,
-                        e
-                    );
-                    break;
-                }
-            };
-            verified_blocks.push(block);
-        }
-
-        // --- batch connection knowledge update (one lock acquisition) ---
-        if let Some(ck) = connection_knowledge.as_ref() {
-            let refs: Vec<_> = verified_blocks.iter().map(|b| *b.reference()).collect();
-            let mut ck = ck.write();
-            ck.mark_headers_useful_from_peer(&refs);
-        }
-
-        // --- batch filter insert + new-detection (one lock acquisition) ---
-        let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
-        let is_new = self.filter_for_blocks.insert_and_report_new(&digests);
-        let mut new_data_blocks = Vec::new();
-        for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
-            if is_new {
-                let mut storage_block = storage_block;
-                storage_block.preserialize();
-                debug_assert!(
-                    storage_block.serialized_header_bytes().is_some(),
-                    "header must be preserialized before entering core"
-                );
-                new_data_blocks.push(Data::new(storage_block));
-            }
-        }
-
-        tracing::debug!(
-            "To be processed after verification from {:?}, source={}, {} new \
-             blocks without transactions {:?}",
-            self.peer,
-            source,
-            new_data_blocks.len(),
-            new_data_blocks
-        );
-        if !new_data_blocks.is_empty() {
-            // Send block copies to BLS service for signature verification.
-            if let Some(ref bls) = self.bls_service {
-                bls.send(BlsServiceMessage::ProcessBlocks(new_data_blocks.clone()));
-            }
-            // Notify CordialKnowledge about all new headers in one batch.
-            let header_refs = new_data_blocks
-                .iter()
-                .map(|block| *block.reference())
-                .collect();
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::DagParts {
-                    headers: header_refs,
-                    shards: Vec::new(),
-                });
-            // Every newly received header-only block signals that we'll
-            // need shards from that author to reconstruct the full block;
-            // mark the supplying peer as a useful shard source for that
-            // author, regardless of payload. Mirrors IOTA's
-            // report_useful_authors trigger.
-            let useful_shard_refs: Vec<_> = new_data_blocks
-                .iter()
-                .map(|block| *block.reference())
-                .collect();
-            if !useful_shard_refs.is_empty() {
-                self.inner
-                    .cordial_knowledge
-                    .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
-                        useful_shard_refs,
-                    ));
-            }
-            let (missing_parents, processed_additional_refs) =
-                self.inner.syncer.add_headers(new_data_blocks, source).await;
-            if !missing_parents.is_empty() {
-                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
-                tracing::debug!(
-                    "Make request missing parents of header/shard blocks {:?} \
-                     from peer {:?} after source={}",
-                    missing_parents,
-                    self.peer,
-                    source
-                );
-                self.metrics
-                    .block_sync_requests_sent
-                    .with_label_values(&[&self.peer_id.to_string()])
-                    .inc();
-                self.sender
-                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
-                    .await
-                    .ok();
-            }
-            self.metrics
-                .used_additional_blocks_total
-                .inc_by(processed_additional_refs.len() as u64);
-        }
-    }
-
-    async fn process_full_blocks(
-        &mut self,
-        blocks: Vec<Data<VerifiedBlock>>,
-        source: DataSource,
-    ) -> AHashSet<BlockReference> {
+    async fn process_full_blocks(&mut self, blocks: Vec<Data<VerifiedBlock>>, source: DataSource) {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
@@ -1034,7 +1049,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_data_blocks
         );
         if verified_data_blocks.is_empty() {
-            return AHashSet::new();
+            return;
         }
         // Send block copies to BLS service for signature verification.
         if let Some(ref bls) = self.bls_service {
@@ -1087,7 +1102,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .await
                 .ok();
         }
-        missing_parents
     }
 
     /// Returns `true` to continue, `false` to break the connection loop.
