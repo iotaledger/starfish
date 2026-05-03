@@ -9,7 +9,7 @@ repos:
       - id: end-of-file-fixer
       - id: mixed-line-ending
   - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
-    rev: "3.6.0"
+    rev: "3.6.1"
     hooks:
       - id: editorconfig-checker
         alias: ec
@@ -20,7 +20,7 @@ repos:
         args: []
         pass_filenames: false
   - repo: https://github.com/crate-ci/typos
-    rev: v1.44.0
+    rev: v1
     hooks:
       - id: typos
         pass_filenames: false
@@ -30,7 +30,7 @@ repos:
       - id: cargo-sort
         args: ["--workspace"]
   - repo: https://github.com/EmbarkStudios/cargo-deny
-    rev: 0.19.0
+    rev: 0.19.4
     hooks:
       - id: cargo-deny
   - repo: local

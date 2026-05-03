@@ -14,9 +14,17 @@ use std::{
 
 use prettytable::{Table as PrettyTable, format, row};
 use prometheus::{
-    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-    register_histogram_with_registry, register_int_counter_vec_with_registry,
-    register_int_counter_with_registry, register_int_gauge_vec_with_registry,
+    Histogram,
+    HistogramOpts,
+    IntCounter,
+    IntCounterVec,
+    IntGauge,
+    IntGaugeVec,
+    Registry,
+    register_histogram_with_registry,
+    register_int_counter_vec_with_registry,
+    register_int_counter_with_registry,
+    register_int_gauge_vec_with_registry,
     register_int_gauge_with_registry,
 };
 use tabled::{Table, Tabled};

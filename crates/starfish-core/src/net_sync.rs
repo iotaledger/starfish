@@ -15,10 +15,10 @@ use ahash::{AHashMap, AHashSet};
 use futures::future::join_all;
 use rand::seq::SliceRandom;
 use reed_solomon_simd::ReedSolomonEncoder;
-use tokio::time::Instant;
 use tokio::{
     select,
     sync::{Notify, mpsc},
+    time::Instant,
 };
 
 use crate::{
@@ -30,7 +30,10 @@ use crate::{
     config::{DisseminationMode, NodeParameters},
     consensus::universal_committer::UniversalCommitter,
     cordial_knowledge::{
-        ConnectionKnowledge, CordialKnowledgeHandle, CordialKnowledgeMessage, UsefulAuthorsMessage,
+        ConnectionKnowledge,
+        CordialKnowledgeHandle,
+        CordialKnowledgeMessage,
+        UsefulAuthorsMessage,
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
@@ -41,13 +44,24 @@ use crate::{
     network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
     sailfish_service::{
-        SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
+        SailfishCertEvent,
+        SailfishServiceHandle,
+        SailfishServiceMessage,
+        start_sailfish_service,
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, PartialSig, PartialSigKind,
-        ProvableShard, RoundNumber, VerifiedBlock, format_authority_index,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockDigest,
+        BlockReference,
+        PartialSig,
+        PartialSigKind,
+        ProvableShard,
+        RoundNumber,
+        VerifiedBlock,
+        format_authority_index,
     },
 };
 

@@ -10,7 +10,6 @@ use std::{
 
 use ::prometheus::Registry;
 use eyre::{Context, Result, eyre};
-
 use tokio::sync::mpsc;
 
 use crate::{

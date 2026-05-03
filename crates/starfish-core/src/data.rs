@@ -14,7 +14,10 @@ use std::{
 
 use bytes::Bytes;
 use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
     de::{DeserializeOwned, Error},
 };
 
