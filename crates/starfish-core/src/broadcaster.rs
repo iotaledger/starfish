@@ -371,11 +371,17 @@ where
                                 useful_headers_to_peer,
                             )
                         };
-                        let extra_refs = self.inner.dag_state.filter_block_refs_unknown_to_peer(
-                            &extra_candidates,
-                            peer_id,
-                            remaining_extra_budget,
-                        );
+                        let extra_refs = self
+                            .inner
+                            .cordial_knowledge
+                            .dag_knowledge()
+                            .expect("push dissemination requires dag knowledge")
+                            .read()
+                            .filter_block_refs_unknown_to_peer(
+                                &extra_candidates,
+                                peer_id,
+                                remaining_extra_budget,
+                            );
                         if !extra_refs.is_empty() {
                             let mut included = AHashSet::with_capacity(
                                 refs_to_send.len().saturating_add(extra_refs.len()),
@@ -990,18 +996,14 @@ where
 {
     // In pull mode only own blocks are proactively disseminated;
     // peers obtain other blocks via MissingParentsRequest.
-    let authorities_with_missing_blocks: AHashSet<AuthorityIndex> = AHashSet::new();
     let batch_own_block_size = broadcaster_parameters.batch_own_block_size;
-    let batch_other_block_size = 0;
     let peer = format_authority_index(to_whom_authority_index);
     let blocks = {
         let sent = sent_to_peer.read();
-        inner.dag_state.get_unsent_causal_history(
+        inner.dag_state.get_unsent_own_blocks_pull(
             &sent,
             to_whom_authority_index,
             batch_own_block_size,
-            batch_other_block_size,
-            authorities_with_missing_blocks,
         )
     };
     // Full-block protocols do not advertise header/shard usefulness.
@@ -1131,11 +1133,16 @@ where
                     },
                 )
             };
-            let other_refs = inner.dag_state.filter_block_refs_unknown_to_peer(
-                &other_candidates,
-                to_whom_authority_index,
-                broadcaster_parameters.batch_other_block_size,
-            );
+            let other_refs = inner
+                .cordial_knowledge
+                .dag_knowledge()
+                .expect("push dissemination requires dag knowledge")
+                .read()
+                .filter_block_refs_unknown_to_peer(
+                    &other_candidates,
+                    to_whom_authority_index,
+                    broadcaster_parameters.batch_other_block_size,
+                );
             (other_refs, shard_refs, useful_headers, useful_shards)
         }
     };

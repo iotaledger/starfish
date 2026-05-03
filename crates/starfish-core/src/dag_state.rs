@@ -22,7 +22,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
-    cordial_knowledge::{CordialKnowledgeHandle, DagKnowledgeInner},
+    cordial_knowledge::{CordialKnowledgeHandle, CordialKnowledgeMessage, DagKnowledgeInner},
     crypto::{BlsSignatureBytes, TransactionsCommitment},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
@@ -37,10 +37,6 @@ use crate::{
         VerifiedBlock,
     },
 };
-
-/// Bitmask tracking which authorities know about a block. Supports up to
-/// `MAX_COMMITTEE_SIZE` authorities.
-type AuthorityBitmask = AuthoritySet;
 
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
 
@@ -280,10 +276,6 @@ type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
 /// traversals can complete without storage fallback.
 pub(crate) const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
 
-/// Per-authority DAG: round → (digest → (parents, known_by_bitmask)).
-type DagAuthorityMap =
-    BTreeMap<RoundNumber, HashMap<BlockDigest, (Vec<BlockReference>, AuthorityBitmask)>>;
-
 #[derive(Default)]
 struct StarfishSpeedLeaderRoundHints {
     voter_masks: AHashMap<AuthorityIndex, AuthoritySet>,
@@ -336,8 +328,6 @@ struct DagStateInner {
     committee_size: usize,
     last_seen_by_authority: Vec<RoundNumber>,
     last_own_block: Option<BlockReference>,
-    /// Per-authority DAG metadata. Vec index = authority.
-    dag: Vec<DagAuthorityMap>,
     /// Per-authority eviction frontier: highest round evicted for each
     /// authority.
     evicted_rounds: Vec<RoundNumber>,
@@ -417,10 +407,6 @@ struct DagStateInner {
     sailfish_timeout_certs: BTreeMap<RoundNumber, SailfishTimeoutCert>,
     /// Sailfish++ no-vote certificates, indexed by (round, leader).
     sailfish_novote_certs: BTreeMap<(RoundNumber, AuthorityIndex), SailfishNoVoteCert>,
-    /// When true, skip the BFS known_by propagation in update_dag and
-    /// don't populate the per-block dag metadata. Pull-mode protocols
-    /// don't need cordial-knowledge tracking.
-    skip_dag_bfs: bool,
 }
 
 impl DagState {
@@ -460,7 +446,18 @@ impl DagState {
         let consensus_protocol = ConsensusProtocol::from_str(&consensus);
         let resolved_dissemination =
             consensus_protocol.resolve_dissemination_mode(dissemination_mode);
-        let skip_dag_bfs = matches!(resolved_dissemination, DisseminationMode::Pull);
+        let push_mode = matches!(
+            resolved_dissemination,
+            DisseminationMode::PushCausal | DisseminationMode::PushUseful
+        );
+        // Construct dag knowledge up-front so recovery code below can
+        // populate it directly (no actor exists yet).
+        let dag_knowledge = push_mode.then(|| {
+            Arc::new(RwLock::new(DagKnowledgeInner::new(
+                authority,
+                committee.len(),
+            )))
+        });
         let last_seen_by_authority = committee.authorities().map(|_| 0).collect();
         let n = committee.len();
         let mut inner = DagStateInner {
@@ -476,7 +473,6 @@ impl DagState {
             own_blocks: (0..n).map(|_| BTreeMap::new()).collect(),
             highest_round: 0,
             last_own_block: None,
-            dag: (0..n).map(|_| BTreeMap::new()).collect(),
             evicted_rounds: vec![0; n],
             pending_not_certified: Vec::new(),
             pending_not_available: Vec::new(),
@@ -505,7 +501,6 @@ impl DagState {
             bls_verified_blocks: (0..n).map(|_| BTreeSet::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
-            skip_dag_bfs,
         };
         let mut builder = RecoveredStateBuilder::new();
         let replay_started = Instant::now();
@@ -562,14 +557,11 @@ impl DagState {
                 builder.block(block_ref.round, block.clone());
                 block_count += 1;
                 let mut activated = Vec::new();
-                inner.add_block(
-                    block,
-                    0,
-                    committee.len(),
-                    &mut bfs_buf,
-                    &committee,
-                    &mut activated,
-                );
+                let parents = block.block_references().clone();
+                inner.add_block(block, 0, committee.len(), &committee, &mut activated);
+                if let Some(dag) = &dag_knowledge {
+                    dag.write().update_dag(block_ref, parents, &mut bfs_buf);
+                }
 
                 if let Some(commit_data) = store
                     .get_commit(&block_ref)
@@ -612,14 +604,11 @@ impl DagState {
                 builder.block(block_ref.round, block.clone());
                 block_count += 1;
                 let mut activated = Vec::new();
-                inner.add_block(
-                    block,
-                    0,
-                    committee.len(),
-                    &mut bfs_buf,
-                    &committee,
-                    &mut activated,
-                );
+                let parents = block.block_references().clone();
+                inner.add_block(block, 0, committee.len(), &committee, &mut activated);
+                if let Some(dag) = &dag_knowledge {
+                    dag.write().update_dag(block_ref, parents, &mut bfs_buf);
+                }
                 if recovered_commit_leaders.insert(block_ref) {
                     if let Some(commit_data) = store
                         .get_commit(&block_ref)
@@ -705,16 +694,12 @@ impl DagState {
                     .threshold_clock
                     .add_block(*block.reference(), &committee);
                 let mut activated = Vec::new();
-                inner.add_block(
-                    block.clone(),
-                    0,
-                    committee_len,
-                    &mut bfs_buf,
-                    &committee,
-                    &mut activated,
-                );
+                inner.add_block(block.clone(), 0, committee_len, &committee, &mut activated);
+                // Genesis blocks (round 0) intentionally do not enter the
+                // dag knowledge BFS (update_dag short-circuits on round 0).
             }
         }
+        let _ = bfs_buf;
 
         let byzantine_strategy = ByzantineStrategy::from_strategy_str(byzantine_strategy.as_str());
         match &consensus_protocol {
@@ -733,16 +718,6 @@ impl DagState {
                 tracing::info!("Starting Mysticeti-BLS protocol")
             }
         }
-        let push_mode = matches!(
-            resolved_dissemination,
-            DisseminationMode::PushCausal | DisseminationMode::PushUseful
-        );
-        let dag_knowledge = push_mode.then(|| {
-            Arc::new(RwLock::new(DagKnowledgeInner::new(
-                authority,
-                committee.len(),
-            )))
-        });
         let dag_state = Self {
             store: store.clone(),
             byzantine_strategy,
@@ -826,32 +801,6 @@ impl DagState {
         proposal.min(upper_bound)
     }
 
-    pub fn get_dag_sorted(&self) -> Vec<(BlockReference, Vec<BlockReference>, AuthorityBitmask)> {
-        let inner = self.dag_state_inner.read();
-        let mut result: Vec<_> = inner
-            .dag
-            .iter()
-            .enumerate()
-            .flat_map(|(auth_idx, auth_dag)| {
-                auth_dag.iter().flat_map(move |(round, entries)| {
-                    entries.iter().map(move |(digest, (parents, known_by))| {
-                        (
-                            BlockReference {
-                                authority: auth_idx as AuthorityIndex,
-                                round: *round,
-                                digest: *digest,
-                            },
-                            parents.clone(),
-                            *known_by,
-                        )
-                    })
-                })
-            })
-            .collect();
-        result.sort_by_key(|(r, _, _)| r.round);
-        result
-    }
-
     pub fn get_own_authority_index(&self) -> AuthorityIndex {
         self.dag_state_inner.read().authority
     }
@@ -925,25 +874,31 @@ impl DagState {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_block_count.inc();
 
+        let block_ref = *block.reference();
+        let parents_for_dag = self
+            .dag_knowledge
+            .as_ref()
+            .map(|_| block.block_references().clone());
         let (highest_round, lowest_round, _activated) = {
             let mut inner = self.dag_state_inner.write();
             // Keep threshold clock mutation co-located with DAG insertion so
             // runtime block acceptance and recovery use the same path.
-            inner
-                .threshold_clock
-                .add_block(*block.reference(), &self.committee);
-            let mut bfs_buf = Vec::new();
+            inner.threshold_clock.add_block(block_ref, &self.committee);
             let mut activated = Vec::new();
             inner.add_block(
                 block,
                 authority_index_start,
                 authority_index_end,
-                &mut bfs_buf,
                 &self.committee,
                 &mut activated,
             );
             (inner.highest_round, inner.global_lowest_round(), activated)
         };
+        if let Some(parents) = parents_for_dag {
+            if let Some(handle) = self.cordial_handle.read().as_ref() {
+                handle.send(CordialKnowledgeMessage::BlockAdded { block_ref, parents });
+            }
+        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -1022,25 +977,40 @@ impl DagState {
         }
 
         // Phase 2: single write lock for all DAG mutations.
+        let push_mode = self.dag_knowledge.is_some();
+        let mut pending_dag_updates: Vec<(BlockReference, Vec<BlockReference>)> = if push_mode {
+            Vec::with_capacity(blocks.len())
+        } else {
+            Vec::new()
+        };
         let (highest_round, lowest_round, _activated) = {
             let mut inner = self.dag_state_inner.write();
-            let mut bfs_buf = Vec::new();
             let mut activated = Vec::new();
             for block in blocks {
                 inner
                     .threshold_clock
                     .add_block(*block.reference(), &self.committee);
+                if push_mode {
+                    pending_dag_updates
+                        .push((*block.reference(), block.block_references().clone()));
+                }
                 inner.add_block(
                     block,
                     authority_index_start,
                     authority_index_end,
-                    &mut bfs_buf,
                     &self.committee,
                     &mut activated,
                 );
             }
             (inner.highest_round, inner.global_lowest_round(), activated)
         };
+        if push_mode {
+            if let Some(handle) = self.cordial_handle.read().as_ref() {
+                for (block_ref, parents) in pending_dag_updates {
+                    handle.send(CordialKnowledgeMessage::BlockAdded { block_ref, parents });
+                }
+            }
+        }
         self.metrics.dag_highest_round.set(highest_round as i64);
         self.metrics.dag_lowest_round.set(lowest_round as i64);
     }
@@ -1721,15 +1691,6 @@ impl DagState {
         self.dag_state_inner.read().block_exists(reference)
     }
 
-    /// A peer reports it has only synced up to `round`.
-    /// Clear its known-by bit for newer blocks so they become eligible for
-    /// re-dissemination.
-    pub fn reset_peer_known_by_after_round(&self, peer: AuthorityIndex, round: RoundNumber) {
-        self.dag_state_inner
-            .write()
-            .reset_peer_known_by_after_round(peer, round);
-    }
-
     pub fn is_data_available(&self, reference: &BlockReference) -> bool {
         self.dag_state_inner.read().is_data_available(reference)
     }
@@ -2176,7 +2137,7 @@ impl DagState {
     pub fn cleanup(&self) {
         let _timer = self.metrics.dag_state_cleanup_util.utilization_timer();
 
-        let (highest_round, lowest_round, block_count, max_evicted) = {
+        let (highest_round, lowest_round, block_count, max_evicted, evicted_rounds) = {
             let mut inner = self.dag_state_inner.write();
             inner.evict_per_authority();
             inner.prune_certificate_state();
@@ -2190,8 +2151,15 @@ impl DagState {
                     .map(|h| h.len() as i64)
                     .sum::<i64>(),
                 inner.evicted_rounds.iter().copied().max().unwrap_or(0),
+                inner.evicted_rounds.clone(),
             )
         };
+        // Forward eviction to the cordial knowledge actor so it can drop
+        // matching dag/header/shard tracking. Already-attached only — during
+        // recovery cleanup is not invoked.
+        if let Some(handle) = self.cordial_handle.read().as_ref() {
+            handle.send(CordialKnowledgeMessage::EvictBelow(evicted_rounds));
+        }
 
         // Invalidate cache below max evicted round (any partially-evicted round
         // is stale).
@@ -2218,79 +2186,17 @@ impl DagState {
             .collect()
     }
 
-    pub fn get_unsent_own_blocks(
+    /// Pull-mode dissemination: drain unsent own blocks for `peer`, sorted
+    /// by round. Reads only `own_blocks`; no dag knowledge is required.
+    pub fn get_unsent_own_blocks_pull(
         &self,
         sent: &AHashSet<BlockReference>,
         peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<Data<VerifiedBlock>> {
-        self.dag_state_inner
-            .read()
-            .get_unsent_own_blocks(sent, peer, batch_own_block_size)
-    }
-
-    /// Keep only block references whose headers are not already implied as
-    /// known by `peer` via the DAG's `known_by` bitmask. References missing
-    /// from the in-memory DAG are retained, since we cannot prove they are
-    /// redundant.
-    pub fn filter_block_refs_unknown_to_peer(
-        &self,
-        refs: &[BlockReference],
-        peer: AuthorityIndex,
-        limit: usize,
-    ) -> Vec<BlockReference> {
-        self.dag_state_inner
-            .read()
-            .filter_block_refs_unknown_to_peer(refs, peer, limit)
-    }
-
-    pub fn get_unsent_other_blocks(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        batch_other_block_size: usize,
-        max_round_own_blocks: Option<RoundNumber>,
-    ) -> Vec<Data<VerifiedBlock>> {
-        self.dag_state_inner.read().get_unsent_other_blocks(
-            sent,
-            peer,
-            batch_other_block_size,
-            max_round_own_blocks,
-        )
-    }
-
-    pub fn get_unsent_causal_history(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        batch_own_block_size: usize,
-        batch_other_block_size: usize,
-        authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
-    ) -> Vec<Data<VerifiedBlock>> {
-        self.dag_state_inner.read().get_unsent_causal_history(
-            sent,
-            peer,
-            batch_own_block_size,
-            batch_other_block_size,
-            authorities_with_missing_blocks,
-        )
-    }
-
-    pub fn get_unsent_past_cone(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        block_reference: BlockReference,
-        batch_own_block_size: usize,
-        batch_other_block_size: usize,
-    ) -> Vec<Data<VerifiedBlock>> {
-        self.dag_state_inner.read().get_unsent_past_cone(
-            sent,
-            peer,
-            block_reference,
-            batch_own_block_size,
-            batch_other_block_size,
-        )
+        let inner = self.dag_state_inner.read();
+        let own = inner.collect_own_blocks_no_dag(sent, peer, batch_own_block_size);
+        DagStateInner::into_sorted_blocks(own)
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -2345,19 +2251,11 @@ impl DagState {
 
 impl DagStateInner {
     fn global_lowest_round(&self) -> RoundNumber {
-        if self.skip_dag_bfs {
-            self.index
-                .iter()
-                .filter_map(|m| m.keys().next().copied())
-                .min()
-                .unwrap_or(0)
-        } else {
-            self.dag
-                .iter()
-                .filter_map(|m| m.keys().next().copied())
-                .min()
-                .unwrap_or(0)
-        }
+        self.index
+            .iter()
+            .filter_map(|m| m.keys().next().copied())
+            .min()
+            .unwrap_or(0)
     }
 
     fn min_evicted_round(&self) -> RoundNumber {
@@ -2564,9 +2462,6 @@ impl DagStateInner {
 
             self.index[auth] = self.index[auth].split_off(&threshold);
             self.shard_index[auth] = self.shard_index[auth].split_off(&threshold);
-            if !self.skip_dag_bfs {
-                self.dag[auth] = self.dag[auth].split_off(&threshold);
-            }
             if auth == self.authority as usize {
                 for own_blocks_by_peer in &mut self.own_blocks {
                     *own_blocks_by_peer = own_blocks_by_peer.split_off(&threshold);
@@ -2795,7 +2690,6 @@ impl DagStateInner {
         block: Data<VerifiedBlock>,
         authority_index_start: usize,
         authority_index_end: usize,
-        bfs_buffer: &mut Vec<BlockReference>,
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
@@ -2827,7 +2721,6 @@ impl DagStateInner {
         map.insert(reference.digest, block.clone());
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
-        self.update_dag(*reference, block.block_references().clone(), bfs_buffer);
         self.update_data_availability(&block);
         self.update_starfish_speed_leader_hints(&block);
         self.update_inferred_clean_support(&block, committee, activated);
@@ -3066,95 +2959,6 @@ impl DagStateInner {
         }
     }
 
-    fn dag_get(&self, r: &BlockReference) -> Option<&(Vec<BlockReference>, AuthorityBitmask)> {
-        self.dag[r.authority as usize].get(&r.round)?.get(&r.digest)
-    }
-
-    fn dag_get_mut(
-        &mut self,
-        r: &BlockReference,
-    ) -> Option<&mut (Vec<BlockReference>, AuthorityBitmask)> {
-        self.dag[r.authority as usize]
-            .get_mut(&r.round)?
-            .get_mut(&r.digest)
-    }
-
-    fn dag_contains(&self, r: &BlockReference) -> bool {
-        self.dag_get(r).is_some()
-    }
-
-    fn dag_insert(&mut self, r: BlockReference, val: (Vec<BlockReference>, AuthorityBitmask)) {
-        self.dag[r.authority as usize]
-            .entry(r.round)
-            .or_default()
-            .insert(r.digest, val);
-    }
-
-    fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, round: RoundNumber) {
-        if self.skip_dag_bfs {
-            return;
-        }
-        let bit = !AuthoritySet::singleton(peer);
-        for auth_dag in self.dag.iter_mut() {
-            for (_, entries) in auth_dag.range_mut((round.saturating_add(1))..) {
-                for (_, (_, known_by)) in entries.iter_mut() {
-                    *known_by &= bit;
-                }
-            }
-        }
-    }
-
-    /// Insert a block into the DAG and propagate "known-by" bits along the
-    /// causal history. `known_by` tracks only header knowledge; shard/data
-    /// availability is tracked separately in CordialKnowledge.
-    ///
-    /// `bfs_buffer` is a reusable work queue to avoid per-call allocation.
-    /// It will be cleared before use.
-    pub fn update_dag(
-        &mut self,
-        block_reference: BlockReference,
-        parents: Vec<BlockReference>,
-        bfs_buffer: &mut Vec<BlockReference>,
-    ) {
-        if self.skip_dag_bfs || block_reference.round == 0 {
-            return;
-        }
-        if self.dag_contains(&block_reference) {
-            return;
-        }
-        let known_by = AuthoritySet::singleton(block_reference.authority)
-            | AuthoritySet::singleton(self.authority);
-        self.dag_insert(block_reference, (parents, known_by));
-
-        let authority = block_reference.authority;
-        let bit = AuthoritySet::singleton(authority);
-
-        bfs_buffer.clear();
-        bfs_buffer.push(block_reference);
-        // Reusable buffer to copy parent refs without cloning the Vec.
-        let mut parents_buf = Vec::new();
-        while let Some(r) = bfs_buffer.pop() {
-            parents_buf.clear();
-            if let Some((parents, _)) = self.dag_get(&r) {
-                parents_buf.extend_from_slice(parents);
-            } else {
-                continue; // evicted
-            }
-            for &parent in &parents_buf {
-                if parent.round == 0 {
-                    continue;
-                }
-                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
-                    continue; // evicted
-                };
-                if (*known_by & bit).is_empty() {
-                    *known_by |= bit;
-                    bfs_buffer.push(parent);
-                }
-            }
-        }
-    }
-
     pub fn update_data_availability(&mut self, block: &VerifiedBlock) {
         let r = block.reference();
         let auth = r.authority as usize;
@@ -3267,139 +3071,6 @@ impl DagStateInner {
 
     /// Collect unsent blocks for a peer by iterating the DAG, skipping those in
     /// `sent`.
-    fn collect_unsent_blocks(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        filter: impl Fn(&BlockReference) -> bool,
-        limit: usize,
-    ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
-        let peer_bit = AuthoritySet::singleton(peer);
-        let mut candidates: Vec<(BlockReference, RoundNumber)> = self
-            .dag
-            .iter()
-            .enumerate()
-            .flat_map(|(auth_idx, auth_dag)| {
-                auth_dag.iter().flat_map(move |(round, entries)| {
-                    entries.iter().map(move |(digest, (_, known_by))| {
-                        (
-                            BlockReference {
-                                authority: auth_idx as AuthorityIndex,
-                                round: *round,
-                                digest: *digest,
-                            },
-                            *known_by,
-                        )
-                    })
-                })
-            })
-            .filter(|(r, known_by)| {
-                (*known_by & peer_bit).is_empty() && !sent.contains(r) && filter(r)
-            })
-            .map(|(r, _)| (r, r.round))
-            .collect();
-        candidates.sort_by_key(|(_, round)| *round);
-        candidates.truncate(limit);
-        candidates
-            .into_iter()
-            .map(|(r, round)| {
-                let block = self
-                    .get_block(r)
-                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
-                (block, round)
-            })
-            .collect()
-    }
-
-    /// Collect unsent blocks with a round-first, authority-fair policy:
-    /// within each round, drain approximately equally across authorities.
-    fn collect_unsent_blocks_round_fair(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        filter: impl Fn(&BlockReference) -> bool,
-        limit: usize,
-    ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
-        if limit == 0 {
-            return Vec::new();
-        }
-
-        let peer_bit = AuthoritySet::singleton(peer);
-        let mut per_authority: Vec<Vec<BlockReference>> = vec![Vec::new(); self.committee_size];
-
-        for (auth_idx, auth_dag) in self.dag.iter().enumerate() {
-            for (round, entries) in auth_dag {
-                for (digest, (_, known_by)) in entries {
-                    let r = BlockReference {
-                        authority: auth_idx as AuthorityIndex,
-                        round: *round,
-                        digest: *digest,
-                    };
-                    if (*known_by & peer_bit).is_empty() && !sent.contains(&r) && filter(&r) {
-                        per_authority[auth_idx].push(r);
-                    }
-                }
-            }
-        }
-
-        for refs in &mut per_authority {
-            refs.sort_by_key(|r| r.round);
-        }
-
-        let mut positions = vec![0usize; per_authority.len()];
-        let mut selected: Vec<(BlockReference, RoundNumber)> = Vec::with_capacity(limit);
-
-        while selected.len() < limit {
-            let min_round = per_authority
-                .iter()
-                .enumerate()
-                .filter_map(|(auth, refs)| refs.get(positions[auth]).map(|r| r.round))
-                .min();
-            let Some(min_round) = min_round else {
-                break;
-            };
-
-            loop {
-                let mut made_progress = false;
-                for auth in 0..per_authority.len() {
-                    if selected.len() >= limit {
-                        break;
-                    }
-                    let idx = positions[auth];
-                    if let Some(next_ref) = per_authority[auth].get(idx) {
-                        if next_ref.round == min_round {
-                            selected.push((*next_ref, next_ref.round));
-                            positions[auth] += 1;
-                            made_progress = true;
-                        }
-                    }
-                }
-
-                if selected.len() >= limit {
-                    break;
-                }
-
-                let round_has_more = per_authority.iter().enumerate().any(|(auth, refs)| {
-                    refs.get(positions[auth])
-                        .is_some_and(|next_ref| next_ref.round == min_round)
-                });
-                if !made_progress || !round_has_more {
-                    break;
-                }
-            }
-        }
-
-        selected
-            .into_iter()
-            .map(|(r, round)| {
-                let block = self
-                    .get_block(r)
-                    .unwrap_or_else(|| panic!("Block index corrupted, not found: {r}"));
-                (block, round)
-            })
-            .collect()
-    }
-
     fn into_sorted_blocks(
         mut blocks: Vec<(Data<VerifiedBlock>, RoundNumber)>,
     ) -> Vec<Data<VerifiedBlock>> {
@@ -3407,118 +3078,8 @@ impl DagStateInner {
         blocks.into_iter().map(|x| x.0).collect()
     }
 
-    pub fn get_unsent_own_blocks(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        batch_own_block_size: usize,
-    ) -> Vec<Data<VerifiedBlock>> {
-        let Some(own_blocks) = self.own_blocks.get(peer as usize) else {
-            return Vec::new();
-        };
-        let peer_bit = AuthoritySet::singleton(peer);
-        let mut result = Vec::with_capacity(batch_own_block_size);
-
-        for (round, digest) in own_blocks {
-            if result.len() >= batch_own_block_size {
-                break;
-            }
-
-            let block_ref = BlockReference {
-                authority: self.authority,
-                round: *round,
-                digest: *digest,
-            };
-
-            if sent.contains(&block_ref) {
-                continue;
-            }
-
-            let Some((_, known_by)) = self.dag_get(&block_ref) else {
-                // Preserve the old behavior: once the DAG metadata for this round
-                // is evicted, this path stops considering it for unsent scans.
-                continue;
-            };
-            if !(*known_by & peer_bit).is_empty() {
-                continue;
-            }
-
-            let block = self
-                .get_transmission_block(block_ref)
-                .unwrap_or_else(|| panic!("Block index corrupted, not found: {block_ref}"));
-            result.push(block);
-        }
-
-        result
-    }
-
-    fn filter_block_refs_unknown_to_peer(
-        &self,
-        refs: &[BlockReference],
-        peer: AuthorityIndex,
-        limit: usize,
-    ) -> Vec<BlockReference> {
-        let peer_bit = AuthoritySet::singleton(peer);
-        let mut result = Vec::with_capacity(limit.min(refs.len()));
-
-        for block_ref in refs {
-            if result.len() >= limit {
-                break;
-            }
-
-            match self.dag_get(block_ref) {
-                Some((_, known_by)) if !(*known_by & peer_bit).is_empty() => {}
-                _ => result.push(*block_ref),
-            }
-        }
-
-        result
-    }
-
-    pub fn get_unsent_other_blocks(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        batch_other_block_size: usize,
-        max_round: Option<RoundNumber>,
-    ) -> Vec<Data<VerifiedBlock>> {
-        let auth = self.authority;
-        let max = max_round.unwrap_or(RoundNumber::MAX);
-        Self::into_sorted_blocks(self.collect_unsent_blocks(
-            sent,
-            peer,
-            |r| r.authority != auth && r.round < max,
-            batch_other_block_size,
-        ))
-    }
-
-    pub fn get_unsent_causal_history(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        batch_own_block_size: usize,
-        batch_other_block_size: usize,
-        authorities_with_missing_blocks: AHashSet<AuthorityIndex>,
-    ) -> Vec<Data<VerifiedBlock>> {
-        if self.skip_dag_bfs {
-            let own = self.collect_own_blocks_no_dag(sent, peer, batch_own_block_size);
-            return Self::into_sorted_blocks(own);
-        }
-        let auth = self.authority;
-        let own =
-            self.collect_unsent_blocks(sent, peer, |r| r.authority == auth, batch_own_block_size);
-        let max = own.iter().map(|x| x.1).max().unwrap_or(RoundNumber::MAX);
-        let other = self.collect_unsent_blocks(
-            sent,
-            peer,
-            |r| authorities_with_missing_blocks.contains(&r.authority) && r.round < max,
-            batch_other_block_size,
-        );
-        Self::into_sorted_blocks(own.into_iter().chain(other).collect())
-    }
-
-    /// Collect own unsent blocks without DAG known_by metadata.
-    /// Used by pull-mode protocols where the BFS is skipped.
+    /// Collect own unsent blocks. Pull-mode dissemination: blocks are
+    /// always kept; the broadcaster's `sent` set provides idempotency.
     fn collect_own_blocks_no_dag(
         &self,
         sent: &AHashSet<BlockReference>,
@@ -3550,31 +3111,6 @@ impl DagStateInner {
             result.push((block, *round));
         }
         result
-    }
-
-    pub fn get_unsent_past_cone(
-        &self,
-        sent: &AHashSet<BlockReference>,
-        peer: AuthorityIndex,
-        block_reference: BlockReference,
-        batch_own_block_size: usize,
-        batch_other_block_size: usize,
-    ) -> Vec<Data<VerifiedBlock>> {
-        let auth = self.authority;
-        let max = block_reference.round;
-        let own = self.collect_unsent_blocks(
-            sent,
-            peer,
-            |r| r.authority == auth && r.round < max,
-            batch_own_block_size,
-        );
-        let other = self.collect_unsent_blocks_round_fair(
-            sent,
-            peer,
-            |r| r.authority != auth && r.round < max,
-            batch_other_block_size,
-        );
-        Self::into_sorted_blocks(own.into_iter().chain(other).collect())
     }
 
     fn add_own_index(

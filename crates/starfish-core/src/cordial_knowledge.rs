@@ -797,7 +797,7 @@ impl DagKnowledgeInner {
     /// Insert a block into the dag and propagate `known_by` bits along its
     /// causal history. `bfs_buffer` is reused across calls to avoid
     /// per-message allocation; the caller (the actor) owns it.
-    fn update_dag(
+    pub fn update_dag(
         &mut self,
         block_ref: BlockReference,
         parents: Vec<BlockReference>,
@@ -839,7 +839,11 @@ impl DagKnowledgeInner {
     /// Clear the `peer` bit from `known_by` for all blocks at rounds strictly
     /// greater than `after_round`. Called when a peer reconnects: any blocks
     /// we'd marked as already known to them are conservatively re-sent.
-    fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, after_round: RoundNumber) {
+    pub fn reset_peer_known_by_after_round(
+        &mut self,
+        peer: AuthorityIndex,
+        after_round: RoundNumber,
+    ) {
         let bit = !AuthoritySet::singleton(peer);
         let from = after_round.saturating_add(1);
         for auth_dag in self.dag.iter_mut() {
