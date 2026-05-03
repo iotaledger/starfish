@@ -780,7 +780,6 @@ impl DagState {
         self.dag_knowledge.is_some()
     }
 
-
     /// Returns the cached genesis blocks (one per authority, round 0).
     pub fn genesis_blocks(&self) -> &[Data<VerifiedBlock>] {
         &self.genesis

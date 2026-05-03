@@ -417,22 +417,42 @@ impl MeasurementsCollection {
         self.max_result(label, |x| x.count) as f64 / duration_secs
     }
 
-    /// Aggregate the per-scraper bandwidth in bytes per second.
+    /// Aggregate the per-scraper bandwidth in bytes per second over the
+    /// active submission window only.
+    ///
+    /// The validator's `benchmark_duration` Prometheus counter is gated so
+    /// it stays at zero during warmup; the first scrape with a non-zero
+    /// timestamp therefore marks the start of the active window. This
+    /// function takes the delta of the cumulative `bytes_sent_total`
+    /// (or `count`) counter between that baseline scrape and the latest
+    /// scrape, dividing by the same delta in timestamps. For old runs
+    /// where `benchmark_duration` ticked from boot, `timestamp > 0` from
+    /// the first scrape onwards and the formula degenerates to today's
+    /// behavior.
     pub fn aggregate_bandwidth(&self, label: &str) -> Vec<f64> {
-        let duration_secs = self.max_result(label, |x| x.timestamp).as_secs_f64();
-        if duration_secs == 0.0 {
+        let Some(scraper_data) = self.data.get(label) else {
             return Vec::new();
-        }
-
-        self.latest_measurements(label)
-            .into_iter()
-            .map(|measurement| {
-                let total = if measurement.scalar > 0.0 {
-                    measurement.scalar
-                } else {
-                    measurement.count as f64
+        };
+        scraper_data
+            .values()
+            .filter_map(|samples| {
+                let baseline = samples
+                    .iter()
+                    .find(|s| s.timestamp.as_secs() > 0)
+                    .or_else(|| samples.first())?;
+                let last = samples.last()?;
+                let dt = last.timestamp.as_secs_f64() - baseline.timestamp.as_secs_f64();
+                if dt <= 0.0 {
+                    return None;
+                }
+                let pick = |m: &Measurement| {
+                    if m.scalar > 0.0 {
+                        m.scalar
+                    } else {
+                        m.count as f64
+                    }
                 };
-                total / duration_secs
+                Some((pick(last) - pick(baseline)) / dt)
             })
             .collect()
     }
@@ -503,12 +523,31 @@ impl MeasurementsCollection {
         self.aggregate_bandwidth("bytes_sent_total")
     }
 
+    /// Per-validator CPU usage in cores, averaged over the active window.
+    ///
+    /// `process_cpu_seconds_total` is exposed by Prometheus's process
+    /// collector and ticks from validator boot, so we compute the rate as a
+    /// delta between the first in-window scrape (the earliest with a
+    /// non-zero `benchmark_duration` timestamp) and the latest scrape.
+    /// For old runs without active-window gating this falls back to the
+    /// first sample in the series and produces today's "boot-to-end" rate.
     fn cpu_samples(&self) -> Vec<f64> {
-        self.latest_measurements("process_cpu_seconds_total")
-            .into_iter()
-            .filter_map(|measurement| {
-                let duration_secs = measurement.timestamp.as_secs_f64();
-                (duration_secs > 0.0).then_some(measurement.scalar / duration_secs)
+        let Some(scraper_data) = self.data.get("process_cpu_seconds_total") else {
+            return Vec::new();
+        };
+        scraper_data
+            .values()
+            .filter_map(|samples| {
+                let baseline = samples
+                    .iter()
+                    .find(|s| s.timestamp.as_secs() > 0)
+                    .or_else(|| samples.first())?;
+                let last = samples.last()?;
+                let dt = last.timestamp.as_secs_f64() - baseline.timestamp.as_secs_f64();
+                if dt <= 0.0 {
+                    return None;
+                }
+                Some((last.scalar - baseline.scalar) / dt)
             })
             .collect()
     }
