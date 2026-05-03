@@ -344,6 +344,66 @@ fn infer_peer_knowledge_from_received_batch(
     }
 }
 
+/// Spawn the per-connection worker task that drains raw shard payloads,
+/// verifies their merkle proofs, applies the dedup filter, and forwards the
+/// surviving shards to the global shard reconstructor. Running off the
+/// connection's main loop keeps verification work off the path that handles
+/// the next incoming network message.
+fn spawn_standalone_shard_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
+    mut rx: mpsc::UnboundedReceiver<Vec<ShardPayload>>,
+    inner: Arc<NetworkSyncerInner<H, C>>,
+    filter_for_shards: Arc<FilterForShards>,
+    metrics: Arc<Metrics>,
+    committee_size: usize,
+    peer: String,
+) {
+    tokio::spawn(async move {
+        while let Some(shards) = rx.recv().await {
+            let maybe_tx = inner.shard_tx.lock().clone();
+            let Some(shard_tx) = maybe_tx else { continue };
+
+            let mut verified: Vec<(BlockReference, ShardMessage, usize)> =
+                Vec::with_capacity(shards.len());
+            for payload in shards {
+                let shard_index = payload.shard.shard_index();
+                if !filter_for_shards.needed(&payload.block_reference.digest, shard_index) {
+                    metrics.filtered_shards_total.inc();
+                    continue;
+                }
+                if !payload.shard.verify(committee_size) {
+                    tracing::warn!(
+                        "Standalone shard for {:?} from {} failed Merkle proof — dropped",
+                        payload.block_reference,
+                        peer
+                    );
+                    continue;
+                }
+                verified.push((
+                    payload.block_reference,
+                    ShardMessage::Shard {
+                        block_reference: payload.block_reference,
+                        transactions_commitment: payload.shard.transactions_commitment(),
+                        shard: payload.shard.shard().clone(),
+                        shard_index,
+                    },
+                    shard_index,
+                ));
+            }
+
+            let filter_entries: Vec<_> = verified
+                .iter()
+                .map(|(r, _, idx)| (r.digest, *idx))
+                .collect();
+            filter_for_shards.add_batch(&filter_entries);
+
+            let batch: Vec<_> = verified.into_iter().map(|(_, msg, _)| msg).collect();
+            if !batch.is_empty() {
+                let _ = shard_tx.send(batch);
+            }
+        }
+    });
+}
+
 /// Per-connection state for `connection_task`. Groups the 15+ shared locals
 /// into a struct so the 400-line match body can be split into focused handlers.
 struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static> {
@@ -359,6 +419,11 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     peer: String,
     own_id: AuthorityIndex,
     sender: mpsc::Sender<NetworkMessage>,
+    /// Hand-off channel into the per-connection standalone-shard worker
+    /// task. The main connection loop fires raw shard payloads here and
+    /// returns immediately; the worker verifies merkle proofs and forwards
+    /// to the global shard reconstructor.
+    standalone_shard_tx: mpsc::UnboundedSender<Vec<ShardPayload>>,
     bls_service: Option<BlsServiceHandle>,
     sailfish_service: Option<SailfishServiceHandle>,
 }
@@ -404,6 +469,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         let own_id = inner.dag_state.get_own_authority_index();
         let peer = format_authority_index(peer_id);
 
+        let (standalone_shard_tx, standalone_shard_rx) = mpsc::unbounded_channel();
+        spawn_standalone_shard_worker(
+            standalone_shard_rx,
+            inner.clone(),
+            filter_for_shards.clone(),
+            metrics.clone(),
+            committee_size,
+            peer.clone(),
+        );
+
         Self {
             consensus_protocol,
             inner,
@@ -417,6 +492,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             peer,
             own_id,
             sender: connection.sender.clone(),
+            standalone_shard_tx,
             bls_service,
             sailfish_service,
         }
@@ -668,6 +744,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
         }
 
+        // Process full blocks first. If they land cleanly (no missing
+        // parents), the headers shipped alongside them are causally
+        // redundant and we skip the verify/insert work entirely.
+        let missing_parents = self
+            .process_full_blocks(blocks_with_transactions, source)
+            .await;
+
         // Header-only blocks are only valid for Starfish erasure-coding
         // variants. SailfishPlusPlus and Mysticeti require full blocks;
         // reject any headers a peer may have sent.
@@ -678,12 +761,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishBls
         ) {
             blocks_without_transactions.extend(headers);
-            let header_source = match source {
-                DataSource::BlockBundleStreaming => DataSource::BlockBundleStreamingHeader,
-                other => other,
-            };
-            self.process_block_headers(blocks_without_transactions, header_source)
-                .await;
+            if !blocks_without_transactions.is_empty() && !missing_parents.is_empty() {
+                let header_source = match source {
+                    DataSource::BlockBundleStreaming => DataSource::BlockBundleStreamingHeader,
+                    other => other,
+                };
+                self.process_block_headers(blocks_without_transactions, header_source)
+                    .await;
+            } else if !blocks_without_transactions.is_empty() {
+                self.metrics
+                    .skipped_redundant_headers_total
+                    .inc_by(blocks_without_transactions.len() as u64);
+            }
         } else if !headers.is_empty() {
             tracing::warn!(
                 "Rejecting {} header-only blocks from peer {} \
@@ -694,86 +783,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             );
         }
 
-        // Process standalone shards — route directly to shard reconstructor
+        // Process standalone shards last so that any full blocks that
+        // landed above can cancel in-flight reconstruction work via
+        // ShardMessage::FullBlock before we accumulate more shards. The
+        // verification + forwarding happens on a per-connection worker
+        // task so the main connection loop does not block on merkle
+        // proof checks.
         if !shards.is_empty() {
-            self.process_standalone_shards(shards).await;
+            let _ = self.standalone_shard_tx.send(shards);
         }
-
-        // Then process blocks with transactions
-        self.process_full_blocks(blocks_with_transactions, source)
-            .await;
 
         drop(timer);
-    }
-
-    async fn process_standalone_shards(&mut self, shards: Vec<ShardPayload>) {
-        let maybe_tx = self.inner.shard_tx.lock().clone();
-        let Some(shard_tx) = maybe_tx else { return };
-        let connection_knowledge = self
-            .inner
-            .cordial_knowledge
-            .connection_knowledge(self.peer_id);
-        let committee_size = self.inner.committee.len();
-
-        // --- verify loop (only read locks on filter_for_shards) ---
-        let mut verified: Vec<(BlockReference, ShardMessage, usize)> = Vec::new();
-        for payload in shards {
-            let shard_index = payload.shard.shard_index();
-            if !self
-                .filter_for_shards
-                .needed(&payload.block_reference.digest, shard_index)
-            {
-                self.metrics.filtered_shards_total.inc();
-                continue;
-            }
-
-            // Verify the Merkle proof against the embedded transactions commitment.
-            if !payload.shard.verify(committee_size) {
-                tracing::warn!(
-                    "Standalone shard for {:?} from {} failed Merkle proof — dropped",
-                    payload.block_reference,
-                    self.peer
-                );
-                continue;
-            }
-
-            verified.push((
-                payload.block_reference,
-                ShardMessage::Shard {
-                    block_reference: payload.block_reference,
-                    transactions_commitment: payload.shard.transactions_commitment(),
-                    shard: payload.shard.shard().clone(),
-                    shard_index,
-                },
-                shard_index,
-            ));
-        }
-
-        // --- batch CK update (one write lock) ---
-        let useful_shard_refs: Vec<_> = verified.iter().map(|(r, _, _)| *r).collect();
-        if let Some(ck) = connection_knowledge.as_ref() {
-            ck.write().mark_shards_useful_from_peer(&useful_shard_refs);
-        }
-        if !useful_shard_refs.is_empty() {
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
-                    useful_shard_refs.clone(),
-                ));
-        }
-
-        // --- batch filter update (one write lock) ---
-        let filter_entries: Vec<_> = verified
-            .iter()
-            .map(|(r, _, idx)| (r.digest, *idx))
-            .collect();
-        self.filter_for_shards.add_batch(&filter_entries);
-
-        // --- send batch ---
-        let batch: Vec<_> = verified.into_iter().map(|(_, msg, _)| msg).collect();
-        if !batch.is_empty() {
-            let _ = shard_tx.send(batch).await;
-        }
     }
 
     async fn process_block_headers(
@@ -869,9 +889,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     headers: header_refs,
                     shards: Vec::new(),
                 });
+            // Every newly received header-only block signals that we'll
+            // need shards from that author to reconstruct the full block;
+            // mark the supplying peer as a useful shard source for that
+            // author, regardless of payload. Mirrors IOTA's
+            // report_useful_authors trigger.
             let useful_shard_refs: Vec<_> = new_data_blocks
                 .iter()
-                .filter(|block| !block.has_empty_payload())
                 .map(|block| *block.reference())
                 .collect();
             if !useful_shard_refs.is_empty() {
@@ -907,7 +931,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
     }
 
-    async fn process_full_blocks(&mut self, blocks: Vec<Data<VerifiedBlock>>, source: DataSource) {
+    async fn process_full_blocks(
+        &mut self,
+        blocks: Vec<Data<VerifiedBlock>>,
+        source: DataSource,
+    ) -> AHashSet<BlockReference> {
         let connection_knowledge = self
             .inner
             .cordial_knowledge
@@ -993,7 +1021,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 .map(|b| ShardMessage::FullBlock(*b.reference()))
                 .collect();
             if !full_block_msgs.is_empty() {
-                let _ = shard_tx.send(full_block_msgs).await;
+                let _ = shard_tx.send(full_block_msgs);
             }
         }
 
@@ -1005,61 +1033,61 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             verified_data_blocks.len(),
             verified_data_blocks
         );
-        if !verified_data_blocks.is_empty() {
-            // Send block copies to BLS service for signature verification.
-            if let Some(ref bls) = self.bls_service {
-                bls.send(BlsServiceMessage::ProcessBlocks(
-                    verified_data_blocks.clone(),
-                ));
-            }
-            // Notify CordialKnowledge about all new headers and shards in one batch.
-            let header_refs: Vec<_> = verified_data_blocks
-                .iter()
-                .map(|block| *block.reference())
-                .collect();
-            let shard_refs: Vec<_> = verified_data_blocks
-                .iter()
-                .zip(verified_has_shard.iter())
-                .filter_map(|(block, &has_shard)| has_shard.then_some(*block.reference()))
-                .collect();
-            self.inner
-                .cordial_knowledge
-                .send(CordialKnowledgeMessage::DagParts {
-                    headers: header_refs,
-                    shards: shard_refs,
-                });
-            let (_pending_block_references, missing_parents, _processed_additional_blocks) = self
-                .inner
-                .syncer
-                .add_blocks(verified_block_shards, source)
-                .await;
-            if !missing_parents.is_empty() {
-                tracing::debug!(
-                    "Missing parents when processing block from peer {:?} after source={}: {:?}",
-                    self.peer,
-                    source,
-                    missing_parents
-                );
-            }
-            if !missing_parents.is_empty() {
-                let missing_parents = missing_parents.iter().copied().collect::<Vec<_>>();
-                tracing::debug!(
-                    "Make request missing parents of blocks {:?} from peer \
-                     {:?} after source={}",
-                    missing_parents,
-                    self.peer,
-                    source
-                );
-                self.metrics
-                    .block_sync_requests_sent
-                    .with_label_values(&[&self.peer_id.to_string()])
-                    .inc();
-                self.sender
-                    .send(NetworkMessage::MissingParentsRequest(missing_parents))
-                    .await
-                    .ok();
-            }
+        if verified_data_blocks.is_empty() {
+            return AHashSet::new();
         }
+        // Send block copies to BLS service for signature verification.
+        if let Some(ref bls) = self.bls_service {
+            bls.send(BlsServiceMessage::ProcessBlocks(
+                verified_data_blocks.clone(),
+            ));
+        }
+        // Notify CordialKnowledge about all new headers and shards in one batch.
+        let header_refs: Vec<_> = verified_data_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        let shard_refs: Vec<_> = verified_data_blocks
+            .iter()
+            .zip(verified_has_shard.iter())
+            .filter_map(|(block, &has_shard)| has_shard.then_some(*block.reference()))
+            .collect();
+        self.inner
+            .cordial_knowledge
+            .send(CordialKnowledgeMessage::DagParts {
+                headers: header_refs,
+                shards: shard_refs,
+            });
+        let (_pending_block_references, missing_parents, _processed_additional_blocks) = self
+            .inner
+            .syncer
+            .add_blocks(verified_block_shards, source)
+            .await;
+        if !missing_parents.is_empty() {
+            tracing::debug!(
+                "Missing parents when processing block from peer {:?} after source={}: {:?}",
+                self.peer,
+                source,
+                missing_parents
+            );
+            let missing_parents_vec = missing_parents.iter().copied().collect::<Vec<_>>();
+            tracing::debug!(
+                "Make request missing parents of blocks {:?} from peer \
+                 {:?} after source={}",
+                missing_parents_vec,
+                self.peer,
+                source
+            );
+            self.metrics
+                .block_sync_requests_sent
+                .with_label_values(&[&self.peer_id.to_string()])
+                .inc();
+            self.sender
+                .send(NetworkMessage::MissingParentsRequest(missing_parents_vec))
+                .await
+                .ok();
+        }
+        missing_parents
     }
 
     /// Returns `true` to continue, `false` to break the connection loop.
@@ -1289,8 +1317,9 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
     pub gc_round: Arc<AtomicU32>,
-    pub shard_tx:
-        parking_lot::Mutex<Option<mpsc::Sender<Vec<crate::shard_reconstructor::ShardMessage>>>>,
+    pub shard_tx: parking_lot::Mutex<
+        Option<mpsc::UnboundedSender<Vec<crate::shard_reconstructor::ShardMessage>>>,
+    >,
     pub cordial_knowledge: CordialKnowledgeHandle,
     /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,

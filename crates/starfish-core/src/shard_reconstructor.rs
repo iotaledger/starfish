@@ -16,7 +16,7 @@ use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use tokio::{
     sync::{
         Mutex, mpsc,
-        mpsc::{Receiver, Sender},
+        mpsc::{Sender, UnboundedReceiver, UnboundedSender},
     },
     task::JoinHandle,
     time::{Instant, sleep_until},
@@ -101,12 +101,12 @@ pub type DecodedBlocks = Vec<ReconstructedTransactionData>;
 
 /// Public handle for the running shard reconstructor.
 pub struct ShardReconstructorHandle {
-    shard_message_sender: Sender<Vec<ShardMessage>>,
+    shard_message_sender: UnboundedSender<Vec<ShardMessage>>,
     join_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ShardReconstructorHandle {
-    pub fn shard_message_sender(&self) -> Sender<Vec<ShardMessage>> {
+    pub fn shard_message_sender(&self) -> UnboundedSender<Vec<ShardMessage>> {
         self.shard_message_sender.clone()
     }
 
@@ -137,12 +137,12 @@ struct ShardReconstructor {
     processed_blocks: BTreeSet<BlockReference>,
     reconstruction_queue: AHashSet<BlockReference>,
     // Incoming shard messages (batched)
-    shard_rx: Receiver<Vec<ShardMessage>>,
+    shard_rx: UnboundedReceiver<Vec<ShardMessage>>,
     // Worker pool channels
-    ready_tx: Sender<ReconstructionJob>,
-    ready_rx: Arc<Mutex<Receiver<ReconstructionJob>>>,
-    result_tx: Sender<ReconstructionResult>,
-    result_rx: Receiver<ReconstructionResult>,
+    ready_tx: UnboundedSender<ReconstructionJob>,
+    ready_rx: Arc<Mutex<UnboundedReceiver<ReconstructionJob>>>,
+    result_tx: UnboundedSender<ReconstructionResult>,
+    result_rx: UnboundedReceiver<ReconstructionResult>,
     // Decoded blocks waiting to be flushed to core
     pending_decoded: DecodedBlocks,
     // Output channel to core bridge
@@ -178,9 +178,9 @@ impl ShardReconstructor {
         let info_length = committee.info_length();
         let committee_size = committee.len();
 
-        let (shard_tx, shard_rx) = mpsc::channel(100_000);
-        let (ready_tx, ready_rx) = mpsc::channel(1000);
-        let (result_tx, result_rx) = mpsc::channel(1000);
+        let (shard_tx, shard_rx) = mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = mpsc::unbounded_channel();
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
 
         let mut reconstructor = Self {
             info_length,
@@ -269,7 +269,6 @@ impl ShardReconstructor {
                                     block_reference,
                                     data,
                                 })
-                                .await
                                 .is_err()
                             {
                                 break;
@@ -298,7 +297,7 @@ impl ShardReconstructor {
                     match msgs {
                         Some(msgs) => {
                             for msg in msgs {
-                                self.handle_message(msg).await;
+                                self.handle_message(msg);
                             }
                         }
                         None => {
@@ -328,7 +327,7 @@ impl ShardReconstructor {
         self.flush_to_core().await;
     }
 
-    async fn handle_message(&mut self, msg: ShardMessage) {
+    fn handle_message(&mut self, msg: ShardMessage) {
         match msg {
             ShardMessage::Shard {
                 block_reference,
@@ -369,7 +368,6 @@ impl ShardReconstructor {
                     if self
                         .ready_tx
                         .send((block_reference, acc.transactions_commitment, acc.shards))
-                        .await
                         .is_err()
                     {
                         tracing::warn!("Worker channel closed");
@@ -587,7 +585,7 @@ mod tests {
                 transactions_commitment: block.merkle_root(),
             })
             .collect();
-        sender.send(batch).await.unwrap();
+        sender.send(batch).unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(5), decoded_rx.recv()).await;
         assert!(
@@ -647,12 +645,10 @@ mod tests {
                 shard_index: 0,
                 transactions_commitment: block.merkle_root(),
             }])
-            .await
             .unwrap();
 
         sender
             .send(vec![ShardMessage::FullBlock(block_ref)])
-            .await
             .unwrap();
 
         let remaining: Vec<_> = shards
@@ -666,7 +662,7 @@ mod tests {
                 transactions_commitment: block.merkle_root(),
             })
             .collect();
-        sender.send(remaining).await.unwrap();
+        sender.send(remaining).unwrap();
 
         let result = tokio::time::timeout(Duration::from_millis(200), decoded_rx.recv()).await;
         assert!(
