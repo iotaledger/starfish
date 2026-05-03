@@ -76,7 +76,13 @@ impl BlsBatchVerifier {
                 pk_aff,
                 false, // pk_validate (committee keys validated once at startup)
                 sig_aff,
-                false, // sig_groupcheck (already validated from_bytes)
+                // sig_groupcheck: blst::Signature::from_bytes only decompresses
+                // the curve point — it does NOT verify that the point lies in
+                // the prime-order subgroup of G1. Without this check, a
+                // malicious signer could craft a non-subgroup signature that
+                // still passes finalverify, breaking message-binding under
+                // known conjugate-element attacks.
+                true,
                 &rand_bytes,
                 64, // nbits
                 &task.message,
