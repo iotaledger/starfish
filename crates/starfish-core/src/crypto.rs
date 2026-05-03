@@ -803,6 +803,14 @@ impl fmt::Debug for BlsSignatureBytes {
 // --- BlsPublicKey impls ---
 
 impl BlsPublicKey {
+    /// Validate this public key once (subgroup + infinity checks).
+    ///
+    /// When committee keys are static, callers can validate them at startup and
+    /// then skip repeated `pk_validate` work during signature verification.
+    pub fn validate(&self) -> Result<(), blst::BLST_ERROR> {
+        self.0.validate()
+    }
+
     pub fn verify(
         &self,
         digest: &[u8; 32],
@@ -811,6 +819,26 @@ impl BlsPublicKey {
         let signature =
             bls::Signature::from_bytes(&sig.0).map_err(|_| blst::BLST_ERROR::BLST_BAD_ENCODING)?;
         let result = signature.verify(true, digest, BLS_DST, &[], &self.0, true);
+        if result == blst::BLST_ERROR::BLST_SUCCESS {
+            Ok(())
+        } else {
+            Err(result)
+        }
+    }
+
+    /// Verify a signature against this public key without re-validating the
+    /// public key.
+    ///
+    /// Safe when this public key was already validated once (e.g. at committee
+    /// construction).
+    pub fn verify_trusted(
+        &self,
+        digest: &[u8; 32],
+        sig: &BlsSignatureBytes,
+    ) -> Result<(), blst::BLST_ERROR> {
+        let signature =
+            bls::Signature::from_bytes(&sig.0).map_err(|_| blst::BLST_ERROR::BLST_BAD_ENCODING)?;
+        let result = signature.verify(true, digest, BLS_DST, &[], &self.0, false);
         if result == blst::BLST_ERROR::BLST_SUCCESS {
             Ok(())
         } else {

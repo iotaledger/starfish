@@ -74,7 +74,7 @@ impl BlsBatchVerifier {
 
             let result = pairing.mul_n_aggregate(
                 pk_aff,
-                true, // pk_validate
+                false, // pk_validate (committee keys validated once at startup)
                 sig_aff,
                 false, // sig_groupcheck (already validated from_bytes)
                 &rand_bytes,
@@ -102,7 +102,7 @@ impl BlsBatchVerifier {
         signature: &BlsSignatureBytes,
         public_key: &BlsPublicKey,
     ) -> bool {
-        public_key.verify(message, signature).is_ok()
+        public_key.verify_trusted(message, signature).is_ok()
     }
 
     /// Verify a batch of BLS signatures across multiple threads.

@@ -47,6 +47,15 @@ impl Committee {
 
         // Ensure all stakes are positive
         assert!(authorities.iter().all(|a| a.stake() > 0));
+
+        // Committee BLS public keys are static. Validate them once so that the
+        // hot path can skip repeated `pk_validate` work during signature
+        // verification.
+        for (authority, info) in authorities.iter().enumerate() {
+            info.bls_public_key()
+                .validate()
+                .unwrap_or_else(|e| panic!("Invalid BLS public key for authority {authority}: {e:?}"));
+        }
         use crate::types::MAX_COMMITTEE_SIZE;
         assert!(
             authorities.len() <= MAX_COMMITTEE_SIZE as usize,
