@@ -2,12 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    cmp::max,
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-    time::Duration,
-};
+use std::{cmp::max, collections::HashMap, sync::Arc, time::Duration};
 
 use ahash::AHashSet;
 use futures::future::join_all;
@@ -915,38 +910,15 @@ where
     let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
         return Vec::new();
     };
-    let sent = sent_to_peer.read();
-    let mut queued = AHashSet::with_capacity(roots.len());
-    let mut frontier: VecDeque<_> = roots.iter().copied().collect();
-    let mut collected = Vec::with_capacity(limit);
-
-    while !frontier.is_empty() && collected.len() < limit {
-        let frontier_refs: Vec<_> = frontier.drain(..).collect();
-        let blocks = inner.dag_state.get_storage_blocks(&frontier_refs);
-        for block in blocks.into_iter().flatten() {
-            for parent in block.block_references() {
-                if parent.round == 0
-                    || parent.authority == peer
-                    || parent.authority == own_authority
-                    || sent.contains(parent)
-                    || !queued.insert(*parent)
-                {
-                    continue;
-                }
-                if ck.read().knows_header(parent) {
-                    continue;
-                }
-                collected.push(*parent);
-                frontier.push_back(*parent);
-                if collected.len() >= limit {
-                    break;
-                }
-            }
-            if collected.len() >= limit {
-                break;
-            }
-        }
-    }
+    let Some(dag_knowledge) = inner.cordial_knowledge.dag_knowledge() else {
+        return Vec::new();
+    };
+    let collected = {
+        let sent = sent_to_peer.read();
+        dag_knowledge
+            .read()
+            .collect_unsent_ancestor_refs(roots, peer, own_authority, &sent, limit)
+    };
 
     if !collected.is_empty() {
         let mut known = ck.write();

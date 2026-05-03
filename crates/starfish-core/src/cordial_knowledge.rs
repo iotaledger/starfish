@@ -9,7 +9,7 @@
 //! `Arc<RwLock<ConnectionKnowledge>>` to read when building batches.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -935,6 +935,61 @@ impl DagKnowledgeInner {
         candidates.sort_by_key(|(_, round)| *round);
         candidates.truncate(limit);
         candidates
+    }
+
+    /// BFS-walk ancestors of `roots`, returning block refs whose `known_by`
+    /// bit for `peer` is not yet set. Walks the in-memory parent graph; does
+    /// not touch dag-state storage. Refs originating from `peer` itself,
+    /// from `own_authority`, at round 0, or already in `sent` are skipped.
+    /// The walk halts at evicted blocks (no entry in the dag map) and at
+    /// `limit`.
+    pub fn collect_unsent_ancestor_refs(
+        &self,
+        roots: &[BlockReference],
+        peer: AuthorityIndex,
+        own_authority: AuthorityIndex,
+        sent: &AHashSet<BlockReference>,
+        limit: usize,
+    ) -> Vec<BlockReference> {
+        if limit == 0 || roots.is_empty() {
+            return Vec::new();
+        }
+        let peer_bit = AuthoritySet::singleton(peer);
+        let mut queued: AHashSet<BlockReference> = AHashSet::with_capacity(roots.len());
+        let mut frontier: VecDeque<BlockReference> = roots.iter().copied().collect();
+        let mut collected: Vec<BlockReference> = Vec::with_capacity(limit);
+
+        while let Some(node) = frontier.pop_front() {
+            if collected.len() >= limit {
+                break;
+            }
+            // Snapshot parents so we can release the dag borrow before the
+            // per-parent known_by lookup below.
+            let parents = match self.dag_get(&node) {
+                Some((parents, _)) => parents.clone(),
+                None => continue, // evicted or not tracked — halt this branch
+            };
+            for parent in parents {
+                if collected.len() >= limit {
+                    break;
+                }
+                if parent.round == 0
+                    || parent.authority == peer
+                    || parent.authority == own_authority
+                    || sent.contains(&parent)
+                    || !queued.insert(parent)
+                {
+                    continue;
+                }
+                match self.dag_get(&parent) {
+                    Some((_, known_by)) if !(*known_by & peer_bit).is_empty() => continue,
+                    _ => {}
+                }
+                collected.push(parent);
+                frontier.push_back(parent);
+            }
+        }
+        collected
     }
 
     /// Round-fair variant of [`Self::collect_unsent_refs`]: within each round,
