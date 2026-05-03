@@ -9,7 +9,7 @@
 //! `Arc<RwLock<ConnectionKnowledge>>` to read when building batches.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,15 +19,18 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
-use crate::types::{AuthorityIndex, AuthoritySet, BlockReference, RoundNumber};
+use crate::types::{AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, RoundNumber};
+
+/// Per-block dag metadata: parent refs and an `AuthoritySet` known-by bitmask.
+type DagBlockEntry = (Vec<BlockReference>, AuthoritySet);
+/// Per-authority dag map: round -> digest -> (parents, known_by).
+type DagAuthorityMap = BTreeMap<RoundNumber, HashMap<BlockDigest, DagBlockEntry>>;
 
 /// Maximum round gap beyond which a peer's data is no longer considered useful.
 /// Headers/shards from an authority whose latest useful round is more than this
 /// many rounds behind the current round will not be piggybacked.
 const MAX_ROUND_GAP_FOR_USEFUL_PARTS: RoundNumber = 40;
 
-/// Channel capacity for the cordial knowledge actor.
-const CHANNEL_CAPACITY: usize = 100_000;
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
@@ -72,6 +75,19 @@ pub enum CordialKnowledgeMessage {
     UsefulShardsFromPeers(Vec<BlockReference>),
     /// Evict entries below these per-authority rounds.
     EvictBelow(Vec<RoundNumber>),
+    /// A new block was added locally. Trigger BFS propagation of the
+    /// `known_by` bitmask through the block's causal history. Push-only;
+    /// pull-mode protocols never send this.
+    BlockAdded {
+        block_ref: BlockReference,
+        parents: Vec<BlockReference>,
+    },
+    /// Reconnected to `peer`. Clear the peer bit from `known_by` for all
+    /// blocks above `round`. Push-only.
+    ResetPeerKnown {
+        peer: AuthorityIndex,
+        after_round: RoundNumber,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +747,275 @@ impl ConnectionKnowledge {
 }
 
 // ---------------------------------------------------------------------------
+// DagKnowledgeInner — per-block known_by tracking for push dissemination
+// ---------------------------------------------------------------------------
+
+/// Per-authority dag with `known_by` bitmask propagation. Used by push
+/// dissemination to skip blocks that the destination peer is already known
+/// to have. Mutated only by the [`CordialKnowledge`] actor; readers (the
+/// broadcaster, via `DagState` wrappers) take a read lock on
+/// `Arc<RwLock<DagKnowledgeInner>>`.
+pub struct DagKnowledgeInner {
+    /// Local authority index. Used as the second source bit when seeding the
+    /// `known_by` mask of a freshly inserted block.
+    authority: AuthorityIndex,
+    committee_size: usize,
+    /// Per-authority dag map. `Vec` index = authority.
+    dag: Vec<DagAuthorityMap>,
+}
+
+impl DagKnowledgeInner {
+    pub fn new(authority: AuthorityIndex, committee_size: usize) -> Self {
+        Self {
+            authority,
+            committee_size,
+            dag: vec![DagAuthorityMap::new(); committee_size],
+        }
+    }
+
+    fn dag_get(&self, r: &BlockReference) -> Option<&DagBlockEntry> {
+        self.dag[r.authority as usize].get(&r.round)?.get(&r.digest)
+    }
+
+    fn dag_get_mut(&mut self, r: &BlockReference) -> Option<&mut DagBlockEntry> {
+        self.dag[r.authority as usize]
+            .get_mut(&r.round)?
+            .get_mut(&r.digest)
+    }
+
+    fn dag_contains(&self, r: &BlockReference) -> bool {
+        self.dag_get(r).is_some()
+    }
+
+    fn dag_insert(&mut self, r: BlockReference, val: DagBlockEntry) {
+        self.dag[r.authority as usize]
+            .entry(r.round)
+            .or_default()
+            .insert(r.digest, val);
+    }
+
+    /// Insert a block into the dag and propagate `known_by` bits along its
+    /// causal history. `bfs_buffer` is reused across calls to avoid
+    /// per-message allocation; the caller (the actor) owns it.
+    fn update_dag(
+        &mut self,
+        block_ref: BlockReference,
+        parents: Vec<BlockReference>,
+        bfs_buffer: &mut Vec<BlockReference>,
+    ) {
+        if block_ref.round == 0 || self.dag_contains(&block_ref) {
+            return;
+        }
+        let known_by =
+            AuthoritySet::singleton(block_ref.authority) | AuthoritySet::singleton(self.authority);
+        self.dag_insert(block_ref, (parents, known_by));
+
+        let bit = AuthoritySet::singleton(block_ref.authority);
+        bfs_buffer.clear();
+        bfs_buffer.push(block_ref);
+        let mut parents_buf: Vec<BlockReference> = Vec::new();
+        while let Some(r) = bfs_buffer.pop() {
+            parents_buf.clear();
+            if let Some((parents, _)) = self.dag_get(&r) {
+                parents_buf.extend_from_slice(parents);
+            } else {
+                continue; // evicted
+            }
+            for &parent in &parents_buf {
+                if parent.round == 0 {
+                    continue;
+                }
+                let Some((_, known_by)) = self.dag_get_mut(&parent) else {
+                    continue; // evicted
+                };
+                if (*known_by & bit).is_empty() {
+                    *known_by |= bit;
+                    bfs_buffer.push(parent);
+                }
+            }
+        }
+    }
+
+    /// Clear the `peer` bit from `known_by` for all blocks at rounds strictly
+    /// greater than `after_round`. Called when a peer reconnects: any blocks
+    /// we'd marked as already known to them are conservatively re-sent.
+    fn reset_peer_known_by_after_round(&mut self, peer: AuthorityIndex, after_round: RoundNumber) {
+        let bit = !AuthoritySet::singleton(peer);
+        let from = after_round.saturating_add(1);
+        for auth_dag in self.dag.iter_mut() {
+            for (_, entries) in auth_dag.range_mut(from..) {
+                for (_, (_, known_by)) in entries.iter_mut() {
+                    *known_by &= bit;
+                }
+            }
+        }
+    }
+
+    /// Drop entries below the per-authority eviction frontier.
+    fn evict_below(&mut self, rounds: &[RoundNumber]) {
+        for (auth, threshold) in rounds.iter().enumerate() {
+            if auth >= self.committee_size {
+                break;
+            }
+            self.dag[auth] = self.dag[auth].split_off(threshold);
+        }
+    }
+
+    // ---- read-only accessors for the broadcaster path ----
+
+    /// Returns `Some(true)` if the peer's bit is set, `Some(false)` if the
+    /// block is tracked but the peer's bit is not set, and `None` if the
+    /// block is not tracked (e.g. evicted).
+    pub fn peer_knows(&self, r: &BlockReference, peer: AuthorityIndex) -> Option<bool> {
+        let (_, known_by) = self.dag_get(r)?;
+        Some(!(*known_by & AuthoritySet::singleton(peer)).is_empty())
+    }
+
+    /// Filter `refs` keeping only those whose `known_by` bit for `peer` is
+    /// not yet set. Refs not present in the dag (evicted) are also kept,
+    /// matching the prior behavior of `DagState`.
+    pub fn filter_block_refs_unknown_to_peer(
+        &self,
+        refs: &[BlockReference],
+        peer: AuthorityIndex,
+        limit: usize,
+    ) -> Vec<BlockReference> {
+        let peer_bit = AuthoritySet::singleton(peer);
+        let mut result = Vec::with_capacity(limit.min(refs.len()));
+        for block_ref in refs {
+            if result.len() >= limit {
+                break;
+            }
+            match self.dag_get(block_ref) {
+                Some((_, known_by)) if !(*known_by & peer_bit).is_empty() => {}
+                _ => result.push(*block_ref),
+            }
+        }
+        result
+    }
+
+    /// Iterate the entire dag and return (ref, round) pairs for blocks not
+    /// yet known to `peer`, that pass `filter` and aren't in `sent`. Returned
+    /// list is round-sorted ascending and truncated to `limit`.
+    pub fn collect_unsent_refs(
+        &self,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
+        filter: impl Fn(&BlockReference) -> bool,
+        limit: usize,
+    ) -> Vec<(BlockReference, RoundNumber)> {
+        let peer_bit = AuthoritySet::singleton(peer);
+        let mut candidates: Vec<(BlockReference, RoundNumber)> = self
+            .dag
+            .iter()
+            .enumerate()
+            .flat_map(|(auth_idx, auth_dag)| {
+                auth_dag.iter().flat_map(move |(round, entries)| {
+                    entries.iter().map(move |(digest, (_, known_by))| {
+                        (
+                            BlockReference {
+                                authority: auth_idx as AuthorityIndex,
+                                round: *round,
+                                digest: *digest,
+                            },
+                            *known_by,
+                        )
+                    })
+                })
+            })
+            .filter(|(r, known_by)| {
+                (*known_by & peer_bit).is_empty() && !sent.contains(r) && filter(r)
+            })
+            .map(|(r, _)| (r, r.round))
+            .collect();
+        candidates.sort_by_key(|(_, round)| *round);
+        candidates.truncate(limit);
+        candidates
+    }
+
+    /// Round-fair variant of [`Self::collect_unsent_refs`]: within each round,
+    /// drain approximately equally across authorities.
+    pub fn collect_unsent_refs_round_fair(
+        &self,
+        sent: &AHashSet<BlockReference>,
+        peer: AuthorityIndex,
+        filter: impl Fn(&BlockReference) -> bool,
+        limit: usize,
+    ) -> Vec<(BlockReference, RoundNumber)> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let peer_bit = AuthoritySet::singleton(peer);
+        let mut per_authority: Vec<Vec<BlockReference>> = vec![Vec::new(); self.committee_size];
+
+        for (auth_idx, auth_dag) in self.dag.iter().enumerate() {
+            for (round, entries) in auth_dag {
+                for (digest, (_, known_by)) in entries {
+                    let r = BlockReference {
+                        authority: auth_idx as AuthorityIndex,
+                        round: *round,
+                        digest: *digest,
+                    };
+                    if (*known_by & peer_bit).is_empty() && !sent.contains(&r) && filter(&r) {
+                        per_authority[auth_idx].push(r);
+                    }
+                }
+            }
+        }
+
+        for refs in &mut per_authority {
+            refs.sort_by_key(|r| r.round);
+        }
+
+        let mut positions = vec![0usize; per_authority.len()];
+        let mut selected: Vec<(BlockReference, RoundNumber)> = Vec::with_capacity(limit);
+
+        while selected.len() < limit {
+            let min_round = per_authority
+                .iter()
+                .enumerate()
+                .filter_map(|(auth, refs)| refs.get(positions[auth]).map(|r| r.round))
+                .min();
+            let Some(min_round) = min_round else {
+                break;
+            };
+
+            loop {
+                let mut made_progress = false;
+                for auth in 0..per_authority.len() {
+                    if selected.len() >= limit {
+                        break;
+                    }
+                    let idx = positions[auth];
+                    if let Some(next_ref) = per_authority[auth].get(idx) {
+                        if next_ref.round == min_round {
+                            selected.push((*next_ref, next_ref.round));
+                            positions[auth] += 1;
+                            made_progress = true;
+                        }
+                    }
+                }
+
+                if selected.len() >= limit {
+                    break;
+                }
+
+                let round_has_more = per_authority.iter().enumerate().any(|(auth, refs)| {
+                    refs.get(positions[auth])
+                        .is_some_and(|next_ref| next_ref.round == min_round)
+                });
+                if !made_progress || !round_has_more {
+                    break;
+                }
+            }
+        }
+
+        selected
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CordialKnowledge — central actor
 // ---------------------------------------------------------------------------
 
@@ -741,8 +1026,14 @@ pub struct CordialKnowledge {
     shared: Arc<RwLock<SharedKnowledgeState>>,
     /// One per peer, shared with connection tasks via `Arc<RwLock<>>`.
     connection_knowledges: Vec<Arc<RwLock<ConnectionKnowledge>>>,
+    /// Per-block known-by metadata for push dissemination. `None` in pull
+    /// mode — the actor still drains the channel but no push-only messages
+    /// arrive.
+    dag_knowledge: Option<Arc<RwLock<DagKnowledgeInner>>>,
+    /// Reusable BFS work queue for `BlockAdded` updates.
+    bfs_buffer: Vec<BlockReference>,
     /// Receives events from DagState / core / shard reconstructor.
-    receiver: mpsc::Receiver<CordialKnowledgeMessage>,
+    receiver: mpsc::UnboundedReceiver<CordialKnowledgeMessage>,
     metrics: Arc<Metrics>,
 }
 
@@ -803,6 +1094,21 @@ impl CordialKnowledge {
                     for ck in &self.connection_knowledges {
                         ck.write().evict_local_below(&rounds);
                     }
+                    if let Some(dag) = &self.dag_knowledge {
+                        dag.write().evict_below(&rounds);
+                    }
+                }
+                CordialKnowledgeMessage::BlockAdded { block_ref, parents } => {
+                    if let Some(dag) = &self.dag_knowledge {
+                        dag.write()
+                            .update_dag(block_ref, parents, &mut self.bfs_buffer);
+                    }
+                }
+                CordialKnowledgeMessage::ResetPeerKnown { peer, after_round } => {
+                    if let Some(dag) = &self.dag_knowledge {
+                        dag.write()
+                            .reset_peer_known_by_after_round(peer, after_round);
+                    }
                 }
             }
             let now = Instant::now();
@@ -861,16 +1167,27 @@ impl CordialKnowledge {
 /// Cloned and distributed to connection tasks and the core thread.
 #[derive(Clone)]
 pub struct CordialKnowledgeHandle {
-    sender: mpsc::Sender<CordialKnowledgeMessage>,
+    sender: mpsc::UnboundedSender<CordialKnowledgeMessage>,
     connection_knowledges: Vec<Arc<RwLock<ConnectionKnowledge>>>,
+    /// Shared dag knowledge for push dissemination. `None` in pull mode.
+    /// Cloned by `DagState` for synchronous reads from the broadcaster.
+    dag_knowledge: Option<Arc<RwLock<DagKnowledgeInner>>>,
 }
 
 impl CordialKnowledgeHandle {
     /// Create the actor and its handle. Returns `(handle, actor)`.
     ///
     /// The caller should spawn `actor.run()` on a tokio runtime.
-    pub fn new(committee_size: usize, metrics: Arc<Metrics>) -> (Self, CordialKnowledge) {
-        let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+    /// `dag_knowledge` is supplied externally (typically by `DagState`)
+    /// so that recovery code paths and the broadcaster share the same
+    /// underlying `RwLock`. `None` means pull-mode — push-only messages
+    /// such as `BlockAdded` and `ResetPeerKnown` become no-ops.
+    pub fn new(
+        committee_size: usize,
+        dag_knowledge: Option<Arc<RwLock<DagKnowledgeInner>>>,
+        metrics: Arc<Metrics>,
+    ) -> (Self, CordialKnowledge) {
+        let (sender, receiver) = mpsc::unbounded_channel();
         let shared = Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size)));
 
         let connection_knowledges: Vec<_> = (0..committee_size)
@@ -886,12 +1203,15 @@ impl CordialKnowledgeHandle {
         let handle = Self {
             sender,
             connection_knowledges: connection_knowledges.clone(),
+            dag_knowledge: dag_knowledge.clone(),
         };
 
         let actor = CordialKnowledge {
             committee_size,
             shared,
             connection_knowledges,
+            dag_knowledge,
+            bfs_buffer: Vec::new(),
             receiver,
             metrics,
         };
@@ -907,17 +1227,22 @@ impl CordialKnowledgeHandle {
         self.connection_knowledges.get(peer as usize).cloned()
     }
 
-    /// Send a message to the actor. Non-blocking; drops on full channel.
-    pub fn send(&self, msg: CordialKnowledgeMessage) {
-        // Use try_send to avoid blocking the caller (core thread or connection
-        // task). If the channel is full, we drop the message — the knowledge
-        // tracker is best-effort and will self-correct via eviction.
-        let _ = self.sender.try_send(msg);
+    /// Get the shared dag knowledge for push dissemination. `None` in pull
+    /// mode — callers gated on push must already check or `expect`.
+    pub fn dag_knowledge(&self) -> Option<Arc<RwLock<DagKnowledgeInner>>> {
+        self.dag_knowledge.clone()
     }
 
-    /// Send a message to the actor, awaiting capacity.
+    /// Send a message to the actor. Non-blocking; only fails on a closed
+    /// channel (i.e. shutdown).
+    pub fn send(&self, msg: CordialKnowledgeMessage) {
+        let _ = self.sender.send(msg);
+    }
+
+    /// Compatibility shim — unbounded sends never await, but kept for
+    /// callers that previously used the bounded `send_async` form.
     pub async fn send_async(&self, msg: CordialKnowledgeMessage) {
-        let _ = self.sender.send(msg).await;
+        let _ = self.sender.send(msg);
     }
 }
 
@@ -1169,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_useful_authors_updates_to_peer() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
+        let (handle, actor) = CordialKnowledgeHandle::new(4, None, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         // Peer 1 tells us authorities 0 and 2 are useful at round 10
@@ -1198,7 +1523,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_useful_shards_from_peers_to_all_connections() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
+        let (handle, actor) = CordialKnowledgeHandle::new(4, None, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         handle.send(CordialKnowledgeMessage::UsefulShardsFromPeers(vec![
@@ -1236,7 +1561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_new_header() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
+        let (handle, actor) = CordialKnowledgeHandle::new(4, None, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         let r = block_ref(2, 5);
@@ -1259,7 +1584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_propagates_dag_parts_batch() {
-        let (handle, actor) = CordialKnowledgeHandle::new(4, test_metrics());
+        let (handle, actor) = CordialKnowledgeHandle::new(4, None, test_metrics());
         let actor_task = tokio::spawn(actor.run());
 
         let header = block_ref(2, 5);

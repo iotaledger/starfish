@@ -22,6 +22,7 @@ use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
     config::{DisseminationMode, StorageBackend},
     consensus::linearizer::{CommittedSubDag, MAX_TRAVERSAL_DEPTH},
+    cordial_knowledge::{CordialKnowledgeHandle, DagKnowledgeInner},
     crypto::{BlsSignatureBytes, TransactionsCommitment},
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
@@ -260,6 +261,16 @@ pub struct DagState {
     /// of the node to prevent eviction.
     genesis: Vec<Data<VerifiedBlock>>,
     starfish_speed_adaptive_acknowledgments: bool,
+    /// Per-block known_by tracking for push dissemination. `None` in pull
+    /// mode. Broadcaster paths read this `Arc` directly through the
+    /// [`CordialKnowledgeHandle`]; we keep a clone here so recovery code
+    /// inside `open()` can populate it before the actor exists.
+    dag_knowledge: Option<Arc<RwLock<DagKnowledgeInner>>>,
+    /// Cordial knowledge handle used to enqueue push-only events
+    /// (BlockAdded / EvictBelow). Set after `open()` returns via
+    /// [`Self::attach_cordial_knowledge`]; before then, recovery paths
+    /// mutate `dag_knowledge` directly under its own write lock.
+    cordial_handle: Arc<parking_lot::RwLock<Option<CordialKnowledgeHandle>>>,
 }
 
 type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
@@ -722,6 +733,16 @@ impl DagState {
                 tracing::info!("Starting Mysticeti-BLS protocol")
             }
         }
+        let push_mode = matches!(
+            resolved_dissemination,
+            DisseminationMode::PushCausal | DisseminationMode::PushUseful
+        );
+        let dag_knowledge = push_mode.then(|| {
+            Arc::new(RwLock::new(DagKnowledgeInner::new(
+                authority,
+                committee.len(),
+            )))
+        });
         let dag_state = Self {
             store: store.clone(),
             byzantine_strategy,
@@ -733,9 +754,32 @@ impl DagState {
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
             starfish_speed_adaptive_acknowledgments,
+            dag_knowledge,
+            cordial_handle: Arc::new(parking_lot::RwLock::new(None)),
         };
         builder.build(store, dag_state)
     }
+
+    /// Attach the cordial knowledge handle. Called by the network layer
+    /// once the [`CordialKnowledge`] actor has been constructed. After this
+    /// returns, push-only mutations are enqueued through the actor.
+    pub fn attach_cordial_knowledge(&self, handle: CordialKnowledgeHandle) {
+        *self.cordial_handle.write() = Some(handle);
+    }
+
+    /// Returns the shared dag knowledge `Arc`. Used by the network layer
+    /// when constructing the [`CordialKnowledge`] actor so that the actor
+    /// and the broadcaster share the same underlying `RwLock`.
+    pub fn dag_knowledge(&self) -> Option<Arc<RwLock<DagKnowledgeInner>>> {
+        self.dag_knowledge.clone()
+    }
+
+    /// Returns `true` when push dissemination is enabled and dag knowledge
+    /// is being tracked.
+    pub fn is_push_dissemination(&self) -> bool {
+        self.dag_knowledge.is_some()
+    }
+
 
     /// Returns the cached genesis blocks (one per authority, round 0).
     pub fn genesis_blocks(&self) -> &[Data<VerifiedBlock>] {

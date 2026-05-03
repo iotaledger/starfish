@@ -1388,9 +1388,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             (None, None)
         };
 
-        // Create CordialKnowledge actor for per-peer header/shard tracking
-        let (cordial_knowledge_handle, cordial_knowledge_actor) =
-            CordialKnowledgeHandle::new(committee.len(), metrics.clone());
+        // Create CordialKnowledge actor. The dag knowledge `Arc` is owned
+        // by `DagState` (built during `open()` for push modes); we share
+        // the same handle so the actor and the broadcaster's reads target
+        // the same `RwLock`.
+        let (cordial_knowledge_handle, cordial_knowledge_actor) = CordialKnowledgeHandle::new(
+            committee.len(),
+            dag_state.dag_knowledge(),
+            metrics.clone(),
+        );
+        dag_state.attach_cordial_knowledge(cordial_knowledge_handle.clone());
         let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
 
         let inner = Arc::new(NetworkSyncerInner {
