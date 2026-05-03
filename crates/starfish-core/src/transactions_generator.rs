@@ -70,6 +70,15 @@ impl TransactionGenerator {
                 (self.node_public_config.identifiers.len() as f64 / 100.0 * 5000.0) as u64,
             );
         let benchmark_duration = self.parameters.benchmark_duration;
+
+        // When the orchestrator sets a finite benchmark window, gate metrics
+        // off during the warmup so the validator's `benchmark_duration`
+        // counter only ticks inside the active submission window. Without
+        // this, the warmup seconds inflate the TPS denominator.
+        if benchmark_duration.is_some() {
+            self.metrics.metrics_active.store(false, Ordering::Relaxed);
+        }
+
         tracing::info!(
             "Starting tx generator. After {} sec, \
             targeting {load} tx/s \
@@ -102,17 +111,32 @@ impl TransactionGenerator {
         runtime::sleep(initial_delay_plus_extra_delay).await;
         let generation_start = Instant::now();
 
+        // Open the active metrics window: anchor `benchmark_duration`'s
+        // clock to this instant so the TPS denominator only counts seconds
+        // during which transactions are actually being submitted.
+        let active_start_micros = self
+            .metrics
+            .validator_start
+            .elapsed()
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        self.metrics
+            .active_start_micros
+            .store(active_start_micros, Ordering::Relaxed);
+        self.metrics.metrics_active.store(true, Ordering::Relaxed);
+
         loop {
             if let Some(limit) = benchmark_duration {
                 if generation_start.elapsed() >= limit {
                     tracing::info!(
                         "Tx generator reached benchmark duration ({} sec); \
-                         stopping submissions and freezing latency metrics.",
+                         stopping submissions and closing the metrics window.",
                         limit.as_secs(),
                     );
-                    // Freeze latency observations so commits arriving during
-                    // the wind-down do not pollute cumulative quantiles.
-                    self.metrics.metrics_frozen.store(true, Ordering::Relaxed);
+                    // Close the active metrics window so commits arriving
+                    // during the wind-down don't pollute cumulative
+                    // quantiles or skew the TPS denominator.
+                    self.metrics.metrics_active.store(false, Ordering::Relaxed);
                     break;
                 }
             }

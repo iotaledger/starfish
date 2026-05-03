@@ -7,7 +7,7 @@ use std::{
     ops::AddAssign,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -165,11 +165,22 @@ pub struct Metrics {
     pub ck_peer_known_headers: IntGaugeVec,
     pub ck_peer_known_shards: IntGaugeVec,
 
-    /// When set, latency metrics stop accepting new observations. The
-    /// transaction generator flips this true once it has stopped submitting
-    /// load, so commits that arrive during the wind-down (clients drained,
-    /// validators about to be torn down) do not pollute cumulative quantiles.
-    pub metrics_frozen: Arc<AtomicBool>,
+    /// True iff the validator is inside the active transaction-submission
+    /// window. Outside this window — during the warmup before the first
+    /// transaction is generated, and after the generator stops — every
+    /// rate-relevant metric update (latency observations, sequenced /
+    /// committed counters, the `benchmark_duration` clock) is skipped, so
+    /// reported TPS / BPS / p50 latency reflect only the steady-state window.
+    pub metrics_active: Arc<AtomicBool>,
+    /// Wall-clock instant the validator's metrics were first activated, in
+    /// microseconds since `validator_start`. Used by the
+    /// `benchmark_duration` Prometheus counter so its denominator counts
+    /// only active-window seconds (not warmup or drain).
+    pub active_start_micros: Arc<AtomicU64>,
+    /// Reference instant against which `active_start_micros` is measured.
+    /// Set once at validator boot and shared across the block handler and
+    /// the transaction generator.
+    pub validator_start: tokio::time::Instant,
 }
 
 pub struct MetricReporter {
@@ -928,7 +939,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            metrics_frozen: Arc::new(AtomicBool::new(false)),
+            // Default to active=true for production (no benchmark_duration
+            // bound). The transaction generator overrides to false during
+            // its warmup when the orchestrator sets a finite duration.
+            metrics_active: Arc::new(AtomicBool::new(true)),
+            active_start_micros: Arc::new(AtomicU64::new(0)),
+            validator_start: tokio::time::Instant::now(),
         };
 
         (Arc::new(metrics), Arc::new(reporter))

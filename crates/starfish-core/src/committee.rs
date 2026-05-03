@@ -52,9 +52,9 @@ impl Committee {
         // hot path can skip repeated `pk_validate` work during signature
         // verification.
         for (authority, info) in authorities.iter().enumerate() {
-            info.bls_public_key()
-                .validate()
-                .unwrap_or_else(|e| panic!("Invalid BLS public key for authority {authority}: {e:?}"));
+            info.bls_public_key().validate().unwrap_or_else(|e| {
+                panic!("Invalid BLS public key for authority {authority}: {e:?}")
+            });
         }
         use crate::types::MAX_COMMITTEE_SIZE;
         assert!(

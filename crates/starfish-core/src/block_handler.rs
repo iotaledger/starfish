@@ -17,7 +17,7 @@ use crate::{
     dag_state::{ConsensusProtocol, DacCertificateVerificationState, DagState, PendingSubDag},
     data::Data,
     metrics::Metrics,
-    runtime::{self, TimeInstant},
+    runtime,
     syncer::CommitObserver,
     transactions_generator::TransactionGenerator,
     types::{BaseTransaction, BlockReference, RoundNumber, Transaction, VerifiedBlock},
@@ -99,7 +99,6 @@ pub struct RealCommitHandler {
     committed_count: usize,
     sequenced_commit_count: usize,
     commit_digest: [u8; 32],
-    start_time: TimeInstant,
     metrics: Arc<Metrics>,
 }
 
@@ -117,30 +116,33 @@ impl RealCommitHandler {
             committed_count: 0,
             sequenced_commit_count: 0,
             commit_digest: [0u8; 32],
-            start_time: TimeInstant::now(),
             metrics,
         }
     }
 
     fn transaction_observer(&self, block: Data<VerifiedBlock>) {
-        let current_timestamp = runtime::timestamp_utc();
-        let metrics_frozen = self
+        // Skip every rate-feeding metric outside the active submission
+        // window. Late commits during warmup or wind-down would otherwise
+        // skew TPS, the cumulative latency distribution, and the bandwidth-
+        // efficiency denominator.
+        if !self
             .metrics
-            .metrics_frozen
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .metrics_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let current_timestamp = runtime::timestamp_utc();
         if let Some(vec) = block.transactions() {
             for transaction in vec {
                 let BaseTransaction::Share(transaction) = transaction;
                 let tx_submission_timestamp = TransactionGenerator::extract_timestamp(transaction);
                 let latency = current_timestamp.saturating_sub(tx_submission_timestamp);
 
-                if !metrics_frozen {
-                    self.metrics.transaction_committed_latency.observe(latency);
-                    self.metrics
-                        .transaction_committed_latency_squared_micros
-                        .inc_by(latency.as_micros().pow(2) as u64);
-                }
-
+                self.metrics.transaction_committed_latency.observe(latency);
+                self.metrics
+                    .transaction_committed_latency_squared_micros
+                    .inc_by(latency.as_micros().pow(2) as u64);
                 self.metrics.sequenced_transactions_total.inc();
                 self.metrics
                     .sequenced_transactions_bytes
@@ -271,9 +273,9 @@ impl CommitObserver for RealCommitHandler {
             .commit_interpreter
             .handle_commit(dag_state, committed_leaders);
         let current_timestamp = runtime::timestamp_utc();
-        let metrics_frozen = self
+        let metrics_active = self
             .metrics
-            .metrics_frozen
+            .metrics_active
             .load(std::sync::atomic::Ordering::Relaxed);
         for commit in &committed {
             self.committed_leaders.push(commit.0.anchor);
@@ -313,7 +315,7 @@ impl CommitObserver for RealCommitHandler {
                     continue;
                 }
 
-                if !metrics_frozen {
+                if metrics_active {
                     self.metrics.block_committed_latency.observe(block_latency);
                     self.metrics
                         .block_committed_latency_squared_micros
@@ -327,11 +329,24 @@ impl CommitObserver for RealCommitHandler {
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }
 
-            // Record benchmark start time.
-            let time_from_start = self.start_time.elapsed();
-            let benchmark_duration = self.metrics.benchmark_duration.get();
-            if let Some(delta) = time_from_start.as_secs().checked_sub(benchmark_duration) {
-                self.metrics.benchmark_duration.inc_by(delta);
+            // Tick the validator's `benchmark_duration` Prometheus counter,
+            // but only inside the active window. The orchestrator uses this
+            // counter as the timestamp on every scrape, which then becomes
+            // the denominator of the TPS rate. Anchor it to
+            // `active_start_micros` so warmup and wind-down seconds do not
+            // dilute the steady-state rate.
+            if metrics_active {
+                let active_start_micros = self
+                    .metrics
+                    .active_start_micros
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now_micros = self.metrics.validator_start.elapsed().as_micros() as u64;
+                let active_elapsed_secs =
+                    now_micros.saturating_sub(active_start_micros) / 1_000_000;
+                let benchmark_duration = self.metrics.benchmark_duration.get();
+                if let Some(delta) = active_elapsed_secs.checked_sub(benchmark_duration) {
+                    self.metrics.benchmark_duration.inc_by(delta);
+                }
             }
         }
         if dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
