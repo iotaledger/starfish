@@ -29,11 +29,13 @@ type DagAuthorityMap = BTreeMap<RoundNumber, HashMap<BlockDigest, DagBlockEntry>
 /// Maximum round gap beyond which a peer's data is no longer considered useful.
 /// Headers/shards from an authority whose latest useful round is more than this
 /// many rounds behind the current round will not be piggybacked.
-/// Window (in rounds) over which an authority's headers stay flagged
-/// "useful from" a peer, expressed as a multiple of the committee size.
-/// Headers fire on every newly-received header, so the signal is naturally
-/// fresh; one committee turnover is enough to ride out reorderings.
-const USEFUL_HEADERS_GAP_FACTOR: RoundNumber = 1;
+/// Fixed window (in rounds) over which an authority's headers stay
+/// flagged "useful from" a peer. Headers fire on every newly-received
+/// header (or, on the to-peer side, on every `MissingParentsRequest` the
+/// peer sends us); the signal is naturally fresh, so a small absolute
+/// window is enough to ride out reorderings without keeping stale
+/// authors lit and dragging extra piggyback work into the response.
+const USEFUL_HEADERS_GAP: RoundNumber = 20;
 /// Window (in rounds) for shards, as a multiple of the committee size.
 /// Shards fire only on explicit `MissingTxDataRequest`, so the signal is
 /// scarce; we keep it lit for two committee turnovers so the leader's
@@ -694,7 +696,7 @@ impl ConnectionKnowledge {
             Self::recent_authors_bitmask(
                 &self.last_useful_headers_from_peer_round,
                 current_round,
-                USEFUL_HEADERS_GAP_FACTOR * n,
+                USEFUL_HEADERS_GAP,
             ),
             Self::recent_authors_bitmask(
                 &self.last_useful_shards_from_peer_round,
@@ -715,7 +717,7 @@ impl ConnectionKnowledge {
             Self::recent_authors_bitmask(
                 &self.last_useful_headers_to_peer_round,
                 current_round,
-                USEFUL_HEADERS_GAP_FACTOR * n,
+                USEFUL_HEADERS_GAP,
             ),
             Self::recent_authors_bitmask(
                 &self.last_useful_shards_to_peer_round,
