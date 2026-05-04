@@ -187,11 +187,12 @@ impl ConsensusProtocol {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::SailfishPlusPlus
             | ConsensusProtocol::Bluestreak
-            | ConsensusProtocol::MysticetiBls => DisseminationMode::Pull,
-            ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::Starfish
-            | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => DisseminationMode::PushCausal,
+            | ConsensusProtocol::MysticetiBls
+            | ConsensusProtocol::StarfishBls => DisseminationMode::Pull,
+            ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
+            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
+                DisseminationMode::PushUseful
+            }
         }
     }
 
@@ -4262,16 +4263,20 @@ mod tests {
         );
         assert_eq!(
             ConsensusProtocol::Starfish.default_dissemination_mode(),
-            DisseminationMode::PushCausal
+            DisseminationMode::PushUseful
+        );
+        assert_eq!(
+            ConsensusProtocol::StarfishSpeed.default_dissemination_mode(),
+            DisseminationMode::PushUseful
         );
         assert_eq!(
             ConsensusProtocol::StarfishBls
                 .resolve_dissemination_mode(DisseminationMode::ProtocolDefault),
-            DisseminationMode::PushCausal
+            DisseminationMode::Pull
         );
         assert_eq!(
-            ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushUseful),
-            DisseminationMode::PushUseful
+            ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushCausal),
+            DisseminationMode::PushCausal
         );
     }
 }
