@@ -214,6 +214,7 @@ pub enum ByzantineStrategy {
     RandomDrop,             // Drop messages randomly
     LeaderWithholding,      // Withholding leader blocks (sent to f+1+c validators)
     ChainBomb,              // Fork bomb: withhold a chain of blocks and release it all at once
+    ChainBombQuorum,        // Fork bomb released to the next 2f+1 indices (wrapping) after self
     EquivocatingChainsBomb, // Equivocation fork bomb: send different chains to each validator
 }
 
@@ -235,6 +236,7 @@ impl ByzantineStrategy {
             "equivocating-chains" => Some(Self::EquivocatingChains),
             "equivocating-two-chains" => Some(Self::EquivocatingTwoChains),
             "chain-bomb" => Some(Self::ChainBomb),
+            "chain-bomb-quorum" => Some(Self::ChainBombQuorum),
             "equivocating-chains-bomb" => Some(Self::EquivocatingChainsBomb),
             "random-drop" => Some(Self::RandomDrop),
             _ => None,

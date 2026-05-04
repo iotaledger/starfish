@@ -595,6 +595,32 @@ where
                     }
                     notified.await;
                 }
+                // Send a chain of own blocks to a 2f+1 quorum of peers
+                // (the next 2f+1 indices after self, wrapping). Same
+                // trigger as ChainBomb but a wider blast radius —
+                // enough to influence the next commit decision.
+                Some(ByzantineStrategy::ChainBombQuorum) => {
+                    if current_round as usize % committee_size == own_authority_index as usize {
+                        let quorum_count = 2 * committee_size / 3 + 1;
+                        let dist = (to_whom_authority_index as usize + committee_size
+                            - own_authority_index as usize
+                            - 1)
+                            % committee_size;
+                        if dist < quorum_count {
+                            send_own_block_batch(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_byzantine_own_block_size,
+                                &metrics,
+                                sent_to_peer.clone(),
+                            )
+                            .await?;
+                        }
+                    }
+                    notified.await;
+                }
                 // Send block with a given probability
                 Some(ByzantineStrategy::RandomDrop) => {
                     let probability = 1.0 / committee_size as f64;
