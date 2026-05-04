@@ -132,6 +132,19 @@ def summarize_measurement(path):
         if last["count"] > 0:
             header_values.append(last["scalar"] / last["count"])
 
+    # --- Per-validator vCPU usage (rate of process_cpu_seconds_total) ---
+    cpu_values = []
+    cpu = data.get("process_cpu_seconds_total", {})
+    for scraper_id, samples in cpu.items():
+        if len(samples) < 2:
+            continue
+        samples_sorted = sorted(samples, key=lambda s: duration_to_secs(s["timestamp"]))
+        first, last = samples_sorted[0], samples_sorted[-1]
+        dt = duration_to_secs(last["timestamp"]) - duration_to_secs(first["timestamp"])
+        if dt > 0:
+            cpu_rate = (last["scalar"] - first["scalar"]) / dt
+            cpu_values.append(cpu_rate)
+
     return {
         "protocol": protocol,
         "committee": committee,
@@ -150,6 +163,7 @@ def summarize_measurement(path):
             "p50": median(efficiency_values),
         },
         "block_header_size_bytes": median(header_values),
+        "vcpu_per_validator": median(cpu_values),
         "source_file": str(path),
     }
 
@@ -168,7 +182,20 @@ def extract_timestamp_from_dir(path):
         return 0
 
 
-def collect_summaries(results_dir, target_load):
+# Canonical alias map. The orchestrator has produced two CLI spellings for
+# the same protocol over time; normalize before filtering / plotting so a
+# sweep that mixes runs is still consistent.
+PROTOCOL_ALIASES = {
+    "sailfish-pp":   "sailfish++",
+    "starfish-s":    "starfish-speed",
+}
+
+
+def canonical_protocol(name):
+    return PROTOCOL_ALIASES.get(name, name)
+
+
+def collect_summaries(results_dir, target_load, allowed_protocols=None):
     """Walk result directories, aggregate, and deduplicate by (protocol, committee)."""
     pattern = os.path.join(results_dir, "benchmark-committee-sweep-*", "measurements-*.json")
     files = sorted(glob.glob(pattern))
@@ -181,6 +208,9 @@ def collect_summaries(results_dir, target_load):
             print(f"  SKIP {path}: {e}")
             continue
         if s["load"] != target_load:
+            continue
+        s["protocol"] = canonical_protocol(s["protocol"])
+        if allowed_protocols is not None and s["protocol"] not in allowed_protocols:
             continue
         summaries.append(s)
 
@@ -200,6 +230,8 @@ def collect_summaries(results_dir, target_load):
 # ---------------------------------------------------------------------------
 
 PROTOCOL_STYLE = {
+    "starfish":      {"color": "#9467bd", "marker": "P",  "label": "Starfish"},
+    "starfish-bls":  {"color": "#8c564b", "marker": "X",  "label": "Starfish-BLS"},
     "mysticeti":     {"color": "#2ca02c", "marker": "o",  "label": "Mysticeti"},
     "mysticeti-bls": {"color": "#ff7f0e", "marker": "s",  "label": "Mysticeti-BLS"},
     "bluestreak":    {"color": "#1f77b4", "marker": "^",  "label": "Bluestreak"},
@@ -217,18 +249,6 @@ def plot(summaries, output_path):
     for proto in by_protocol:
         by_protocol[proto].sort(key=lambda s: s["committee"])
 
-    # Manual overrides for noisy data points.
-    LATENCY_OVERRIDES = {
-        ("mysticeti", 350): 1250,
-        ("sailfish++", 50): 740,
-        ("bluestreak", 150): 488,
-        ("bluestreak", 200): 498,
-        ("bluestreak", 300): 595,
-    }
-    for (proto, committee), val in LATENCY_OVERRIDES.items():
-        for p in by_protocol.get(proto, []):
-            if p["committee"] == committee:
-                p["transaction_latency_ms"]["p50"] = val
 
     plt.rcParams.update({
         "font.family": "serif",
@@ -238,8 +258,8 @@ def plot(summaries, output_path):
         "figure.dpi": 150,
     })
 
-    fig, (ax_lat, ax_eff, ax_hdr) = plt.subplots(
-        3, 1, sharex=True, figsize=(6, 7.5),
+    fig, (ax_lat, ax_eff, ax_hdr, ax_cpu) = plt.subplots(
+        4, 1, sharex=True, figsize=(6, 9.5),
         gridspec_kw={"hspace": 0.08},
     )
 
@@ -249,18 +269,15 @@ def plot(summaries, output_path):
         lat_p50 = [p["transaction_latency_ms"]["p50"] for p in points]
         eff_p50 = [p["bandwidth_efficiency"]["p50"] for p in points]
         hdr_size = [p["block_header_size_bytes"] / 1000 for p in points]  # KB
-
-        # Enforce monotonicity (running maximum).
-        for i in range(1, len(lat_p50)):
-            lat_p50[i] = max(lat_p50[i], lat_p50[i - 1])
-        for i in range(1, len(eff_p50)):
-            eff_p50[i] = max(eff_p50[i], eff_p50[i - 1])
+        cpu_p50 = [p.get("vcpu_per_validator", 0.0) for p in points]
 
         ax_lat.plot(committees, lat_p50, marker=style["marker"], color=style["color"],
                     label=style["label"], linewidth=0.9, markersize=4)
         ax_eff.plot(committees, eff_p50, marker=style["marker"], color=style["color"],
                     label=style["label"], linewidth=0.9, markersize=4)
         ax_hdr.plot(committees, hdr_size, marker=style["marker"], color=style["color"],
+                    label=style["label"], linewidth=0.9, markersize=4)
+        ax_cpu.plot(committees, cpu_p50, marker=style["marker"], color=style["color"],
                     label=style["label"], linewidth=0.9, markersize=4)
 
     ax_lat.set_ylabel("End-to-end latency\n(ms)")
@@ -269,18 +286,29 @@ def plot(summaries, output_path):
     ax_lat.grid(True, alpha=0.3, linewidth=0.5)
 
     ax_eff.set_ylabel("Bandwidth efficiency\n(bytes sent / sequenced)")
-    ax_eff.set_ylim(bottom=0.5)
-    ax_eff.set_yticks([1, 3, 5, 7, 9, 11, 13])
-    ax_eff.grid(True, alpha=0.3, linewidth=0.5)
+    ax_eff.set_yscale("log")
+    ax_eff.set_yticks([1, 2, 3, 5, 10, 20, 30])
+    ax_eff.set_yticklabels(["1", "2", "3", "5", "10", "20", "30"])
+    ax_eff.set_ylim(bottom=0.9)
+    ax_eff.grid(True, which="both", alpha=0.3, linewidth=0.5)
 
     ax_hdr.set_ylabel("Block metadata\n(KB)")
-    ax_hdr.legend(loc="upper right", framealpha=0.9)
-    ax_hdr.set_xlabel("Committee size")
     ax_hdr.grid(True, alpha=0.3, linewidth=0.5)
-    ax_hdr.set_xticks([10, 50, 100, 150, 200, 250, 300, 350, 400])
-    ax_hdr.set_xlim(left=0)
 
-    fig.align_ylabels([ax_lat, ax_eff, ax_hdr])
+    ax_cpu.set_ylabel("vCPUs per validator")
+    ax_cpu.set_ylim(bottom=0)
+    ax_cpu.legend(loc="upper left", framealpha=0.9)
+    ax_cpu.set_xlabel("Committee size")
+    ax_cpu.grid(True, alpha=0.3, linewidth=0.5)
+    # Auto-fit x range to the actual measured committee sizes.
+    all_committees = sorted({c for proto, pts in by_protocol.items() for c in (p["committee"] for p in pts)})
+    if all_committees:
+        ax_cpu.set_xticks(all_committees)
+        cmin, cmax = min(all_committees), max(all_committees)
+        pad = max(2, (cmax - cmin) * 0.05)
+        ax_cpu.set_xlim(cmin - pad, cmax + pad)
+
+    fig.align_ylabels([ax_lat, ax_eff, ax_hdr, ax_cpu])
     fig.savefig(output_path, bbox_inches="tight")
     print(f"Saved figure to {output_path}")
     plt.close(fig)
@@ -301,10 +329,16 @@ def main():
                         default="results/committee_scaling_aggregated.json")
     parser.add_argument("--output-pdf", type=str,
                         default="results/committee_scaling.pdf")
+    parser.add_argument(
+        "--protocols", type=str, nargs="+",
+        default=["starfish", "starfish-bls", "mysticeti", "mysticeti-bls", "sailfish++"],
+        help="Restrict plot to these (canonical) protocol names",
+    )
     args = parser.parse_args()
 
-    print(f"Scanning {args.results_dir} for load={args.load} ...")
-    summaries = collect_summaries(args.results_dir, args.load)
+    allowed = set(canonical_protocol(p) for p in args.protocols)
+    print(f"Scanning {args.results_dir} for load={args.load}, protocols={sorted(allowed)} ...")
+    summaries = collect_summaries(args.results_dir, args.load, allowed_protocols=allowed)
 
     # Print what we found.
     print(f"\nFound {len(summaries)} data points:")
@@ -312,7 +346,8 @@ def main():
         print(f"  {s['protocol']:15s}  committee={s['committee']:>4d}  "
               f"latency_p50={s['transaction_latency_ms']['p50']:8.1f} ms  "
               f"efficiency={s['bandwidth_efficiency']['p50']:.2f}  "
-              f"tps={s['tps']:.0f}")
+              f"tps={s['tps']:.0f}  "
+              f"vcpu={s.get('vcpu_per_validator', 0.0):.2f}")
 
     # Save aggregated JSON.
     clean = [{k: v for k, v in s.items() if k != "source_file"} for s in summaries]
