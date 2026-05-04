@@ -208,6 +208,21 @@ where
         let sample_timeout = parameters.sample_timeout;
         let upper_limit_request_size = parameters.batch_other_block_size;
         let consensus_protocol = inner.dag_state.consensus_protocol;
+        // Per-block 2f+1 quorum used to *advertise* shard demand:
+        // for each missing block, only the 2f+1 authorities starting
+        // at the block's author (wrapping) are told via the next
+        // outgoing block bundle that we need shards for that author —
+        // they then proactively include those shards in their batches
+        // back to us. The MissingTxDataRequest itself still goes to
+        // every peer since we don't know which one will respond first.
+        let committee_size = inner.committee.len();
+        let quorum_count = 2 * committee_size / 3 + 1;
+        let peer_idx = peer_id as usize;
+        let in_block_quorum = |block_ref: &BlockReference| -> bool {
+            let author = block_ref.authority as usize;
+            let dist = (peer_idx + committee_size - author) % committee_size;
+            dist < quorum_count
+        };
         loop {
             let committed_dags = inner.dag_state.read_pending_unavailable();
             // Collect candidates that pass the aggregator filter.
@@ -247,6 +262,19 @@ where
                     .tx_data_requests_sent
                     .with_label_values(&[&peer_id.to_string()])
                     .inc();
+                // Of the requested refs, advertise demand only on this
+                // peer's ConnectionKnowledge if this peer falls in the
+                // block's per-block 2f+1 quorum. The marker is read by
+                // `useful_authors_bitmasks` when we build the next
+                // outgoing bundle to this peer, so the peer learns it
+                // should proactively send shards from those authors.
+                let advertise: Vec<_> =
+                    to_request.iter().copied().filter(in_block_quorum).collect();
+                if !advertise.is_empty() {
+                    if let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer_id) {
+                        ck.write().mark_shards_useful_from_peer(&advertise);
+                    }
+                }
                 to.send(NetworkMessage::MissingTxDataRequest(to_request))
                     .await
                     .ok()?;

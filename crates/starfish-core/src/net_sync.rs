@@ -504,17 +504,14 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                     headers: header_refs,
                     shards: Vec::new(),
                 });
-            let useful_shard_refs: Vec<_> = new_data_blocks
-                .iter()
-                .map(|block| *block.reference())
-                .collect();
-            if !useful_shard_refs.is_empty() {
-                inner
-                    .cordial_knowledge
-                    .send(CordialKnowledgeMessage::UsefulShardsFromPeers(
-                        useful_shard_refs,
-                    ));
-            }
+            // Note: shard usefulness is no longer derived from header
+            // arrival. Headers are too noisy a trigger — push-mode
+            // disseminates the entire causal cone, lighting up every
+            // authority in the bitmask. Instead, the
+            // `UsefulShardsFromPeers` signal fires only when this
+            // validator sends a `MissingTxDataRequest` (see
+            // `BlockDisseminator::request_missing_data_blocks` in
+            // broadcaster.rs), which reflects real outstanding demand.
             let (missing_parents, processed_additional_refs) =
                 inner.syncer.add_headers(new_data_blocks, source).await;
             if !missing_parents.is_empty() {
