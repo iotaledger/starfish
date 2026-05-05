@@ -551,6 +551,10 @@ impl Worker {
                     connection_scaled,
                     &network_start_for_ping,
                 ));
+                if latency > MAX_SIMULATED_LATENCY {
+                    // Drop the ping rather than holding the task asleep.
+                    continue;
+                }
                 tokio::time::sleep(latency).await;
 
                 if let Err(e) = writer_clone.lock().await.write_all(&ping).await {
@@ -580,13 +584,16 @@ impl Worker {
                                 connection_scaled,
                                 &network_start_for_pong,
                             ));
-                            tokio::time::sleep(latency).await;
+                            if latency <= MAX_SIMULATED_LATENCY {
+                                tokio::time::sleep(latency).await;
 
-                            if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
-                                tracing::error!("Failed to write pong: {e}");
-                                break;
+                                if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
+                                    tracing::error!("Failed to write pong: {e}");
+                                    break;
+                                }
+                                bytes_sent_total_clone.inc_by(12); // pong is 12-byte sized
                             }
-                            bytes_sent_total_clone.inc_by(12); // pong is 12-byte sized
+                            // else: drop the pong.
                         }
                         None => {
                             tracing::warn!("Invalid ping: {ping}");
@@ -684,6 +691,13 @@ impl Worker {
                     connection_scaled,
                     &network_start,
                 ));
+                if latency > MAX_SIMULATED_LATENCY {
+                    // Drop the message rather than sleeping on it; an
+                    // unbounded ramp would otherwise pile up in-flight
+                    // tasks and OOM the validator. The consensus protocol
+                    // tolerates lost messages.
+                    continue;
+                }
                 let request_type = message.request_type();
 
                 join_set.spawn(async move {
@@ -907,6 +921,11 @@ const ADVERSARIAL_RAMP_SEED: u64 = 0xADBA_0000_0000_0000;
 /// are exempt from the adversarial-latency ramp. Picked above typical AWS
 /// same-region RTTs (~0.5-2 ms) and below cross-region minima (~30 ms).
 const ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS: f64 = 5.0;
+
+/// Cap on simulated per-message latency. Anything above this is dropped
+/// instead of held in flight, so a long ramp under `--adversarial-latency`
+/// cannot pile up sleeping send tasks and OOM the validator.
+const MAX_SIMULATED_LATENCY: Duration = Duration::from_millis(1000);
 
 /// Returns the per-call effective latency. When `scaled` is false (or base is
 /// zero) the base is returned unchanged. Otherwise the base is multiplied by
