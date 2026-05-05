@@ -60,7 +60,7 @@ Strategies: `timeout-leader`, `leader-withholding`,
 
 | Variable | Default | Description |
 |---|---|---|
-| `ADVERSARIAL_LATENCY` | *(unset)* | Set to `1` to overlay 10 s latency on f farthest peers |
+| `ADVERSARIAL_LATENCY` | *(unset)* | Set to `1` to multiply 50% of per-row outbound latencies by `1 + t / 10s` |
 | `UNIFORM_LATENCY_MS` | *(unset)* | Uniform latency in ms; overrides the AWS RTT table |
 
 ### Docker / Infrastructure

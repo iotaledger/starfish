@@ -8,7 +8,7 @@ use futures::{
     FutureExt,
     future::{Either, select, select_all},
 };
-use rand::{Rng, prelude::ThreadRng};
+use rand::{Rng, SeedableRng, prelude::ThreadRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -254,7 +254,8 @@ impl Network {
                 addresses.len()
             );
         }
-        let latency_table = generate_latency_table(addresses.len(), node_parameters);
+        let (latency_table, scaled_mask) = generate_latency_table(addresses.len(), node_parameters);
+        let network_start = Arc::new(Instant::now());
         let server = {
             let socket = if local_addr.is_ipv4() {
                 TcpSocket::new_v4().unwrap()
@@ -288,6 +289,8 @@ impl Network {
                     metrics: metrics.clone(),
                     active_immediately: id < our_id,
                     extra_connection_latency: latency_table[id][our_id],
+                    extra_connection_scaled: scaled_mask[id][our_id],
+                    network_start: network_start.clone(),
                     compress_network: node_parameters.compress_network,
                 }
                 .run(receiver),
@@ -361,6 +364,8 @@ struct Worker {
     metrics: Arc<Metrics>,
     active_immediately: bool,
     extra_connection_latency: f64,
+    extra_connection_scaled: bool,
+    network_start: Arc<Instant>,
     compress_network: bool,
 }
 
@@ -432,7 +437,14 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection, self.extra_connection_latency).await
+        Self::handle_stream(
+            stream,
+            connection,
+            self.extra_connection_latency,
+            self.extra_connection_scaled,
+            self.network_start.clone(),
+        )
+        .await
     }
 
     async fn handle_passive_stream(&self, mut stream: TcpStream) -> io::Result<()> {
@@ -447,13 +459,22 @@ impl Worker {
             // todo - pass signal to break the main loop
             return Ok(());
         };
-        Self::handle_stream(stream, connection, self.extra_connection_latency).await
+        Self::handle_stream(
+            stream,
+            connection,
+            self.extra_connection_latency,
+            self.extra_connection_scaled,
+            self.network_start.clone(),
+        )
+        .await
     }
 
     async fn handle_stream(
         stream: TcpStream,
         connection: WorkerConnection,
         extra_connection_latency: f64,
+        extra_connection_scaled: bool,
+        network_start: Arc<Instant>,
     ) -> io::Result<()> {
         let WorkerConnection {
             sender,
@@ -481,6 +502,8 @@ impl Worker {
             latency_sender,
             metrics.clone(),
             extra_connection_latency,
+            extra_connection_scaled,
+            network_start,
             compress_network,
         )
         .boxed();
@@ -499,6 +522,8 @@ impl Worker {
         latency_sender: HistogramSender<Duration>,
         metrics: Arc<Metrics>,
         connection_latency: f64,
+        connection_scaled: bool,
+        network_start: Arc<Instant>,
         compress_network: bool,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
@@ -510,6 +535,7 @@ impl Worker {
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
+        let network_start_for_ping = network_start.clone();
         let ping_task = tokio::spawn(async move {
             let mut ping_deadline = start + PING_INTERVAL;
             loop {
@@ -520,7 +546,11 @@ impl Worker {
                 assert!(ping_time > 0); // interval can't be 0
 
                 let ping = encode_ping(ping_time);
-                let latency = generate_latency(connection_latency);
+                let latency = generate_latency(effective_latency(
+                    connection_latency,
+                    connection_scaled,
+                    &network_start_for_ping,
+                ));
                 tokio::time::sleep(latency).await;
 
                 if let Err(e) = writer_clone.lock().await.write_all(&ping).await {
@@ -534,6 +564,7 @@ impl Worker {
         // Spawn the second task for handling pong responses
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
+        let network_start_for_pong = network_start.clone();
         let pong_task = tokio::spawn(async move {
             while let Some(ping) = pong_receiver.recv().await {
                 if ping == 0 {
@@ -544,7 +575,11 @@ impl Worker {
                     match ping.checked_neg() {
                         Some(pong) => {
                             let pong = encode_ping(pong);
-                            let latency = generate_latency(connection_latency);
+                            let latency = generate_latency(effective_latency(
+                                connection_latency,
+                                connection_scaled,
+                                &network_start_for_pong,
+                            ));
                             tokio::time::sleep(latency).await;
 
                             if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
@@ -644,7 +679,11 @@ impl Worker {
                 let bytes_sent_total = bytes_sent_total.clone();
                 let network_requests_sent_total = network_requests_sent_total.clone();
                 let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
-                let latency = generate_latency(connection_latency);
+                let latency = generate_latency(effective_latency(
+                    connection_latency,
+                    connection_scaled,
+                    &network_start,
+                ));
                 let request_type = message.request_type();
 
                 join_set.spawn(async move {
@@ -791,7 +830,10 @@ impl Worker {
 /// If `seed == 0`, the table is initialized with all zeros.
 /// expected mean latency for a quorum of nodes should be below within expected
 /// thresholds
-fn generate_latency_table(n: usize, node_params: &NodeParameters) -> Vec<Vec<f64>> {
+fn generate_latency_table(
+    n: usize,
+    node_params: &NodeParameters,
+) -> (Vec<Vec<f64>>, Vec<Vec<bool>>) {
     let mut resulting_table = vec![vec![]; n];
 
     // Priority: uniform_latency_ms > mimic_latency > zero
@@ -820,27 +862,52 @@ fn generate_latency_table(n: usize, node_params: &NodeParameters) -> Vec<Vec<f64
         }
     }
 
-    // Adversarial latency overlay: for n = 3f+1, each node has f "far"
-    // peers at circular distance > f. Far connections get a flat 10s
-    // latency. The circular distance is symmetric by definition.
+    // Adversarial latency ramp: 50% of off-diagonal cells per row are flagged
+    // as "scaled". Their latency is multiplied at sample time by
+    // 1 + t / ADVERSARIAL_RAMP_PERIOD_SECS (continuous, no step), where t is
+    // wall-clock seconds since network start. The scaled set is chosen
+    // independently per row from a deterministic seed, so every node
+    // generates the same table without coordination but the slow connections
+    // are not aligned in a fixed band — each row has a different unstable
+    // set, while ~50% of its peers stay at base latency forever.
+    let mut scaled_mask = vec![vec![false; n]; n];
     if node_params.adversarial_latency && n > 1 {
-        const ADVERSARIAL_LATENCY_MS: f64 = 10_000.0;
-        let f = (n - 1) / 3;
-        for (i, row) in resulting_table.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                if i == j {
-                    continue;
-                }
-                let diff = j.abs_diff(i);
-                let circ_dist = diff.min(n - diff);
-                if circ_dist > f {
-                    *cell = ADVERSARIAL_LATENCY_MS;
-                }
+        let scaled_per_row = ((n - 1) * 5).div_ceil(10);
+        for (i, row) in scaled_mask.iter_mut().enumerate() {
+            let mut rng = StdRng::seed_from_u64(ADVERSARIAL_RAMP_SEED ^ i as u64);
+            let mut cols: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+            cols.shuffle(&mut rng);
+            for &j in cols.iter().take(scaled_per_row) {
+                row[j] = true;
             }
         }
     }
 
-    resulting_table
+    (resulting_table, scaled_mask)
+}
+
+/// Period (seconds) over which the adversarial latency multiplier grows
+/// by one. After `k * ADVERSARIAL_RAMP_PERIOD_SECS` of network uptime,
+/// scaled cells carry `(k + 1) ×` their base latency. Growth is continuous
+/// — at t = 0.5 * period the multiplier is 1.5, etc.
+const ADVERSARIAL_RAMP_PERIOD_SECS: f64 = 10.0;
+
+/// Deterministic seed for the per-row "scaled" peer selection. XOR'd with
+/// the row index so each row gets an independent shuffle, but every node
+/// computes the same table on every boot.
+const ADVERSARIAL_RAMP_SEED: u64 = 0xADBA_0000_0000_0000;
+
+/// Returns the per-call effective latency. When `scaled` is false (or base is
+/// zero) the base is returned unchanged. Otherwise the base is multiplied by
+/// `1 + t / ADVERSARIAL_RAMP_PERIOD_SECS`, where `t` is wall-clock seconds
+/// since `network_start`.
+fn effective_latency(base: f64, scaled: bool, network_start: &Instant) -> f64 {
+    if !scaled || base == 0.0 {
+        return base;
+    }
+    let secs = network_start.elapsed().as_secs_f64();
+    let mult = 1.0 + secs / ADVERSARIAL_RAMP_PERIOD_SECS;
+    base * mult
 }
 
 fn generate_latency(mean: f64) -> Duration {

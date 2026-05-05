@@ -83,7 +83,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
-        /// Overlay 10s latency on the f farthest peers (circular distance).
+        /// Multiply outbound latency on a random 50% of peers per row by
+        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
+        /// peers stay at base latency.
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
@@ -126,7 +128,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
-        /// Overlay 10s latency on the f farthest peers (circular distance).
+        /// Multiply outbound latency on a random 50% of peers per row by
+        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
+        /// peers stay at base latency.
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
@@ -334,7 +338,10 @@ async fn local_benchmark(
         );
     }
     if node_parameters.adversarial_latency {
-        println!("Adversarial Latency: 10s on f farthest peers");
+        println!(
+            "Adversarial Latency: 50% random peers per row, mult = 1 + t/10s \
+             (continuous ramp); other 50% stay at base latency"
+        );
     }
     println!("Duration: {duration_secs} seconds");
     println!("===========================\n");
