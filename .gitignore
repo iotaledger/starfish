@@ -30,6 +30,8 @@ local-dryrun/data/
 *.tex
 *.txt
 !papers/*.pdf
+scripts/plot_*.py
+scripts/__pycache__/
 
 # But track local-dryrun sources, not generated data
 !local-dryrun/
