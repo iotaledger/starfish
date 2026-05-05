@@ -3,14 +3,14 @@
 #----------------------------------------------------------------------
 # Configuration Parameters
 #----------------------------------------------------------------------
-NUM_NODES=${NUM_NODES:-22}
+NUM_NODES=${NUM_NODES:-30}
 NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
 CONSENSUS=${CONSENSUS:-starfish}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-7}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
 #   chain-bomb, chain-bomb-quorum,
@@ -27,7 +27,7 @@ STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
 TRANSACTION_MODE=${TRANSACTION_MODE:-random}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-DISSEMINATION_MODE=${DISSEMINATION_MODE:-protocol-default}
+DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
 # Enable lz4 network compression.
 # Auto-enabled for random transaction mode.
 # Set COMPRESS_NETWORK=1 or =0 to override.
@@ -38,8 +38,10 @@ if [ -z "${COMPRESS_NETWORK+x}" ]; then
         COMPRESS_NETWORK=0
     fi
 fi
-# Set to 1 to overlay 10s latency on the f farthest peers
-#ADVERSARIAL_LATENCY=1
+# Adversarial latency: set to a percentage (1-100) to enable.
+# That share of each row's cross-region peers is scaled by
+# `1 + t/10s` (continuous ramp). Unset or 0 disables it.
+ADVERSARIAL_LATENCY=${ADVERSARIAL_LATENCY:-40}
 DATA_DIR="local-dryrun/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-starfish-dryrun}
@@ -47,8 +49,9 @@ COMPOSE_NETWORK_NAME="${COMPOSE_PROJECT_NAME}_starfish-net"
 REMOVE_VOLUMES=${REMOVE_VOLUMES:-1}
 # Set to 1 to wipe Prometheus/Grafana data
 CLEAN_MONITORING=${CLEAN_MONITORING:-0}
-# Host ports for monitoring (offset from orchestrator's 9090/3000)
-PROMETHEUS_PORT=${PROMETHEUS_PORT:-9091}
+# Host ports for monitoring (offset from orchestrator's 9090/3000).
+# 9091 is the default pushgateway port on many setups, so default to 9092.
+PROMETHEUS_PORT=${PROMETHEUS_PORT:-9092}
 GRAFANA_PORT=${GRAFANA_PORT:-3001}
 
 # Docker network. If SUBNET is not set, pick a free /23 automatically.
@@ -550,8 +553,10 @@ EOH
             LATENCY_FLAGS+=" --uniform-latency-ms"
             LATENCY_FLAGS+=" $UNIFORM_LATENCY_MS"
         fi
-        if [ "${ADVERSARIAL_LATENCY:-0}" = 1 ]; then
+        if [ "${ADVERSARIAL_LATENCY:-0}" -gt 0 ] 2>/dev/null; then
             LATENCY_FLAGS+=" --adversarial-latency"
+            LATENCY_FLAGS+=" --adversarial-latency-percent"
+            LATENCY_FLAGS+=" $ADVERSARIAL_LATENCY"
         fi
 
         PARAM_FLAGS=""
@@ -610,15 +615,18 @@ printf "  %-18s ${YELLOW}%s${RESET}\n" \
     "Storage:" "$STORAGE_BACKEND" \
     "Tx mode:" "$TRANSACTION_MODE" \
     "Compression:" "$([ "$COMPRESS_NETWORK" = 1 ] && echo enabled || echo disabled)" \
-    "Byzantine:" "$NUM_BYZANTINE_NODES" \
     "Test duration:" "${TEST_TIME}s"
+if (( NUM_BYZANTINE_NODES > 0 )); then
+    printf "  %-18s ${YELLOW}%s${RESET}\n" \
+        "Byzantine:" "$NUM_BYZANTINE_NODES"
+fi
 if [ -n "${UNIFORM_LATENCY_MS:-}" ]; then
     printf "  %-18s ${YELLOW}%s${RESET}\n" \
         "Uniform latency:" "${UNIFORM_LATENCY_MS}ms"
 fi
-if [ "${ADVERSARIAL_LATENCY:-0}" = 1 ]; then
+if [ "${ADVERSARIAL_LATENCY:-0}" -gt 0 ] 2>/dev/null; then
     printf "  %-18s ${YELLOW}%s${RESET}\n" \
-        "Adversarial lat.:" "enabled"
+        "Adversarial lat.:" "enabled (${ADVERSARIAL_LATENCY}%)"
 fi
 if (( NUM_BYZANTINE_NODES > 0 )); then
     printf "  %-18s ${YELLOW}%s${RESET}\n" \

@@ -881,19 +881,21 @@ fn generate_latency_table(
     // fast. The exemption is expressed as a base-latency threshold so it
     // applies uniformly across mimic / uniform / zero modes: any cell with
     // base < ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS is exempt. Of the remaining
-    // "far" peers per row, 34% are flagged "scaled": their latency is
-    // multiplied at sample time by 1 + t / ADVERSARIAL_RAMP_PERIOD_SECS
-    // (continuous, no step), where t is wall-clock seconds since network
-    // start. The scaled set is chosen independently per row from a
-    // deterministic seed, so every node generates the same table without
-    // coordination but the slow connections are not aligned in a fixed band.
+    // "far" peers per row, `adversarial_latency_percent`% are flagged
+    // "scaled": their latency is multiplied at sample time by
+    // 1 + t / ADVERSARIAL_RAMP_PERIOD_SECS (continuous, no step), where t is
+    // wall-clock seconds since network start. The scaled set is chosen
+    // independently per row from a deterministic seed, so every node
+    // generates the same table without coordination but the slow
+    // connections are not aligned in a fixed band.
     let mut scaled_mask = vec![vec![false; n]; n];
     if node_params.adversarial_latency && n > 1 {
+        let percent = node_params.adversarial_latency_percent.min(100) as usize;
         for (i, row) in scaled_mask.iter_mut().enumerate() {
             let candidates: Vec<usize> = (0..n)
                 .filter(|&j| j != i && resulting_table[i][j] >= ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS)
                 .collect();
-            let scaled_per_row = (candidates.len() * 34).div_ceil(100);
+            let scaled_per_row = (candidates.len() * percent).div_ceil(100);
             let mut rng = StdRng::seed_from_u64(ADVERSARIAL_RAMP_SEED ^ i as u64);
             let mut shuffled = candidates;
             shuffled.shuffle(&mut rng);

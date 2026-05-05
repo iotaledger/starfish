@@ -85,9 +85,14 @@ enum Operation {
         uniform_latency_ms: Option<f64>,
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34)]
+        adversarial_latency_percent: u32,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         /// Directory to store validator data (default: current directory)
@@ -130,9 +135,14 @@ enum Operation {
         uniform_latency_ms: Option<f64>,
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34)]
+        adversarial_latency_percent: u32,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         #[clap(long, value_name = "INT", default_value_t = 600)]
@@ -188,6 +198,7 @@ async fn main() -> Result<()> {
             mimic_extra_latency: mimic_latency,
             uniform_latency_ms,
             adversarial_latency,
+            adversarial_latency_percent,
             consensus: consensus_protocol,
             data_dir,
             base_ip,
@@ -205,6 +216,7 @@ async fn main() -> Result<()> {
                 mimic_latency,
                 uniform_latency_ms,
                 adversarial_latency,
+                adversarial_latency_percent,
                 consensus_protocol,
                 data_dir,
                 base_ip,
@@ -224,6 +236,7 @@ async fn main() -> Result<()> {
             mimic_extra_latency,
             uniform_latency_ms,
             adversarial_latency,
+            adversarial_latency_percent,
             consensus: consensus_protocol,
             duration_secs,
             dissemination_mode,
@@ -233,6 +246,7 @@ async fn main() -> Result<()> {
                 node_parameters.uniform_latency_ms = Some(latency);
             }
             node_parameters.adversarial_latency = adversarial_latency;
+            node_parameters.adversarial_latency_percent = adversarial_latency_percent;
             if let Some(ref mode) = dissemination_mode {
                 node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
@@ -339,9 +353,10 @@ async fn local_benchmark(
     }
     if node_parameters.adversarial_latency {
         println!(
-            "Adversarial Latency: 34% of cross-region peers per row scaled \
+            "Adversarial Latency: {}% of cross-region peers per row scaled \
              by mult = 1 + t/10s (continuous ramp); same-region peers \
-             (base < 5ms) stay at base latency"
+             (base < 5ms) stay at base latency",
+            node_parameters.adversarial_latency_percent
         );
     }
     println!("Duration: {duration_secs} seconds");
@@ -538,6 +553,7 @@ async fn dryrun(
     mimic_latency: bool,
     uniform_latency_ms: Option<f64>,
     adversarial_latency: bool,
+    adversarial_latency_percent: u32,
     consensus_protocol: String,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
@@ -578,6 +594,7 @@ async fn dryrun(
         node_parameters.uniform_latency_ms = Some(latency);
     }
     node_parameters.adversarial_latency = adversarial_latency;
+    node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;

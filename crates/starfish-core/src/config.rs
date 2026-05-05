@@ -46,6 +46,8 @@ pub struct NodeParameters {
     pub uniform_latency_ms: Option<f64>,
     #[serde(default = "node_defaults::default_adversarial_latency")]
     pub adversarial_latency: bool,
+    #[serde(default = "node_defaults::default_adversarial_latency_percent")]
+    pub adversarial_latency_percent: u32,
     #[serde(default = "node_defaults::default_compress_network")]
     pub compress_network: bool,
     #[serde(default = "node_defaults::default_bls_verification_workers")]
@@ -89,6 +91,10 @@ pub mod node_defaults {
         false
     }
 
+    pub fn default_adversarial_latency_percent() -> u32 {
+        34
+    }
+
     pub fn default_compress_network() -> bool {
         false
     }
@@ -116,6 +122,7 @@ impl Default for NodeParameters {
             mimic_latency: node_defaults::default_mimic_latency(),
             uniform_latency_ms: node_defaults::default_uniform_latency_ms(),
             adversarial_latency: node_defaults::default_adversarial_latency(),
+            adversarial_latency_percent: node_defaults::default_adversarial_latency_percent(),
             compress_network: node_defaults::default_compress_network(),
             bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),

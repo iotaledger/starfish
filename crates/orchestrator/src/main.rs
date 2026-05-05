@@ -93,9 +93,15 @@ pub enum Operation {
 
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
+
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34, global = true)]
+        adversarial_latency_percent: u32,
 
         /// The set of loads to submit to the system (tx/s). Each load triggers
         /// a separate benchmark run. Setting a load to zero will not
@@ -217,9 +223,15 @@ pub enum Operation {
 
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
+
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34, global = true)]
+        adversarial_latency_percent: u32,
 
         /// Whether to skip testbed updates before running benchmarks.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -328,9 +340,15 @@ pub enum Operation {
 
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
+
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34, global = true)]
+        adversarial_latency_percent: u32,
 
         /// Whether to skip testbed updates before running benchmarks.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -392,9 +410,15 @@ pub enum Operation {
 
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
+
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34, global = true)]
+        adversarial_latency_percent: u32,
 
         /// Whether to skip testbed updates before running benchmarks.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -532,9 +556,15 @@ pub enum Operation {
 
         /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
         /// are kept stable. Of the remaining cross-region peers per row, a
-        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
+        /// random `adversarial_latency_percent`% are scaled by `1 + t / 10`
+        /// seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
+
+        /// Percentage of cross-region peers per row that are scaled when
+        /// `--adversarial-latency` is enabled (0-100).
+        #[clap(long, value_name = "INT", default_value_t = 34, global = true)]
+        adversarial_latency_percent: u32,
 
         /// Whether to skip testbed updates before running benchmarks.
         #[clap(long, action, default_value_t = false, global = true)]
@@ -810,6 +840,7 @@ fn load_benchmark_configs(
     settings: &Settings,
     mimic_extra_latency: bool,
     adversarial_latency: bool,
+    adversarial_latency_percent: u32,
     storage_backend: &Option<String>,
     transaction_mode: &Option<String>,
     dissemination_mode: &Option<String>,
@@ -821,6 +852,7 @@ fn load_benchmark_configs(
         None => NodeParameters::default_with_latency(mimic_extra_latency),
     };
     node_parameters.adversarial_latency = adversarial_latency;
+    node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -1160,6 +1192,7 @@ async fn run<C: ServerProviderClient>(
             protocols,
             destroy_testbed_after,
             adversarial_latency,
+            adversarial_latency_percent,
             loads,
             spare_instances,
             skip_testbed_update,
@@ -1189,6 +1222,7 @@ async fn run<C: ServerProviderClient>(
                 &settings,
                 mimic_extra_latency,
                 adversarial_latency,
+                adversarial_latency_percent,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -1235,7 +1269,14 @@ async fn run<C: ServerProviderClient>(
                     ),
                 );
             }
-            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config(
+                "Adversarial latency",
+                if node_parameters.adversarial_latency {
+                    format!("enabled ({}%)", node_parameters.adversarial_latency_percent)
+                } else {
+                    "disabled".to_string()
+                },
+            );
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
@@ -1309,6 +1350,7 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             adversarial_latency,
+            adversarial_latency_percent,
             skip_testbed_update,
             skip_testbed_configuration,
             destroy_testbed_after,
@@ -1346,6 +1388,7 @@ async fn run<C: ServerProviderClient>(
                 &settings,
                 mimic_extra_latency,
                 adversarial_latency,
+                adversarial_latency_percent,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -1394,7 +1437,14 @@ async fn run<C: ServerProviderClient>(
                     ),
                 );
             }
-            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config(
+                "Adversarial latency",
+                if node_parameters.adversarial_latency {
+                    format!("enabled ({}%)", node_parameters.adversarial_latency_percent)
+                } else {
+                    "disabled".to_string()
+                },
+            );
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
@@ -1474,6 +1524,7 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             adversarial_latency,
+            adversarial_latency_percent,
             skip_testbed_update,
             skip_testbed_configuration,
             destroy_testbed_after,
@@ -1543,6 +1594,7 @@ async fn run<C: ServerProviderClient>(
                 &settings,
                 mimic_extra_latency,
                 adversarial_latency,
+                adversarial_latency_percent,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -1592,7 +1644,14 @@ async fn run<C: ServerProviderClient>(
                     ),
                 );
             }
-            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config(
+                "Adversarial latency",
+                if node_parameters.adversarial_latency {
+                    format!("enabled ({}%)", node_parameters.adversarial_latency_percent)
+                } else {
+                    "disabled".to_string()
+                },
+            );
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
@@ -1674,6 +1733,7 @@ async fn run<C: ServerProviderClient>(
             sweep_focus_step,
             destroy_testbed_after,
             adversarial_latency,
+            adversarial_latency_percent,
             skip_testbed_update,
             skip_testbed_configuration,
             enable_tracing,
@@ -1699,6 +1759,7 @@ async fn run<C: ServerProviderClient>(
                 &settings,
                 mimic_extra_latency,
                 adversarial_latency,
+                adversarial_latency_percent,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -1759,7 +1820,14 @@ async fn run<C: ServerProviderClient>(
                     ),
                 );
             }
-            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config(
+                "Adversarial latency",
+                if node_parameters.adversarial_latency {
+                    format!("enabled ({}%)", node_parameters.adversarial_latency_percent)
+                } else {
+                    "disabled".to_string()
+                },
+            );
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
@@ -1853,6 +1921,7 @@ async fn run<C: ServerProviderClient>(
             byzantine_nodes,
             byzantine_strategy,
             adversarial_latency,
+            adversarial_latency_percent,
             skip_testbed_update,
             skip_testbed_configuration,
             destroy_testbed_after,
@@ -1895,6 +1964,7 @@ async fn run<C: ServerProviderClient>(
                 &settings,
                 mimic_extra_latency,
                 adversarial_latency,
+                adversarial_latency_percent,
                 &storage_backend,
                 &transaction_mode,
                 &dissemination_mode,
@@ -1939,7 +2009,14 @@ async fn run<C: ServerProviderClient>(
                     ),
                 );
             }
-            display::config("Adversarial latency", node_parameters.adversarial_latency);
+            display::config(
+                "Adversarial latency",
+                if node_parameters.adversarial_latency {
+                    format!("enabled ({}%)", node_parameters.adversarial_latency_percent)
+                } else {
+                    "disabled".to_string()
+                },
+            );
             display::config("Enable tracing", enable_tracing);
             display::newline();
 
