@@ -217,6 +217,7 @@ pub enum ByzantineStrategy {
     ChainBomb,              // Fork bomb: withhold a chain of blocks and release it all at once
     ChainBombQuorum,        // Fork bomb released to the next 2f+1 indices (wrapping) after self
     EquivocatingChainsBomb, // Equivocation fork bomb: send different chains to each validator
+    RampUpWithholding,      // Like LeaderWithholding but skip prob ramps 0->0.5 over 5m
 }
 
 impl ByzantineStrategy {
@@ -240,6 +241,7 @@ impl ByzantineStrategy {
             "chain-bomb-quorum" => Some(Self::ChainBombQuorum),
             "equivocating-chains-bomb" => Some(Self::EquivocatingChainsBomb),
             "random-drop" => Some(Self::RandomDrop),
+            "ramp-up-withholding" => Some(Self::RampUpWithholding),
             _ => None,
         }
     }
@@ -3199,8 +3201,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CACHED_ROUNDS, CertificateEvent, ConsensusProtocol, DacCertificateVerificationState,
-        DagState, DataSource, OwnBlockData,
+        ByzantineStrategy, CACHED_ROUNDS, CertificateEvent, ConsensusProtocol,
+        DacCertificateVerificationState, DagState, DataSource, OwnBlockData,
     };
     use crate::{
         committee::Committee,
@@ -4249,6 +4251,14 @@ mod tests {
         assert!(dag_state.has_clean_vertex(&leader_ref));
         assert!(dag_state.has_clean_vertex(compress_a.reference()));
         assert!(dag_state.has_clean_vertex(compress_b.reference()));
+    }
+
+    #[test]
+    fn byzantine_strategy_parses_ramp_up_withholding() {
+        assert_eq!(
+            ByzantineStrategy::from_strategy_str("ramp-up-withholding"),
+            Some(ByzantineStrategy::RampUpWithholding)
+        );
     }
 
     #[test]

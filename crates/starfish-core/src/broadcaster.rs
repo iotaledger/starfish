@@ -667,6 +667,35 @@ where
                     }
                     notified.await;
                 }
+                // Same body as LeaderWithholding (leader-round gate + 450
+                // ms pre-send delay) except the constant 0.5 send
+                // probability is replaced by a ramp:
+                //   p_send(t) = 1 - min(0.5, t / 600).
+                // Skip probability ramps 0 -> 0.5 over 5 minutes, then plateaus
+                // — at t=0 the byzantine leader is honest, at t >= 5 minutes it
+                // matches LeaderWithholding's 50% reach.
+                Some(ByzantineStrategy::RampUpWithholding) => {
+                    let leaders_current_round = universal_committer.get_leaders(current_round);
+                    if leaders_current_round.contains(&own_authority_index) {
+                        let _sleep = sleep(withholding_timeout).await;
+                        let t = inner.start_time.elapsed().as_secs_f64();
+                        let p_send = 1.0 - (t / 600.0).min(0.5);
+                        let send: bool = rng.gen_bool(p_send);
+                        if send {
+                            send_own_block_batch(
+                                inner.clone(),
+                                to.clone(),
+                                to_whom_authority_index,
+                                &mut round,
+                                batch_byzantine_own_block_size,
+                                &metrics,
+                                sent_to_peer.clone(),
+                            )
+                            .await?;
+                        }
+                    }
+                    notified.await;
+                }
                 // Create two equivocating blocks and, send the first one to the first 50% and the
                 // second to the other 50% of the validators
                 Some(ByzantineStrategy::EquivocatingTwoChains) => {

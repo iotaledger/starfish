@@ -1339,6 +1339,10 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     /// Sailfish++ service handle for sending control messages
     /// (timeout/no-vote). None for non-SailfishPlusPlus protocols.
     pub sailfish_handle: Option<SailfishServiceHandle>,
+    /// Wall-clock at NetworkSyncer start; consumed by time-dependent
+    /// Byzantine strategies (e.g. RampUpWithholding) to ramp behavior
+    /// over a fixed schedule.
+    pub start_time: std::time::Instant,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -1459,6 +1463,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             leader_timeout: node_parameters.leader_timeout,
             soft_block_timeout: node_parameters.soft_block_timeout,
             sailfish_handle: sf_handle_for_inner,
+            start_time: std::time::Instant::now(),
         });
 
         // Start bridge task that forwards reconstructed transaction data to core

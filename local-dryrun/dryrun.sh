@@ -3,18 +3,20 @@
 #----------------------------------------------------------------------
 # Configuration Parameters
 #----------------------------------------------------------------------
-NUM_NODES=${NUM_NODES:-10}
+NUM_NODES=${NUM_NODES:-22}
 NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
 # Options: starfish, starfish-speed, starfish-bls,
 #          cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
 CONSENSUS=${CONSENSUS:-starfish}
-NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
+NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-7}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
-#   chain-bomb, equivocating-chains-bomb, random-drop
-BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-equivocating-chains-bomb}
+#   chain-bomb, chain-bomb-quorum,
+#   equivocating-chains-bomb, random-drop,
+#   ramp-up-withholding
+BYZANTINE_STRATEGY=${BYZANTINE_STRATEGY:-ramp-up-withholding}
 TEST_TIME=${TEST_TIME:-3000}
 # Optional: set to use uniform latency (ms)
 # instead of AWS RTT table
@@ -295,8 +297,10 @@ if (( NUM_BYZANTINE_NODES > 0 )); then
         |equivocating-chains \
         |equivocating-two-chains \
         |chain-bomb \
+        |chain-bomb-quorum \
         |equivocating-chains-bomb \
-        |random-drop) ;;
+        |random-drop \
+        |ramp-up-withholding) ;;
         *)
             echo -e \
                 "${RED}Invalid BYZANTINE_STRATEGY:" \
@@ -308,8 +312,10 @@ if (( NUM_BYZANTINE_NODES > 0 )); then
                 "equivocating-chains," \
                 "equivocating-two-chains," \
                 "chain-bomb," \
+                "chain-bomb-quorum," \
                 "equivocating-chains-bomb," \
-                "random-drop${RESET}"
+                "random-drop," \
+                "ramp-up-withholding${RESET}"
             exit 1
             ;;
     esac
