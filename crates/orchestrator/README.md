@@ -161,7 +161,7 @@ Additional benchmark flags:
 | `--transaction-mode` | _(unset)_ | `all_zero` or `random` |
 | `--protocols` | _(required)_ | Run one or more protocols in sequence |
 | `--enable-tracing` | false | Enable detailed log traces |
-| `--adversarial-latency` | false | Multiply outbound latency on a random 50% of peers per row by `1 + t/10s` (continuous ramp); other 50% stay at base |
+| `--adversarial-latency` | false | Scale 34% of cross-region peers per row by `1 + t/10s` (continuous ramp); same-region peers (base < 5 ms) stay at base |
 | `--skip-testbed-update` | false | Skip pulling latest code on remotes |
 | `--skip-testbed-configuration` | false | Skip reconfiguring nodes |
 | `--destroy-testbed-after` | false | Destroy testbed after benchmark |

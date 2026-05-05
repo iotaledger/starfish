@@ -91,9 +91,9 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
 
@@ -215,9 +215,9 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
 
@@ -326,9 +326,9 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
 
@@ -390,9 +390,9 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
 
@@ -530,9 +530,9 @@ pub enum Operation {
         #[clap(long, value_name = "STRING", default_value = "timeout", global = true)]
         byzantine_strategy: String,
 
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, action, default_value_t = false, global = true)]
         adversarial_latency: bool,
 

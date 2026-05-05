@@ -862,22 +862,28 @@ fn generate_latency_table(
         }
     }
 
-    // Adversarial latency ramp: 50% of off-diagonal cells per row are flagged
-    // as "scaled". Their latency is multiplied at sample time by
-    // 1 + t / ADVERSARIAL_RAMP_PERIOD_SECS (continuous, no step), where t is
-    // wall-clock seconds since network start. The scaled set is chosen
-    // independently per row from a deterministic seed, so every node
-    // generates the same table without coordination but the slow connections
-    // are not aligned in a fixed band — each row has a different unstable
-    // set, while ~50% of its peers stay at base latency forever.
+    // Adversarial latency ramp: same-region (small base latency) peers stay
+    // stable — under the AWS RTT table these are ~1 ms hops we want to keep
+    // fast. The exemption is expressed as a base-latency threshold so it
+    // applies uniformly across mimic / uniform / zero modes: any cell with
+    // base < ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS is exempt. Of the remaining
+    // "far" peers per row, 34% are flagged "scaled": their latency is
+    // multiplied at sample time by 1 + t / ADVERSARIAL_RAMP_PERIOD_SECS
+    // (continuous, no step), where t is wall-clock seconds since network
+    // start. The scaled set is chosen independently per row from a
+    // deterministic seed, so every node generates the same table without
+    // coordination but the slow connections are not aligned in a fixed band.
     let mut scaled_mask = vec![vec![false; n]; n];
     if node_params.adversarial_latency && n > 1 {
-        let scaled_per_row = ((n - 1) * 5).div_ceil(10);
         for (i, row) in scaled_mask.iter_mut().enumerate() {
+            let candidates: Vec<usize> = (0..n)
+                .filter(|&j| j != i && resulting_table[i][j] >= ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS)
+                .collect();
+            let scaled_per_row = (candidates.len() * 34).div_ceil(100);
             let mut rng = StdRng::seed_from_u64(ADVERSARIAL_RAMP_SEED ^ i as u64);
-            let mut cols: Vec<usize> = (0..n).filter(|&j| j != i).collect();
-            cols.shuffle(&mut rng);
-            for &j in cols.iter().take(scaled_per_row) {
+            let mut shuffled = candidates;
+            shuffled.shuffle(&mut rng);
+            for &j in shuffled.iter().take(scaled_per_row) {
                 row[j] = true;
             }
         }
@@ -896,6 +902,11 @@ const ADVERSARIAL_RAMP_PERIOD_SECS: f64 = 10.0;
 /// the row index so each row gets an independent shuffle, but every node
 /// computes the same table on every boot.
 const ADVERSARIAL_RAMP_SEED: u64 = 0xADBA_0000_0000_0000;
+
+/// Cells with base latency strictly below this threshold (in milliseconds)
+/// are exempt from the adversarial-latency ramp. Picked above typical AWS
+/// same-region RTTs (~0.5-2 ms) and below cross-region minima (~30 ms).
+const ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS: f64 = 5.0;
 
 /// Returns the per-call effective latency. When `scaled` is false (or base is
 /// zero) the base is returned unchanged. Otherwise the base is multiplied by

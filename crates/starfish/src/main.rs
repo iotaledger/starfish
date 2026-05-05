@@ -83,9 +83,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
@@ -128,9 +128,9 @@ enum Operation {
         mimic_extra_latency: bool,
         #[clap(long, value_name = "FLOAT")]
         uniform_latency_ms: Option<f64>,
-        /// Multiply outbound latency on a random 50% of peers per row by
-        /// `1 + t / 10` seconds (continuous ramp). The remaining 50% of
-        /// peers stay at base latency.
+        /// Adversarial-latency ramp. Same-region peers (base latency < 5 ms)
+        /// are kept stable. Of the remaining cross-region peers per row, a
+        /// random 34% are scaled by `1 + t / 10` seconds (continuous ramp).
         #[clap(long, default_value_t = false)]
         adversarial_latency: bool,
         #[clap(long, value_name = "STRING", default_value = "starfish")]
@@ -339,8 +339,9 @@ async fn local_benchmark(
     }
     if node_parameters.adversarial_latency {
         println!(
-            "Adversarial Latency: 50% random peers per row, mult = 1 + t/10s \
-             (continuous ramp); other 50% stay at base latency"
+            "Adversarial Latency: 34% of cross-region peers per row scaled \
+             by mult = 1 + t/10s (continuous ramp); same-region peers \
+             (base < 5ms) stay at base latency"
         );
     }
     println!("Duration: {duration_secs} seconds");
