@@ -44,6 +44,12 @@ fn peer_can_serve_missing_data(
     }
 }
 
+const RAMP_UP_CHAIN_BOMB_SECS: f64 = 180.0;
+
+fn ramp_up_chain_bomb_release_probability(elapsed_secs: f64) -> f64 {
+    (elapsed_secs / RAMP_UP_CHAIN_BOMB_SECS).clamp(0.0, 1.0)
+}
+
 #[derive(Clone)]
 pub struct BroadcasterParameters {
     /// The number of own blocks to send in a single batch.
@@ -667,31 +673,28 @@ where
                     }
                     notified.await;
                 }
-                // Same body as LeaderWithholding (leader-round gate + 450
-                // ms pre-send delay) except the constant 0.5 send
-                // probability is replaced by a ramp:
-                //   p_send(t) = 1 - min(0.5, t / 600).
-                // Skip probability ramps 0 -> 0.5 over 5 minutes, then plateaus
-                // — at t=0 the byzantine leader is honest, at t >= 5 minutes it
-                // matches LeaderWithholding's 50% reach.
+                // ChainBomb shape with a time ramp: initially withhold, then
+                // probabilistically release to the next leader until it fully
+                // matches ChainBomb after 3 minutes.
                 Some(ByzantineStrategy::RampUpWithholding) => {
-                    let leaders_current_round = universal_committer.get_leaders(current_round);
-                    if leaders_current_round.contains(&own_authority_index) {
-                        let _sleep = sleep(withholding_timeout).await;
-                        let t = inner.start_time.elapsed().as_secs_f64();
-                        let p_send = 1.0 - (t / 600.0).min(0.5);
-                        let send: bool = rng.gen_bool(p_send);
-                        if send {
-                            send_own_block_batch(
-                                inner.clone(),
-                                to.clone(),
-                                to_whom_authority_index,
-                                &mut round,
-                                batch_byzantine_own_block_size,
-                                &metrics,
-                                sent_to_peer.clone(),
-                            )
-                            .await?;
+                    if current_round as usize % committee_size == own_authority_index as usize {
+                        let leaders_next_round = universal_committer.get_leaders(current_round + 1);
+                        if leaders_next_round.contains(&to_whom_authority_index) {
+                            let release_probability = ramp_up_chain_bomb_release_probability(
+                                inner.start_time.elapsed().as_secs_f64(),
+                            );
+                            if rng.gen_bool(release_probability) {
+                                send_own_block_batch(
+                                    inner.clone(),
+                                    to.clone(),
+                                    to_whom_authority_index,
+                                    &mut round,
+                                    batch_byzantine_own_block_size,
+                                    &metrics,
+                                    sent_to_peer.clone(),
+                                )
+                                .await?;
+                            }
                         }
                     }
                     notified.await;
@@ -954,63 +957,27 @@ where
     Some(())
 }
 
-fn take_previous_round_header_refs<H, C>(
-    inner: &Arc<NetworkSyncerInner<H, C>>,
-    peer: AuthorityIndex,
-    round: RoundNumber,
-    limit: usize,
-) -> Vec<BlockReference>
-where
-    C: 'static + CommitObserver,
-    H: 'static + BlockHandler,
-{
-    let own_authority = inner.dag_state.get_own_authority_index();
-    let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
-        return Vec::new();
-    };
-    let header_refs =
-        ck.write()
-            .take_unsent_headers_at_round_excluding_authority(limit, round, own_authority);
-    header_refs
-}
-
-fn collect_unsent_ancestor_header_refs<H, C>(
+fn take_unknown_history_header_refs<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     peer: AuthorityIndex,
     own_authority: AuthorityIndex,
-    sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
-    roots: &[BlockReference],
     limit: usize,
 ) -> Vec<BlockReference>
 where
     C: 'static + CommitObserver,
     H: 'static + BlockHandler,
 {
-    if limit == 0 || roots.is_empty() {
+    if limit == 0 {
         return Vec::new();
     }
 
     let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
         return Vec::new();
     };
-    let Some(dag_knowledge) = inner.cordial_knowledge.dag_knowledge() else {
-        return Vec::new();
-    };
-    let collected = {
-        let sent = sent_to_peer.read();
-        dag_knowledge
-            .read()
-            .collect_unsent_ancestor_refs(roots, peer, own_authority, &sent, limit)
-    };
-
-    if !collected.is_empty() {
-        let mut known = ck.write();
-        for block_ref in &collected {
-            known.mark_header_known(*block_ref);
-        }
-    }
-
-    collected
+    let refs = ck
+        .write()
+        .take_unsent_headers_excluding_authority(limit, own_authority);
+    refs
 }
 
 fn take_causal_shard_refs<H, C>(
@@ -1087,7 +1054,6 @@ fn select_push_batch_parts<H, C>(
     to_whom_authority_index: AuthorityIndex,
     own_round: RoundNumber,
     broadcaster_parameters: &BroadcasterParameters,
-    sent_to_peer: &Arc<parking_lot::RwLock<AHashSet<BlockReference>>>,
     selection_mode: PushSelectionMode,
 ) -> Option<PushBatchParts>
 where
@@ -1106,32 +1072,15 @@ where
     let (mut other_refs, mut shard_refs, useful_headers, useful_shards) = match selection_mode {
         PushSelectionMode::Causal => {
             let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
-            let mut other_refs = Vec::new();
+            let other_refs = take_unknown_history_header_refs(
+                inner,
+                to_whom_authority_index,
+                own_authority,
+                broadcaster_parameters.batch_other_block_size,
+            );
             let mut shard_refs = Vec::new();
 
             if let Some(newest_round) = newest_own_round {
-                let previous_round = newest_round.saturating_sub(1);
-                if previous_round > 0 {
-                    let seed_refs = take_previous_round_header_refs(
-                        inner,
-                        to_whom_authority_index,
-                        previous_round,
-                        broadcaster_parameters.batch_other_block_size,
-                    );
-                    let ancestor_refs = collect_unsent_ancestor_header_refs(
-                        inner,
-                        to_whom_authority_index,
-                        own_authority,
-                        sent_to_peer,
-                        &seed_refs,
-                        broadcaster_parameters
-                            .batch_other_block_size
-                            .saturating_sub(seed_refs.len()),
-                    );
-                    other_refs.extend(seed_refs);
-                    other_refs.extend(ancestor_refs);
-                }
-
                 if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
                     let shard_round_cutoff = newest_round
                         .saturating_sub(broadcaster_parameters.causal_push_shard_round_lag);
@@ -1277,7 +1226,6 @@ where
         to_whom_authority_index,
         *round,
         &broadcaster_parameters,
-        &sent_to_peer,
         selection_mode,
     );
     report_useful_authorities(
@@ -1433,5 +1381,13 @@ mod tests {
             0,
             1,
         ));
+    }
+
+    #[test]
+    fn ramp_up_chain_bomb_probability_reaches_full_release_at_three_minutes() {
+        assert_eq!(ramp_up_chain_bomb_release_probability(0.0), 0.0);
+        assert_eq!(ramp_up_chain_bomb_release_probability(90.0), 0.5);
+        assert_eq!(ramp_up_chain_bomb_release_probability(180.0), 1.0);
+        assert_eq!(ramp_up_chain_bomb_release_probability(240.0), 1.0);
     }
 }

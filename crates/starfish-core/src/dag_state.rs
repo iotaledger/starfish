@@ -217,7 +217,7 @@ pub enum ByzantineStrategy {
     ChainBomb,              // Fork bomb: withhold a chain of blocks and release it all at once
     ChainBombQuorum,        // Fork bomb released to the next 2f+1 indices (wrapping) after self
     EquivocatingChainsBomb, // Equivocation fork bomb: send different chains to each validator
-    RampUpWithholding,      // Like LeaderWithholding but skip prob ramps 0->0.5 over 5m
+    RampUpWithholding,      // Like ChainBomb but release probability ramps to 1.0 over 3m
 }
 
 impl ByzantineStrategy {

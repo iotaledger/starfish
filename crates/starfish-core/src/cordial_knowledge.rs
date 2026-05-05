@@ -1422,6 +1422,21 @@ mod tests {
     }
 
     #[test]
+    fn test_take_unsent_headers_excluding_authority_drains_all_rounds() {
+        let mut ck = ConnectionKnowledge::new(1, 4);
+        let round_two = block_ref(2, 2);
+        let round_three = block_ref(3, 3);
+        let round_five = block_ref(2, 5);
+
+        ck.new_header(round_five);
+        ck.new_header(round_two);
+        ck.new_header(round_three);
+
+        let drained = ck.take_unsent_headers_excluding_authority(10, 0);
+        assert_eq!(drained, vec![round_two, round_three, round_five]);
+    }
+
+    #[test]
     fn test_take_unsent_headers_for_authorities() {
         let mut ck = ConnectionKnowledge::new(1, 4);
         let first = block_ref(0, 5);
