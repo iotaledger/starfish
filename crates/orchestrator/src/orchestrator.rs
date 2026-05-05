@@ -402,6 +402,37 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         format!("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get {args}")
     }
 
+    /// One-liner that disables Ubuntu's automatic apt machinery so our
+    /// own `apt-get` calls can grab `/var/lib/dpkg/lock-frontend`
+    /// immediately. Without this, a freshly booted AMI runs
+    /// `unattended-upgrades` and `apt-daily` at the same time as our
+    /// install command, and the `&&`-chained install can die mid-stream
+    /// before the working-dir mkdir runs. Cheaper than waiting on a
+    /// flock for several minutes per machine.
+    fn disable_unattended_apt() -> String {
+        // We must NOT use `pkill -f` here: matching against full command
+        // lines would kill our own bash, which carries the entire `&&`
+        // chain (including the names "apt-get" and "unattended-upgrade")
+        // as arguments. Match by process basename only.
+        [
+            // Stop any timers that might re-trigger updates mid-install.
+            "sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.timer 2>/dev/null || true",
+            "sudo systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true",
+            // Kill in-flight apt holders by exact process name.
+            "sudo pkill -9 -x apt-get 2>/dev/null || true",
+            "sudo pkill -9 -x dpkg 2>/dev/null || true",
+            "sudo pkill -9 -x unattended-upgrade 2>/dev/null || true",
+            "sudo pkill -9 -x unattended-upgrades 2>/dev/null || true",
+            // Remove stale lock files (safe once the procs are gone).
+            "sudo rm -f /var/lib/apt/lists/lock \
+                       /var/lib/dpkg/lock \
+                       /var/lib/dpkg/lock-frontend \
+                       /var/cache/apt/archives/lock",
+            "sudo dpkg --configure -a",
+        ]
+        .join(" && ")
+    }
+
     fn percentile(values: &[f64], percentile: f64) -> f64 {
         if values.is_empty() {
             return 0.0;
@@ -663,10 +694,11 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
             // Pre-built binary mode: minimal runtime dependencies only.
             // Directory at $HOME/{repo_name} to match protocol commands (cd {repo_name}).
             vec![
+                // Take ownership of apt before doing anything else, so
+                // unattended-upgrades / apt-daily can't hold the dpkg
+                // lock while our install command runs.
+                Self::disable_unattended_apt(),
                 Self::apt_get_noninteractive("update"),
-                Self::apt_get_noninteractive("-y remove needrestart"),
-                Self::apt_get_noninteractive("-y upgrade"),
-                Self::apt_get_noninteractive("-y autoremove"),
                 Self::apt_get_noninteractive("-y install sysstat libssl3 ca-certificates curl"),
                 format!("mkdir -p $HOME/{repo_name}/target/release"),
                 // Create empty cargo env so `source $HOME/.cargo/env` in protocol
@@ -676,6 +708,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         } else {
             // Build from source: full toolchain and dependencies.
             vec![
+                Self::disable_unattended_apt(),
                 Self::apt_get_noninteractive("update"),
                 Self::apt_get_noninteractive("-y remove needrestart"),
                 Self::apt_get_noninteractive("-y upgrade"),
