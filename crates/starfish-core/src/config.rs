@@ -422,7 +422,7 @@ pub(crate) mod param_defaults {
     }
 
     pub fn default_leader_timeout() -> Duration {
-        Duration::from_millis(400)
+        Duration::from_millis(600)
     }
 
     pub fn default_soft_block_timeout() -> Duration {
