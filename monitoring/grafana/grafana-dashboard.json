@@ -657,6 +657,38 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
+          "expr": "avg(block_committed_latency{v=\"p90\", node=~\"$node\"}) / 1000",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "legendFormat": "Block Commit p90",
+          "range": true,
+          "refId": "C",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "avg(block_committed_latency{v=\"p99\", node=~\"$node\"}) / 1000",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "legendFormat": "Block Commit p99",
+          "range": true,
+          "refId": "D",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
           "expr": "avg(transaction_committed_latency{v=\"p50\", node=~\"$node\"}) / 1000",
           "fullMetaSearch": false,
           "hide": false,
@@ -664,6 +696,38 @@
           "legendFormat": "Transaction Commit p50",
           "range": true,
           "refId": "B",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "avg(transaction_committed_latency{v=\"p90\", node=~\"$node\"}) / 1000",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "legendFormat": "Transaction Commit p90",
+          "range": true,
+          "refId": "E",
+          "useBackend": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr": "avg(transaction_committed_latency{v=\"p99\", node=~\"$node\"}) / 1000",
+          "fullMetaSearch": false,
+          "hide": false,
+          "includeNullMetadata": true,
+          "legendFormat": "Transaction Commit p99",
+          "range": true,
+          "refId": "F",
           "useBackend": false
         }
       ],
@@ -6668,6 +6732,6 @@
   "timezone": "",
   "title": "Consensus Dashboard",
   "uid": "bdd54ee7-84de-4018-8bb7-92af2defc041",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }
