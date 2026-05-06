@@ -389,14 +389,12 @@ where
                 {
                     if let Some(ck) = self.inner.cordial_knowledge.connection_knowledge(peer_id) {
                         let current_round = self.inner.dag_state.highest_round();
-                        let header_candidate_limit =
-                            remaining_extra_budget.saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
                         let extra_candidates = {
                             let mut ck = ck.write();
                             let (useful_headers_to_peer, _) =
                                 ck.useful_authors_to_peer_bitmasks(current_round);
                             ck.take_unsent_headers_for_authorities(
-                                header_candidate_limit,
+                                remaining_extra_budget,
                                 useful_headers_to_peer,
                             )
                         };
@@ -894,7 +892,6 @@ fn report_useful_authorities(
         .set(useful_shards.count_ones() as i64);
 }
 
-const HEADER_PRUNE_OVERFETCH_FACTOR: usize = 4;
 const MISSING_PARENTS_CHUNK_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy)]
@@ -957,10 +954,12 @@ where
     Some(())
 }
 
-fn take_unknown_history_header_refs<H, C>(
+fn take_unknown_causal_history_header_refs<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     peer: AuthorityIndex,
     own_authority: AuthorityIndex,
+    own_blocks: &[Data<VerifiedBlock>],
+    sent_to_peer: &AHashSet<BlockReference>,
     limit: usize,
 ) -> Vec<BlockReference>
 where
@@ -971,13 +970,51 @@ where
         return Vec::new();
     }
 
-    let Some(ck) = inner.cordial_knowledge.connection_knowledge(peer) else {
+    let Some(dag) = inner.cordial_knowledge.dag_knowledge() else {
         return Vec::new();
     };
-    let refs = ck
-        .write()
-        .take_unsent_headers_excluding_authority(limit, own_authority);
-    refs
+
+    // Fast path: include direct parents of newly pushed own blocks that we
+    // believe the peer is missing, even if the CordialKnowledge actor hasn't
+    // yet processed the new block's `BlockAdded` event.
+    let dag = dag.read();
+    let mut direct_unknown: Vec<BlockReference> = Vec::new();
+    let mut seen = AHashSet::new();
+    for block in own_blocks {
+        for parent in block.block_references().iter().copied() {
+            if direct_unknown.len() >= limit {
+                return direct_unknown;
+            }
+            if parent.round == 0
+                || parent.authority == peer
+                || parent.authority == own_authority
+                || sent_to_peer.contains(&parent)
+                || !seen.insert(parent)
+            {
+                continue;
+            }
+            if dag.peer_knows(&parent, peer).unwrap_or(false) {
+                continue;
+            }
+            direct_unknown.push(parent);
+        }
+    }
+
+    // Fill remaining budget by walking further ancestors using the in-memory
+    // parent graph in CordialKnowledge (no DagState traversal).
+    let remaining = limit.saturating_sub(direct_unknown.len());
+    if remaining > 0 && !direct_unknown.is_empty() {
+        let more = dag.collect_unsent_ancestor_refs(
+            &direct_unknown,
+            peer,
+            own_authority,
+            sent_to_peer,
+            remaining,
+        );
+        direct_unknown.extend(more);
+    }
+
+    direct_unknown
 }
 
 fn take_causal_shard_refs<H, C>(
@@ -1055,6 +1092,7 @@ fn select_push_batch_parts<H, C>(
     own_round: RoundNumber,
     broadcaster_parameters: &BroadcasterParameters,
     selection_mode: PushSelectionMode,
+    sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
 ) -> Option<PushBatchParts>
 where
     C: 'static + CommitObserver,
@@ -1068,16 +1106,37 @@ where
         broadcaster_parameters.batch_own_block_size,
     );
     let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
+    // When pushing in `PushUseful` mode we may select a block that references
+    // direct ancestors whose authors are *not* currently considered "useful"
+    // to the peer. Proactively prioritizing those ancestors avoids a
+    // MissingParentsRequest round-trip for freshly created blocks.
+    let own_direct_ancestor_refs: Vec<BlockReference> = own_blocks
+        .iter()
+        .flat_map(|block| block.block_references().iter().copied())
+        .filter(|r| {
+            r.round > 0
+                && r.authority != to_whom_authority_index
+                // Avoid sending our own history as header-only in Starfish
+                // variants; own blocks are disseminated as full blocks via
+                // `own_blocks`.
+                && r.authority != own_authority
+        })
+        .collect();
 
     let (mut other_refs, mut shard_refs, useful_headers, useful_shards) = match selection_mode {
         PushSelectionMode::Causal => {
             let newest_own_round = own_blocks.iter().map(|block| block.round()).max();
-            let other_refs = take_unknown_history_header_refs(
-                inner,
-                to_whom_authority_index,
-                own_authority,
-                broadcaster_parameters.batch_other_block_size,
-            );
+            let other_refs = {
+                let sent = sent_to_peer.read();
+                take_unknown_causal_history_header_refs(
+                    inner,
+                    to_whom_authority_index,
+                    own_authority,
+                    &own_blocks,
+                    &sent,
+                    broadcaster_parameters.batch_other_block_size,
+                )
+            };
             let mut shard_refs = Vec::new();
 
             if let Some(newest_round) = newest_own_round {
@@ -1105,18 +1164,72 @@ where
             let ck = inner
                 .cordial_knowledge
                 .connection_knowledge(to_whom_authority_index)?;
-            let header_candidate_limit = broadcaster_parameters
+            // In `PushUseful` we normally only piggyback headers from authors
+            // currently deemed useful to the peer. However, a freshly created
+            // own block may reference direct ancestors from other authors that
+            // are not (yet) useful. If we omit them, the peer will be forced to
+            // issue a MissingParentsRequest round-trip for those parents.
+            //
+            // Important: `ConnectionKnowledge::take_*` advances cursors / marks
+            // returned refs as known (sent). Therefore we must reserve budget
+            // for these direct ancestors first, and only *then* take the
+            // remaining capacity from `ConnectionKnowledge`, otherwise we can
+            // "burn" refs that never make it into the final batch.
+
+            // Dedup direct ancestors and filter out ones we already believe the
+            // peer knows.
+            let mut direct_candidates: Vec<BlockReference> = Vec::new();
+            if !own_direct_ancestor_refs.is_empty() {
+                let mut seen = AHashSet::with_capacity(own_direct_ancestor_refs.len());
+                let ck_read = ck.read();
+                for r in own_direct_ancestor_refs.iter().copied() {
+                    if seen.insert(r) && !ck_read.knows_header(&r) {
+                        direct_candidates.push(r);
+                    }
+                }
+            }
+
+            // Further filter using transitive known-by inference (if tracked).
+            // If the ref is not in dag_knowledge (e.g. evicted), keep it to
+            // match prior behavior.
+            let mut direct_unknown: Vec<BlockReference> = if direct_candidates.is_empty() {
+                Vec::new()
+            } else {
+                inner
+                    .cordial_knowledge
+                    .dag_knowledge()
+                    .expect("push dissemination requires dag knowledge")
+                    .read()
+                    .filter_block_refs_unknown_to_peer(
+                        &direct_candidates,
+                        to_whom_authority_index,
+                        direct_candidates.len(),
+                    )
+            };
+
+            // Don't mark/send more direct ancestors than we can fit in the
+            // batch. Any overflow must remain eligible for later batches.
+            direct_unknown.truncate(broadcaster_parameters.batch_other_block_size);
+
+            let remaining_other_budget = broadcaster_parameters
                 .batch_other_block_size
-                .saturating_mul(HEADER_PRUNE_OVERFETCH_FACTOR);
+                .saturating_sub(direct_unknown.len());
+
             let (other_candidates, shard_refs, useful_headers, useful_shards) = {
                 let mut ck = ck.write();
+
                 let current_round = inner.dag_state.highest_round();
                 let (useful_headers_to_peer, useful_shards_to_peer) =
                     ck.useful_authors_to_peer_bitmasks(current_round);
                 let other_candidates = ck.take_unsent_headers_for_authorities(
-                    header_candidate_limit,
+                    remaining_other_budget,
                     useful_headers_to_peer,
                 );
+                // Record direct ancestors as known so we don't repeatedly
+                // re-send them on subsequent batches.
+                for r in direct_unknown.iter().copied() {
+                    ck.mark_header_known(r);
+                }
                 let shard_refs = if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
                     ck.take_unsent_shards_for_authorities(
                         broadcaster_parameters.batch_shard_size,
@@ -1137,16 +1250,35 @@ where
                     },
                 )
             };
-            let other_refs = inner
-                .cordial_knowledge
-                .dag_knowledge()
-                .expect("push dissemination requires dag knowledge")
-                .read()
-                .filter_block_refs_unknown_to_peer(
-                    &other_candidates,
-                    to_whom_authority_index,
-                    broadcaster_parameters.batch_other_block_size,
-                );
+
+            // Combine direct ancestors first, then the normal useful candidates,
+            // and filter out any refs already known by the peer according to the
+            // transitive DAG knowledge.
+            let mut combined_candidates: Vec<BlockReference> =
+                Vec::with_capacity(direct_unknown.len().saturating_add(other_candidates.len()));
+            combined_candidates.extend(direct_unknown.iter().copied());
+            combined_candidates.extend(other_candidates);
+            if combined_candidates.len() > 1 {
+                // Dedup while keeping earlier entries (direct ancestors) first.
+                let mut seen = AHashSet::with_capacity(combined_candidates.len());
+                combined_candidates.retain(|r| seen.insert(*r));
+            }
+
+            let other_refs = if combined_candidates.is_empty() {
+                Vec::new()
+            } else {
+                inner
+                    .cordial_knowledge
+                    .dag_knowledge()
+                    .expect("push dissemination requires dag knowledge")
+                    .read()
+                    .filter_block_refs_unknown_to_peer(
+                        &combined_candidates,
+                        to_whom_authority_index,
+                        broadcaster_parameters.batch_other_block_size,
+                    )
+            };
+
             (other_refs, shard_refs, useful_headers, useful_shards)
         }
     };
@@ -1227,6 +1359,7 @@ where
         *round,
         &broadcaster_parameters,
         selection_mode,
+        sent_to_peer.as_ref(),
     );
     report_useful_authorities(
         metrics,

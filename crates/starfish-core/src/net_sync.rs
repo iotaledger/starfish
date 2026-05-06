@@ -1784,8 +1784,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
-        let Ok(inner) = Arc::try_unwrap(self.inner) else {
-            panic!("Shutdown failed - not all resources are freed after main task is completed");
+        // Some auxiliary tasks (e.g. per-round timeout timers) are spawned
+        // detached and only notice shutdown once they get a chance to poll and
+        // observe `stopped()`. Give them a short window to drop their `Arc`s
+        // before insisting on `try_unwrap`.
+        let mut inner_arc = self.inner;
+        let mut attempts = 0usize;
+        let inner = loop {
+            match Arc::try_unwrap(inner_arc) {
+                Ok(inner) => break inner,
+                Err(arc) => {
+                    attempts += 1;
+                    if attempts >= 100 {
+                        panic!(
+                            "Shutdown failed - not all resources are freed after main task is completed"
+                        );
+                    }
+                    inner_arc = arc;
+                    tokio::task::yield_now().await;
+                }
+            }
         };
         inner.syncer.stop()
     }

@@ -521,14 +521,16 @@ mod smoke_tests {
         let mut result: HashMap<usize, (i64, i64)> = HashMap::new();
         loop {
             for &(auth, ref addr) in addresses {
-                if result
-                    .get(&auth)
-                    .map(|(idx, _)| *idx >= min_index)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
                 if let Some(metrics) = scrape_metrics(addr).await {
+                    // Commit index should be monotonic; keep the max we've
+                    // observed to avoid transient scrape glitches from
+                    // regressing the snapshot.
+                    if result
+                        .get(&auth)
+                        .is_some_and(|(prev_idx, _)| metrics.0 < *prev_idx)
+                    {
+                        continue;
+                    }
                     result.insert(auth, metrics);
                 }
             }

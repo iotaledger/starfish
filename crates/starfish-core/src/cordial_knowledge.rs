@@ -567,6 +567,47 @@ impl ConnectionKnowledge {
         )
     }
 
+    /// A peer reconnected and told us they only need data strictly after
+    /// `after_round`. Rewind cursors to `after_round + 1` and forget any
+    /// per-block knowledge above `after_round` so push dissemination can
+    /// conservatively re-send data that may have been dropped before the
+    /// reconnect.
+    pub fn reset_after_round(&mut self, after_round: RoundNumber) {
+        let from_round = after_round.saturating_add(1);
+        for cursor in &mut self.header_cursors {
+            cursor.round = from_round;
+            cursor.index = 0;
+        }
+        for cursor in &mut self.shard_cursors {
+            cursor.round = from_round;
+            cursor.index = 0;
+        }
+
+        self.known_headers.retain(|r| r.round <= after_round);
+        self.known_shards.retain(|r| r.round <= after_round);
+
+        for last in &mut self.last_useful_headers_to_peer_round {
+            if last.is_some_and(|r| r > after_round) {
+                *last = None;
+            }
+        }
+        for last in &mut self.last_useful_shards_to_peer_round {
+            if last.is_some_and(|r| r > after_round) {
+                *last = None;
+            }
+        }
+        for last in &mut self.last_useful_headers_from_peer_round {
+            if last.is_some_and(|r| r > after_round) {
+                *last = None;
+            }
+        }
+        for last in &mut self.last_useful_shards_from_peer_round {
+            if last.is_some_and(|r| r > after_round) {
+                *last = None;
+            }
+        }
+    }
+
     fn evict_local_below(&mut self, rounds: &[RoundNumber]) {
         for (authority, threshold) in rounds.iter().enumerate() {
             if authority >= self.committee_size {
@@ -1195,6 +1236,12 @@ impl CordialKnowledge {
                     }
                 }
                 CordialKnowledgeMessage::ResetPeerKnown { peer, after_round } => {
+                    let idx = peer as usize;
+                    if idx < self.committee_size {
+                        self.connection_knowledges[idx]
+                            .write()
+                            .reset_after_round(after_round);
+                    }
                     if let Some(dag) = &self.dag_knowledge {
                         dag.write()
                             .reset_peer_known_by_after_round(peer, after_round);
@@ -1716,5 +1763,55 @@ mod tests {
 
         drop(handle);
         actor_task.await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_actor_reset_peer_known_resets_connection_knowledge_after_round() {
+        let (handle, actor) = CordialKnowledgeHandle::new(4, None, test_metrics());
+        let actor_task = tokio::spawn(actor.run());
+
+        let peer = 1;
+        let before = block_ref(2, 3);
+        let after_a = block_ref(2, 5);
+        let after_b = block_ref(3, 6);
+
+        // Seed shared header index.
+        handle.send(CordialKnowledgeMessage::DagParts {
+            headers: vec![before, after_a, after_b],
+            shards: Vec::new(),
+        });
+        tokio::task::yield_now().await;
+
+        let ck = handle.connection_knowledge(peer).unwrap();
+        {
+            // Drain once to advance cursors + mark these refs as known.
+            let mut ck = ck.write();
+            let drained = ck.take_unsent_headers_excluding_authority(10, 0);
+            let drained: AHashSet<_> = drained.into_iter().collect();
+            let expected: AHashSet<_> = [before, after_a, after_b].into_iter().collect();
+            assert_eq!(drained, expected);
+
+            let drained_again = ck.take_unsent_headers_excluding_authority(10, 0);
+            assert!(drained_again.is_empty());
+        }
+
+        // Simulate reconnect: peer requests data strictly after round 4.
+        handle.send(CordialKnowledgeMessage::ResetPeerKnown {
+            peer,
+            after_round: 4,
+        });
+        tokio::task::yield_now().await;
+
+        {
+            // After reset, we should be able to drain refs at rounds > 4 again.
+            let mut ck = ck.write();
+            let drained = ck.take_unsent_headers_excluding_authority(10, 0);
+            let drained: AHashSet<_> = drained.into_iter().collect();
+            let expected: AHashSet<_> = [after_a, after_b].into_iter().collect();
+            assert_eq!(drained, expected);
+        }
+
+        actor_task.abort();
+        let _ = actor_task.await;
     }
 }
