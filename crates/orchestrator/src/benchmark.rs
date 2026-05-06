@@ -71,6 +71,12 @@ pub struct PercentileSummary {
     pub p25: f64,
     pub p50: f64,
     pub p75: f64,
+    /// Optional tail percentiles. Older summaries serialized before these
+    /// were added deserialize with `0.0` defaults.
+    #[serde(default)]
+    pub p90: f64,
+    #[serde(default)]
+    pub p99: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

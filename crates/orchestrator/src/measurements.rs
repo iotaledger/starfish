@@ -486,6 +486,8 @@ impl MeasurementsCollection {
             p25: Self::percentile(values, 0.25),
             p50: Self::percentile(values, 0.50),
             p75: Self::percentile(values, 0.75),
+            p90: Self::percentile(values, 0.90),
+            p99: Self::percentile(values, 0.99),
         }
     }
 
@@ -645,11 +647,15 @@ impl MeasurementsCollection {
                 p25: self.median_latency_bucket_ms("transaction_committed_latency", "p25"),
                 p50: self.median_latency_bucket_ms("transaction_committed_latency", "p50"),
                 p75: self.median_latency_bucket_ms("transaction_committed_latency", "p75"),
+                p90: self.median_latency_bucket_ms("transaction_committed_latency", "p90"),
+                p99: self.median_latency_bucket_ms("transaction_committed_latency", "p99"),
             },
             block_latency_ms: PercentileSummary {
                 p25: self.median_latency_bucket_ms("block_committed_latency", "p25"),
                 p50: self.median_latency_bucket_ms("block_committed_latency", "p50"),
                 p75: self.median_latency_bucket_ms("block_committed_latency", "p75"),
+                p90: self.median_latency_bucket_ms("block_committed_latency", "p90"),
+                p99: self.median_latency_bucket_ms("block_committed_latency", "p99"),
             },
             bandwidth_efficiency: Self::percentile_summary(&efficiency_samples),
             bandwidth_per_round_bytes: Self::percentile_summary(&bandwidth_per_round_samples),
