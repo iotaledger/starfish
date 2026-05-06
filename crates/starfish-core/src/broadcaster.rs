@@ -1176,14 +1176,24 @@ where
             // remaining capacity from `ConnectionKnowledge`, otherwise we can
             // "burn" refs that never make it into the final batch.
 
-            // Dedup direct ancestors and filter out ones we already believe the
-            // peer knows.
+            // Dedup direct ancestors, keep only those whose author is currently
+            // considered "useful" to the peer per CordialKnowledge, and filter
+            // out ones we already believe the peer knows. Authors that are not
+            // useful are intentionally omitted — `PushUseful` only piggybacks
+            // headers from the useful set; non-useful ancestors are recovered
+            // by the peer via `MissingParentsRequest` if and when needed.
             let mut direct_candidates: Vec<BlockReference> = Vec::new();
             if !own_direct_ancestor_refs.is_empty() {
                 let mut seen = AHashSet::with_capacity(own_direct_ancestor_refs.len());
                 let ck_read = ck.read();
+                let current_round = inner.dag_state.highest_round();
+                let (useful_headers_to_peer, _) =
+                    ck_read.useful_authors_to_peer_bitmasks(current_round);
                 for r in own_direct_ancestor_refs.iter().copied() {
-                    if seen.insert(r) && !ck_read.knows_header(&r) {
+                    if seen.insert(r)
+                        && useful_headers_to_peer.contains(r.authority)
+                        && !ck_read.knows_header(&r)
+                    {
                         direct_candidates.push(r);
                     }
                 }
