@@ -8,7 +8,7 @@ use futures::{
     FutureExt,
     future::{Either, select, select_all},
 };
-use rand::{Rng, prelude::ThreadRng};
+use rand::{Rng, SeedableRng, prelude::ThreadRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -255,7 +255,6 @@ impl Network {
             );
         }
         let (latency_table, scaled_mask) = generate_latency_table(addresses.len(), node_parameters);
-        let network_start = Arc::new(Instant::now());
         let server = {
             let socket = if local_addr.is_ipv4() {
                 TcpSocket::new_v4().unwrap()
@@ -290,15 +289,6 @@ impl Network {
                     active_immediately: id < our_id,
                     extra_connection_latency: latency_table[id][our_id],
                     extra_connection_scaled: scaled_mask[id][our_id],
-                    extra_connection_seed: ADVERSARIAL_RAMP_SEED
-                        ^ ((id as u64) << 32)
-                        ^ (our_id as u64),
-                    extra_connection_burst_pct: if node_parameters.adversarial_latency {
-                        node_parameters.adversarial_latency_percent
-                    } else {
-                        0
-                    },
-                    network_start: network_start.clone(),
                     compress_network: node_parameters.compress_network,
                 }
                 .run(receiver),
@@ -373,9 +363,6 @@ struct Worker {
     active_immediately: bool,
     extra_connection_latency: f64,
     extra_connection_scaled: bool,
-    extra_connection_seed: u64,
-    extra_connection_burst_pct: u32,
-    network_start: Arc<Instant>,
     compress_network: bool,
 }
 
@@ -452,9 +439,6 @@ impl Worker {
             connection,
             self.extra_connection_latency,
             self.extra_connection_scaled,
-            self.extra_connection_seed,
-            self.extra_connection_burst_pct,
-            self.network_start.clone(),
         )
         .await
     }
@@ -476,9 +460,6 @@ impl Worker {
             connection,
             self.extra_connection_latency,
             self.extra_connection_scaled,
-            self.extra_connection_seed,
-            self.extra_connection_burst_pct,
-            self.network_start.clone(),
         )
         .await
     }
@@ -488,9 +469,6 @@ impl Worker {
         connection: WorkerConnection,
         extra_connection_latency: f64,
         extra_connection_scaled: bool,
-        extra_connection_seed: u64,
-        extra_connection_burst_pct: u32,
-        network_start: Arc<Instant>,
     ) -> io::Result<()> {
         let WorkerConnection {
             sender,
@@ -519,9 +497,6 @@ impl Worker {
             metrics.clone(),
             extra_connection_latency,
             extra_connection_scaled,
-            extra_connection_seed,
-            extra_connection_burst_pct,
-            network_start,
             compress_network,
         )
         .boxed();
@@ -541,9 +516,6 @@ impl Worker {
         metrics: Arc<Metrics>,
         connection_latency: f64,
         connection_scaled: bool,
-        connection_seed: u64,
-        connection_burst_pct: u32,
-        network_start: Arc<Instant>,
         compress_network: bool,
     ) -> io::Result<()> {
         // Use Arc and Mutex to share the writer safely across multiple tasks
@@ -555,7 +527,6 @@ impl Worker {
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
-        let network_start_for_ping = network_start.clone();
         let ping_task = tokio::spawn(async move {
             let mut ping_deadline = start + PING_INTERVAL;
             loop {
@@ -566,17 +537,8 @@ impl Worker {
                 assert!(ping_time > 0); // interval can't be 0
 
                 let ping = encode_ping(ping_time);
-                let latency = generate_latency(effective_latency(
-                    connection_latency,
-                    connection_scaled,
-                    connection_seed,
-                    connection_burst_pct,
-                    &network_start_for_ping,
-                ));
-                if latency > MAX_SIMULATED_LATENCY {
-                    // Drop the ping rather than holding the task asleep.
-                    continue;
-                }
+                let latency =
+                    generate_latency(effective_latency(connection_latency, connection_scaled));
                 tokio::time::sleep(latency).await;
 
                 if let Err(e) = writer_clone.lock().await.write_all(&ping).await {
@@ -590,7 +552,6 @@ impl Worker {
         // Spawn the second task for handling pong responses
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
-        let network_start_for_pong = network_start.clone();
         let pong_task = tokio::spawn(async move {
             while let Some(ping) = pong_receiver.recv().await {
                 if ping == 0 {
@@ -604,20 +565,14 @@ impl Worker {
                             let latency = generate_latency(effective_latency(
                                 connection_latency,
                                 connection_scaled,
-                                connection_seed,
-                                connection_burst_pct,
-                                &network_start_for_pong,
                             ));
-                            if latency <= MAX_SIMULATED_LATENCY {
-                                tokio::time::sleep(latency).await;
+                            tokio::time::sleep(latency).await;
 
-                                if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
-                                    tracing::error!("Failed to write pong: {e}");
-                                    break;
-                                }
-                                bytes_sent_total_clone.inc_by(12); // pong is 12-byte sized
+                            if let Err(e) = writer_clone.lock().await.write_all(&pong).await {
+                                tracing::error!("Failed to write pong: {e}");
+                                break;
                             }
-                            // else: drop the pong.
+                            bytes_sent_total_clone.inc_by(12); // pong is 12-byte sized
                         }
                         None => {
                             tracing::warn!("Invalid ping: {ping}");
@@ -710,20 +665,8 @@ impl Worker {
                 let bytes_sent_total = bytes_sent_total.clone();
                 let network_requests_sent_total = network_requests_sent_total.clone();
                 let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
-                let latency = generate_latency(effective_latency(
-                    connection_latency,
-                    connection_scaled,
-                    connection_seed,
-                    connection_burst_pct,
-                    &network_start,
-                ));
-                if latency > MAX_SIMULATED_LATENCY {
-                    // Drop the message rather than sleeping on it; an
-                    // unbounded ramp would otherwise pile up in-flight
-                    // tasks and OOM the validator. The consensus protocol
-                    // tolerates lost messages.
-                    continue;
-                }
+                let latency =
+                    generate_latency(effective_latency(connection_latency, connection_scaled));
                 let request_type = message.request_type();
 
                 join_set.spawn(async move {
@@ -902,20 +845,27 @@ fn generate_latency_table(
         }
     }
 
-    // Adversarial-latency burst eligibility: same-region (small base
-    // latency) peers stay stable — under the AWS RTT table these are ~1 ms
-    // hops we want to keep fast. Any cell with base < threshold is exempt.
-    // Eligible cells receive a per-message ×2 burst with probability
-    // `adversarial_latency_percent`% inside each ADVERSARIAL_BURST_PERIOD
-    // epoch — the actual decision is computed at sample time from a hash
-    // of (cell_seed, epoch), so the scaled subset reshuffles every period.
+    // Adversarial-latency static doubling: same-region (small base latency)
+    // peers stay stable — any cell with base < threshold is exempt. Of the
+    // remaining cross-region peers per row, `adversarial_latency_percent`%
+    // are statically marked "scaled"; their per-message latency is doubled
+    // for the entire run. Selection is deterministic per row, so every node
+    // generates the same table without coordination.
     let mut scaled_mask = vec![vec![false; n]; n];
     if node_params.adversarial_latency && n > 1 {
+        let percent = node_params.adversarial_latency_percent.min(100) as usize;
         for (i, row) in scaled_mask.iter_mut().enumerate() {
-            for (j, cell) in row.iter_mut().enumerate() {
-                if i != j && resulting_table[i][j] >= ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS {
-                    *cell = true;
-                }
+            let candidates: Vec<usize> = (0..n)
+                .filter(|&j| {
+                    j != i && resulting_table[i][j] >= ADVERSARIAL_LATENCY_NEAR_THRESHOLD_MS
+                })
+                .collect();
+            let scaled_per_row = (candidates.len() * percent).div_ceil(100);
+            let mut rng = StdRng::seed_from_u64(ADVERSARIAL_LATENCY_SEED ^ i as u64);
+            let mut shuffled = candidates;
+            shuffled.shuffle(&mut rng);
+            for &j in shuffled.iter().take(scaled_per_row) {
+                row[j] = true;
             }
         }
     }
@@ -923,65 +873,28 @@ fn generate_latency_table(
     (resulting_table, scaled_mask)
 }
 
-/// Length of one adversarial-latency burst epoch. Each epoch independently
-/// re-rolls which eligible cells are doubled, so the scaled subset
-/// reshuffles every ADVERSARIAL_BURST_PERIOD_SECS seconds.
-const ADVERSARIAL_BURST_PERIOD_SECS: f64 = 5.0;
+/// Multiplier applied to scaled cells' base latency for the entire run.
+const ADVERSARIAL_LATENCY_MULT: f64 = 5.0;
 
-/// Multiplier applied to a cell's base latency during a burst.
-const ADVERSARIAL_BURST_MULT: f64 = 2.0;
-
-/// Global seed for the adversarial-latency burst hash. Mixed with per-cell
-/// indices and the current epoch to decide whether a cell is doubled in
-/// that epoch. Stays the same across boots so all nodes agree.
-const ADVERSARIAL_RAMP_SEED: u64 = 0xADBA_0000_0000_0000;
+/// Seed for the per-row deterministic shuffle that picks the scaled subset.
+/// XOR'd with the row index so every node computes the same selection
+/// without coordination.
+const ADVERSARIAL_LATENCY_SEED: u64 = 0xADBA_0000_0000_0000;
 
 /// Cells with base latency strictly below this threshold (in milliseconds)
-/// are exempt from the burst. Picked above typical AWS same-region RTTs
+/// are exempt from doubling. Picked above typical AWS same-region RTTs
 /// (~0.5-2 ms) and below cross-region minima (~30 ms).
-const ADVERSARIAL_RAMP_NEAR_THRESHOLD_MS: f64 = 5.0;
+const ADVERSARIAL_LATENCY_NEAR_THRESHOLD_MS: f64 = 5.0;
 
-/// Cap on simulated per-message latency. Anything above this is dropped
-/// instead of held in flight, so a long ramp under `--adversarial-latency`
-/// cannot pile up sleeping send tasks and OOM the validator.
-const MAX_SIMULATED_LATENCY: Duration = Duration::from_millis(1000);
-
-/// Returns the per-call effective latency. When `scaled` is false (or base is
-/// zero) the base is returned unchanged. Otherwise the base is multiplied by
-/// `1 + t / ADVERSARIAL_RAMP_PERIOD_SECS`, where `t` is wall-clock seconds
-/// since `network_start`.
-/// Returns the per-call effective latency. When `scaled` is false (or base
-/// is zero, or `burst_pct` is zero) the base is returned unchanged.
-/// Otherwise the call falls inside one of `ADVERSARIAL_BURST_PERIOD_SECS`
-/// epochs; for each epoch a deterministic hash of `(cell_seed, epoch)`
-/// decides — with probability `burst_pct`% — whether this cell is doubled
-/// for the duration of the epoch.
-fn effective_latency(
-    base: f64,
-    scaled: bool,
-    cell_seed: u64,
-    burst_pct: u32,
-    network_start: &Instant,
-) -> f64 {
-    if !scaled || base == 0.0 || burst_pct == 0 {
-        return base;
-    }
-    let epoch = (network_start.elapsed().as_secs_f64() / ADVERSARIAL_BURST_PERIOD_SECS) as u64;
-    if epoch_burst_hit(cell_seed, epoch, burst_pct) {
-        base * ADVERSARIAL_BURST_MULT
+/// Returns the per-call effective latency. Cells flagged `scaled` carry
+/// `base * ADVERSARIAL_LATENCY_MULT` for the entire run; everything else
+/// is returned unchanged.
+fn effective_latency(base: f64, scaled: bool) -> f64 {
+    if scaled && base != 0.0 {
+        base * ADVERSARIAL_LATENCY_MULT
     } else {
         base
     }
-}
-
-/// Cheap splitmix-style hash; deterministic across nodes and boots.
-fn epoch_burst_hit(cell_seed: u64, epoch: u64, burst_pct: u32) -> bool {
-    let mut h = cell_seed ^ epoch.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    h ^= h >> 27;
-    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
-    h ^= h >> 31;
-    (h % 100) < burst_pct as u64
 }
 
 fn generate_latency(mean: f64) -> Duration {
