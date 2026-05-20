@@ -708,6 +708,7 @@ mod tests {
 
     use crate::{
         config::{DisseminationMode, StorageBackend},
+        consensus::linearizer::Linearizer,
         crypto::SignatureBytes,
         dag_state::DataSource,
         data::Data,
@@ -889,6 +890,469 @@ mod tests {
                 )
             }),
             "expected round-1 leader to commit from round-3 unprovable certificates"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    //  SparseStarfishSpeed commit-decision truth table (4-validator DAG)
+    // ────────────────────────────────────────────────────────────────────
+    //
+    // n=4 → f=1 → quorum = 3. For a candidate leader L at round r, the
+    // commit decision at round r+2 is one of:
+    //
+    //   Opt     iff 2f+1 round-(r+2) blocks carry Some((L.ref, true))
+    //   Std     iff 2f+1 mixed certs at r+2 AND 2f+1 round-(r+1)
+    //               voters of L are `is_strong_blame()`
+    //   Pending iff 2f+1 mixed certs at r+2 but no strong-blame quorum
+    //   Skip    iff 2f+1 round-(r+1) blocks fail to reference L
+    //   None    iff < 2f+1 certs of any flavor at r+2
+    //
+    // We exercise each branch by fabricating round-r+1 voters and
+    // round-r+2 certifiers directly (the `insert_general_block` path does
+    // not validate, so blocks need only be structurally well-formed).
+
+    fn ssfs_setup() -> (Arc<Committee>, DagState, Arc<crate::metrics::Metrics>) {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("sparse-starfish-speed"),
+            None,
+        );
+        (committee, dag_state, metrics)
+    }
+
+    fn ssfs_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+        acks: Vec<BlockReference>,
+        strong_vote: Option<crate::types::AuthoritySet>,
+        unprovable_cert: Option<(BlockReference, bool)>,
+    ) -> Data<crate::types::VerifiedBlock> {
+        let mut block = crate::types::VerifiedBlock::new_with_unprovable(
+            authority,
+            round,
+            parents,
+            acks,
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            strong_vote,
+            None,
+            None,
+            unprovable_cert,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    /// Convenience: a strong vote with a single blame bit set.
+    fn blame_mask(blamed: AuthorityIndex) -> crate::types::AuthoritySet {
+        let mut m = crate::types::AuthoritySet::default();
+        m.insert(blamed);
+        m
+    }
+
+    /// Fabricate L at round `leader_round` with no parents/acks. The
+    /// caller picks `leader_round` so that `committee.elect_leader` lands
+    /// on the desired authority. The block is inserted into DagState.
+    fn insert_leader(
+        dag_state: &DagState,
+        committee: &Committee,
+        leader_round: RoundNumber,
+    ) -> (AuthorityIndex, BlockReference) {
+        let leader_authority = committee.elect_leader(leader_round);
+        let leader = ssfs_block(leader_authority, leader_round, vec![], vec![], None, None);
+        let leader_ref = *leader.reference();
+        dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
+        (leader_authority, leader_ref)
+    }
+
+    /// Insert one cert at the certifying round with the given flavor.
+    fn insert_cert(
+        dag_state: &DagState,
+        authority: AuthorityIndex,
+        cert_round: RoundNumber,
+        leader_ref: BlockReference,
+        strong: bool,
+    ) {
+        let cert = ssfs_block(
+            authority,
+            cert_round,
+            vec![],
+            vec![],
+            None,
+            Some((leader_ref, strong)),
+        );
+        dag_state.insert_general_block(cert, DataSource::BlockBundleStreaming);
+    }
+
+    /// Insert one voter at the voting round, referencing the leader,
+    /// with the chosen strong_vote mask.
+    fn insert_voter(
+        dag_state: &DagState,
+        authority: AuthorityIndex,
+        voting_round: RoundNumber,
+        leader_ref: BlockReference,
+        strong_vote: Option<crate::types::AuthoritySet>,
+    ) {
+        let voter = ssfs_block(
+            authority,
+            voting_round,
+            vec![leader_ref],
+            vec![],
+            strong_vote,
+            None,
+        );
+        dag_state.insert_general_block(voter, DataSource::BlockBundleStreaming);
+    }
+
+    /// Build a UniversalCommitter wired to the given DagState (committee
+    /// is cloned for the builder; tests own the `Arc<Committee>` for any
+    /// extra calls).
+    fn build_committer(
+        committee: Arc<Committee>,
+        dag_state: DagState,
+        metrics: Arc<crate::metrics::Metrics>,
+    ) -> UniversalCommitter {
+        UniversalCommitterBuilder::new(committee, dag_state, metrics).build()
+    }
+
+    // ── 1. Opt ────────────────────────────────────────────────────────
+    #[test]
+    fn ssfs_direct_commit_opt_with_strong_cert_quorum() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+
+        // 3 strong certs at the certifying round (cert.round + 2 == 5).
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 5, leader_ref, true);
+        }
+
+        let committer = build_committer(committee, dag_state, metrics);
+        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+
+        let (anchor, metastate) =
+            result.expect("3 strong certs constitute a quorum — leader must commit");
+        assert_eq!(*anchor.reference(), leader_ref);
+        assert_eq!(
+            metastate,
+            Some(CommitMetastate::Opt),
+            "strong-cert quorum must yield Opt"
+        );
+    }
+
+    // ── 2. Std (mixed certs + strong-blame quorum at the voting round) ─
+    #[test]
+    fn ssfs_direct_commit_std_with_mixed_certs_and_strong_blame_quorum() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+
+        // Mixed cert quorum: 1 strong + 2 standard at round 5.
+        insert_cert(&dag_state, 0, 5, leader_ref, true);
+        insert_cert(&dag_state, 1, 5, leader_ref, false);
+        insert_cert(&dag_state, 2, 5, leader_ref, false);
+
+        // 3 strong-blame voters at the voting round 4 (they reference L
+        // but emit a non-empty mask — the `is_strong_blame()` quorum).
+        let mask = blame_mask(leader_auth);
+        for auth in [0u16, 1, 2] {
+            insert_voter(&dag_state, auth, 4, leader_ref, Some(mask));
+        }
+
+        let committer = build_committer(committee, dag_state, metrics);
+        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+
+        let (_anchor, metastate) =
+            result.expect("3 mixed certs constitute a cert quorum — leader must commit");
+        assert_eq!(
+            metastate,
+            Some(CommitMetastate::Std),
+            "mixed cert quorum + 2f+1 strong-blames must yield Std"
+        );
+    }
+
+    // ── 3. Pending (mixed certs but no strong-blame quorum) ───────────
+    #[test]
+    fn ssfs_direct_commit_pending_without_strong_blame_quorum() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+
+        // Same mixed cert quorum as the Std test.
+        insert_cert(&dag_state, 0, 5, leader_ref, true);
+        insert_cert(&dag_state, 1, 5, leader_ref, false);
+        insert_cert(&dag_state, 2, 5, leader_ref, false);
+
+        // Only ONE strong-blame voter at the voting round (below quorum).
+        // Two clean voters keep the strong-blame count under 2f+1.
+        let mask = blame_mask(leader_auth);
+        insert_voter(&dag_state, 0, 4, leader_ref, Some(mask));
+        insert_voter(
+            &dag_state,
+            1,
+            4,
+            leader_ref,
+            Some(crate::types::AuthoritySet::default()),
+        );
+        insert_voter(
+            &dag_state,
+            2,
+            4,
+            leader_ref,
+            Some(crate::types::AuthoritySet::default()),
+        );
+
+        let committer = build_committer(committee, dag_state, metrics);
+        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+
+        let (_anchor, metastate) =
+            result.expect("3 mixed certs still commit the leader (kind pending)");
+        assert_eq!(
+            metastate,
+            Some(CommitMetastate::Pending),
+            "mixed quorum without 2f+1 strong-blames must defer to indirect rule"
+        );
+    }
+
+    // ── 4. No direct commit when cert quorum is missing ───────────────
+    #[test]
+    fn ssfs_direct_commit_none_below_cert_quorum() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+
+        // Only 2 certs (any flavor) — short of the 2f+1 = 3 quorum.
+        insert_cert(&dag_state, 0, 5, leader_ref, true);
+        insert_cert(&dag_state, 1, 5, leader_ref, false);
+
+        let committer = build_committer(committee, dag_state, metrics);
+        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+
+        assert!(
+            result.is_none(),
+            "< 2f+1 certs of any flavor must NOT trigger direct commit"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    //  Per-c ack derivation (post-Opt commit, in the linearizer)
+    // ────────────────────────────────────────────────────────────────────
+    //
+    // When the committer reports `CommitMetastate::Opt`, the linearizer
+    // promotes `c ∈ L.acknowledgments()` to the sub-dag iff 2f+1 distinct
+    // round-(L.round+1) voters of L have `!v.strong_vote.contains(c.authority)`.
+    // For these tests we fabricate L so that its `block_references` do NOT
+    // transitively reach its `acknowledgments` — otherwise the structural
+    // BFS in `collect_subdag_ancestors` would commit the acks regardless
+    // of the derivation filter, masking the effect we want to observe.
+
+    /// Build a fully-formed SSFS DAG with three ack candidates (a0/a1/a3
+    /// at round 1, authorities 0/1/3) disjoint from the leader's
+    /// structural parents (p0/p1/p3 at round 2, with refs only to
+    /// genesis). The leader L sits at round 3, references the fillers,
+    /// and acknowledges the three round-1 ack candidates. Returns
+    /// `(committee, dag_state, leader, ack_refs)`.
+    #[allow(clippy::type_complexity)]
+    fn build_derivation_dag() -> (
+        Arc<Committee>,
+        DagState,
+        Data<crate::types::VerifiedBlock>,
+        [BlockReference; 3],
+    ) {
+        let (committee, dag_state, _metrics) = ssfs_setup();
+        let genesis: Vec<_> = (0u16..4)
+            .map(|auth| {
+                *dag_state
+                    .get_blocks_at_authority_round(auth, 0)
+                    .first()
+                    .expect("genesis block")
+                    .reference()
+            })
+            .collect();
+
+        // Three ack candidates at round 1, each rooted at its own
+        // authority's genesis block.
+        let mut ack_refs = [
+            BlockReference::new_test(0, 0),
+            BlockReference::new_test(0, 0),
+            BlockReference::new_test(0, 0),
+        ];
+        for (idx, auth) in [0u16, 1, 3].into_iter().enumerate() {
+            let a = ssfs_block(auth, 1, vec![genesis[auth as usize]], vec![], None, None);
+            ack_refs[idx] = *a.reference();
+            dag_state.insert_general_block(a, DataSource::BlockBundleStreaming);
+        }
+
+        // Three filler parents at round 2. Refs point at genesis only,
+        // NOT at the ack candidates — so the structural BFS from L does
+        // not encounter a0/a1/a3 by accident.
+        let mut filler_refs = Vec::new();
+        for auth in [0u16, 1, 3] {
+            let p = ssfs_block(auth, 2, vec![genesis[auth as usize]], vec![], None, None);
+            filler_refs.push(*p.reference());
+            dag_state.insert_general_block(p, DataSource::BlockBundleStreaming);
+        }
+
+        // Leader at round 3 (committee.elect_leader(3) == 3). Refs are
+        // the three fillers; acks are the three ack candidates.
+        let leader = ssfs_block(3, 3, filler_refs, ack_refs.to_vec(), None, None);
+        let leader_clone = leader.clone();
+        dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
+
+        (committee, dag_state, leader_clone, ack_refs)
+    }
+
+    // ── 6. Opt → all acks promoted when every voter is clean ──────────
+    #[test]
+    fn ssfs_linearizer_promotes_all_acks_with_clean_voters() {
+        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
+        let leader_ref = *leader.reference();
+
+        // Three round-4 voters of L, each with an empty strong_vote.
+        for auth in [0u16, 1, 3] {
+            insert_voter(
+                &dag_state,
+                auth,
+                4,
+                leader_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+
+        let mut linearizer = Linearizer::new((*committee).clone());
+        let committed =
+            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Opt))]);
+
+        assert_eq!(committed.len(), 1);
+        let (sub_dag, _) = &committed[0];
+        let committed_refs: std::collections::BTreeSet<_> =
+            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
+        for ack in &ack_refs {
+            assert!(
+                committed_refs.contains(ack),
+                "ack {ack:?} should be promoted to subdag — all voters clean"
+            );
+        }
+    }
+
+    // ── 7. Opt → filtered ack when one voter blames its author ─────────
+    #[test]
+    fn ssfs_linearizer_filters_ack_when_author_blamed() {
+        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
+        let leader_ref = *leader.reference();
+        let blamed_author = ack_refs[1].authority; // a1 — authored by 1
+
+        // Voter at authority 0 blames authority 1; the other two are clean.
+        insert_voter(
+            &dag_state,
+            0,
+            4,
+            leader_ref,
+            Some(blame_mask(blamed_author)),
+        );
+        for auth in [1u16, 3] {
+            insert_voter(
+                &dag_state,
+                auth,
+                4,
+                leader_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+
+        let mut linearizer = Linearizer::new((*committee).clone());
+        let committed =
+            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Opt))]);
+
+        let (sub_dag, _) = &committed[0];
+        let committed_refs: std::collections::BTreeSet<_> =
+            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
+
+        // a0 and a3 still reach 2f+1=3 votes (all three voters).
+        assert!(
+            committed_refs.contains(&ack_refs[0]),
+            "a0 should be promoted"
+        );
+        assert!(
+            committed_refs.contains(&ack_refs[2]),
+            "a3 should be promoted"
+        );
+        // a1 only collects 2 votes (the two clean voters), below quorum.
+        assert!(
+            !committed_refs.contains(&ack_refs[1]),
+            "a1 should NOT be promoted — its author is blamed by one voter, \
+             leaving only 2 of 3 derived votes (below 2f+1 quorum)"
+        );
+    }
+
+    // ── 8. Std → derivation skipped, only structural ancestors commit ─
+    #[test]
+    fn ssfs_linearizer_skips_ack_derivation_on_std_metastate() {
+        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
+        let leader_ref = *leader.reference();
+
+        // Three clean voters — would promote all acks in Opt mode.
+        for auth in [0u16, 1, 3] {
+            insert_voter(
+                &dag_state,
+                auth,
+                4,
+                leader_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+
+        let mut linearizer = Linearizer::new((*committee).clone());
+        let committed =
+            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Std))]);
+
+        let (sub_dag, _) = &committed[0];
+        let committed_refs: std::collections::BTreeSet<_> =
+            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
+        for ack in &ack_refs {
+            assert!(
+                !committed_refs.contains(ack),
+                "Std metastate must NOT trigger per-c ack derivation"
+            );
+        }
+    }
+
+    // ── 5. Skip when 2f+1 round-(r+1) blocks fail to reference L ──────
+    #[test]
+    fn ssfs_skip_when_quorum_of_non_voters_at_voting_round() {
+        let (committee, dag_state, _metrics) = ssfs_setup();
+        let (leader_auth, _leader_ref) = insert_leader(&dag_state, &committee, 3);
+
+        // 3 round-4 blocks whose refs do NOT include leader_ref. We use
+        // a dummy ref so they parse as non-voters of L.
+        let dummy = BlockReference::new_test(0, 0);
+        for auth in [0u16, 1, 2] {
+            let b = ssfs_block(auth, 4, vec![dummy], vec![], None, None);
+            dag_state.insert_general_block(b, DataSource::BlockBundleStreaming);
+        }
+
+        let committer = UniversalCommitterBuilder::new(
+            committee.clone(),
+            dag_state,
+            // metrics not needed for this assertion path
+            {
+                let registry = Registry::new();
+                let (m, _r) = Metrics::new(
+                    &registry,
+                    Some(committee.as_ref()),
+                    Some("sparse-starfish-speed"),
+                    None,
+                );
+                m
+            },
+        )
+        .build();
+        assert!(
+            committer.check_direct_skip_bluestreak(leader_auth, 3),
+            "2f+1 non-voters at voting round must trigger skip"
         );
     }
 }
