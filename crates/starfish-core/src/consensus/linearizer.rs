@@ -117,9 +117,9 @@ impl Linearizer {
                     }
                 }
                 if follow_unprovable {
-                    if let Some(cert_ref) = x.unprovable_certificate() {
-                        if cert_ref.round >= min_round && self.committed.insert(*cert_ref) {
-                            next_refs.push(*cert_ref);
+                    if let Some((cert_ref, _strong)) = x.unprovable_certificate() {
+                        if cert_ref.round >= min_round && self.committed.insert(cert_ref) {
+                            next_refs.push(cert_ref);
                         }
                     }
                 }
@@ -270,6 +270,13 @@ impl Linearizer {
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::MysticetiBls => {
+                    self.collect_subdag_ancestors(dag_state, leader_block)
+                }
+                // TODO(sparse-starfish-speed): replace with a derivation pass
+                // that promotes L.acks based on (L.acks ∩ voter.strong_vote)
+                // when CommitMetastate::Opt. Until then, treat like Bluestreak
+                // structurally so existing tests stay green.
+                ConsensusProtocol::SparseStarfishSpeed => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
             };

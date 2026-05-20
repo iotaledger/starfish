@@ -668,6 +668,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -889,7 +890,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
-                | ConsensusProtocol::StarfishBls => {
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed => {
                     if block.transactions().is_some() {
                         blocks_with_transactions.push(block);
                     } else {
@@ -913,6 +915,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             blocks_without_transactions.extend(headers);
             if !blocks_without_transactions.is_empty() {
@@ -1116,6 +1119,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .block_sync_requests_received
@@ -1187,6 +1191,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -1416,6 +1421,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {

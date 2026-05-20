@@ -284,7 +284,7 @@ impl UniversalCommitter {
             let cert_blocks = self.dag_state.get_blocks_by_round_cached(cert_round);
             let mut supporters = StakeAggregator::<QuorumThreshold>::new();
             for block in cert_blocks.iter() {
-                if block.unprovable_certificate() == Some(&leader_ref)
+                if block.unprovable_certificate().map(|(r, _)| r) == Some(leader_ref)
                     && supporters.add(block.authority(), &self.committee)
                 {
                     return Some(leader_block);
@@ -547,7 +547,8 @@ impl UniversalCommitterBuilder {
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
-            | ConsensusProtocol::MysticetiBls => Self {
+            | ConsensusProtocol::MysticetiBls
+            | ConsensusProtocol::SparseStarfishSpeed => Self {
                 committee,
                 dag_state,
                 metrics,
@@ -732,7 +733,7 @@ mod tests {
             None,
             None,
             None,
-            Some(leader_ref),
+            Some((leader_ref, false)),
         );
         cert_a.preserialize();
         let cert_a = Data::new(cert_a);
@@ -749,7 +750,7 @@ mod tests {
             None,
             None,
             None,
-            Some(leader_ref),
+            Some((leader_ref, false)),
         );
         cert_b.preserialize();
         let cert_b = Data::new(cert_b);
@@ -766,7 +767,7 @@ mod tests {
             None,
             None,
             None,
-            Some(leader_ref),
+            Some((leader_ref, false)),
         );
         cert_c.preserialize();
         let cert_c = Data::new(cert_c);

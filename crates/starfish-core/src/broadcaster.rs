@@ -90,7 +90,8 @@ impl BroadcasterParameters {
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::CordialMiners
-            | ConsensusProtocol::Bluestreak => Self {
+            | ConsensusProtocol::Bluestreak
+            | ConsensusProtocol::SparseStarfishSpeed => Self {
                 batch_own_block_size: committee_size,
                 batch_other_block_size: committee_size * committee_size,
                 batch_shard_size: committee_size * committee_size,
@@ -379,7 +380,8 @@ where
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishSpeed
-            | ConsensusProtocol::StarfishBls => {
+            | ConsensusProtocol::StarfishBls
+            | ConsensusProtocol::SparseStarfishSpeed => {
                 let mut refs_to_send = block_references;
                 let remaining_extra_budget =
                     batch_other_block_size.saturating_sub(refs_to_send.len());
@@ -918,7 +920,8 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
     match consensus_protocol {
         ConsensusProtocol::Starfish
         | ConsensusProtocol::StarfishSpeed
-        | ConsensusProtocol::StarfishBls => PushOtherBlocksFormat::HeadersAndShards,
+        | ConsensusProtocol::StarfishBls
+        | ConsensusProtocol::SparseStarfishSpeed => PushOtherBlocksFormat::HeadersAndShards,
         ConsensusProtocol::CordialMiners
         | ConsensusProtocol::Mysticeti
         | ConsensusProtocol::SailfishPlusPlus
@@ -1225,10 +1228,10 @@ where
                 .batch_other_block_size
                 .saturating_sub(direct_unknown.len());
 
+            let current_round = inner.dag_state.highest_round();
             let (other_candidates, shard_refs, useful_headers, useful_shards) = {
                 let mut ck = ck.write();
 
-                let current_round = inner.dag_state.highest_round();
                 let (useful_headers_to_peer, useful_shards_to_peer) =
                     ck.useful_authors_to_peer_bitmasks(current_round);
                 let other_candidates = ck.take_unsent_headers_for_authorities(
@@ -1249,16 +1252,23 @@ where
                     Vec::new()
                 };
                 let (useful_headers, useful_shards) = ck.useful_authors_bitmasks(current_round);
-                (
-                    other_candidates,
-                    shard_refs,
-                    useful_headers,
-                    if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
-                        useful_shards
-                    } else {
-                        AuthoritySet::default()
-                    },
-                )
+                (other_candidates, shard_refs, useful_headers, useful_shards)
+            };
+
+            // Shard demand is broadcast: if any peer's headers from author X
+            // are useful, we want X's shards from everyone (f+1 shards needed
+            // to reconstruct, so the more sources the better). This must run
+            // *after* the per-peer `ck.write()` lock above is released —
+            // `useful_headers_from_any_peer_bitmask` read-locks every
+            // connection including this peer's, and grabbing a read while
+            // holding the write would deadlock.
+            let useful_shards = if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
+                useful_shards
+                    | inner
+                        .cordial_knowledge
+                        .useful_headers_from_any_peer_bitmask(current_round)
+            } else {
+                AuthoritySet::default()
             };
 
             // Combine direct ancestors first, then the normal useful candidates,

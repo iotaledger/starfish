@@ -1083,7 +1083,7 @@ impl<H: BlockHandler> Core<H> {
         &self,
         clock_round: RoundNumber,
         _block_references: &[BlockReference],
-    ) -> Option<BlockReference> {
+    ) -> Option<(BlockReference, bool)> {
         let leader_round = clock_round.checked_sub(2)?;
         let leader = self.committee.elect_leader(leader_round);
         let leader_blocks = self
@@ -1097,7 +1097,9 @@ impl<H: BlockHandler> Core<H> {
                 .dag_state
                 .has_bluestreak_certificate_evidence(clock_round, &leader_ref)
             {
-                return Some(leader_ref);
+                // Bluestreak uses only the standard flavor (bool = false);
+                // the strong flavor is reserved for SparseStarfishSpeed.
+                return Some((leader_ref, false));
             }
         }
 

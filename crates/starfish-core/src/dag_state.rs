@@ -117,6 +117,12 @@ pub enum ConsensusProtocol {
     SailfishPlusPlus,
     Bluestreak,
     MysticetiBls,
+    /// Bluestreak-style lean DAG with StarfishSpeed-style strong-vote
+    /// derivation. Only the round leader publishes an explicit acknowledgment
+    /// list; non-leader voters contribute via the constant-size strong-vote
+    /// bitmask, and the linearizer derives the global ack set from
+    /// `(leader.acks, voter.strong_vote)`. No BLS / no DAC certificates.
+    SparseStarfishSpeed,
 }
 
 impl ConsensusProtocol {
@@ -130,6 +136,9 @@ impl ConsensusProtocol {
             "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
             "bluestreak" => ConsensusProtocol::Bluestreak,
             "mysticeti-bls" | "mysticeti-l" => ConsensusProtocol::MysticetiBls,
+            "sparse-starfish-speed" | "sparse-starfish" | "ssfs" => {
+                ConsensusProtocol::SparseStarfishSpeed
+            }
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -140,6 +149,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::SparseStarfishSpeed
         )
     }
 
@@ -149,6 +159,23 @@ impl ConsensusProtocol {
 
     pub fn is_bluestreak(self) -> bool {
         matches!(self, ConsensusProtocol::Bluestreak)
+    }
+
+    /// Protocols that derive non-leader acknowledgments from the round
+    /// leader's ack list and per-voter strong-vote blame masks rather than
+    /// reading an explicit ack list from every block.
+    pub fn derives_acks_from_strong_vote(self) -> bool {
+        matches!(self, ConsensusProtocol::SparseStarfishSpeed)
+    }
+
+    /// Protocols that emit a `strong_vote` bitmask on every block (an empty
+    /// mask attests payload availability; a non-empty mask blames missing
+    /// authorities).
+    pub fn uses_strong_vote(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed
+        )
     }
 
     /// Protocols using BLS aggregate signatures (voted leader, round certs,
@@ -168,6 +195,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::MysticetiBls
+                | ConsensusProtocol::SparseStarfishSpeed
         )
     }
 
@@ -190,9 +218,9 @@ impl ConsensusProtocol {
             | ConsensusProtocol::MysticetiBls
             | ConsensusProtocol::StarfishBls => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
-                DisseminationMode::PushUseful
-            }
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::SparseStarfishSpeed => DisseminationMode::PushUseful,
         }
     }
 
@@ -721,6 +749,9 @@ impl DagState {
             }
             ConsensusProtocol::MysticetiBls => {
                 tracing::info!("Starting Mysticeti-BLS protocol")
+            }
+            ConsensusProtocol::SparseStarfishSpeed => {
+                tracing::info!("Starting Sparse-Starfish-Speed protocol")
             }
         }
         let dag_state = Self {
@@ -2395,9 +2426,9 @@ impl DagStateInner {
                 }
             }
             if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     let parent = self
-                        .get_storage_block(*cert_ref)
+                        .get_storage_block(cert_ref)
                         .expect("Block should be in DagState");
                     if parent.round() >= earlier_block.round() {
                         frontier.push(parent);
@@ -2442,8 +2473,8 @@ impl DagStateInner {
                 }
             }
             if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
-                    if let Some(parent) = self.get_storage_block(*cert_ref) {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
+                    if let Some(parent) = self.get_storage_block(cert_ref) {
                         if parent.round() >= target_round {
                             frontier.push(parent);
                         }
@@ -2612,12 +2643,12 @@ impl DagStateInner {
         // Bluestreak: the unprovable_certificate target is also a
         // causal dependency that must be ancestor-closed.
         if self.consensus_protocol.is_bluestreak() {
-            if let Some(cert_ref) = block.unprovable_certificate() {
+            if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                 if cert_ref.round > 0
-                    && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
-                    && !missing.contains(cert_ref)
+                    && !self.clean_vertices[cert_ref.authority as usize].contains(&cert_ref)
+                    && !missing.contains(&cert_ref)
                 {
-                    missing.push(*cert_ref);
+                    missing.push(cert_ref);
                 }
             }
         }
@@ -2653,14 +2684,14 @@ impl DagStateInner {
                 }
             }
         }
-        if let Some(cert_ref) = block.unprovable_certificate() {
-            if let Some(state) = self.bluestreak_certificate_state.get_mut(cert_ref) {
+        if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
+            if let Some(state) = self.bluestreak_certificate_state.get_mut(&cert_ref) {
                 state.waiting_blocks.remove(&block_ref);
             }
-            if let Some(children) = self.pending_clean_vertex_children.get_mut(cert_ref) {
+            if let Some(children) = self.pending_clean_vertex_children.get_mut(&cert_ref) {
                 children.remove(&block_ref);
                 if children.is_empty() {
-                    self.pending_clean_vertex_children.remove(cert_ref);
+                    self.pending_clean_vertex_children.remove(&cert_ref);
                 }
             }
         }
@@ -2851,23 +2882,23 @@ impl DagStateInner {
             None => {
                 self.note_clean_vertex(block_ref, committee, activated);
             }
-            Some(leader_ref)
+            Some((leader_ref, _strong))
                 if self.has_bluestreak_certificate_evidence(
                     block_ref.round,
-                    leader_ref,
+                    &leader_ref,
                     committee,
                 ) =>
             {
                 self.note_clean_vertex(block_ref, committee, activated);
             }
-            Some(leader_ref) => {
+            Some((leader_ref, _strong)) => {
                 let state = self
                     .bluestreak_certificate_state
-                    .entry(*leader_ref)
+                    .entry(leader_ref)
                     .or_default();
                 state.waiting_blocks.insert(block_ref);
                 if state.propagation_support.add(block.authority(), committee) {
-                    ready_certificates.insert(*leader_ref);
+                    ready_certificates.insert(leader_ref);
                 }
             }
         }
@@ -2913,11 +2944,11 @@ impl DagStateInner {
                 }
             }
             if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     if cert_ref.round > 0
-                        && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
+                        && !self.clean_vertices[cert_ref.authority as usize].contains(&cert_ref)
                     {
-                        stack.push(*cert_ref);
+                        stack.push(cert_ref);
                     }
                 }
             }
@@ -4178,7 +4209,7 @@ mod tests {
             None,
             None,
             None,
-            Some(leader_ref),
+            Some((leader_ref, false)),
         );
         compress.preserialize();
         let compress = Data::new(compress);
@@ -4217,7 +4248,7 @@ mod tests {
                     None,
                     None,
                     None,
-                    unprovable_certificate,
+                    unprovable_certificate.map(|r| (r, false)),
                 );
                 block.preserialize();
                 Data::new(block)

@@ -207,7 +207,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
-        unprovable_certificate: Option<&BlockReference>,
+        unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -257,7 +257,7 @@ impl BlockDigest {
         signature: &SignatureBytes,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
-        unprovable_certificate: Option<&BlockReference>,
+        unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
         Self::digest_without_signature(
@@ -303,16 +303,17 @@ impl BlockDigest {
         }
     }
 
-    /// Extend a block digest hasher with the Bluestreak unprovable
-    /// certificate reference. Called after `digest_without_signature` and
-    /// before finalizing. No-op when `None`, preserving backward
-    /// compatibility.
+    /// Extend a block digest hasher with the generalized unprovable
+    /// certificate reference + strong/standard flavor flag. Called after
+    /// `digest_without_signature` and before finalizing. No-op when `None`,
+    /// preserving backward compatibility.
     pub(crate) fn hash_unprovable_certificate(
         hasher: &mut Blake3Hasher,
-        unprovable_certificate: Option<&BlockReference>,
+        unprovable_certificate: Option<&(BlockReference, bool)>,
     ) {
-        if let Some(cert_ref) = unprovable_certificate {
+        if let Some((cert_ref, strong)) = unprovable_certificate {
             cert_ref.crypto_hash(hasher);
+            (*strong as u8).crypto_hash(hasher);
         }
     }
 }
@@ -491,7 +492,10 @@ impl PublicKey {
             transactions_commitment,
             header.strong_vote(),
         );
-        BlockDigest::hash_unprovable_certificate(&mut hasher, header.unprovable_certificate());
+        BlockDigest::hash_unprovable_certificate(
+            &mut hasher,
+            header.unprovable_certificate.as_ref(),
+        );
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         self.0.verify(&signature, digest.as_ref())
     }
@@ -557,7 +561,7 @@ impl Signer {
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
-        unprovable_certificate: Option<&BlockReference>,
+        unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> SignatureBytes {
         let mut hasher = Blake3Hasher::new();
         BlockDigest::digest_without_signature(
