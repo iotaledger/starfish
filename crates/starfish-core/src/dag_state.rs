@@ -118,10 +118,46 @@ pub enum ConsensusProtocol {
     Bluestreak,
     MysticetiBls,
     /// Bluestreak-style lean DAG with StarfishSpeed-style strong-vote
-    /// derivation. Only the round leader publishes an explicit acknowledgment
-    /// list; non-leader voters contribute via the constant-size strong-vote
-    /// bitmask, and the linearizer derives the global ack set from
-    /// `(leader.acks, voter.strong_vote)`. No BLS / no DAC certificates.
+    /// derivation.
+    ///
+    /// Non-leader blocks reference `[own_prev, leader_{r-1}]` only (same as
+    /// Bluestreak); the round-r leader carries the full 2f+1 reference
+    /// frontier and the only explicit acknowledgment list. Every block
+    /// carries the constant-size `strong_vote: AuthoritySet` blame mask
+    /// (per-author granularity — one bit per authority; set bit means
+    /// "missing at least one block by that author in `{L} ∪ L.acks`",
+    /// authority's responsibility to distribute its own transactions).
+    /// No BLS aggregate signatures, no DAC certificates.
+    ///
+    /// Leader-decision certificate (`unprovable_certificate`, generalized
+    /// to `Option<(BlockReference, bool)>`) is the on-wire vehicle for
+    /// commit:
+    ///   - strong (`true`)   = 2f+1 round-(r-1) voters of leader_{r-2} all
+    ///     carried `strong_vote == Some(empty)`.
+    ///   - standard (`false`)= 2f+1 voters reference the leader but the
+    ///     strong-vote quorum is mixed.
+    ///   - absent (`None`)   = no quorum.
+    ///
+    /// Commit rule for leader L at round r-2 (evaluated at round r):
+    ///   - 2f+1 strong certs at r       => `CommitMetastate::Opt`; the
+    ///     linearizer derives per-`c` acks for `c ∈ L.acks` by counting voters
+    ///     `v` with `!v.strong_vote.contains(c.authority)`.
+    ///   - 2f+1 mixed certs at r AND 2f+1 strong blames at r-1    =>
+    ///     `CommitMetastate::Std`; commit L only (no ack derivation).
+    ///   - 2f+1 mixed certs at r without a strong-blame quorum at r-1 =>
+    ///     `CommitMetastate::Pending`; wait for the indirect rule.
+    ///   - Fewer than 2f+1 certs at r   => skip (recoverable later).
+    ///
+    /// Data availability without DAC/BLS: 2f+1 strong-vote-clean voters
+    /// contain ≥ f+1 honest holders, which (via Reed-Solomon with
+    /// `info_length ≤ f+1`) is enough to reconstruct each acked payload.
+    /// Byzantine voters lying about strong_vote do not break safety; they
+    /// merely fail to honor reconstruction requests, which the honest
+    /// f+1 holders cover.
+    ///
+    /// Pending acknowledgments are drained by the local commit rule (see
+    /// `DagState::purge_pending_acknowledgments`) so future leaders do
+    /// not republish already-sequenced refs.
     SparseStarfishSpeed,
 }
 
@@ -159,13 +195,6 @@ impl ConsensusProtocol {
 
     pub fn is_bluestreak(self) -> bool {
         matches!(self, ConsensusProtocol::Bluestreak)
-    }
-
-    /// Protocols that derive non-leader acknowledgments from the round
-    /// leader's ack list and per-voter strong-vote blame masks rather than
-    /// reading an explicit ack list from every block.
-    pub fn derives_acks_from_strong_vote(self) -> bool {
-        matches!(self, ConsensusProtocol::SparseStarfishSpeed)
     }
 
     /// Protocols that emit a `strong_vote` bitmask on every block (an empty
@@ -1457,6 +1486,17 @@ impl DagState {
         self.dag_state_inner
             .write()
             .get_pending_acknowledgment(round_number)
+    }
+
+    /// Remove the given block references from the pending acknowledgment
+    /// queue. Used by SparseStarfishSpeed to drop refs that the local commit
+    /// rule already sequenced — they would otherwise be re-published by a
+    /// future leader and waste bandwidth. No-op for protocols that do not
+    /// maintain `pending_acknowledgment`.
+    pub fn purge_pending_acknowledgments(&self, sequenced: &[BlockReference]) {
+        self.dag_state_inner
+            .write()
+            .purge_pending_acknowledgments(sequenced);
     }
 
     pub fn requeue_pending_acknowledgment(&self, block_refs: Vec<BlockReference>) {
@@ -3061,6 +3101,21 @@ impl DagStateInner {
             return;
         }
         pending_acknowledgment.extend(block_refs);
+    }
+
+    /// Drop block references already sequenced by the local commit rule from
+    /// the pending queue. Implemented for any protocol that maintains
+    /// `pending_acknowledgment`; the SparseStarfishSpeed commit path calls
+    /// this after each subdag to avoid republishing already-committed refs.
+    fn purge_pending_acknowledgments(&mut self, sequenced: &[BlockReference]) {
+        let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
+            return;
+        };
+        if sequenced.is_empty() || pending_acknowledgment.is_empty() {
+            return;
+        }
+        let sequenced: AHashSet<_> = sequenced.iter().copied().collect();
+        pending_acknowledgment.retain(|r| !sequenced.contains(r));
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {

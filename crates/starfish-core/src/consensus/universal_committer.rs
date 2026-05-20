@@ -43,8 +43,10 @@ impl UniversalCommitter {
         if self.dag_state.consensus_protocol.is_sailfish_pp() {
             return self.try_commit_sailfish(last_decided);
         }
-        if self.dag_state.consensus_protocol.is_bluestreak() {
-            return self.try_commit_bluestreak(last_decided);
+        if self.dag_state.consensus_protocol.is_bluestreak()
+            || self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed
+        {
+            return self.try_commit_compressed_refs(last_decided);
         }
 
         let highest_known_round = self.dag_state.highest_round();
@@ -173,7 +175,23 @@ impl UniversalCommitter {
             .collect()
     }
 
-    fn try_commit_bluestreak(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+    /// Commit path shared by Bluestreak and SparseStarfishSpeed (both use
+    /// compressed references and an on-wire `unprovable_certificate` for
+    /// direct commit). The two protocols differ only in two narrow points
+    /// handled inline: (a) Bluestreak filters the chain walk-back by
+    /// `has_clean_vertex` (which it tracks via dual-DAG support);
+    /// SparseStarfishSpeed has no such tracking. (b) SparseStarfishSpeed
+    /// also derives a `CommitMetastate` from the cert flavors at the
+    /// certifying round; Bluestreak always reports `None`.
+    fn try_commit_compressed_refs(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
+        let protocol = self.dag_state.consensus_protocol;
+        let is_bluestreak = protocol.is_bluestreak();
+        let protocol_name = if is_bluestreak {
+            "Bluestreak"
+        } else {
+            "SparseStarfishSpeed"
+        };
+
         let highest_known_round = self.dag_state.highest_round();
         let last_decided_round = last_decided.round();
         let highest_anchor = highest_known_round.saturating_sub(2);
@@ -211,11 +229,20 @@ impl UniversalCommitter {
                 continue;
             }
 
-            let Some(anchor) = self.try_direct_commit_bluestreak(leader, round) else {
+            let direct = if is_bluestreak {
+                self.try_direct_commit_bluestreak(leader, round)
+                    .map(|b| (b, None))
+            } else {
+                self.try_direct_commit_sparse_starfish_speed(leader, round)
+            };
+            let Some((anchor, anchor_metastate)) = direct else {
                 continue;
             };
 
-            let mut chain = vec![anchor.clone()];
+            // Walk back through prior rounds. Bluestreak additionally
+            // filters by `has_clean_vertex` to skip leaders that the
+            // dual-DAG machinery has not certified.
+            let mut chain = vec![(anchor.clone(), anchor_metastate)];
             let mut current = anchor;
             for prev_round in (last_decided_round + 1..current.round()).rev() {
                 let prev_leader = self.committee.elect_leader(prev_round);
@@ -228,31 +255,33 @@ impl UniversalCommitter {
                     .dag_state
                     .get_blocks_at_authority_round(prev_leader, prev_round)
                     .into_iter()
-                    .filter(|block| self.dag_state.has_clean_vertex(block.reference()))
+                    .filter(|block| {
+                        !is_bluestreak || self.dag_state.has_clean_vertex(block.reference())
+                    })
                     .filter(|block| self.dag_state.linked(&current, block))
                     .collect();
 
                 if linked_leaders.len() > 1 {
                     panic!(
-                        "[Bluestreak] More than one linked leader for {}",
+                        "[{protocol_name}] More than one linked leader for {}",
                         format_authority_round(prev_leader, prev_round)
                     );
                 }
 
                 if let Some(prev) = linked_leaders.pop() {
                     current = prev.clone();
-                    chain.push(prev);
+                    chain.push((prev, None));
                 }
             }
 
             chain.reverse();
-            for leader_block in chain {
+            for (leader_block, metastate) in chain {
                 let key = (leader_block.authority(), leader_block.round());
                 if !newly_committed.insert(key) {
                     continue;
                 }
                 let direct_decide = key.1 == round;
-                let status = LeaderStatus::Commit(leader_block, None);
+                let status = LeaderStatus::Commit(leader_block, metastate);
                 self.decided.insert(key, status.clone());
                 if self.metrics_emitted.insert(key) {
                     tracing::debug!("Decided {status}");
@@ -290,6 +319,74 @@ impl UniversalCommitter {
                     return Some(leader_block);
                 }
             }
+        }
+
+        None
+    }
+
+    /// SparseStarfishSpeed direct-commit: a leader at round r is committed
+    /// when 2f+1 round-(r+2) blocks each carry an `unprovable_certificate`
+    /// pointing to that leader. Returns the (leader_block, metastate) pair.
+    /// Metastate:
+    ///   - Opt    iff 2f+1 of those certs carry `strong = true`
+    ///   - Std    iff 2f+1 mixed AND 2f+1 round-(r+1) voters of the leader are
+    ///     `is_strong_blame()`
+    ///   - Pending otherwise (sequencing blocks until indirect rule resolves)
+    fn try_direct_commit_sparse_starfish_speed(
+        &self,
+        leader: AuthorityIndex,
+        leader_round: RoundNumber,
+    ) -> Option<(
+        crate::data::Data<crate::types::VerifiedBlock>,
+        Option<CommitMetastate>,
+    )> {
+        let cert_round = leader_round + 2;
+        let voting_round = leader_round + 1;
+        let leader_blocks = self
+            .dag_state
+            .get_blocks_at_authority_round(leader, leader_round);
+
+        let cert_blocks = self.dag_state.get_blocks_by_round_cached(cert_round);
+
+        for leader_block in leader_blocks {
+            let leader_ref = *leader_block.reference();
+            let mut all_supporters = StakeAggregator::<QuorumThreshold>::new();
+            let mut strong_supporters = StakeAggregator::<QuorumThreshold>::new();
+            for block in cert_blocks.iter() {
+                let Some((cref, strong)) = block.unprovable_certificate() else {
+                    continue;
+                };
+                if cref != leader_ref {
+                    continue;
+                }
+                all_supporters.add(block.authority(), &self.committee);
+                if strong {
+                    strong_supporters.add(block.authority(), &self.committee);
+                }
+            }
+            if !all_supporters.is_quorum(&self.committee) {
+                continue;
+            }
+
+            let metastate = if strong_supporters.is_quorum(&self.committee) {
+                Some(CommitMetastate::Opt)
+            } else {
+                // Mixed certs reached quorum. Check strong-blame at r+1.
+                let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
+                let mut strong_blamers = StakeAggregator::<QuorumThreshold>::new();
+                for vb in voting_blocks.iter() {
+                    let votes_for_leader = vb.block_references().contains(&leader_ref);
+                    if votes_for_leader && vb.is_strong_blame() {
+                        strong_blamers.add(vb.authority(), &self.committee);
+                    }
+                }
+                if strong_blamers.is_quorum(&self.committee) {
+                    Some(CommitMetastate::Std)
+                } else {
+                    Some(CommitMetastate::Pending)
+                }
+            };
+            return Some((leader_block, metastate));
         }
 
         None

@@ -346,7 +346,10 @@ impl BaseCommitter {
     }
 
     /// Determine the commit metastate for StarfishSpeed direct decide.
-    /// Returns `None` for non-StarfishSpeed protocols.
+    /// Returns `None` for non-StarfishSpeed protocols. SparseStarfishSpeed
+    /// does not flow through this hook — it has its own dedicated commit
+    /// path in `UniversalCommitter::try_commit_sparse_starfish_speed` which
+    /// derives the metastate inline from the round-(r+2) unprovable certs.
     /// - Opt: 2f+1 certifying blocks each carrying a StrongQC
     /// - Std: strong blame quorum at the voting round
     /// - Pending: neither strong vote nor strong blame quorum

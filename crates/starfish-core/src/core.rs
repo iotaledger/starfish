@@ -13,7 +13,7 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
-    committee::Committee,
+    committee::{Committee, QuorumThreshold, StakeAggregator},
     config::NodePrivateConfig,
     consensus::{
         CommitMetastate,
@@ -589,7 +589,15 @@ impl<H: BlockHandler> Core<H> {
         self.prepare_last_blocks();
         let mut encoded_transactions = self.prepare_encoded_transactions(&transactions);
         let acknowledgment_references = if protocol.supports_acknowledgments() {
-            self.dag_state.get_pending_acknowledgment(clock_round)
+            // SparseStarfishSpeed: only the round-r leader drains the pending
+            // queue. Non-leader blocks carry an empty ack list because their
+            // implicit acks are derived at commit time from
+            // (leader.acks, voter.strong_vote).
+            if protocol == ConsensusProtocol::SparseStarfishSpeed && !is_current_leader {
+                Vec::new()
+            } else {
+                self.dag_state.get_pending_acknowledgment(clock_round)
+            }
         } else {
             Vec::new()
         };
@@ -790,15 +798,18 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// For StarfishSpeed, compute the strong-vote hint mask for the current
-    /// leader. `Some(empty)` means the vote is strong; `Some(nonempty)` records
-    /// the authorities whose payloads are still missing locally.
+    /// For StarfishSpeed and SparseStarfishSpeed, compute the strong-vote hint
+    /// mask for the current leader. `Some(empty)` means the vote is strong;
+    /// `Some(nonempty)` records the authorities whose payloads are still
+    /// missing locally (one bit per authority — coarse-grained: any missing
+    /// block by that author sets the bit). Returns `None` when the block is
+    /// not a voter of any leader (no leader_r-1 reference).
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
         block_references: &[BlockReference],
     ) -> Option<AuthoritySet> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
+        if !self.dag_state.consensus_protocol.uses_strong_vote() {
             return None;
         }
 
@@ -961,7 +972,10 @@ impl<H: BlockHandler> Core<H> {
         } else {
             None
         };
-        let unprovable_certificate = if protocol.is_bluestreak() && clock_round >= 3 {
+        let unprovable_certificate = if (protocol.is_bluestreak()
+            || protocol == ConsensusProtocol::SparseStarfishSpeed)
+            && clock_round >= 3
+        {
             self.compute_unprovable_certificate(clock_round, &block_references)
         } else {
             None
@@ -1091,14 +1105,48 @@ impl<H: BlockHandler> Core<H> {
             .get_blocks_at_authority_round(leader, leader_round)
             .into_iter();
 
+        let is_sparse = self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed;
+
         for leader_block in leader_blocks {
             let leader_ref = *leader_block.reference();
+
+            if is_sparse {
+                // SparseStarfishSpeed: scan the voting round to derive the
+                // cert flavor.
+                //  - strong (bool = true) iff 2f+1 round-(leader_round+1) voters of
+                //    `leader_ref` carry an empty strong_vote mask (`is_strong_vote()`).
+                //  - standard (bool = false) iff 2f+1 voters reference `leader_ref` but the
+                //    strong-vote quorum is mixed.
+                //  - absent (None) iff no 2f+1 voter quorum.
+                let voting_round = leader_round + 1;
+                let voting_blocks = self.dag_state.get_blocks_by_round(voting_round);
+                let mut all_votes = StakeAggregator::<QuorumThreshold>::new();
+                let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
+                for vb in &voting_blocks {
+                    let votes_for_leader = vb.block_references().contains(&leader_ref);
+                    if !votes_for_leader {
+                        continue;
+                    }
+                    all_votes.add(vb.authority(), &self.committee);
+                    if vb.is_strong_vote() {
+                        strong_votes.add(vb.authority(), &self.committee);
+                    }
+                }
+                if strong_votes.is_quorum(&self.committee) {
+                    return Some((leader_ref, true));
+                }
+                if all_votes.is_quorum(&self.committee) {
+                    return Some((leader_ref, false));
+                }
+                continue;
+            }
+
+            // Bluestreak path: existing certificate evidence; standard
+            // (bool = false) only.
             if self
                 .dag_state
                 .has_bluestreak_certificate_evidence(clock_round, &leader_ref)
             {
-                // Bluestreak uses only the standard flavor (bool = false);
-                // the strong flavor is reserved for SparseStarfishSpeed.
                 return Some((leader_ref, false));
             }
         }
@@ -1378,6 +1426,17 @@ impl<H: BlockHandler> Core<H> {
         for commit in &committed {
             let committed_rounds = self.dag_state.update_commit_state(commit);
             commit_data.push(CommitData::new(commit, committed_rounds));
+        }
+        // SparseStarfishSpeed: drop sequenced refs from the local pending
+        // acknowledgment queue right after each commit so future leaders
+        // don't republish them. Other protocols leave the queue intact and
+        // rely on round-bounded drains in `get_pending_acknowledgment`.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed {
+            let sequenced: Vec<BlockReference> = committed
+                .iter()
+                .flat_map(|c| c.blocks.iter().map(|b| *b.reference()))
+                .collect();
+            self.dag_state.purge_pending_acknowledgments(&sequenced);
         }
         let store_start = std::time::Instant::now();
         self.store

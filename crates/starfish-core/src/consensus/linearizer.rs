@@ -246,6 +246,80 @@ impl Linearizer {
         holders
     }
 
+    /// SparseStarfishSpeed: derive per-`c` ack votes from `L.acknowledgments`
+    /// and the `strong_vote` masks of L's voters at round `L.round + 1`.
+    ///
+    /// Rule (filter, not intersection):
+    /// `derived_acks(v) = { c ∈ L.acks :
+    /// !v.strong_vote.unwrap().contains(c.authority) }`
+    ///
+    /// Aggregate StakeAggregator votes per `c`; commit when 2f+1 distinct
+    /// voter authorities have `c` in their derived ack set. Only invoked on
+    /// `CommitMetastate::Opt`; `Std` skips ack promotion entirely (only L's
+    /// structural ancestors are committed).
+    fn collect_subdag_sparse_starfish_speed(
+        &mut self,
+        dag_state: &DagState,
+        leader_block: Data<VerifiedBlock>,
+        metastate: Option<CommitMetastate>,
+    ) -> CommittedSubDag {
+        let mut sub_dag = self.collect_subdag_ancestors(dag_state, leader_block.clone());
+        if metastate != Some(CommitMetastate::Opt) {
+            return sub_dag;
+        }
+
+        let leader_block_ref = *leader_block.reference();
+        let leader_acks = leader_block.acknowledgments();
+        if leader_acks.is_empty() {
+            return sub_dag;
+        }
+
+        let voting_round = leader_block_ref.round + 1;
+        let voting_blocks = dag_state.get_blocks_by_round(voting_round);
+
+        let mut new_ack_refs: BTreeSet<BlockReference> = BTreeSet::new();
+        for voter in &voting_blocks {
+            let Some(mask) = voter.strong_vote() else {
+                continue;
+            };
+            let votes_for_leader = voter.block_references().contains(&leader_block_ref);
+            if !votes_for_leader {
+                continue;
+            }
+            let v_authority = voter.authority();
+            for c in &leader_acks {
+                if mask.contains(c.authority) {
+                    continue;
+                }
+                let s = self.votes.entry(*c).or_default();
+                if !s.is_quorum(&self.committee)
+                    && s.add(v_authority, &self.committee)
+                    && self.committed.insert(*c)
+                {
+                    new_ack_refs.insert(*c);
+                }
+            }
+        }
+
+        if new_ack_refs.is_empty() {
+            return sub_dag;
+        }
+        let new_ack_refs: Vec<_> = new_ack_refs.into_iter().collect();
+        for block in dag_state
+            .get_storage_blocks(&new_ack_refs)
+            .into_iter()
+            .flatten()
+        {
+            if self
+                .committed_slots
+                .insert((block.round(), block.authority()))
+            {
+                sub_dag.blocks.push(block);
+            }
+        }
+        sub_dag
+    }
+
     pub fn handle_commit(
         &mut self,
         dag_state: &DagState,
@@ -272,12 +346,8 @@ impl Linearizer {
                 | ConsensusProtocol::MysticetiBls => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
-                // TODO(sparse-starfish-speed): replace with a derivation pass
-                // that promotes L.acks based on (L.acks ∩ voter.strong_vote)
-                // when CommitMetastate::Opt. Until then, treat like Bluestreak
-                // structurally so existing tests stay green.
                 ConsensusProtocol::SparseStarfishSpeed => {
-                    self.collect_subdag_ancestors(dag_state, leader_block)
+                    self.collect_subdag_sparse_starfish_speed(dag_state, leader_block, metastate)
                 }
             };
 
@@ -320,10 +390,7 @@ impl Linearizer {
                     if consensus_protocol.uses_bls() {
                         self.potential_data_holders()
                     } else {
-                        self.votes
-                            .get(x.reference())
-                            .expect("After committing expect a quorum in starfish")
-                            .clone()
+                        self.votes.get(x.reference()).cloned().unwrap_or_default()
                     }
                 })
                 .collect();

@@ -1689,10 +1689,12 @@ impl VerifiedBlock {
                     self.header.acknowledgment_bls_signatures().is_empty(),
                     "SparseStarfishSpeed blocks must not carry DAC certificates"
                 );
-                ensure!(
-                    self.header.strong_vote.is_some(),
-                    "SparseStarfishSpeed blocks must carry a strong_vote bitmask"
-                );
+                // `strong_vote` is None at round 1 (no prior leader) or
+                // when the block does not reference the previous-round
+                // leader; construction returns None in those cases.
+                // Missing strong_vote simply means the block does not
+                // contribute to the commit metastate or to derived acks —
+                // no structural enforcement needed here.
                 let is_leader = self.authority() == committee.elect_leader(round);
                 if is_leader {
                     ensure!(
