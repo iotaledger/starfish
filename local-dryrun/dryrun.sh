@@ -6,8 +6,8 @@
 NUM_NODES=${NUM_NODES:-30}
 NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
-# Options: starfish, starfish-speed, starfish-bls,
-#          cordial-miners, mysticeti, sailfish-pp,
+# Options: starfish, starfish-speed, sparse-starfish-speed,
+#          starfish-bls, cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
 CONSENSUS=${CONSENSUS:-starfish}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}

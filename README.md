@@ -8,7 +8,7 @@
 This repository is a benchmarking framework for DAG-based BFT
 consensus protocols in the partially synchronous model, implemented
 in Rust.
-It includes 8 protocol implementations with configurable
+It includes 9 protocol implementations with configurable
 dissemination strategies, storage backends, and Byzantine fault
 injection.
 
@@ -20,6 +20,7 @@ injection.
 | Mysticeti-BLS | `mysticeti-bls` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
 | Bluestreak | `bluestreak` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [paper](papers/bluestreak.pdf) |
 | Starfish-Speed | `starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | -- |
+| Sparse-Starfish-Speed | `sparse-starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | -- |
 | Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
 | Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |
 | Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
@@ -44,6 +45,13 @@ certificate tracking, similar in architecture to Mysticeti-BLS, but with cheaper
 acknowledgment references between validators.
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
+**Sparse-Starfish-Speed** (work in progress) combines Bluestreak's
+lean DAG with Starfish-Speed's strong-vote mechanism: only the round
+leader carries an explicit acknowledgment list, non-leader voters
+emit a constant-size strong-vote bitmask, and the linearizer derives
+global acks from `(leader.acks, voter.strong_vote)`. The block-header
+unprovable certificate is generalized with a strong/standard flavor
+tag (`Option<(BlockReference, bool)>`).
 **Sailfish++** is a certified DAG protocol using signature-free
 optimistic reliable broadcast (RBC) for vertex certification,
 achieving 2-round optimistic commit latency.
