@@ -747,6 +747,16 @@ impl ConnectionKnowledge {
         )
     }
 
+    /// Bitmask of authorities whose headers from this peer are still
+    /// considered useful (read-only side of `useful_authors_bitmasks`).
+    pub fn useful_headers_from_peer_bitmask(&self, current_round: RoundNumber) -> AuthoritySet {
+        Self::recent_authors_bitmask(
+            &self.last_useful_headers_from_peer_round,
+            current_round,
+            USEFUL_HEADERS_GAP,
+        )
+    }
+
     /// Build bitmasks indicating which authorities' headers/shards are still
     /// useful TO this peer. This gates which extra parts we piggyback.
     pub fn useful_authors_to_peer_bitmasks(
@@ -1362,6 +1372,20 @@ impl CordialKnowledgeHandle {
         peer: AuthorityIndex,
     ) -> Option<Arc<RwLock<ConnectionKnowledge>>> {
         self.connection_knowledges.get(peer as usize).cloned()
+    }
+
+    /// Union across all per-peer connections of "useful headers from this
+    /// peer" bitmasks. Lets us advertise broader shard demand: if a header
+    /// from author X is useful when received from any peer, then shards
+    /// from X are useful when received from every peer (we need f+1
+    /// distinct shards to reconstruct, so demand is broadcast even when
+    /// header demand is targeted).
+    pub fn useful_headers_from_any_peer_bitmask(&self, current_round: RoundNumber) -> AuthoritySet {
+        let mut union = AuthoritySet::default();
+        for ck in &self.connection_knowledges {
+            union |= ck.read().useful_headers_from_peer_bitmask(current_round);
+        }
+        union
     }
 
     /// Get the shared dag knowledge for push dissemination. `None` in pull
