@@ -1250,18 +1250,14 @@ where
                 (other_candidates, shard_refs, useful_headers, useful_shards)
             };
 
-            // Shard demand is broadcast: if any peer's headers from author X
-            // are useful, we want X's shards from everyone (f+1 shards needed
-            // to reconstruct, so the more sources the better). This must run
-            // *after* the per-peer `ck.write()` lock above is released —
-            // `useful_headers_from_any_peer_bitmask` read-locks every
-            // connection including this peer's, and grabbing a read while
-            // holding the write would deadlock.
+            // Shard demand is now explicit-only: `mark_shards_useful_from_peer`
+            // fires solely from `request_missing_data_blocks` when this node
+            // sends a `MissingTxDataRequest` (broadcaster.rs:282). Header
+            // arrivals must NOT leak into the shard side — that was the bug
+            // making `useful_shards_authors` saturate to the full committee
+            // even with zero `tx_data_requests_sent`.
             let useful_shards = if other_blocks_format == PushOtherBlocksFormat::HeadersAndShards {
                 useful_shards
-                    | inner
-                        .cordial_knowledge
-                        .useful_headers_from_any_peer_bitmask(current_round)
             } else {
                 AuthoritySet::default()
             };
