@@ -327,37 +327,16 @@ impl Linearizer {
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::StarfishBls => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, true)
-                }
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
+                },
+                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, false)
-                }
+                },
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::MysticetiBls => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
-                }
-                ConsensusProtocol::SparseStarfishSpeed => match metastate {
-                    Some(CommitMetastate::Opt) => {
-                        // Opt path: same as Bluestreak — strong-vote quorum
-                        // already guarantees f+1-honest data availability
-                        // for L_r and its causal closure, so just commit
-                        // the ancestor closure. L_r.acks are sequenced
-                        // later via the next anchor's Std-path BFS, when
-                        // round-(r+1) non-leaders' derived ack sets pick
-                        // them up.
-                        self.collect_subdag_ancestors(dag_state, leader_block)
-                    }
-                    _ => {
-                        // Std / Pending: same as Starfish — BFS through
-                        // L_r's causal past with the derived ack rule
-                        // (see `effective_acknowledgments`). L_r itself is
-                        // not included in the sub-dag because Std lacks
-                        // the strong-vote quorum that would guarantee its
-                        // data is f+1-available.
-                        self.collect_subdag_acknowledgments(dag_state, leader_block, false)
-                    }
                 },
             };
 
