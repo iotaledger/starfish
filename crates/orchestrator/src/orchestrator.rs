@@ -416,8 +416,14 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         // as arguments. Match by process basename only.
         [
             // Stop any timers that might re-trigger updates mid-install.
-            "sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.timer 2>/dev/null || true",
-            "sudo systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true",
+            concat!(
+                "sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer ",
+                "unattended-upgrades.timer 2>/dev/null || true",
+            ),
+            concat!(
+                "sudo systemctl mask apt-daily.service apt-daily-upgrade.service ",
+                "unattended-upgrades.service 2>/dev/null || true",
+            ),
             // Kill in-flight apt holders by exact process name.
             "sudo pkill -9 -x apt-get 2>/dev/null || true",
             "sudo pkill -9 -x dpkg 2>/dev/null || true",
@@ -1137,7 +1143,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 _ = faults_interval.tick() => {
                     let action = faults_schedule.update();
                     if !action.kill.is_empty() {
-                        killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
+                        killed_node_ids
+                            .extend(action.kill.iter().map(|instance| instance.id.clone()));
                         self.ssh_manager.kill(action.kill.clone(), "node").await?;
                     }
                     if !action.boot.is_empty() {
@@ -1459,9 +1466,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                             )
                             .await;
                         if stdio.is_empty() {
-                            display::warn(
-                                "All stability metrics scrapes failed for this interval; continuing run",
-                            );
+                            display::warn(concat!(
+                                "All stability metrics scrapes failed for this interval; ",
+                                "continuing run",
+                            ));
                         }
 
                         let mut metrics_by_scraper = HashMap::new();
@@ -1523,7 +1531,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     _ = faults_interval.tick() => {
                         let action = faults_schedule.update();
                         if !action.kill.is_empty() {
-                            killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
+                            killed_node_ids
+                                .extend(action.kill.iter().map(|instance| instance.id.clone()));
                             for instance in &action.kill {
                                 if let Some(index) = node_indices.get(&instance.id).copied() {
                                     previous_counters.remove(&index);
@@ -1558,7 +1567,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                         .cloned()
                                         .collect();
                                     if to_kill.is_empty() {
-                                        display::warn("Scheduled outage started but all targeted validators were already down");
+                                        display::warn(concat!(
+                                            "Scheduled outage started but all targeted ",
+                                            "validators were already down",
+                                        ));
                                     } else {
                                         display::newline();
                                         display::config(
@@ -1586,7 +1598,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                             .collect();
                                         for instance in &to_kill {
                                             killed_node_ids.insert(instance.id.clone());
-                                            if let Some(index) = node_indices.get(&instance.id).copied() {
+                                            if let Some(index) =
+                                                node_indices.get(&instance.id).copied()
+                                            {
                                                 previous_counters.remove(&index);
                                             }
                                         }
@@ -1598,7 +1612,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                     let to_boot: Vec<_> = state
                                         .targets
                                         .iter()
-                                        .filter(|instance| state.killed_by_outage.contains(&instance.id))
+                                        .filter(|instance| {
+                                            state.killed_by_outage.contains(&instance.id)
+                                        })
                                         .cloned()
                                         .collect();
                                     if !to_boot.is_empty() {
@@ -1608,12 +1624,16 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                                             format!(
                                                 "Recovering {} validators from {}",
                                                 to_boot.len(),
-                                                state.config.selected_authorities_label(nodes.len()),
+                                                state
+                                                    .config
+                                                    .selected_authorities_label(nodes.len()),
                                             ),
                                         );
                                         for instance in &to_boot {
                                             killed_node_ids.remove(&instance.id);
-                                            if let Some(index) = node_indices.get(&instance.id).copied() {
+                                            if let Some(index) =
+                                                node_indices.get(&instance.id).copied()
+                                            {
                                                 previous_counters.remove(&index);
                                             }
                                         }
@@ -1644,9 +1664,10 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                             )
                             .await;
                         if stdio.is_empty() {
-                            display::warn(
-                                "All stability metrics scrapes failed for this interval; continuing run",
-                            );
+                            display::warn(concat!(
+                                "All stability metrics scrapes failed for this interval; ",
+                                "continuing run",
+                            ));
                         }
 
                         let mut metrics_by_scraper = HashMap::new();
@@ -1708,7 +1729,8 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     _ = faults_interval.tick() => {
                         let action = faults_schedule.update();
                         if !action.kill.is_empty() {
-                            killed_node_ids.extend(action.kill.iter().map(|instance| instance.id.clone()));
+                            killed_node_ids
+                                .extend(action.kill.iter().map(|instance| instance.id.clone()));
                             for instance in &action.kill {
                                 if let Some(index) = node_indices.get(&instance.id).copied() {
                                     previous_counters.remove(&index);

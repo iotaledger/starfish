@@ -1706,8 +1706,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
 
                                 if pending_cert_messages.len() >= SAILFISH_CERT_BATCH_MAX_LEN {
-                                    broadcast_sailfish_cert_messages(&senders, &pending_cert_messages)
-                                        .await;
+                                    broadcast_sailfish_cert_messages(
+                                        &senders,
+                                        &pending_cert_messages,
+                                    )
+                                    .await;
                                     pending_cert_messages.clear();
                                 }
                             }
@@ -1715,14 +1718,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         _ = cert_flush_interval.tick(), if !pending_cert_messages.is_empty() => {
                             let senders: Vec<_> =
                                 event_inner.peer_senders.read().values().cloned().collect();
-                            broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
+                            broadcast_sailfish_cert_messages(&senders, &pending_cert_messages)
+                                .await;
                             pending_cert_messages.clear();
                         }
                     }
                 }
 
                 if !pending_cert_messages.is_empty() {
-                    let senders: Vec<_> = event_inner.peer_senders.read().values().cloned().collect();
+                    let senders: Vec<_> =
+                        event_inner.peer_senders.read().values().cloned().collect();
                     broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
                 }
             });
@@ -1803,7 +1808,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     attempts += 1;
                     if attempts >= 100 {
                         panic!(
-                            "Shutdown failed - not all resources are freed after main task is completed"
+                            "Shutdown failed - not all resources are freed \
+                             after main task is completed"
                         );
                     }
                     inner_arc = arc;

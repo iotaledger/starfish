@@ -990,8 +990,38 @@ dag_highest_round 1000
         "#;
 
         let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+
+        // The CPU and bandwidth rates are computed as deltas between the
+        // first in-window scrape and the latest scrape (introduced by
+        // 96b04ca to avoid warmup inflation). A single-scrape test input
+        // therefore degenerates to dt=0 and produces 0-valued rates,
+        // which would mask any regression in the percentile pipeline.
+        // We synthesize an earlier "baseline" scrape at timestamp=100
+        // with half the cumulative counter values so the delta over the
+        // 100-second active window matches the cumulative-divide-by-
+        // duration semantic the assertions were originally written for.
+        let mut baseline_cpu = measurements["process_cpu_seconds_total"].clone();
+        baseline_cpu.scalar = 160.0;
+        baseline_cpu.timestamp = Duration::from_secs(100);
+        let mut baseline_sent = measurements["bytes_sent_total"].clone();
+        baseline_sent.scalar = 3_000_000.0;
+        baseline_sent.count = 3_000_000;
+        baseline_sent.timestamp = Duration::from_secs(100);
+
         let mut aggregator = MeasurementsCollection::new(BenchmarkParameters::new_for_tests());
         for scraper_id in 0..3 {
+            // Insert the earlier baselines FIRST so the delta calculation
+            // resolves to (last - baseline) / (200 - 100) per scraper.
+            aggregator.add(
+                scraper_id,
+                "process_cpu_seconds_total".to_string(),
+                baseline_cpu.clone(),
+            );
+            aggregator.add(
+                scraper_id,
+                "bytes_sent_total".to_string(),
+                baseline_sent.clone(),
+            );
             for (label, measurement) in measurements.clone() {
                 aggregator.add(scraper_id, label, measurement);
             }
