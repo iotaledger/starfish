@@ -1092,7 +1092,7 @@ where
 fn select_push_batch_parts<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
     to_whom_authority_index: AuthorityIndex,
-    own_round: RoundNumber,
+    own_blocks: Vec<Data<VerifiedBlock>>,
     broadcaster_parameters: &BroadcasterParameters,
     selection_mode: PushSelectionMode,
     sent_to_peer: &parking_lot::RwLock<AHashSet<BlockReference>>,
@@ -1103,11 +1103,6 @@ where
 {
     let own_authority = inner.dag_state.get_own_authority_index();
     let other_blocks_format = push_transport_format(inner.dag_state.consensus_protocol);
-    let own_blocks = inner.dag_state.get_own_transmission_blocks(
-        to_whom_authority_index,
-        own_round,
-        broadcaster_parameters.batch_own_block_size,
-    );
     let own_refs: AHashSet<_> = own_blocks.iter().map(|block| *block.reference()).collect();
     // When pushing in `PushUseful` mode we may select a block that references
     // direct ancestors whose authors are *not* currently considered "useful"
@@ -1373,10 +1368,42 @@ where
     H: 'static + BlockHandler,
 {
     let peer = format_authority_index(to_whom_authority_index);
+
+    // Phase 1 — fast batch: ship the freshly produced own blocks BEFORE
+    // acquiring any CordialKnowledge locks in `select_push_batch_parts`.
+    // The own block is the latency-critical payload (everyone needs it to
+    // advance their threshold-clock); the heavier headers + shards
+    // selection lives on the wire in a follow-up message so it never gates
+    // the receiver's next round.
+    let own_blocks = inner.dag_state.get_own_transmission_blocks(
+        to_whom_authority_index,
+        *round,
+        broadcaster_parameters.batch_own_block_size,
+    );
+    if let Some(max_round) = own_blocks.iter().map(|b| b.round()).max() {
+        *round = max_round;
+    }
+    if !own_blocks.is_empty() {
+        let fast_batch =
+            BlockBatch::full_only(DataSource::BlockBundleStreaming, own_blocks.clone());
+        if let Ok(size) = bincode::serialized_size(&fast_batch) {
+            metrics.block_bundle_size_bytes.observe(size as usize);
+        }
+        let own_refs: Vec<_> = own_blocks.iter().map(|b| *b.reference()).collect();
+        tracing::debug!(
+            "Push fast batch to {peer}: {} full own blocks",
+            fast_batch.full_blocks.len()
+        );
+        send_batch_and_track(&to, fast_batch, &inner, &sent_to_peer, own_refs.into_iter()).await?;
+    }
+
+    // Phase 2 — slow batch: heavy selection (CK reads/writes) for headers
+    // + shards. Own blocks are already on the wire from Phase 1, so we
+    // pass them in only to let the selection logic skip them.
     let plan = select_push_batch_parts(
         &inner,
         to_whom_authority_index,
-        *round,
+        own_blocks,
         &broadcaster_parameters,
         selection_mode,
         sent_to_peer.as_ref(),
@@ -1389,30 +1416,38 @@ where
         plan.as_ref()
             .map_or(AuthoritySet::default(), |p| p.useful_shards),
     );
-    let plan = plan?;
-    if let Some(max_round) = plan.own_blocks.iter().map(|block| block.round()).max() {
-        *round = max_round;
-    }
+    let mut plan = plan?;
 
-    let batch = materialize_push_batch(&inner, plan);
-    if let Ok(size) = bincode::serialized_size(&batch) {
+    // Drop own blocks from the plan — already shipped in the fast batch.
+    plan.own_blocks = Vec::new();
+
+    let slow_batch = materialize_push_batch(&inner, plan);
+    if slow_batch.is_empty() {
+        return Some(());
+    }
+    if let Ok(size) = bincode::serialized_size(&slow_batch) {
         metrics.block_bundle_size_bytes.observe(size as usize);
     }
 
     tracing::debug!(
-        "Push batch to {peer}: {} full, {} headers, {} shards",
-        batch.full_blocks.len(),
-        batch.headers.len(),
-        batch.shards.len()
+        "Push slow batch to {peer}: {} headers, {} shards",
+        slow_batch.headers.len(),
+        slow_batch.shards.len()
     );
-    let sent_refs: Vec<_> = batch
-        .full_blocks
+    let slow_refs: Vec<_> = slow_batch
+        .headers
         .iter()
         .map(|b| *b.reference())
-        .chain(batch.headers.iter().map(|b| *b.reference()))
-        .chain(batch.shards.iter().map(|s| s.block_reference))
+        .chain(slow_batch.shards.iter().map(|s| s.block_reference))
         .collect();
-    send_batch_and_track(&to, batch, &inner, &sent_to_peer, sent_refs.into_iter()).await
+    send_batch_and_track(
+        &to,
+        slow_batch,
+        &inner,
+        &sent_to_peer,
+        slow_refs.into_iter(),
+    )
+    .await
 }
 
 enum BlockFetcherMessage {
