@@ -1849,7 +1849,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             metrics.clone(),
         ));
-        let cert_pull_task = if inner.dag_state.consensus_protocol.is_bluestreak() {
+        let cert_pull_task = if inner
+            .dag_state
+            .consensus_protocol
+            .carries_unprovable_certificate()
+        {
             Some(handle.spawn(Self::unprovable_cert_pull_task(inner.clone())))
         } else {
             None
@@ -2155,8 +2159,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         const SCAN_INTERVAL: Duration = Duration::from_millis(100);
         const PEER_COUNT: usize = 2;
 
-        let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
-        let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
+        // Tracking is keyed by (leader_ref, strong) so that standard and
+        // strong cert flavors are rate-limited independently (SSFS).
+        let mut first_seen: AHashMap<(BlockReference, bool), Instant> = AHashMap::new();
+        let mut last_requested: AHashMap<(BlockReference, bool), Instant> = AHashMap::new();
 
         loop {
             select! {
@@ -2167,18 +2173,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let pending = inner.dag_state.pending_unprovable_certificates();
             let now = Instant::now();
 
-            // Prune tracking maps for leaders no longer pending.
-            first_seen.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
-            last_requested.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
+            // Prune tracking maps for cert keys no longer pending.
+            first_seen.retain(|k, _| pending.iter().any(|(lr, strong, _)| (*lr, *strong) == *k));
+            last_requested
+                .retain(|k, _| pending.iter().any(|(lr, strong, _)| (*lr, *strong) == *k));
 
-            for (leader_ref, known_voters) in &pending {
+            for (leader_ref, strong, known_voters) in &pending {
+                let key = (*leader_ref, *strong);
                 // Must have been waiting >= SCAN_INTERVAL before first request.
-                let first = first_seen.entry(*leader_ref).or_insert(now);
+                let first = first_seen.entry(key).or_insert(now);
                 if now.duration_since(*first) < SCAN_INTERVAL {
                     continue;
                 }
-                // Rate limit: one request per leader per interval.
-                if let Some(last) = last_requested.get(leader_ref) {
+                // Rate limit: one request per cert flavor per interval.
+                if let Some(last) = last_requested.get(&key) {
                     if now.duration_since(*last) < SCAN_INTERVAL {
                         continue;
                     }
@@ -2191,8 +2199,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                 tracing::debug!(
                     "Request unprovable certificate support for leader {} \
-                     from {} peers (known_voters={})",
+                     (strong={}) from {} peers (known_voters={})",
                     leader_ref,
+                    strong,
                     senders.len(),
                     known_voters.count_ones()
                 );
@@ -2204,7 +2213,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let _ = sender.send(msg).await;
                 }
 
-                last_requested.insert(*leader_ref, now);
+                last_requested.insert(key, now);
             }
         }
     }

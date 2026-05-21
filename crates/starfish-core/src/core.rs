@@ -13,7 +13,7 @@ use crate::{
     block_handler::BlockHandler,
     block_manager::BlockManager,
     bls_certificate_aggregator::{BlsCertificateAggregator, apply_certificate_events},
-    committee::{Committee, QuorumThreshold, StakeAggregator},
+    committee::Committee,
     config::NodePrivateConfig,
     consensus::{
         CommitMetastate,
@@ -530,21 +530,27 @@ impl<H: BlockHandler> Core<H> {
         let is_current_leader = self.committee.elect_leader(clock_round) == self.authority;
         // BLS non-leaders can always build with minimal refs.
         let bls_non_leader = protocol.uses_bls() && !is_current_leader;
-        // Bluestreak prev-round leader can build with own-prev only.
-        let bluestreak_prev_leader = protocol.is_bluestreak()
+        // Compressed-ref + dual-DAG protocols (Bluestreak, SparseStarfishSpeed):
+        // prev-round leader can build with own-prev only when its causal
+        // frontier is unavailable.
+        let compressed_dual_dag =
+            protocol.uses_compressed_refs() && protocol.carries_unprovable_certificate();
+        let compressed_prev_leader = compressed_dual_dag
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
-        // For Bluestreak non-leaders, block creation may fall back to
-        // "own-prev only" when the previous-round leader block is missing
-        // locally. Unlike Mysticeti, Bluestreak compresses references down to
-        // the previous-round leader; if that leader isn't available/clean yet,
-        // we still want to keep producing blocks (this also matches the BLS
-        // non-leader behavior which always permits minimal refs).
-        let bluestreak_non_leader = protocol.is_bluestreak() && !is_current_leader;
-        let allows_minimal_refs = bls_non_leader || bluestreak_prev_leader || bluestreak_non_leader;
-        if bluestreak_non_leader && block_references.is_empty() && !bluestreak_prev_leader {
+        // For compressed-ref dual-DAG non-leaders, block creation may fall
+        // back to "own-prev only" when the previous-round leader block is
+        // missing locally. Unlike Mysticeti, Bluestreak/SSFS compress
+        // references down to the previous-round leader; if that leader isn't
+        // available/clean yet, we still want to keep producing blocks (this
+        // also matches the BLS non-leader behavior which always permits
+        // minimal refs).
+        let compressed_non_leader = compressed_dual_dag && !is_current_leader;
+        let allows_minimal_refs = bls_non_leader || compressed_prev_leader || compressed_non_leader;
+        if compressed_non_leader && block_references.is_empty() && !compressed_prev_leader {
             tracing::debug!(
-                "Bluestreak: constructing block in round {} \
+                "{:?}: constructing block in round {} \
                  with only own-prev (missing clean prev-leader parent)",
+                protocol,
                 clock_round
             );
         }
@@ -827,19 +833,23 @@ impl<H: BlockHandler> Core<H> {
 
         let leader_ref = leader_ref?;
 
-        let mut missing_mask = AuthoritySet::default();
-        if !self.dag_state.is_data_available(leader_ref) {
-            missing_mask.insert(leader_ref.authority);
-        }
-
         let leader_block = self
             .dag_state
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
-        for ack_ref in leader_block.acknowledgments() {
-            if !self.dag_state.is_data_available(&ack_ref) {
-                missing_mask.insert(ack_ref.authority);
+        // Single batched data-availability check over [leader_ref, ack_refs...]
+        // — one DagState read lock instead of (1 + acks.len()) acquisitions.
+        let acks = leader_block.acknowledgments();
+        let mut refs_to_check = Vec::with_capacity(1 + acks.len());
+        refs_to_check.push(*leader_ref);
+        refs_to_check.extend_from_slice(&acks);
+        let availability = self.dag_state.is_data_available_batch(&refs_to_check);
+
+        let mut missing_mask = AuthoritySet::default();
+        for (r, available) in refs_to_check.iter().zip(availability) {
+            if !available {
+                missing_mask.insert(r.authority);
             }
         }
 
@@ -1111,31 +1121,18 @@ impl<H: BlockHandler> Core<H> {
             let leader_ref = *leader_block.reference();
 
             if is_sparse {
-                // SparseStarfishSpeed: scan the voting round to derive the
-                // cert flavor.
-                //  - strong (bool = true) iff 2f+1 round-(leader_round+1) voters of
-                //    `leader_ref` carry an empty strong_vote mask (`is_strong_vote()`).
-                //  - standard (bool = false) iff 2f+1 voters reference `leader_ref` but the
-                //    strong-vote quorum is mixed.
-                //  - absent (None) iff no 2f+1 voter quorum.
-                let voting_round = leader_round + 1;
-                let voting_blocks = self.dag_state.get_blocks_by_round(voting_round);
-                let mut all_votes = StakeAggregator::<QuorumThreshold>::new();
-                let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
-                for vb in &voting_blocks {
-                    let votes_for_leader = vb.block_references().contains(&leader_ref);
-                    if !votes_for_leader {
-                        continue;
-                    }
-                    all_votes.add(vb.authority(), &self.committee);
-                    if vb.is_strong_vote() {
-                        strong_votes.add(vb.authority(), &self.committee);
-                    }
-                }
-                if strong_votes.is_quorum(&self.committee) {
+                // SparseStarfishSpeed: O(1) precomputed-tally lookups.
+                // `record_ssfs_leader_vote_support` in DagState updates
+                // both `leader_vote_support` and `leader_strong_vote_support`
+                // on every block insert, so we don't rescan round-(r+1)
+                // voters here.
+                //  - strong (true)  iff strong-vote quorum reached.
+                //  - standard (false) iff vote quorum exists but strong quorum hasn't.
+                //  - absent (None) iff no vote quorum.
+                if self.dag_state.ssfs_leader_strong_vote_quorum(&leader_ref) {
                     return Some((leader_ref, true));
                 }
-                if all_votes.is_quorum(&self.committee) {
+                if self.dag_state.ssfs_leader_vote_quorum(&leader_ref) {
                     return Some((leader_ref, false));
                 }
                 continue;
@@ -1145,7 +1142,7 @@ impl<H: BlockHandler> Core<H> {
             // (bool = false) only.
             if self
                 .dag_state
-                .has_bluestreak_certificate_evidence(clock_round, &leader_ref)
+                .has_unprovable_certificate_evidence(clock_round, &leader_ref, false)
             {
                 return Some((leader_ref, false));
             }
