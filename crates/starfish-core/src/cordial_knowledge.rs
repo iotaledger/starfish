@@ -10,7 +10,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -103,6 +106,59 @@ pub enum CordialKnowledgeMessage {
 }
 
 // ---------------------------------------------------------------------------
+// GlobalUsefulRounds — lock-free per-author max round
+// ---------------------------------------------------------------------------
+
+/// Per-author atomic max-round tracker shared across all
+/// [`ConnectionKnowledge`] instances. Encodes the cross-peer union of
+/// "useful headers from any peer" so the broadcaster can read it via a
+/// single `O(n)` pass over atomics, replacing the previous
+/// `useful_headers_from_any_peer_bitmask` scan that needed read locks on
+/// every per-peer `ConnectionKnowledge`.
+///
+/// `0` is the sentinel for "never observed". Real round-0 marks (genesis)
+/// would never satisfy the `round + gap >= current_round` window check
+/// at any current round past the gap anyway, so collapsing `None` and
+/// `Some(0)` is observationally identical to the previous
+/// `Option<RoundNumber>` representation in `ConnectionKnowledge`.
+struct GlobalUsefulRounds {
+    /// One slot per authority. Updated via `fetch_max` whenever a
+    /// per-peer `mark_header(s)_useful_from_peer` advances its round.
+    max_headers_round: Vec<AtomicU32>,
+}
+
+impl GlobalUsefulRounds {
+    fn new(committee_size: usize) -> Self {
+        Self {
+            max_headers_round: (0..committee_size).map(|_| AtomicU32::new(0)).collect(),
+        }
+    }
+
+    /// Record a useful header observation for `author` at `round`.
+    /// Lock-free, monotonically advances the per-author max.
+    fn record_header(&self, author: AuthorityIndex, round: RoundNumber) {
+        if let Some(slot) = self.max_headers_round.get(author as usize) {
+            slot.fetch_max(round, Ordering::Relaxed);
+        }
+    }
+
+    /// Single-pass lock-free read of the cross-peer union bitmask.
+    /// Mirrors `ConnectionKnowledge::recent_authors_bitmask` semantics
+    /// but reads the global max per author instead of any single peer's
+    /// `last_useful_headers_from_peer_round`.
+    fn headers_bitmask(&self, current_round: RoundNumber, gap: RoundNumber) -> AuthoritySet {
+        let mut mask = AuthoritySet::default();
+        for (author, slot) in self.max_headers_round.iter().enumerate() {
+            let round = slot.load(Ordering::Relaxed);
+            if round > 0 && round.saturating_add(gap) >= current_round {
+                mask.insert(author as AuthorityIndex);
+            }
+        }
+        mask
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ConnectionKnowledge — per-peer tracker
 // ---------------------------------------------------------------------------
 
@@ -190,6 +246,10 @@ pub struct ConnectionKnowledge {
     peer: AuthorityIndex,
     committee_size: usize,
     shared: Arc<RwLock<SharedKnowledgeState>>,
+    /// Cross-peer atomic max-round tracker for "useful headers from any
+    /// peer". `mark_header(s)_useful_from_peer` advances this lock-free
+    /// alongside the per-peer `last_useful_headers_from_peer_round`.
+    global_useful_rounds: Arc<GlobalUsefulRounds>,
     header_cursors: Vec<RoundCursor>,
     shard_cursors: Vec<RoundCursor>,
     /// Headers we know this peer already has, so later `NewHeader` events do
@@ -407,6 +467,7 @@ impl ConnectionKnowledge {
             peer,
             committee_size,
             Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size))),
+            Arc::new(GlobalUsefulRounds::new(committee_size)),
         )
     }
 
@@ -414,11 +475,13 @@ impl ConnectionKnowledge {
         peer: AuthorityIndex,
         committee_size: usize,
         shared: Arc<RwLock<SharedKnowledgeState>>,
+        global_useful_rounds: Arc<GlobalUsefulRounds>,
     ) -> Self {
         Self {
             peer,
             committee_size,
             shared,
+            global_useful_rounds,
             header_cursors: vec![RoundCursor::default(); committee_size],
             shard_cursors: vec![RoundCursor::default(); committee_size],
             known_headers: AHashSet::new(),
@@ -646,11 +709,17 @@ impl ConnectionKnowledge {
     /// Record that a header received from this peer was useful to us.
     pub fn mark_header_useful_from_peer(&mut self, block_ref: BlockReference) {
         Self::update_last_useful_round(&mut self.last_useful_headers_from_peer_round, block_ref);
+        self.global_useful_rounds
+            .record_header(block_ref.authority, block_ref.round);
     }
 
     /// Batch variant: record that multiple headers from this peer were useful.
     pub fn mark_headers_useful_from_peer(&mut self, block_refs: &[BlockReference]) {
         Self::update_last_useful_rounds(&mut self.last_useful_headers_from_peer_round, block_refs);
+        for r in block_refs {
+            self.global_useful_rounds
+                .record_header(r.authority, r.round);
+        }
     }
 
     /// Record that a header from this authority is currently useful to the
@@ -744,16 +813,6 @@ impl ConnectionKnowledge {
                 current_round,
                 USEFUL_SHARDS_GAP_FACTOR * n,
             ),
-        )
-    }
-
-    /// Bitmask of authorities whose headers from this peer are still
-    /// considered useful (read-only side of `useful_authors_bitmasks`).
-    pub fn useful_headers_from_peer_bitmask(&self, current_round: RoundNumber) -> AuthoritySet {
-        Self::recent_authors_bitmask(
-            &self.last_useful_headers_from_peer_round,
-            current_round,
-            USEFUL_HEADERS_GAP,
         )
     }
 
@@ -1316,6 +1375,10 @@ impl CordialKnowledge {
 pub struct CordialKnowledgeHandle {
     sender: mpsc::UnboundedSender<CordialKnowledgeMessage>,
     connection_knowledges: Vec<Arc<RwLock<ConnectionKnowledge>>>,
+    /// Cross-peer atomic max-round tracker (cloned from the actor at
+    /// construction). Used by `useful_headers_from_any_peer_bitmask` for
+    /// a lock-free O(n) scan instead of the previous read-lock storm.
+    global_useful_rounds: Arc<GlobalUsefulRounds>,
     /// Shared dag knowledge for push dissemination. `None` in pull mode.
     /// Cloned by `DagState` for synchronous reads from the broadcaster.
     dag_knowledge: Option<Arc<RwLock<DagKnowledgeInner>>>,
@@ -1336,6 +1399,7 @@ impl CordialKnowledgeHandle {
     ) -> (Self, CordialKnowledge) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let shared = Arc::new(RwLock::new(SharedKnowledgeState::new(committee_size)));
+        let global_useful_rounds = Arc::new(GlobalUsefulRounds::new(committee_size));
 
         let connection_knowledges: Vec<_> = (0..committee_size)
             .map(|i| {
@@ -1343,6 +1407,7 @@ impl CordialKnowledgeHandle {
                     i as AuthorityIndex,
                     committee_size,
                     shared.clone(),
+                    global_useful_rounds.clone(),
                 )))
             })
             .collect();
@@ -1350,6 +1415,7 @@ impl CordialKnowledgeHandle {
         let handle = Self {
             sender,
             connection_knowledges: connection_knowledges.clone(),
+            global_useful_rounds,
             dag_knowledge: dag_knowledge.clone(),
         };
 
@@ -1380,12 +1446,25 @@ impl CordialKnowledgeHandle {
     /// from X are useful when received from every peer (we need f+1
     /// distinct shards to reconstruct, so demand is broadcast even when
     /// header demand is targeted).
+    ///
+    /// Lock-free O(committee_size) atomic scan: each
+    /// `ConnectionKnowledge::mark_header(s)_useful_from_peer` updates a
+    /// shared per-author `AtomicU32` via `fetch_max`, so this read
+    /// reproduces the previous scan's result without taking a read lock
+    /// on every per-peer CK. Previously, this scan blocked behind every
+    /// other broadcaster task's `ck.write()` and created an O(n²)
+    /// fan-out lock-storm on the PushUseful slow-batch path.
+    ///
+    /// One-sided staleness note: `ResetPeerKnown` clears a single peer's
+    /// `last_useful_headers_from_peer_round` but does not roll back the
+    /// global max. The result is intentionally conservative — we may
+    /// keep an author "lit" until its max ages out via
+    /// `round + USEFUL_HEADERS_GAP < current_round`. Overestimating
+    /// shard demand is a small bandwidth cost; underestimating would
+    /// silently drop useful pushes.
     pub fn useful_headers_from_any_peer_bitmask(&self, current_round: RoundNumber) -> AuthoritySet {
-        let mut union = AuthoritySet::default();
-        for ck in &self.connection_knowledges {
-            union |= ck.read().useful_headers_from_peer_bitmask(current_round);
-        }
-        union
+        self.global_useful_rounds
+            .headers_bitmask(current_round, USEFUL_HEADERS_GAP)
     }
 
     /// Get the shared dag knowledge for push dissemination. `None` in pull
