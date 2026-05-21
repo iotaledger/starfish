@@ -270,7 +270,22 @@ impl UniversalCommitter {
 
                 if let Some(prev) = linked_leaders.pop() {
                     current = prev.clone();
-                    chain.push((prev, None));
+                    // SparseStarfishSpeed: re-derive the metastate for
+                    // every chain-walked leader from its OWN certifying-
+                    // round certs + voting-round strong-blame quorum.
+                    // If sufficient certs exist for the older leader,
+                    // promote its ack list via Opt; if a mixed-cert
+                    // quorum sits alongside a strong-blame quorum at the
+                    // voting round, Std; otherwise leave metastate as
+                    // None (treated as no ack derivation by the
+                    // linearizer). Bluestreak always uses None.
+                    let prev_metastate = if is_bluestreak {
+                        None
+                    } else {
+                        self.try_direct_commit_sparse_starfish_speed(prev.authority(), prev.round())
+                            .and_then(|(_, ms)| ms)
+                    };
+                    chain.push((prev, prev_metastate));
                 }
             }
 
@@ -1317,6 +1332,158 @@ mod tests {
                 !committed_refs.contains(ack),
                 "Std metastate must NOT trigger per-c ack derivation"
             );
+        }
+    }
+
+    // ── 9 & 10. Indirect (chain-walk-back) metastate derivation ───────
+    //
+    // In `try_commit_compressed_refs`, when a newer leader `L_anchor`
+    // direct-commits and the chain walk-back discovers an older leader
+    // `L_old` that has not yet been decided, the chain walk pushes
+    // `L_old` to the committed sequence with a metastate derived from
+    // `L_old`'s OWN certifying-round certs — not `None`. This means an
+    // older leader can pick up `Opt` (or `Std`) from the indirect path
+    // and the linearizer will run the per-`c` ack derivation for it.
+    //
+    // Direct iteration order is ascending, so in a fresh `try_commit`
+    // call `L_old`'s round is processed before `L_anchor`'s and would
+    // normally direct-commit if certs exist. To exercise the chain-walk
+    // derivation in isolation, we pre-populate `self.decided` with a
+    // `Skip` for `L_old` — the cache check at the top of the loop
+    // short-circuits the direct path, then `L_anchor`'s chain walk
+    // discovers `L_old` (still linked, not yet in `newly_committed`)
+    // and overrides the cached `Skip` with `Commit(L_old, derived)`.
+
+    /// Build a 2-leader chain: L_old at round 1 + L_anchor at round 3,
+    /// each with its own cert quorum at its certifying_round, plus a
+    /// causal linkage from L_anchor to L_old via a round-2 block. Used
+    /// for both indirect-Opt and indirect-Std tests.
+    fn build_indirect_chain_dag() -> (
+        Arc<Committee>,
+        DagState,
+        Arc<crate::metrics::Metrics>,
+        BlockReference, // L_old.ref
+        BlockReference, // L_anchor.ref
+    ) {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let genesis: Vec<_> = (0u16..4)
+            .map(|auth| {
+                *dag_state
+                    .get_blocks_at_authority_round(auth, 0)
+                    .first()
+                    .expect("genesis block")
+                    .reference()
+            })
+            .collect();
+
+        // L_old at round 1 — authority 1 (= elect_leader(1)).
+        let l_old = ssfs_block(1, 1, vec![genesis[1]], vec![], None, None);
+        let l_old_ref = *l_old.reference();
+        dag_state.insert_general_block(l_old, DataSource::BlockBundleStreaming);
+
+        // Round-2 bridge block (auth 0) that references L_old. This
+        // creates a causal path so L_anchor (at round 3, with this
+        // round-2 block among its parents) reaches L_old via `linked`.
+        let bridge = ssfs_block(0, 2, vec![l_old_ref], vec![], None, None);
+        let bridge_ref = *bridge.reference();
+        dag_state.insert_general_block(bridge, DataSource::BlockBundleStreaming);
+
+        // L_anchor at round 3 — authority 3 (= elect_leader(3)). Refs
+        // include the bridge so linkage to L_old is provable.
+        let l_anchor = ssfs_block(3, 3, vec![bridge_ref], vec![], None, None);
+        let l_anchor_ref = *l_anchor.reference();
+        dag_state.insert_general_block(l_anchor, DataSource::BlockBundleStreaming);
+
+        (committee, dag_state, metrics, l_old_ref, l_anchor_ref)
+    }
+
+    // ── 9. Indirect Opt: chain walk-back derives Opt for L_old ────────
+    #[test]
+    fn ssfs_indirect_chain_walk_derives_opt_for_older_leader() {
+        let (committee, dag_state, metrics, l_old_ref, l_anchor_ref) = build_indirect_chain_dag();
+
+        // L_old (round 1) gets a strong-cert quorum at its certifying
+        // round (cert.round + 2 == 3) — so try_direct_commit returns Opt.
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 3, l_old_ref, true);
+        }
+
+        // L_anchor (round 3) gets its own strong-cert quorum at round 5.
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 5, l_anchor_ref, true);
+        }
+
+        let mut committer = build_committer(committee, dag_state, metrics);
+
+        // Pre-poison the decided cache: mark L_old as Skip so the
+        // direct-iteration short-circuits at round 1; only the chain
+        // walk from L_anchor will reach it.
+        committer.decided.insert((1, 1), LeaderStatus::Skip(1, 1));
+
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+
+        let l_old_status = committed
+            .iter()
+            .find(|s| s.round() == 1 && s.authority() == 1)
+            .expect("L_old must appear in committed sequence via chain walk");
+        match l_old_status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(
+                    *metastate,
+                    Some(CommitMetastate::Opt),
+                    "indirect chain walk should derive Opt from L_old's own \
+                     strong-cert quorum at its certifying round"
+                );
+            }
+            other => panic!("expected Commit, got {other:?}"),
+        }
+    }
+
+    // ── 10. Indirect Std: chain walk-back derives Std for L_old ───────
+    #[test]
+    fn ssfs_indirect_chain_walk_derives_std_for_older_leader() {
+        let (committee, dag_state, metrics, l_old_ref, l_anchor_ref) = build_indirect_chain_dag();
+
+        // L_old certs at its certifying round 3: 1 strong + 2 standard
+        // (cert quorum exists but no STRONG quorum) AND 3 strong-blame
+        // voters at the voting round 2 — recipe for Std.
+        insert_cert(&dag_state, 0, 3, l_old_ref, true);
+        insert_cert(&dag_state, 1, 3, l_old_ref, false);
+        insert_cert(&dag_state, 2, 3, l_old_ref, false);
+        // Strong-blame voters at L_old's voting_round = 2.
+        // The bridge block at (auth 0, round 2) already references
+        // L_old, but it has strong_vote = None. We add three voter
+        // blocks at distinct authorities (1, 2, 3) with non-empty
+        // masks to satisfy the strong-blame quorum.
+        let blame = blame_mask(1);
+        insert_voter(&dag_state, 1, 2, l_old_ref, Some(blame));
+        insert_voter(&dag_state, 2, 2, l_old_ref, Some(blame));
+        insert_voter(&dag_state, 3, 2, l_old_ref, Some(blame));
+
+        // L_anchor strong-cert quorum at round 5 — direct Opt.
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 5, l_anchor_ref, true);
+        }
+
+        let mut committer = build_committer(committee, dag_state, metrics);
+        committer.decided.insert((1, 1), LeaderStatus::Skip(1, 1));
+
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+
+        let l_old_status = committed
+            .iter()
+            .find(|s| s.round() == 1 && s.authority() == 1)
+            .expect("L_old must appear in committed sequence via chain walk");
+        match l_old_status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(
+                    *metastate,
+                    Some(CommitMetastate::Std),
+                    "indirect chain walk should derive Std when L_old has \
+                     mixed certs + strong-blame quorum at the voting round"
+                );
+            }
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
