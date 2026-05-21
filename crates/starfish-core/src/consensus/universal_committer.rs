@@ -723,7 +723,6 @@ mod tests {
 
     use crate::{
         config::{DisseminationMode, StorageBackend},
-        consensus::linearizer::Linearizer,
         crypto::SignatureBytes,
         dag_state::DataSource,
         data::Data,
@@ -1153,187 +1152,13 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    //  Per-c ack derivation (post-Opt commit, in the linearizer)
-    // ────────────────────────────────────────────────────────────────────
-    //
-    // When the committer reports `CommitMetastate::Opt`, the linearizer
-    // promotes `c ∈ L.acknowledgments()` to the sub-dag iff 2f+1 distinct
-    // round-(L.round+1) voters of L have `!v.strong_vote.contains(c.authority)`.
-    // For these tests we fabricate L so that its `block_references` do NOT
-    // transitively reach its `acknowledgments` — otherwise the structural
-    // BFS in `collect_subdag_ancestors` would commit the acks regardless
-    // of the derivation filter, masking the effect we want to observe.
-
-    /// Build a fully-formed SSFS DAG with three ack candidates (a0/a1/a3
-    /// at round 1, authorities 0/1/3) disjoint from the leader's
-    /// structural parents (p0/p1/p3 at round 2, with refs only to
-    /// genesis). The leader L sits at round 3, references the fillers,
-    /// and acknowledges the three round-1 ack candidates. Returns
-    /// `(committee, dag_state, leader, ack_refs)`.
-    #[allow(clippy::type_complexity)]
-    fn build_derivation_dag() -> (
-        Arc<Committee>,
-        DagState,
-        Data<crate::types::VerifiedBlock>,
-        [BlockReference; 3],
-    ) {
-        let (committee, dag_state, _metrics) = ssfs_setup();
-        let genesis: Vec<_> = (0u16..4)
-            .map(|auth| {
-                *dag_state
-                    .get_blocks_at_authority_round(auth, 0)
-                    .first()
-                    .expect("genesis block")
-                    .reference()
-            })
-            .collect();
-
-        // Three ack candidates at round 1, each rooted at its own
-        // authority's genesis block.
-        let mut ack_refs = [
-            BlockReference::new_test(0, 0),
-            BlockReference::new_test(0, 0),
-            BlockReference::new_test(0, 0),
-        ];
-        for (idx, auth) in [0u16, 1, 3].into_iter().enumerate() {
-            let a = ssfs_block(auth, 1, vec![genesis[auth as usize]], vec![], None, None);
-            ack_refs[idx] = *a.reference();
-            dag_state.insert_general_block(a, DataSource::BlockBundleStreaming);
-        }
-
-        // Three filler parents at round 2. Refs point at genesis only,
-        // NOT at the ack candidates — so the structural BFS from L does
-        // not encounter a0/a1/a3 by accident.
-        let mut filler_refs = Vec::new();
-        for auth in [0u16, 1, 3] {
-            let p = ssfs_block(auth, 2, vec![genesis[auth as usize]], vec![], None, None);
-            filler_refs.push(*p.reference());
-            dag_state.insert_general_block(p, DataSource::BlockBundleStreaming);
-        }
-
-        // Leader at round 3 (committee.elect_leader(3) == 3). Refs are
-        // the three fillers; acks are the three ack candidates.
-        let leader = ssfs_block(3, 3, filler_refs, ack_refs.to_vec(), None, None);
-        let leader_clone = leader.clone();
-        dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
-
-        (committee, dag_state, leader_clone, ack_refs)
-    }
-
-    // ── 6. Opt → all acks promoted when every voter is clean ──────────
-    #[test]
-    fn ssfs_linearizer_promotes_all_acks_with_clean_voters() {
-        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
-        let leader_ref = *leader.reference();
-
-        // Three round-4 voters of L, each with an empty strong_vote.
-        for auth in [0u16, 1, 3] {
-            insert_voter(
-                &dag_state,
-                auth,
-                4,
-                leader_ref,
-                Some(crate::types::AuthoritySet::default()),
-            );
-        }
-
-        let mut linearizer = Linearizer::new((*committee).clone());
-        let committed =
-            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Opt))]);
-
-        assert_eq!(committed.len(), 1);
-        let (sub_dag, _) = &committed[0];
-        let committed_refs: std::collections::BTreeSet<_> =
-            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
-        for ack in &ack_refs {
-            assert!(
-                committed_refs.contains(ack),
-                "ack {ack:?} should be promoted to subdag — all voters clean"
-            );
-        }
-    }
-
-    // ── 7. Opt → filtered ack when one voter blames its author ─────────
-    #[test]
-    fn ssfs_linearizer_filters_ack_when_author_blamed() {
-        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
-        let leader_ref = *leader.reference();
-        let blamed_author = ack_refs[1].authority; // a1 — authored by 1
-
-        // Voter at authority 0 blames authority 1; the other two are clean.
-        insert_voter(
-            &dag_state,
-            0,
-            4,
-            leader_ref,
-            Some(blame_mask(blamed_author)),
-        );
-        for auth in [1u16, 3] {
-            insert_voter(
-                &dag_state,
-                auth,
-                4,
-                leader_ref,
-                Some(crate::types::AuthoritySet::default()),
-            );
-        }
-
-        let mut linearizer = Linearizer::new((*committee).clone());
-        let committed =
-            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Opt))]);
-
-        let (sub_dag, _) = &committed[0];
-        let committed_refs: std::collections::BTreeSet<_> =
-            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
-
-        // a0 and a3 still reach 2f+1=3 votes (all three voters).
-        assert!(
-            committed_refs.contains(&ack_refs[0]),
-            "a0 should be promoted"
-        );
-        assert!(
-            committed_refs.contains(&ack_refs[2]),
-            "a3 should be promoted"
-        );
-        // a1 only collects 2 votes (the two clean voters), below quorum.
-        assert!(
-            !committed_refs.contains(&ack_refs[1]),
-            "a1 should NOT be promoted — its author is blamed by one voter, \
-             leaving only 2 of 3 derived votes (below 2f+1 quorum)"
-        );
-    }
-
-    // ── 8. Std → derivation skipped, only structural ancestors commit ─
-    #[test]
-    fn ssfs_linearizer_skips_ack_derivation_on_std_metastate() {
-        let (committee, dag_state, leader, ack_refs) = build_derivation_dag();
-        let leader_ref = *leader.reference();
-
-        // Three clean voters — would promote all acks in Opt mode.
-        for auth in [0u16, 1, 3] {
-            insert_voter(
-                &dag_state,
-                auth,
-                4,
-                leader_ref,
-                Some(crate::types::AuthoritySet::default()),
-            );
-        }
-
-        let mut linearizer = Linearizer::new((*committee).clone());
-        let committed =
-            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Std))]);
-
-        let (sub_dag, _) = &committed[0];
-        let committed_refs: std::collections::BTreeSet<_> =
-            sub_dag.blocks.iter().map(|b| *b.reference()).collect();
-        for ack in &ack_refs {
-            assert!(
-                !committed_refs.contains(ack),
-                "Std metastate must NOT trigger per-c ack derivation"
-            );
-        }
-    }
+    // ── 6/7/8. (Removed) Opt voter-of-L_r ack-derivation tests ─────────
+    // The Opt path no longer derives acks from round-(r+1) voters of L_r.
+    // It now matches Bluestreak's ancestor-closure semantics; acks are
+    // sequenced by subsequent Std-path BFS commits via the derived
+    // `effective_acknowledgments` rule in the linearizer. The
+    // `build_derivation_dag` helper that supported these tests was
+    // removed alongside them.
 
     // ── 9 & 10. Indirect (chain-walk-back) metastate derivation ───────
     //

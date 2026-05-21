@@ -89,6 +89,72 @@ impl Linearizer {
         holders
     }
 
+    /// Effective acknowledgment set carried by `block` for sub-dag derivation.
+    ///
+    /// For protocols other than SparseStarfishSpeed this is simply
+    /// `block.acknowledgments()` (explicit list on the wire), preserving
+    /// existing Starfish/StarfishSpeed/StarfishBls semantics.
+    ///
+    /// For SparseStarfishSpeed the per-block ack set is derived from the
+    /// `strong_vote` mask plus a *source* set:
+    /// - **Leader blocks**: source = `block.acknowledgments()` (the explicit
+    ///   ack list the leader drained from `pending_acknowledgment`).
+    /// - **Non-leader blocks** at round `k`: source =
+    ///   `L_{k-1}.acknowledgments() ∪ {L_{k-1}.ref}` — what the previous-round
+    ///   leader acknowledged, plus the leader block itself (its own
+    ///   transactions).
+    ///
+    /// In both cases we then filter the source by `block.strong_vote()`,
+    /// dropping any ref whose author the block flagged as unavailable.
+    ///
+    /// Returns an empty list when:
+    /// - `strong_vote` is `None` (non-SSFS block in mixed test setups).
+    /// - Non-leader's `block_references` doesn't contain `L_{k-1}` (e.g.
+    ///   own-prev-only fallback under chain-bomb scenarios).
+    /// - `L_{k-1}` is missing from storage.
+    fn effective_acknowledgments(
+        &self,
+        dag_state: &DagState,
+        block: &VerifiedBlock,
+    ) -> Vec<BlockReference> {
+        let explicit = block.acknowledgments();
+        if dag_state.consensus_protocol != ConsensusProtocol::SparseStarfishSpeed {
+            return explicit;
+        }
+        let Some(mask) = block.strong_vote() else {
+            return explicit;
+        };
+        let round = block.round();
+        if round == 0 {
+            return explicit;
+        }
+        let is_leader = self.committee.elect_leader(round) == block.authority();
+        let source: Vec<BlockReference> = if is_leader {
+            explicit
+        } else {
+            let prev_round = round - 1;
+            let prev_leader_auth = self.committee.elect_leader(prev_round);
+            let Some(prev_leader_ref) = block
+                .block_references()
+                .iter()
+                .find(|r| r.round == prev_round && r.authority == prev_leader_auth)
+                .copied()
+            else {
+                return Vec::new();
+            };
+            let Some(prev_leader) = dag_state.get_storage_block(prev_leader_ref) else {
+                return Vec::new();
+            };
+            let mut v = prev_leader.acknowledgments();
+            v.push(prev_leader_ref);
+            v
+        };
+        source
+            .into_iter()
+            .filter(|r| !mask.contains(r.authority))
+            .collect()
+    }
+
     /// Collect the sub-dag from a specific anchor excluding any duplicates or
     /// blocks that have already been committed (within previous sub-dags).
     /// Uses BFS with per-level batch fetching to minimize lock acquisitions.
@@ -163,7 +229,7 @@ impl Linearizer {
             let mut next_refs = Vec::new();
             for x in &current_level {
                 let who_votes = x.authority();
-                for ack_ref in x.acknowledgments() {
+                for ack_ref in self.effective_acknowledgments(dag_state, x) {
                     if ack_ref.round < min_round {
                         continue;
                     }
@@ -246,80 +312,6 @@ impl Linearizer {
         holders
     }
 
-    /// SparseStarfishSpeed: derive per-`c` ack votes from `L.acknowledgments`
-    /// and the `strong_vote` masks of L's voters at round `L.round + 1`.
-    ///
-    /// Rule (filter, not intersection):
-    /// `derived_acks(v) = { c ∈ L.acks :
-    /// !v.strong_vote.unwrap().contains(c.authority) }`
-    ///
-    /// Aggregate StakeAggregator votes per `c`; commit when 2f+1 distinct
-    /// voter authorities have `c` in their derived ack set. Only invoked on
-    /// `CommitMetastate::Opt`; `Std` skips ack promotion entirely (only L's
-    /// structural ancestors are committed).
-    fn collect_subdag_sparse_starfish_speed(
-        &mut self,
-        dag_state: &DagState,
-        leader_block: Data<VerifiedBlock>,
-        metastate: Option<CommitMetastate>,
-    ) -> CommittedSubDag {
-        let mut sub_dag = self.collect_subdag_ancestors(dag_state, leader_block.clone());
-        if metastate != Some(CommitMetastate::Opt) {
-            return sub_dag;
-        }
-
-        let leader_block_ref = *leader_block.reference();
-        let leader_acks = leader_block.acknowledgments();
-        if leader_acks.is_empty() {
-            return sub_dag;
-        }
-
-        let voting_round = leader_block_ref.round + 1;
-        let voting_blocks = dag_state.get_blocks_by_round(voting_round);
-
-        let mut new_ack_refs: BTreeSet<BlockReference> = BTreeSet::new();
-        for voter in &voting_blocks {
-            let Some(mask) = voter.strong_vote() else {
-                continue;
-            };
-            let votes_for_leader = voter.block_references().contains(&leader_block_ref);
-            if !votes_for_leader {
-                continue;
-            }
-            let v_authority = voter.authority();
-            for c in &leader_acks {
-                if mask.contains(c.authority) {
-                    continue;
-                }
-                let s = self.votes.entry(*c).or_default();
-                if !s.is_quorum(&self.committee)
-                    && s.add(v_authority, &self.committee)
-                    && self.committed.insert(*c)
-                {
-                    new_ack_refs.insert(*c);
-                }
-            }
-        }
-
-        if new_ack_refs.is_empty() {
-            return sub_dag;
-        }
-        let new_ack_refs: Vec<_> = new_ack_refs.into_iter().collect();
-        for block in dag_state
-            .get_storage_blocks(&new_ack_refs)
-            .into_iter()
-            .flatten()
-        {
-            if self
-                .committed_slots
-                .insert((block.round(), block.authority()))
-            {
-                sub_dag.blocks.push(block);
-            }
-        }
-        sub_dag
-    }
-
     pub fn handle_commit(
         &mut self,
         dag_state: &DagState,
@@ -346,9 +338,27 @@ impl Linearizer {
                 | ConsensusProtocol::MysticetiBls => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
                 }
-                ConsensusProtocol::SparseStarfishSpeed => {
-                    self.collect_subdag_sparse_starfish_speed(dag_state, leader_block, metastate)
-                }
+                ConsensusProtocol::SparseStarfishSpeed => match metastate {
+                    Some(CommitMetastate::Opt) => {
+                        // Opt path: same as Bluestreak — strong-vote quorum
+                        // already guarantees f+1-honest data availability
+                        // for L_r and its causal closure, so just commit
+                        // the ancestor closure. L_r.acks are sequenced
+                        // later via the next anchor's Std-path BFS, when
+                        // round-(r+1) non-leaders' derived ack sets pick
+                        // them up.
+                        self.collect_subdag_ancestors(dag_state, leader_block)
+                    }
+                    _ => {
+                        // Std / Pending: same as Starfish — BFS through
+                        // L_r's causal past with the derived ack rule
+                        // (see `effective_acknowledgments`). L_r itself is
+                        // not included in the sub-dag because Std lacks
+                        // the strong-vote quorum that would guarantee its
+                        // data is f+1-available.
+                        self.collect_subdag_acknowledgments(dag_state, leader_block, false)
+                    }
+                },
             };
 
             // For StarfishSpeed Opt: additionally include blocks from the leader's
