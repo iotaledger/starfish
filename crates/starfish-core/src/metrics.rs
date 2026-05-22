@@ -14,10 +14,10 @@ use std::{
 
 use prettytable::{Table as PrettyTable, format, row};
 use prometheus::{
-    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-    register_histogram_with_registry, register_int_counter_vec_with_registry,
-    register_int_counter_with_registry, register_int_gauge_vec_with_registry,
-    register_int_gauge_with_registry,
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Registry, register_histogram_vec_with_registry, register_histogram_with_registry,
+    register_int_counter_vec_with_registry, register_int_counter_with_registry,
+    register_int_gauge_vec_with_registry, register_int_gauge_with_registry,
 };
 use tabled::{Table, Tabled};
 use tokio::time::Instant;
@@ -100,7 +100,7 @@ pub struct Metrics {
     pub proposed_transaction_size_bytes: HistogramSender<usize>,
     pub block_bundle_size_bytes: HistogramSender<usize>,
     pub proposed_block_refs: Histogram,
-    pub proposed_block_acks: Histogram,
+    pub proposed_block_acks: HistogramVec,
     pub created_own_blocks: IntCounterVec,
     pub previous_round_refs: Histogram,
     pub commit_gap: Histogram,
@@ -800,7 +800,7 @@ impl Metrics {
             },
             proposed_block_acks: {
                 let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
-                register_histogram_with_registry!(
+                register_histogram_vec_with_registry!(
                     HistogramOpts::new(
                         "proposed_block_acks",
                         "Number of acknowledgment references in proposed blocks \
@@ -808,6 +808,7 @@ impl Metrics {
                          references)", // editorconfig-checker-disable-line
                     )
                     .buckets(buckets),
+                    &["role"],
                     registry,
                 )
                 .unwrap()

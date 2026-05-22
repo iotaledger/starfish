@@ -2966,14 +2966,14 @@
                 "uid": "Fixed-UID-testbed"
               },
               "editorMode": "code",
-              "expr": "rate(proposed_block_acks_sum{node=~\"$node\"}[1m]) / rate(proposed_block_acks_count{node=~\"$node\"}[1m])",
+              "expr": "rate(proposed_block_acks_sum{node=~\"$node\",role=\"leader\"}[1m]) / rate(proposed_block_acks_count{node=~\"$node\",role=\"leader\"}[1m])",
               "legendFormat": "{{node}}",
               "instant": false,
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "Acknowledgment references per block",
+          "title": "Acknowledgment references per leader block",
           "type": "timeseries"
         },
         {

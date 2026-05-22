@@ -327,17 +327,19 @@ impl Linearizer {
             let mut sub_dag = match consensus_protocol {
                 ConsensusProtocol::StarfishBls => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, true)
-                },
-                ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed => {
+                }
+                ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::SparseStarfishSpeed => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, false)
-                },
+                }
                 ConsensusProtocol::Mysticeti
                 | ConsensusProtocol::CordialMiners
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::MysticetiBls => {
                     self.collect_subdag_ancestors(dag_state, leader_block)
-                },
+                }
             };
 
             // For StarfishSpeed Opt: additionally include blocks from the leader's
