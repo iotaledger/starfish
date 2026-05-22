@@ -99,7 +99,7 @@ pub struct Metrics {
     pub proposed_header_size_bytes: HistogramSender<usize>,
     pub proposed_transaction_size_bytes: HistogramSender<usize>,
     pub block_bundle_size_bytes: HistogramSender<usize>,
-    pub proposed_block_refs: Histogram,
+    pub proposed_block_refs: HistogramVec,
     pub proposed_block_acks: HistogramVec,
     pub created_own_blocks: IntCounterVec,
     pub previous_round_refs: Histogram,
@@ -788,12 +788,13 @@ impl Metrics {
             block_bundle_size_bytes,
             proposed_block_refs: {
                 let buckets: Vec<f64> = (0..=200).map(|i| i as f64).collect();
-                register_histogram_with_registry!(
+                register_histogram_vec_with_registry!(
                     HistogramOpts::new(
                         "proposed_block_refs",
                         "Number of block references in proposed blocks",
                     )
                     .buckets(buckets),
+                    &["role"],
                     registry,
                 )
                 .unwrap()

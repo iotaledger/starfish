@@ -1014,17 +1014,18 @@ impl<H: BlockHandler> Core<H> {
             unprovable_certificate,
         );
 
-        self.metrics
-            .proposed_block_refs
-            .observe(block_ref_count as f64);
-        let ack_role = if is_round_leader {
+        let role = if is_round_leader {
             "leader"
         } else {
             "non_leader"
         };
         self.metrics
+            .proposed_block_refs
+            .with_label_values(&[role])
+            .observe(block_ref_count as f64);
+        self.metrics
             .proposed_block_acks
-            .with_label_values(&[ack_role])
+            .with_label_values(&[role])
             .observe(block.acknowledgment_count() as f64);
 
         block.preserialize();
