@@ -216,7 +216,7 @@ impl UniversalCommitter {
                 }
             }
 
-            if self.check_direct_skip_bluestreak(leader, round) {
+            if self.check_direct_skip(leader, round) {
                 if !self.decided.contains_key(&key) {
                     let status = LeaderStatus::Skip(leader, round);
                     self.decided.insert(key, status.clone());
@@ -239,9 +239,18 @@ impl UniversalCommitter {
                 continue;
             };
 
+            // SSFS: a Pending direct decision is *not* final. Don't emit
+            // it; don't run the chain walk-back from a Pending anchor.
+            // A future anchor at round >= round+2 will pick this slot
+            // back up via the indirect rule below.
+            if matches!(anchor_metastate, Some(CommitMetastate::Pending)) {
+                continue;
+            }
+
             // Walk back through prior rounds. Bluestreak additionally
             // filters by `has_clean_vertex` to skip leaders that the
             // dual-DAG machinery has not certified.
+            let anchor_for_link = anchor.clone();
             let mut chain = vec![(anchor.clone(), anchor_metastate)];
             let mut current = anchor;
             for prev_round in (last_decided_round + 1..current.round()).rev() {
@@ -269,23 +278,51 @@ impl UniversalCommitter {
                 }
 
                 if let Some(prev) = linked_leaders.pop() {
-                    current = prev.clone();
-                    // SparseStarfishSpeed: re-derive the metastate for
-                    // every chain-walked leader from its OWN certifying-
-                    // round certs + voting-round strong-blame quorum.
-                    // If sufficient certs exist for the older leader,
-                    // promote its ack list via Opt; if a mixed-cert
-                    // quorum sits alongside a strong-blame quorum at the
-                    // voting round, Std; otherwise leave metastate as
-                    // None (treated as no ack derivation by the
-                    // linearizer). Bluestreak always uses None.
+                    // Indirect metastate derivation (SSFS): mirrors
+                    // `BaseCommitter::decide_leader_from_anchor` for
+                    // StarfishSpeed, swapping the explicit-certificate
+                    // check for the on-wire `unprovable_certificate`.
+                    // Among cert blocks at `prev_round + 2` reachable
+                    // from the anchor, any block whose cert targets
+                    // `prev` with `strong=true` yields Opt; any cert
+                    // targeting `prev` (mixed) yields Std. If no such
+                    // cert is in the anchor's closure (e.g. anchor's
+                    // immediate predecessor, whose certs live one round
+                    // above anchor), skip this prev_round — a future
+                    // anchor at round >= prev_round + 2 will resolve it.
+                    // Bluestreak keeps the None metastate it has always
+                    // used.
                     let prev_metastate = if is_bluestreak {
-                        None
+                        Some(None)
                     } else {
-                        self.try_direct_commit_sparse_starfish_speed(prev.authority(), prev.round())
-                            .and_then(|(_, ms)| ms)
+                        let prev_ref = *prev.reference();
+                        let cert_round = prev.round() + 2;
+                        let reachable = self
+                            .dag_state
+                            .reachable_at_round(&anchor_for_link, cert_round);
+                        let mut meta: Option<CommitMetastate> = None;
+                        for block in self.dag_state.get_blocks_by_round_cached(cert_round).iter() {
+                            if !reachable.contains(block.reference()) {
+                                continue;
+                            }
+                            let Some((cref, strong)) = block.unprovable_certificate() else {
+                                continue;
+                            };
+                            if cref != prev_ref {
+                                continue;
+                            }
+                            if strong {
+                                meta = Some(CommitMetastate::Opt);
+                                break;
+                            }
+                            meta = Some(CommitMetastate::Std);
+                        }
+                        meta.map(Some)
                     };
-                    chain.push((prev, prev_metastate));
+                    if let Some(metastate) = prev_metastate {
+                        current = prev.clone();
+                        chain.push((prev, metastate));
+                    }
                 }
             }
 
@@ -407,7 +444,7 @@ impl UniversalCommitter {
         None
     }
 
-    fn check_direct_skip_bluestreak(&self, leader: AuthorityIndex, round: RoundNumber) -> bool {
+    fn check_direct_skip(&self, leader: AuthorityIndex, round: RoundNumber) -> bool {
         let vote_round = round + 1;
         let vote_blocks = self.dag_state.get_blocks_by_round_cached(vote_round);
         let mut non_voters = StakeAggregator::<QuorumThreshold>::new();
@@ -630,9 +667,7 @@ impl UniversalCommitter {
             LeaderStatus::Commit(.., Some(CommitMetastate::Std)) => {
                 format!("{direct_or_indirect}-commit-std")
             }
-            LeaderStatus::Commit(.., Some(CommitMetastate::Pending)) => {
-                format!("{direct_or_indirect}-commit-pending")
-            }
+            LeaderStatus::Commit(.., Some(CommitMetastate::Pending)) => return,
             LeaderStatus::Commit(.., None) => format!("{direct_or_indirect}-commit"),
             LeaderStatus::Skip(..) => format!("{direct_or_indirect}-skip"),
             LeaderStatus::Undecided(..) => return,
@@ -1345,7 +1380,7 @@ mod tests {
         )
         .build();
         assert!(
-            committer.check_direct_skip_bluestreak(leader_auth, 3),
+            committer.check_direct_skip(leader_auth, 3),
             "2f+1 non-voters at voting round must trigger skip"
         );
     }
