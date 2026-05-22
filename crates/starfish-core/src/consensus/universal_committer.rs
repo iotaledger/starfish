@@ -630,7 +630,9 @@ impl UniversalCommitter {
             LeaderStatus::Commit(.., Some(CommitMetastate::Std)) => {
                 format!("{direct_or_indirect}-commit-std")
             }
-            LeaderStatus::Commit(.., Some(CommitMetastate::Pending)) => return,
+            LeaderStatus::Commit(.., Some(CommitMetastate::Pending)) => {
+                format!("{direct_or_indirect}-commit-pending")
+            }
             LeaderStatus::Commit(.., None) => format!("{direct_or_indirect}-commit"),
             LeaderStatus::Skip(..) => format!("{direct_or_indirect}-skip"),
             LeaderStatus::Undecided(..) => return,
