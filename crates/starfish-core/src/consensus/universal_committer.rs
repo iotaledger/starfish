@@ -264,9 +264,7 @@ impl UniversalCommitter {
                     .dag_state
                     .get_blocks_at_authority_round(prev_leader, prev_round)
                     .into_iter()
-                    .filter(|block| {
-                        !is_bluestreak || self.dag_state.has_clean_vertex(block.reference())
-                    })
+                    .filter(|block| self.dag_state.has_clean_vertex(block.reference()))
                     .filter(|block| self.dag_state.linked(&current, block))
                     .collect();
 
@@ -401,6 +399,9 @@ impl UniversalCommitter {
         let cert_blocks = self.dag_state.get_blocks_by_round_cached(cert_round);
 
         for leader_block in leader_blocks {
+            if !self.dag_state.has_clean_vertex(leader_block.reference()) {
+                continue;
+            }
             let leader_ref = *leader_block.reference();
             let mut all_supporters = StakeAggregator::<QuorumThreshold>::new();
             let mut strong_supporters = StakeAggregator::<QuorumThreshold>::new();
