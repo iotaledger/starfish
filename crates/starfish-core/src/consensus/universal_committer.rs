@@ -1048,9 +1048,10 @@ mod tests {
         let mut committer = build_committer(committee, dag_state, metrics);
         let committed = committer.try_commit(BlockReference::new_test(0, 0));
         assert!(
-            committed
-                .iter()
-                .any(|status| matches!(status, LeaderStatus::Skip(authority, 1) if *authority == leader_auth)),
+            committed.iter().any(|status| matches!(
+                status,
+                LeaderStatus::Skip(authority, 1) if *authority == leader_auth
+            )),
             "2f+1 non-voters at voting round must trigger skip"
         );
     }
