@@ -588,8 +588,8 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
-        if starfish_speed_excluded_authors.contains(self.authority) {
+        let strong_vote_excluded_authors = self.strong_vote_excluded_ack_authors(clock_round);
+        if strong_vote_excluded_authors.contains(self.authority) {
             self.requeue_transactions(std::mem::take(&mut transactions));
         }
         self.prepare_last_blocks();
@@ -607,8 +607,8 @@ impl<H: BlockHandler> Core<H> {
         } else {
             Vec::new()
         };
-        let acknowledgment_references = self.filter_starfish_speed_leader_acknowledgments(
-            starfish_speed_excluded_authors,
+        let acknowledgment_references = self.filter_strong_vote_leader_acknowledgments(
+            strong_vote_excluded_authors,
             acknowledgment_references,
         );
         let number_of_blocks_to_create = self.last_own_block.len();
@@ -856,17 +856,17 @@ impl<H: BlockHandler> Core<H> {
         Some(missing_mask)
     }
 
-    fn starfish_speed_excluded_ack_authors(&self, clock_round: RoundNumber) -> AuthoritySet {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed
+    fn strong_vote_excluded_ack_authors(&self, clock_round: RoundNumber) -> AuthoritySet {
+        if !self.dag_state.consensus_protocol.uses_strong_vote()
             || self.committee.elect_leader(clock_round) != self.authority
         {
             return AuthoritySet::default();
         }
 
-        self.dag_state.starfish_speed_excluded_ack_authorities()
+        self.dag_state.strong_vote_excluded_ack_authorities()
     }
 
-    fn filter_starfish_speed_leader_acknowledgments(
+    fn filter_strong_vote_leader_acknowledgments(
         &self,
         excluded_authors: AuthoritySet,
         acknowledgment_references: Vec<BlockReference>,

@@ -106,7 +106,7 @@ impl Validator {
             &parameters.storage_backend,
             public_config
                 .parameters
-                .enable_starfish_speed_adaptive_acknowledgments,
+                .enable_strong_vote_adaptive_acknowledgments,
             resolved_dissemination,
         );
 

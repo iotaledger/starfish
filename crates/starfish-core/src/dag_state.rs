@@ -332,7 +332,7 @@ pub struct DagState {
     /// Immutable genesis blocks, one per authority. Cached for the lifetime
     /// of the node to prevent eviction.
     genesis: Vec<Data<VerifiedBlock>>,
-    starfish_speed_adaptive_acknowledgments: bool,
+    strong_vote_adaptive_acknowledgments: bool,
     /// Per-block known_by tracking for push dissemination. `None` in pull
     /// mode. Broadcaster paths read this `Arc` directly through the
     /// [`CordialKnowledgeHandle`]; we keep a clone here so recovery code
@@ -353,12 +353,12 @@ type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
 pub(crate) const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
 
 #[derive(Default)]
-struct StarfishSpeedLeaderRoundHints {
+struct StrongVoteLeaderRoundHints {
     voter_masks: AHashMap<AuthorityIndex, AuthoritySet>,
     complaint_counts: Vec<u16>,
 }
 
-impl StarfishSpeedLeaderRoundHints {
+impl StrongVoteLeaderRoundHints {
     fn new(committee_size: usize) -> Self {
         Self {
             voter_masks: AHashMap::new(),
@@ -432,10 +432,10 @@ struct DagStateInner {
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with DAC certificates that failed BLS verification.
     rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
-    /// For StarfishSpeed, keep the recent complaint masks reported by voters
-    /// about leader blocks, keyed by leader authority then leader round.
-    starfish_speed_leader_hints: Vec<BTreeMap<RoundNumber, StarfishSpeedLeaderRoundHints>>,
-    starfish_speed_adaptive_acknowledgments: bool,
+    /// For strong-vote protocols, keep the recent complaint masks reported by
+    /// voters about leader blocks, keyed by leader authority then leader round.
+    strong_vote_leader_hints: Vec<BTreeMap<RoundNumber, StrongVoteLeaderRoundHints>>,
+    strong_vote_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
@@ -503,7 +503,7 @@ impl DagState {
         byzantine_strategy: String,
         consensus: String,
         storage_backend: &StorageBackend,
-        starfish_speed_adaptive_acknowledgments: bool,
+        strong_vote_adaptive_acknowledgments: bool,
         dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
         assert!(
@@ -568,8 +568,8 @@ impl DagState {
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            starfish_speed_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
-            starfish_speed_adaptive_acknowledgments,
+            strong_vote_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
+            strong_vote_adaptive_acknowledgments,
             consensus_protocol,
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
@@ -817,7 +817,7 @@ impl DagState {
             consensus_protocol,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
-            starfish_speed_adaptive_acknowledgments,
+            strong_vote_adaptive_acknowledgments,
             dag_knowledge,
             cordial_handle: Arc::new(parking_lot::RwLock::new(None)),
         };
@@ -1787,16 +1787,15 @@ impl DagState {
         true
     }
 
-    pub fn starfish_speed_excluded_ack_authorities(&self) -> AuthoritySet {
-        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
-            || !self.starfish_speed_adaptive_acknowledgments
+    pub fn strong_vote_excluded_ack_authorities(&self) -> AuthoritySet {
+        if !self.consensus_protocol.uses_strong_vote() || !self.strong_vote_adaptive_acknowledgments
         {
             return AuthoritySet::default();
         }
 
         let inner = self.dag_state_inner.read();
         let mut scores = vec![0usize; self.committee.len()];
-        for hints in inner.starfish_speed_leader_hints[inner.authority as usize]
+        for hints in inner.strong_vote_leader_hints[inner.authority as usize]
             .iter()
             .rev()
             .take(STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS)
@@ -2865,7 +2864,7 @@ impl DagStateInner {
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_data_availability(&block);
-        self.update_starfish_speed_leader_hints(&block);
+        self.update_strong_vote_leader_hints(&block);
         self.update_inferred_clean_support(&block, committee, activated);
         // Bluestreak and SparseStarfishSpeed: pre-clean check populates
         // leader_vote_support (and SSFS's strong-vote tally), then either
@@ -3096,9 +3095,8 @@ impl DagStateInner {
         }
     }
 
-    fn update_starfish_speed_leader_hints(&mut self, block: &VerifiedBlock) {
-        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
-            || !self.starfish_speed_adaptive_acknowledgments
+    fn update_strong_vote_leader_hints(&mut self, block: &VerifiedBlock) {
+        if !self.consensus_protocol.uses_strong_vote() || !self.strong_vote_adaptive_acknowledgments
         {
             return;
         }
@@ -3119,10 +3117,10 @@ impl DagStateInner {
             return;
         };
 
-        let leader_history = &mut self.starfish_speed_leader_hints[leader_ref.authority as usize];
+        let leader_history = &mut self.strong_vote_leader_hints[leader_ref.authority as usize];
         let entry = leader_history
             .entry(leader_ref.round)
-            .or_insert_with(|| StarfishSpeedLeaderRoundHints::new(self.committee_size));
+            .or_insert_with(|| StrongVoteLeaderRoundHints::new(self.committee_size));
         entry.update_vote(block.authority(), mask);
         while leader_history.len() > STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS {
             let Some(oldest_round) = leader_history.keys().next().copied() else {
@@ -3467,7 +3465,7 @@ mod tests {
     fn open_test_dag_state_for_with_feature(
         consensus: &str,
         authority: AuthorityIndex,
-        enable_starfish_speed_adaptive_acknowledgments: bool,
+        enable_strong_vote_adaptive_acknowledgments: bool,
     ) -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
@@ -3484,7 +3482,7 @@ mod tests {
             "honest".to_string(),
             consensus.to_string(),
             &StorageBackend::Rocksdb,
-            enable_starfish_speed_adaptive_acknowledgments,
+            enable_strong_vote_adaptive_acknowledgments,
             DisseminationMode::ProtocolDefault,
         )
         .dag_state
@@ -3921,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_only_uses_local_leader_history() {
+    fn strong_vote_adaptive_acknowledgments_only_uses_local_leader_history() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let own_leader_ref = BlockReference::new_test(0, 4);
         let other_leader_ref = BlockReference::new_test(1, 1);
@@ -3937,14 +3935,31 @@ mod tests {
             DataSource::BlockBundleStreaming,
         );
 
-        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
         assert!(excluded.contains(1));
         assert!(!excluded.contains(0));
         assert!(!excluded.contains(2));
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
+    fn strong_vote_adaptive_acknowledgments_apply_to_sparse_starfish_speed() {
+        let dag_state = open_test_dag_state_for_with_feature("sparse-starfish-speed", 0, true);
+        let own_leader_ref = BlockReference::new_test(0, 4);
+
+        dag_state.insert_general_blocks(
+            vec![
+                make_starfish_speed_vote_block(1, 5, own_leader_ref, AuthoritySet::singleton(1)),
+                make_starfish_speed_vote_block(2, 5, own_leader_ref, AuthoritySet::singleton(1)),
+            ],
+            DataSource::BlockBundleStreaming,
+        );
+
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
+        assert!(excluded.contains(1));
+    }
+
+    #[test]
+    fn strong_vote_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let leader_rounds = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44];
         let mut blocks = Vec::new();
@@ -3964,13 +3979,13 @@ mod tests {
         }
         dag_state.insert_general_blocks(blocks, DataSource::BlockBundleStreaming);
 
-        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
         assert!(!excluded.contains(1));
         assert!(excluded.contains(2));
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_can_be_disabled() {
+    fn strong_vote_adaptive_acknowledgments_can_be_disabled() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, false);
         let own_leader_ref = BlockReference::new_test(0, 4);
         dag_state.insert_general_block(
@@ -3978,11 +3993,7 @@ mod tests {
             DataSource::BlockBundleStreaming,
         );
 
-        assert!(
-            dag_state
-                .starfish_speed_excluded_ack_authorities()
-                .is_empty()
-        );
+        assert!(dag_state.strong_vote_excluded_ack_authorities().is_empty());
     }
 
     #[test]

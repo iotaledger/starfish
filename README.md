@@ -212,6 +212,25 @@ Grafana is available at `http://localhost:3001` (admin/admin).
 See [local-dryrun/README.md](./local-dryrun/README.md) for the
 full parameter reference.
 
+#### Local dryrun benchmark
+
+The following numbers are from a local Docker dryrun with 10 validators,
+1000 TPS, 60 seconds, default protocol dissemination modes, RocksDB,
+random transaction payloads, lz4 network compression, and WAN latency
+emulation enabled. Latencies and header sizes are p50 values.
+
+| Protocol | Block latency (ms) | Transaction latency (ms) | Header size (B) |
+|---|---:|---:|---:|
+| Mysticeti | 417.1 | 475.2 | 493 |
+| Mysticeti-BLS | 410.4 | 470.3 | 687 |
+| Bluestreak | 414.4 | 473.0 | 279 |
+| Starfish-Speed | 439.3 | 505.1 | 797 |
+| Sparse-Starfish-Speed | 425.2 | 486.8 | 393 |
+| Starfish | 569.0 | 621.6 | 673 |
+| Cordial Miners | 547.2 | 737.6 | 462 |
+| Sailfish++ | 557.1 | 909.2 | 490 |
+| Starfish-BLS | 662.5 | 710.5 | 903 |
+
 ### Distributed Testing using Orchestrator
 
 To run tests on a geo-distributed network, look at instructions in
@@ -220,4 +239,3 @@ To run tests on a geo-distributed network, look at instructions in
 ## License
 
 [Apache 2.0](LICENSE)
-

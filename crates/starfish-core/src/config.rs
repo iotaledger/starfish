@@ -57,10 +57,11 @@ pub struct NodeParameters {
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
-        default = "node_defaults::default_enable_starfish_speed_adaptive_acknowledgments",
+        default = "node_defaults::default_enable_strong_vote_adaptive_acknowledgments",
+        alias = "enable_starfish_speed_adaptive_acknowledgments",
         alias = "enable_starfish_s_adaptive_acknowledgments"
     )]
-    pub enable_starfish_speed_adaptive_acknowledgments: bool,
+    pub enable_strong_vote_adaptive_acknowledgments: bool,
     #[serde(default = "param_defaults::default_soft_block_timeout")]
     pub soft_block_timeout: Duration,
 }
@@ -107,7 +108,7 @@ pub mod node_defaults {
         0
     }
 
-    pub fn default_enable_starfish_speed_adaptive_acknowledgments() -> bool {
+    pub fn default_enable_strong_vote_adaptive_acknowledgments() -> bool {
         true
     }
 }
@@ -127,8 +128,8 @@ impl Default for NodeParameters {
             bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
-            enable_starfish_speed_adaptive_acknowledgments:
-                node_defaults::default_enable_starfish_speed_adaptive_acknowledgments(),
+            enable_strong_vote_adaptive_acknowledgments:
+                node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
         }
     }
