@@ -318,7 +318,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "quantile(0.5, starfish:tx_throughput:rate1m{node=~\"$node\"})",
+          "expr": "quantile(0.5, rate(sequenced_transactions_total{node=~\"$node\"}[1m]))",
           "legendFormat": "",
           "refId": "A",
           "instant": true
@@ -536,7 +536,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "starfish:tx_throughput:rate1m{node=~\"$node\"}",
+          "expr": "rate(sequenced_transactions_total{node=~\"$node\"}[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1213,7 +1213,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(starfish:bytes_sent:rate1m{node=~\"$node\"})*8",
+          "expr": "avg(rate(bytes_sent_total{node=~\"$node\"}[1m]))*8",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1230,7 +1230,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(starfish:bytes_received:rate1m{node=~\"$node\"})*8",
+          "expr": "avg(rate(bytes_received_total{node=~\"$node\"}[1m]))*8",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1435,7 +1435,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "avg(starfish:bandwidth:rate1m{node=~\"$node\"}) / avg(deriv(dag_highest_round{node=~\"$node\"}[1m]))",
+          "expr": "avg((rate(bytes_sent_total{node=~\"$node\"}[1m]) + rate(bytes_received_total{node=~\"$node\"}[1m]))) / avg(deriv(dag_highest_round{node=~\"$node\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1536,7 +1536,7 @@
             "uid": "Fixed-UID-testbed"
           },
           "editorMode": "code",
-          "expr": "avg(rate(bytes_uncompressed_sent_total{node=~\"$node\"}[1m])) / avg(starfish:bytes_sent:rate1m{node=~\"$node\"})",
+          "expr": "avg(rate(bytes_uncompressed_sent_total{node=~\"$node\"}[1m])) / avg(rate(bytes_sent_total{node=~\"$node\"}[1m]))",
           "instant": false,
           "legendFormat": "ratio",
           "range": true,
@@ -1828,7 +1828,7 @@
                 "uid": "Fixed-UID-testbed"
               },
               "editorMode": "code",
-              "expr": "sum(starfish:committed_leaders:rate1m{node=~\"$node\"}) by (commit_type)",
+              "expr": "sum(rate(committed_leaders_total{node=~\"$node\"}[1m])) by (commit_type)",
               "legendFormat": "{{commit_type}}",
               "range": true,
               "refId": "A"
@@ -2995,6 +2995,200 @@
                 "barAlignment": 0,
                 "barWidthFactor": 0.6,
                 "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 85
+          },
+          "id": 255,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "11.3.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "Fixed-UID-testbed"
+              },
+              "editorMode": "code",
+              "expr": "rate(proposed_block_refs_sum{node=~\"$node\",role=\"leader\"}[1m]) / rate(proposed_block_refs_count{node=~\"$node\",role=\"leader\"}[1m])",
+              "legendFormat": "{{node}}",
+              "instant": false,
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Block references per leader block",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 85
+          },
+          "id": 256,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "11.3.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "Fixed-UID-testbed"
+              },
+              "editorMode": "code",
+              "expr": "rate(proposed_block_acks_sum{node=~\"$node\",role=\"leader\"}[1m]) / rate(proposed_block_acks_count{node=~\"$node\",role=\"leader\"}[1m])",
+              "legendFormat": "{{node}}",
+              "instant": false,
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Acknowledgments per leader block",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Fixed-UID-testbed"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
                 "fillOpacity": 10,
                 "gradientMode": "none",
                 "hideFrom": {
@@ -3054,7 +3248,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 85
+            "y": 93
           },
           "id": 246,
           "title": "Accepted blocks/s by source",
@@ -3150,7 +3344,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 85
+            "y": 93
           },
           "id": 247,
           "title": "Accepted headers/s by source",
@@ -3246,7 +3440,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 85
+            "y": 93
           },
           "id": 248,
           "title": "Accepted tx data/s by source",
@@ -3342,7 +3536,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 93
+            "y": 101
           },
           "id": 231,
           "title": "Block sync requests sent",
@@ -3371,7 +3565,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 101
+        "y": 109
       },
       "id": 235,
       "panels": [
@@ -3454,7 +3648,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 102
+            "y": 110
           },
           "id": 236,
           "title": "Certificate completion rate",
@@ -3552,7 +3746,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 102
+            "y": 110
           },
           "id": 237,
           "title": "DAC rejections",
@@ -3650,7 +3844,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 110
+            "y": 118
           },
           "id": 238,
           "title": "BLS service throughput",
@@ -3762,7 +3956,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 110
+            "y": 118
           },
           "id": 239,
           "title": "BLS service utilization %",
@@ -3791,7 +3985,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 126
       },
       "id": 206,
       "panels": [
@@ -3859,7 +4053,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 119
+            "y": 127
           },
           "id": 207,
           "options": {
@@ -3968,7 +4162,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 119
+            "y": 127
           },
           "id": 209,
           "options": {
@@ -4065,7 +4259,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 127
+            "y": 135
           },
           "id": 220,
           "options": {
@@ -4162,7 +4356,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 127
+            "y": 135
           },
           "id": 221,
           "options": {
@@ -4259,7 +4453,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 127
+            "y": 135
           },
           "id": 222,
           "options": {
@@ -4302,7 +4496,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 135
+        "y": 143
       },
       "id": 202,
       "panels": [
@@ -4370,7 +4564,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 136
+            "y": 144
           },
           "id": 14,
           "options": {
@@ -4467,7 +4661,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 136
+            "y": 144
           },
           "id": 252,
           "options": {
@@ -4564,7 +4758,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 136
+            "y": 144
           },
           "id": 13,
           "options": {
@@ -4661,7 +4855,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 144
+            "y": 152
           },
           "id": 16,
           "options": {
@@ -4758,7 +4952,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 144
+            "y": 152
           },
           "id": 216,
           "options": {
@@ -4854,7 +5048,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 144
+            "y": 152
           },
           "id": 253,
           "options": {
@@ -4946,7 +5140,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 152
+            "y": 160
           },
           "id": 25,
           "options": {
@@ -5056,7 +5250,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 152
+            "y": 160
           },
           "id": 26,
           "options": {
@@ -5118,7 +5312,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 152
+            "y": 160
           },
           "id": 232,
           "options": {
@@ -5236,7 +5430,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 160
+            "y": 168
           },
           "id": 249,
           "options": {
@@ -5369,7 +5563,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 160
+            "y": 168
           },
           "id": 250,
           "options": {
@@ -5424,7 +5618,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 168
+        "y": 176
       },
       "id": 203,
       "panels": [
@@ -5493,7 +5687,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 169
+            "y": 177
           },
           "id": 12,
           "options": {
@@ -5517,7 +5711,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "starfish:bytes_sent:rate1m{node=~\"$node\"}*8",
+              "expr": "rate(bytes_sent_total{node=~\"$node\"}[1m])*8",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "instant": false,
@@ -5595,7 +5789,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 169
+            "y": 177
           },
           "id": 5,
           "options": {
@@ -5619,7 +5813,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "starfish:bytes_received:rate1m{node=~\"$node\"}*8",
+              "expr": "rate(bytes_received_total{node=~\"$node\"}[1m])*8",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "instant": false,
@@ -5679,7 +5873,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 177
+            "y": 185
           },
           "id": 21,
           "options": {
@@ -5758,7 +5952,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 177
+            "y": 185
           },
           "id": 22,
           "options": {
@@ -5854,7 +6048,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 185
+            "y": 193
           },
           "id": 210,
           "options": {
@@ -5950,7 +6144,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 185
+            "y": 193
           },
           "id": 211,
           "options": {
@@ -6047,7 +6241,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 193
+            "y": 201
           },
           "id": 212,
           "options": {
@@ -6145,7 +6339,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 193
+            "y": 201
           },
           "id": 213,
           "options": {
@@ -6229,7 +6423,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 201
+            "y": 209
           },
           "id": 254,
           "options": {
@@ -6337,7 +6531,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 201
+            "y": 209
           },
           "id": 243,
           "options": {
@@ -6447,7 +6641,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 201
+            "y": 209
           },
           "id": 244,
           "options": {
@@ -6556,7 +6750,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 209
+            "y": 217
           },
           "id": 9,
           "options": {
@@ -6654,7 +6848,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 209
+            "y": 217
           },
           "id": 214,
           "options": {

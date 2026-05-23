@@ -3,13 +3,13 @@
 #----------------------------------------------------------------------
 # Configuration Parameters
 #----------------------------------------------------------------------
-NUM_NODES=${NUM_NODES:-30}
+NUM_NODES=${NUM_NODES:-10}
 NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
-# Options: starfish, starfish-speed, starfish-bls,
-#          cordial-miners, mysticeti, sailfish-pp,
+# Options: starfish, starfish-speed, sparse-starfish-speed,
+#          starfish-bls, cordial-miners, mysticeti, sailfish-pp,
 #          bluestreak, mysticeti-bls
-CONSENSUS=${CONSENSUS:-starfish}
+CONSENSUS=${CONSENSUS:- sparse-starfish-speed}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
 #   equivocating-chains, equivocating-two-chains,
@@ -27,7 +27,7 @@ STORAGE_BACKEND=${STORAGE_BACKEND:-rocksdb}
 TRANSACTION_MODE=${TRANSACTION_MODE:-random}
 # Dissemination mode: protocol-default (default) | pull |
 #   push-causal | push-useful
-DISSEMINATION_MODE=${DISSEMINATION_MODE:-push-causal}
+DISSEMINATION_MODE=${DISSEMINATION_MODE:-protocol-default}
 # Enable lz4 network compression.
 # Auto-enabled for random transaction mode.
 # Set COMPRESS_NETWORK=1 or =0 to override.
@@ -41,7 +41,7 @@ fi
 # Adversarial latency: set to a percentage (1-100) to enable.
 # That share of each row's cross-region peers is scaled by
 # `1 + t/10s` (continuous ramp). Unset or 0 disables it.
-ADVERSARIAL_LATENCY=${ADVERSARIAL_LATENCY:-40}
+ADVERSARIAL_LATENCY=${ADVERSARIAL_LATENCY:-0}
 DATA_DIR="local-dryrun/data"
 COMPOSE_FILE="$DATA_DIR/docker-compose.yml"
 COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-starfish-dryrun}

@@ -288,9 +288,17 @@ pub struct BlockHeader {
     /// Sailfish++ control certificates (timeout/no-vote). None for all other
     /// protocols.
     pub(crate) sailfish: Option<Box<SailfishFields>>,
-    /// Bluestreak unprovable certificate: optional reference to a
-    /// leader at round r-2 certified by 2f+1 votes at r-1.
-    pub(crate) unprovable_certificate: Option<BlockReference>,
+    /// Generalized leader-decision certificate: optional reference to a
+    /// leader at round r-2 along with a flavor flag.
+    ///
+    /// - **Bluestreak**: only the `false` (standard) flavor is used; the
+    ///   certificate carries the existing "2f+1 voters at r-1 declared the
+    ///   leader unsupportable" semantic.
+    /// - **SparseStarfishSpeed**: `true` (strong) means the carrying block
+    ///   observed 2f+1 round-r-1 voters of the leader all with `strong_vote ==
+    ///   Some(empty)`; `false` (standard) means 2f+1 voters reference the
+    ///   leader but the strong-vote quorum is mixed.
+    pub(crate) unprovable_certificate: Option<(BlockReference, bool)>,
 
     // -- Cache (not serialized) -----------------------------------------------
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
@@ -438,8 +446,8 @@ impl BlockHeader {
             .unwrap_or(&[])
     }
 
-    pub fn unprovable_certificate(&self) -> Option<&BlockReference> {
-        self.unprovable_certificate.as_ref()
+    pub fn unprovable_certificate(&self) -> Option<(BlockReference, bool)> {
+        self.unprovable_certificate
     }
 
     pub fn sailfish(&self) -> Option<&SailfishFields> {
@@ -750,7 +758,7 @@ impl VerifiedBlock {
         strong_vote: Option<AuthoritySet>,
         bls: Option<BlsFields>,
         sailfish: Option<SailfishFields>,
-        unprovable_certificate: Option<BlockReference>,
+        unprovable_certificate: Option<(BlockReference, bool)>,
     ) -> Self {
         let (acknowledgment_intersection, acknowledgment_references) =
             compress_acknowledgments(&block_references, &acknowledgment_references);
@@ -906,7 +914,7 @@ impl VerifiedBlock {
         precomputed_round_sig: Option<BlsSignatureBytes>,
         precomputed_leader_sig: Option<BlsSignatureBytes>,
         sailfish: Option<SailfishFields>,
-        unprovable_certificate: Option<BlockReference>,
+        unprovable_certificate: Option<(BlockReference, bool)>,
     ) -> Self {
         let supports_acknowledgments = consensus_protocol.supports_acknowledgments();
         let header_transactions_commitment = if consensus_protocol.supports_acknowledgments() {
@@ -1099,7 +1107,7 @@ impl VerifiedBlock {
         self.header.is_strong_blame()
     }
 
-    pub fn unprovable_certificate(&self) -> Option<&BlockReference> {
+    pub fn unprovable_certificate(&self) -> Option<(BlockReference, bool)> {
         self.header.unprovable_certificate()
     }
 
@@ -1308,7 +1316,7 @@ impl VerifiedBlock {
             &self.header.signature,
             digest_transactions_commitment,
             self.header.strong_vote,
-            self.header.unprovable_certificate(),
+            self.header.unprovable_certificate.as_ref(),
         );
         ensure!(
             digest == self.digest(),
@@ -1598,7 +1606,7 @@ impl VerifiedBlock {
                         "Bluestreak leader must reference 2f+1 blocks from previous round"
                     );
                 }
-                if let Some(cert_ref) = self.header.unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = self.header.unprovable_certificate() {
                     ensure!(
                         round >= 3 && cert_ref.round + 2 == round,
                         "unprovable_certificate must reference leader at round r-2"
@@ -1666,6 +1674,63 @@ impl VerifiedBlock {
                     }
                 } else if let Some(sf) = self.header.sailfish() {
                     self.verify_sailfish_fields(sf, committee)?;
+                }
+            }
+            ConsensusProtocol::SparseStarfishSpeed => {
+                ensure!(
+                    self.header.bls().is_none(),
+                    "Only StarfishBls/MysticetiBls blocks may carry BLS fields"
+                );
+                ensure!(
+                    self.header.sailfish().is_none(),
+                    "Only SailfishPlusPlus blocks may carry sailfish fields"
+                );
+                ensure!(
+                    self.header.acknowledgment_bls_signatures().is_empty(),
+                    "SparseStarfishSpeed blocks must not carry DAC certificates"
+                );
+                // `strong_vote` is None at round 1 (no prior leader) or
+                // when the block does not reference the previous-round
+                // leader; construction returns None in those cases.
+                // Missing strong_vote simply means the block does not
+                // contribute to the commit metastate or to derived acks —
+                // no structural enforcement needed here.
+                let is_leader = self.authority() == committee.elect_leader(round);
+                if is_leader {
+                    ensure!(
+                        threshold_clock_valid_block_header(&self.header, committee),
+                        "SparseStarfishSpeed leader must reference 2f+1 blocks from previous round"
+                    );
+                } else {
+                    ensure!(
+                        acknowledgments.is_empty(),
+                        "SparseStarfishSpeed non-leader blocks must not carry acknowledgments"
+                    );
+                    ensure!(
+                        self.header.block_references.len() <= 2,
+                        "SparseStarfishSpeed non-leader may reference at most own_prev + leader"
+                    );
+                    let _self_ref = *self
+                        .header
+                        .block_references
+                        .iter()
+                        .find(|r| r.authority == self.authority())
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "SparseStarfishSpeed non-leader block \
+                                 must reference its own previous block"
+                            )
+                        })?;
+                }
+                if let Some((cert_ref, _strong)) = self.header.unprovable_certificate() {
+                    ensure!(
+                        round >= 3 && cert_ref.round + 2 == round,
+                        "unprovable_certificate must reference leader at round r-2"
+                    );
+                    ensure!(
+                        cert_ref.authority == committee.elect_leader(cert_ref.round),
+                        "unprovable_certificate must reference the elected leader"
+                    );
                 }
             }
         }
@@ -2610,7 +2675,7 @@ mod tests {
             None,
             None,
             None,
-            Some(BlockReference::new_test(round_1_leader, 1)),
+            Some((BlockReference::new_test(round_1_leader, 1), false)),
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -2653,7 +2718,7 @@ mod tests {
             None,
             None,
             None,
-            Some(BlockReference::new_test(round_1_leader, 1)),
+            Some((BlockReference::new_test(round_1_leader, 1), false)),
         );
 
         let mut encoder = Encoder::new(2, 4, 2).unwrap();

@@ -106,7 +106,7 @@ impl Validator {
             &parameters.storage_backend,
             public_config
                 .parameters
-                .enable_starfish_speed_adaptive_acknowledgments,
+                .enable_strong_vote_adaptive_acknowledgments,
             resolved_dissemination,
         );
 
@@ -312,6 +312,7 @@ mod smoke_tests {
     #[test_case("sailfish++", 120)]
     #[test_case("bluestreak", 140)]
     #[test_case("mysticeti-bls", 160)]
+    #[test_case("sparse-starfish-speed", 180)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -411,6 +412,7 @@ mod smoke_tests {
     #[test_case("sailfish++", 220)]
     #[test_case("bluestreak", 260)]
     #[test_case("mysticeti-bls", 280)]
+    #[test_case("sparse-starfish-speed", 320)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
@@ -476,6 +478,7 @@ mod smoke_tests {
     #[test_case("sailfish++", 320)]
     #[test_case("bluestreak", 380)]
     #[test_case("mysticeti-bls", 400)]
+    #[test_case("sparse-starfish-speed", 420)]
     #[tokio::test]
     async fn validator_crash_faults(consensus: &str, port_offset: u16) {
         run_crash_faults_test(consensus, port_offset).await;
@@ -680,6 +683,7 @@ mod smoke_tests {
     #[tokio::test(flavor = "multi_thread")]
     #[test_case("sailfish++", 620)]
     #[test_case("mysticeti-bls", 640)]
+    #[test_case("sparse-starfish-speed", 660)]
     async fn validator_lifecycle_and_recovery(consensus: &str, port_offset: u16) {
         run_lifecycle_test(consensus, port_offset).await;
     }

@@ -530,21 +530,27 @@ impl<H: BlockHandler> Core<H> {
         let is_current_leader = self.committee.elect_leader(clock_round) == self.authority;
         // BLS non-leaders can always build with minimal refs.
         let bls_non_leader = protocol.uses_bls() && !is_current_leader;
-        // Bluestreak prev-round leader can build with own-prev only.
-        let bluestreak_prev_leader = protocol.is_bluestreak()
+        // Compressed-ref + dual-DAG protocols (Bluestreak, SparseStarfishSpeed):
+        // prev-round leader can build with own-prev only when its causal
+        // frontier is unavailable.
+        let compressed_dual_dag =
+            protocol.uses_compressed_refs() && protocol.carries_unprovable_certificate();
+        let compressed_prev_leader = compressed_dual_dag
             && self.committee.elect_leader(clock_round.saturating_sub(1)) == self.authority;
-        // For Bluestreak non-leaders, block creation may fall back to
-        // "own-prev only" when the previous-round leader block is missing
-        // locally. Unlike Mysticeti, Bluestreak compresses references down to
-        // the previous-round leader; if that leader isn't available/clean yet,
-        // we still want to keep producing blocks (this also matches the BLS
-        // non-leader behavior which always permits minimal refs).
-        let bluestreak_non_leader = protocol.is_bluestreak() && !is_current_leader;
-        let allows_minimal_refs = bls_non_leader || bluestreak_prev_leader || bluestreak_non_leader;
-        if bluestreak_non_leader && block_references.is_empty() && !bluestreak_prev_leader {
+        // For compressed-ref dual-DAG non-leaders, block creation may fall
+        // back to "own-prev only" when the previous-round leader block is
+        // missing locally. Unlike Mysticeti, Bluestreak/SSFS compress
+        // references down to the previous-round leader; if that leader isn't
+        // available/clean yet, we still want to keep producing blocks (this
+        // also matches the BLS non-leader behavior which always permits
+        // minimal refs).
+        let compressed_non_leader = compressed_dual_dag && !is_current_leader;
+        let allows_minimal_refs = bls_non_leader || compressed_prev_leader || compressed_non_leader;
+        if compressed_non_leader && block_references.is_empty() && !compressed_prev_leader {
             tracing::debug!(
-                "Bluestreak: constructing block in round {} \
+                "{:?}: constructing block in round {} \
                  with only own-prev (missing clean prev-leader parent)",
+                protocol,
                 clock_round
             );
         }
@@ -582,19 +588,27 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
-        let starfish_speed_excluded_authors = self.starfish_speed_excluded_ack_authors(clock_round);
-        if starfish_speed_excluded_authors.contains(self.authority) {
+        let strong_vote_excluded_authors = self.strong_vote_excluded_ack_authors(clock_round);
+        if strong_vote_excluded_authors.contains(self.authority) {
             self.requeue_transactions(std::mem::take(&mut transactions));
         }
         self.prepare_last_blocks();
         let mut encoded_transactions = self.prepare_encoded_transactions(&transactions);
         let acknowledgment_references = if protocol.supports_acknowledgments() {
-            self.dag_state.get_pending_acknowledgment(clock_round)
+            // SparseStarfishSpeed: only the round-r leader drains the pending
+            // queue. Non-leader blocks carry an empty ack list because their
+            // implicit acks are derived at commit time from
+            // (leader.acks, voter.strong_vote).
+            if protocol == ConsensusProtocol::SparseStarfishSpeed && !is_current_leader {
+                Vec::new()
+            } else {
+                self.dag_state.get_pending_acknowledgment(clock_round)
+            }
         } else {
             Vec::new()
         };
-        let acknowledgment_references = self.filter_starfish_speed_leader_acknowledgments(
-            starfish_speed_excluded_authors,
+        let acknowledgment_references = self.filter_strong_vote_leader_acknowledgments(
+            strong_vote_excluded_authors,
             acknowledgment_references,
         );
         let number_of_blocks_to_create = self.last_own_block.len();
@@ -790,15 +804,18 @@ impl<H: BlockHandler> Core<H> {
         }
     }
 
-    /// For StarfishSpeed, compute the strong-vote hint mask for the current
-    /// leader. `Some(empty)` means the vote is strong; `Some(nonempty)` records
-    /// the authorities whose payloads are still missing locally.
+    /// For StarfishSpeed and SparseStarfishSpeed, compute the strong-vote hint
+    /// mask for the current leader. `Some(empty)` means the vote is strong;
+    /// `Some(nonempty)` records the authorities whose payloads are still
+    /// missing locally (one bit per authority — coarse-grained: any missing
+    /// block by that author sets the bit). Returns `None` when the block is
+    /// not a voter of any leader (no leader_r-1 reference).
     fn compute_strong_vote(
         &self,
         clock_round: RoundNumber,
         block_references: &[BlockReference],
     ) -> Option<AuthoritySet> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
+        if !self.dag_state.consensus_protocol.uses_strong_vote() {
             return None;
         }
 
@@ -816,36 +833,40 @@ impl<H: BlockHandler> Core<H> {
 
         let leader_ref = leader_ref?;
 
-        let mut missing_mask = AuthoritySet::default();
-        if !self.dag_state.is_data_available(leader_ref) {
-            missing_mask.insert(leader_ref.authority);
-        }
-
         let leader_block = self
             .dag_state
             .get_storage_block(*leader_ref)
             .expect("Leader block should exist if it's in our includes");
 
-        for ack_ref in leader_block.acknowledgments() {
-            if !self.dag_state.is_data_available(&ack_ref) {
-                missing_mask.insert(ack_ref.authority);
+        // Single batched data-availability check over [leader_ref, ack_refs...]
+        // — one DagState read lock instead of (1 + acks.len()) acquisitions.
+        let acks = leader_block.acknowledgments();
+        let mut refs_to_check = Vec::with_capacity(1 + acks.len());
+        refs_to_check.push(*leader_ref);
+        refs_to_check.extend_from_slice(&acks);
+        let availability = self.dag_state.is_data_available_batch(&refs_to_check);
+
+        let mut missing_mask = AuthoritySet::default();
+        for (r, available) in refs_to_check.iter().zip(availability) {
+            if !available {
+                missing_mask.insert(r.authority);
             }
         }
 
         Some(missing_mask)
     }
 
-    fn starfish_speed_excluded_ack_authors(&self, clock_round: RoundNumber) -> AuthoritySet {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed
+    fn strong_vote_excluded_ack_authors(&self, clock_round: RoundNumber) -> AuthoritySet {
+        if !self.dag_state.consensus_protocol.uses_strong_vote()
             || self.committee.elect_leader(clock_round) != self.authority
         {
             return AuthoritySet::default();
         }
 
-        self.dag_state.starfish_speed_excluded_ack_authorities()
+        self.dag_state.strong_vote_excluded_ack_authorities()
     }
 
-    fn filter_starfish_speed_leader_acknowledgments(
+    fn filter_strong_vote_leader_acknowledgments(
         &self,
         excluded_authors: AuthoritySet,
         acknowledgment_references: Vec<BlockReference>,
@@ -961,7 +982,10 @@ impl<H: BlockHandler> Core<H> {
         } else {
             None
         };
-        let unprovable_certificate = if protocol.is_bluestreak() && clock_round >= 3 {
+        let unprovable_certificate = if (protocol.is_bluestreak()
+            || protocol == ConsensusProtocol::SparseStarfishSpeed)
+            && clock_round >= 3
+        {
             self.compute_unprovable_certificate(clock_round, &block_references)
         } else {
             None
@@ -990,11 +1014,18 @@ impl<H: BlockHandler> Core<H> {
             unprovable_certificate,
         );
 
+        let role = if is_round_leader {
+            "leader"
+        } else {
+            "non_leader"
+        };
         self.metrics
             .proposed_block_refs
+            .with_label_values(&[role])
             .observe(block_ref_count as f64);
         self.metrics
             .proposed_block_acks
+            .with_label_values(&[role])
             .observe(block.acknowledgment_count() as f64);
 
         block.preserialize();
@@ -1083,7 +1114,7 @@ impl<H: BlockHandler> Core<H> {
         &self,
         clock_round: RoundNumber,
         _block_references: &[BlockReference],
-    ) -> Option<BlockReference> {
+    ) -> Option<(BlockReference, bool)> {
         let leader_round = clock_round.checked_sub(2)?;
         let leader = self.committee.elect_leader(leader_round);
         let leader_blocks = self
@@ -1091,13 +1122,36 @@ impl<H: BlockHandler> Core<H> {
             .get_blocks_at_authority_round(leader, leader_round)
             .into_iter();
 
+        let is_sparse = self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed;
+
         for leader_block in leader_blocks {
             let leader_ref = *leader_block.reference();
+
+            if is_sparse {
+                // SparseStarfishSpeed: O(1) precomputed-tally lookups.
+                // `record_ssfs_leader_vote_support` in DagState updates
+                // both `leader_vote_support` and `leader_strong_vote_support`
+                // on every block insert, so we don't rescan round-(r+1)
+                // voters here.
+                //  - strong (true)  iff strong-vote quorum reached.
+                //  - standard (false) iff vote quorum exists but strong quorum hasn't.
+                //  - absent (None) iff no vote quorum.
+                if self.dag_state.ssfs_leader_strong_vote_quorum(&leader_ref) {
+                    return Some((leader_ref, true));
+                }
+                if self.dag_state.ssfs_leader_vote_quorum(&leader_ref) {
+                    return Some((leader_ref, false));
+                }
+                continue;
+            }
+
+            // Bluestreak path: existing certificate evidence; standard
+            // (bool = false) only.
             if self
                 .dag_state
-                .has_bluestreak_certificate_evidence(clock_round, &leader_ref)
+                .has_unprovable_certificate_evidence(clock_round, &leader_ref, false)
             {
-                return Some(leader_ref);
+                return Some((leader_ref, false));
             }
         }
 
@@ -1376,6 +1430,17 @@ impl<H: BlockHandler> Core<H> {
         for commit in &committed {
             let committed_rounds = self.dag_state.update_commit_state(commit);
             commit_data.push(CommitData::new(commit, committed_rounds));
+        }
+        // SparseStarfishSpeed: drop sequenced refs from the local pending
+        // acknowledgment queue right after each commit so future leaders
+        // don't republish them. Other protocols leave the queue intact and
+        // rely on round-bounded drains in `get_pending_acknowledgment`.
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed {
+            let sequenced: Vec<BlockReference> = committed
+                .iter()
+                .flat_map(|c| c.blocks.iter().map(|b| *b.reference()))
+                .collect();
+            self.dag_state.purge_pending_acknowledgments(&sequenced);
         }
         let store_start = std::time::Instant::now();
         self.store

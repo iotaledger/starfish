@@ -668,6 +668,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -889,7 +890,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
-                | ConsensusProtocol::StarfishBls => {
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed => {
                     if block.transactions().is_some() {
                         blocks_with_transactions.push(block);
                     } else {
@@ -913,6 +915,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             blocks_without_transactions.extend(headers);
             if !blocks_without_transactions.is_empty() {
@@ -1116,6 +1119,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .block_sync_requests_received
@@ -1187,6 +1191,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -1416,6 +1421,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
@@ -1700,8 +1706,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
 
                                 if pending_cert_messages.len() >= SAILFISH_CERT_BATCH_MAX_LEN {
-                                    broadcast_sailfish_cert_messages(&senders, &pending_cert_messages)
-                                        .await;
+                                    broadcast_sailfish_cert_messages(
+                                        &senders,
+                                        &pending_cert_messages,
+                                    )
+                                    .await;
                                     pending_cert_messages.clear();
                                 }
                             }
@@ -1709,14 +1718,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         _ = cert_flush_interval.tick(), if !pending_cert_messages.is_empty() => {
                             let senders: Vec<_> =
                                 event_inner.peer_senders.read().values().cloned().collect();
-                            broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
+                            broadcast_sailfish_cert_messages(&senders, &pending_cert_messages)
+                                .await;
                             pending_cert_messages.clear();
                         }
                     }
                 }
 
                 if !pending_cert_messages.is_empty() {
-                    let senders: Vec<_> = event_inner.peer_senders.read().values().cloned().collect();
+                    let senders: Vec<_> =
+                        event_inner.peer_senders.read().values().cloned().collect();
                     broadcast_sailfish_cert_messages(&senders, &pending_cert_messages).await;
                 }
             });
@@ -1797,7 +1808,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     attempts += 1;
                     if attempts >= 100 {
                         panic!(
-                            "Shutdown failed - not all resources are freed after main task is completed"
+                            "Shutdown failed - not all resources are freed \
+                             after main task is completed"
                         );
                     }
                     inner_arc = arc;
@@ -1837,7 +1849,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             inner.clone(),
             metrics.clone(),
         ));
-        let cert_pull_task = if inner.dag_state.consensus_protocol.is_bluestreak() {
+        let cert_pull_task = if inner
+            .dag_state
+            .consensus_protocol
+            .carries_unprovable_certificate()
+        {
             Some(handle.spawn(Self::unprovable_cert_pull_task(inner.clone())))
         } else {
             None
@@ -2143,8 +2159,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         const SCAN_INTERVAL: Duration = Duration::from_millis(100);
         const PEER_COUNT: usize = 2;
 
-        let mut first_seen: AHashMap<BlockReference, Instant> = AHashMap::new();
-        let mut last_requested: AHashMap<BlockReference, Instant> = AHashMap::new();
+        // Tracking is keyed by (leader_ref, strong) so that standard and
+        // strong cert flavors are rate-limited independently (SSFS).
+        let mut first_seen: AHashMap<(BlockReference, bool), Instant> = AHashMap::new();
+        let mut last_requested: AHashMap<(BlockReference, bool), Instant> = AHashMap::new();
 
         loop {
             select! {
@@ -2155,18 +2173,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             let pending = inner.dag_state.pending_unprovable_certificates();
             let now = Instant::now();
 
-            // Prune tracking maps for leaders no longer pending.
-            first_seen.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
-            last_requested.retain(|k, _| pending.iter().any(|(lr, _)| lr == k));
+            // Prune tracking maps for cert keys no longer pending.
+            first_seen.retain(|k, _| pending.iter().any(|(lr, strong, _)| (*lr, *strong) == *k));
+            last_requested
+                .retain(|k, _| pending.iter().any(|(lr, strong, _)| (*lr, *strong) == *k));
 
-            for (leader_ref, known_voters) in &pending {
+            for (leader_ref, strong, known_voters) in &pending {
+                let key = (*leader_ref, *strong);
                 // Must have been waiting >= SCAN_INTERVAL before first request.
-                let first = first_seen.entry(*leader_ref).or_insert(now);
+                let first = first_seen.entry(key).or_insert(now);
                 if now.duration_since(*first) < SCAN_INTERVAL {
                     continue;
                 }
-                // Rate limit: one request per leader per interval.
-                if let Some(last) = last_requested.get(leader_ref) {
+                // Rate limit: one request per cert flavor per interval.
+                if let Some(last) = last_requested.get(&key) {
                     if now.duration_since(*last) < SCAN_INTERVAL {
                         continue;
                     }
@@ -2179,8 +2199,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
 
                 tracing::debug!(
                     "Request unprovable certificate support for leader {} \
-                     from {} peers (known_voters={})",
+                     (strong={}) from {} peers (known_voters={})",
                     leader_ref,
+                    strong,
                     senders.len(),
                     known_voters.count_ones()
                 );
@@ -2192,7 +2213,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     let _ = sender.send(msg).await;
                 }
 
-                last_requested.insert(*leader_ref, now);
+                last_requested.insert(key, now);
             }
         }
     }

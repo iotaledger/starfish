@@ -35,7 +35,7 @@ type DagAuthorityMap = BTreeMap<RoundNumber, HashMap<BlockDigest, DagBlockEntry>
 /// peer sends us); the signal is naturally fresh, so a small absolute
 /// window is enough to ride out reorderings without keeping stale
 /// authors lit and dragging extra piggyback work into the response.
-const USEFUL_HEADERS_GAP: RoundNumber = 100;
+const USEFUL_HEADERS_GAP: RoundNumber = 50;
 /// Window (in rounds) for shards, as a multiple of the committee size.
 /// Shards fire only on explicit `MissingTxDataRequest`, so the signal is
 /// scarce; we keep it lit for two committee turnovers so the leader's

@@ -41,14 +41,20 @@ use crate::{
 pub type PendingSubDag = (CommittedSubDag, Vec<StakeAggregator<QuorumThreshold>>);
 
 #[derive(Default)]
-struct BluestreakCertificateState {
+struct UnprovableCertificateState {
     /// f+1 propagation support from round r for the same unprovable
-    /// certificate reference.
+    /// certificate reference (cert flavor is encoded in the map key).
     propagation_support: StakeAggregator<ValidityThreshold>,
     /// Blocks waiting for this certificate to become provable in the dirty
     /// DAG before they can join the clean DAG.
     waiting_blocks: BTreeSet<BlockReference>,
 }
+
+/// Identifies an unprovable certificate by its target leader and flavor.
+/// SparseStarfishSpeed carries both `(leader, false)` (standard cert) and
+/// `(leader, true)` (strong cert); Bluestreak only ever uses the
+/// `(leader, false)` variant.
+type CertKey = (BlockReference, bool);
 
 /// Tracks where block headers and transaction data originate.
 /// Carried on the wire inside `BlockBatch` so the receiver can distinguish
@@ -117,6 +123,46 @@ pub enum ConsensusProtocol {
     SailfishPlusPlus,
     Bluestreak,
     MysticetiBls,
+    /// Bluestreak-style lean DAG with StarfishSpeed-style strong-vote
+    /// derivation.
+    ///
+    /// Non-leader blocks reference `[own_prev, leader_{r-1}]` only (same as
+    /// Bluestreak); the round-r leader carries the full 2f+1 reference
+    /// frontier and the only explicit acknowledgment list. Every block
+    /// carries the constant-size `strong_vote: AuthoritySet` blame mask
+    /// (per-author granularity — one bit per authority; set bit means
+    /// "missing at least one block by that author in `{L} ∪ L.acks`",
+    /// authority's responsibility to distribute its own transactions).
+    /// No BLS aggregate signatures, no DAC certificates.
+    ///
+    /// Leader-decision certificate (`unprovable_certificate`, generalized
+    /// to `Option<(BlockReference, bool)>`) is the on-wire vehicle for
+    /// commit:
+    ///   - strong (`true`)   = 2f+1 round-(r-1) voters of leader_{r-2} all
+    ///     carried `strong_vote == Some(empty)`.
+    ///   - standard (`false`)= 2f+1 voters reference the leader but the
+    ///     strong-vote quorum is mixed.
+    ///   - absent (`None`)   = no quorum.
+    ///
+    /// Commit rule for leader L at round r-2 (evaluated at round r):
+    ///   - 2f+1 strong certs at r       => `CommitMetastate::Opt`; the
+    ///     linearizer derives per-`c` acks for `c ∈ L.acks` by counting voters
+    ///     `v` with `!v.strong_vote.contains(c.authority)`.
+    ///   - 2f+1 mixed certs at r        => `CommitMetastate::Std`; the
+    ///     linearizer uses the standard quorum-acknowledgment mechanism.
+    ///   - Fewer than 2f+1 certs at r   => skip (recoverable later).
+    ///
+    /// Data availability without DAC/BLS: 2f+1 strong-vote-clean voters
+    /// contain ≥ f+1 honest holders, which (via Reed-Solomon with
+    /// `info_length ≤ f+1`) is enough to reconstruct each acked payload.
+    /// Byzantine voters lying about strong_vote do not break safety; they
+    /// merely fail to honor reconstruction requests, which the honest
+    /// f+1 holders cover.
+    ///
+    /// Pending acknowledgments are drained by the local commit rule (see
+    /// `DagState::purge_pending_acknowledgments`) so future leaders do
+    /// not republish already-sequenced refs.
+    SparseStarfishSpeed,
 }
 
 impl ConsensusProtocol {
@@ -130,6 +176,9 @@ impl ConsensusProtocol {
             "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
             "bluestreak" => ConsensusProtocol::Bluestreak,
             "mysticeti-bls" | "mysticeti-l" => ConsensusProtocol::MysticetiBls,
+            "sparse-starfish-speed" | "sparse-starfish" | "ssfs" => {
+                ConsensusProtocol::SparseStarfishSpeed
+            }
             _ => ConsensusProtocol::Starfish,
         }
     }
@@ -140,6 +189,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::SparseStarfishSpeed
         )
     }
 
@@ -149,6 +199,16 @@ impl ConsensusProtocol {
 
     pub fn is_bluestreak(self) -> bool {
         matches!(self, ConsensusProtocol::Bluestreak)
+    }
+
+    /// Protocols that emit a `strong_vote` bitmask on every block (an empty
+    /// mask attests payload availability; a non-empty mask blames missing
+    /// authorities).
+    pub fn uses_strong_vote(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed
+        )
     }
 
     /// Protocols using BLS aggregate signatures (voted leader, round certs,
@@ -168,6 +228,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::MysticetiBls
+                | ConsensusProtocol::SparseStarfishSpeed
         )
     }
 
@@ -179,6 +240,16 @@ impl ConsensusProtocol {
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::MysticetiBls
+                | ConsensusProtocol::SparseStarfishSpeed
+        )
+    }
+
+    /// Protocols whose blocks may carry an `unprovable_certificate` field
+    /// gating clean-DAG admission via dirty-DAG evidence or f+1 propagation.
+    pub fn carries_unprovable_certificate(self) -> bool {
+        matches!(
+            self,
+            ConsensusProtocol::Bluestreak | ConsensusProtocol::SparseStarfishSpeed
         )
     }
 
@@ -190,9 +261,9 @@ impl ConsensusProtocol {
             | ConsensusProtocol::MysticetiBls
             | ConsensusProtocol::StarfishBls => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
-                DisseminationMode::PushUseful
-            }
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishSpeed
+            | ConsensusProtocol::SparseStarfishSpeed => DisseminationMode::PushUseful,
         }
     }
 
@@ -261,7 +332,7 @@ pub struct DagState {
     /// Immutable genesis blocks, one per authority. Cached for the lifetime
     /// of the node to prevent eviction.
     genesis: Vec<Data<VerifiedBlock>>,
-    starfish_speed_adaptive_acknowledgments: bool,
+    strong_vote_adaptive_acknowledgments: bool,
     /// Per-block known_by tracking for push dissemination. `None` in pull
     /// mode. Broadcaster paths read this `Arc` directly through the
     /// [`CordialKnowledgeHandle`]; we keep a clone here so recovery code
@@ -282,12 +353,12 @@ type RoundBlockCache = AHashMap<RoundNumber, (u64, Arc<[Data<VerifiedBlock>]>)>;
 pub(crate) const CACHED_ROUNDS: RoundNumber = 2 * MAX_TRAVERSAL_DEPTH;
 
 #[derive(Default)]
-struct StarfishSpeedLeaderRoundHints {
+struct StrongVoteLeaderRoundHints {
     voter_masks: AHashMap<AuthorityIndex, AuthoritySet>,
     complaint_counts: Vec<u16>,
 }
 
-impl StarfishSpeedLeaderRoundHints {
+impl StrongVoteLeaderRoundHints {
     fn new(committee_size: usize) -> Self {
         Self {
             voter_masks: AHashMap::new(),
@@ -361,10 +432,10 @@ struct DagStateInner {
     dac_certificates: Vec<BTreeMap<BlockReference, BlsAggregateCertificate>>,
     /// Block references with DAC certificates that failed BLS verification.
     rejected_dac_certificates: Vec<BTreeSet<BlockReference>>,
-    /// For StarfishSpeed, keep the recent complaint masks reported by voters
-    /// about leader blocks, keyed by leader authority then leader round.
-    starfish_speed_leader_hints: Vec<BTreeMap<RoundNumber, StarfishSpeedLeaderRoundHints>>,
-    starfish_speed_adaptive_acknowledgments: bool,
+    /// For strong-vote protocols, keep the recent complaint masks reported by
+    /// voters about leader blocks, keyed by leader authority then leader round.
+    strong_vote_leader_hints: Vec<BTreeMap<RoundNumber, StrongVoteLeaderRoundHints>>,
+    strong_vote_adaptive_acknowledgments: bool,
     /// Protocol variant, needed to gate ack queueing on DAC certificates.
     consensus_protocol: ConsensusProtocol,
     precomputed_round_sigs: BTreeMap<RoundNumber, BlsSignatureBytes>,
@@ -399,9 +470,18 @@ struct DagStateInner {
     /// so other protocols can reuse leader vote aggregation without rescanning
     /// dirty DAG rounds.
     leader_vote_support: BTreeMap<BlockReference, StakeAggregator<QuorumThreshold>>,
-    /// Bluestreak-specific propagation support and blocks waiting for a given
-    /// unprovable certificate reference to become provable.
-    bluestreak_certificate_state: BTreeMap<BlockReference, BluestreakCertificateState>,
+    /// Parallel to `leader_vote_support` but counts only voters whose
+    /// `strong_vote` is `Some(empty)` (i.e. `is_strong_vote()` true).
+    /// Maintained for `SparseStarfishSpeed` so that
+    /// `compute_unprovable_certificate` can read precomputed strong-quorum
+    /// support in O(1) instead of scanning `get_blocks_by_round` per
+    /// proposal.
+    leader_strong_vote_support: BTreeMap<BlockReference, StakeAggregator<QuorumThreshold>>,
+    /// Propagation support and blocks waiting for a given unprovable
+    /// certificate to become provable. Keyed by `(leader_ref, strong)` so
+    /// that SparseStarfishSpeed can track standard and strong cert
+    /// flavors independently; Bluestreak only ever stores `(leader, false)`.
+    unprovable_cert_state: BTreeMap<CertKey, UnprovableCertificateState>,
     /// Per-authority blocks whose BLS fields have all been verified
     /// (StarfishBls/MysticetiBls). Stored per-authority to enable efficient
     /// cleanup at the eviction frontier. Blocks are added here when
@@ -423,7 +503,7 @@ impl DagState {
         byzantine_strategy: String,
         consensus: String,
         storage_backend: &StorageBackend,
-        starfish_speed_adaptive_acknowledgments: bool,
+        strong_vote_adaptive_acknowledgments: bool,
         dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
         assert!(
@@ -488,8 +568,8 @@ impl DagState {
             leader_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             dac_certificates: (0..n).map(|_| BTreeMap::new()).collect(),
             rejected_dac_certificates: (0..n).map(|_| BTreeSet::new()).collect(),
-            starfish_speed_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
-            starfish_speed_adaptive_acknowledgments,
+            strong_vote_leader_hints: (0..n).map(|_| BTreeMap::new()).collect(),
+            strong_vote_adaptive_acknowledgments,
             consensus_protocol,
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
@@ -502,7 +582,8 @@ impl DagState {
             pending_persisted_clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
             inferred_clean_support: (0..n).map(|_| BTreeMap::new()).collect(),
             leader_vote_support: BTreeMap::new(),
-            bluestreak_certificate_state: BTreeMap::new(),
+            leader_strong_vote_support: BTreeMap::new(),
+            unprovable_cert_state: BTreeMap::new(),
             bls_verified_blocks: (0..n).map(|_| BTreeSet::new()).collect(),
             sailfish_timeout_certs: BTreeMap::new(),
             sailfish_novote_certs: BTreeMap::new(),
@@ -658,7 +739,7 @@ impl DagState {
                 }
             }
         }
-        if consensus_protocol.is_bluestreak() {
+        if consensus_protocol.carries_unprovable_certificate() {
             let mut recovered_blocks: Vec<_> = inner
                 .index
                 .iter()
@@ -668,7 +749,7 @@ impl DagState {
             recovered_blocks.sort_by_key(|block| *block.reference());
             let mut activated = Vec::new();
             for block in recovered_blocks {
-                inner.check_bluestreak_pre_clean(&block, &committee, &mut activated);
+                inner.check_pre_clean(&block, &committee, &mut activated);
             }
         }
 
@@ -722,6 +803,9 @@ impl DagState {
             ConsensusProtocol::MysticetiBls => {
                 tracing::info!("Starting Mysticeti-BLS protocol")
             }
+            ConsensusProtocol::SparseStarfishSpeed => {
+                tracing::info!("Starting Sparse-Starfish-Speed protocol")
+            }
         }
         let dag_state = Self {
             store: store.clone(),
@@ -733,7 +817,7 @@ impl DagState {
             consensus_protocol,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
-            starfish_speed_adaptive_acknowledgments,
+            strong_vote_adaptive_acknowledgments,
             dag_knowledge,
             cordial_handle: Arc::new(parking_lot::RwLock::new(None)),
         };
@@ -832,20 +916,26 @@ impl DagState {
 
     /// Returns leaders with non-empty waiting blocks (unprovable certificates
     /// not yet resolved) and the `AuthoritySet` of authorities whose voting
-    /// blocks we already have for each leader.
-    pub fn pending_unprovable_certificates(&self) -> Vec<(BlockReference, AuthoritySet)> {
+    /// blocks we already have for each leader. The third tuple element is
+    /// the cert flavor — `false` for standard (Bluestreak / SSFS standard
+    /// cert), `true` for SSFS strong cert.
+    pub fn pending_unprovable_certificates(&self) -> Vec<(BlockReference, bool, AuthoritySet)> {
         let inner = self.dag_state_inner.read();
         inner
-            .bluestreak_certificate_state
+            .unprovable_cert_state
             .iter()
             .filter(|(_, state)| !state.waiting_blocks.is_empty())
-            .map(|(leader_ref, _)| {
-                let known_voters = inner
-                    .leader_vote_support
+            .map(|((leader_ref, strong), _)| {
+                let direct_support = if *strong {
+                    &inner.leader_strong_vote_support
+                } else {
+                    &inner.leader_vote_support
+                };
+                let known_voters = direct_support
                     .get(leader_ref)
                     .map(|agg| agg.votes)
                     .unwrap_or_default();
-                (*leader_ref, known_voters)
+                (*leader_ref, *strong, known_voters)
             })
             .collect()
     }
@@ -1266,16 +1356,40 @@ impl DagState {
         self.dag_state_inner.read().clean_vertices[block_ref.authority as usize].contains(block_ref)
     }
 
-    /// Check whether the local dirty DAG has enough evidence to prove a
-    /// Bluestreak unprovable certificate for `leader_ref` at `block_round`.
-    pub fn has_bluestreak_certificate_evidence(
+    /// Check whether the local dirty DAG has enough evidence to prove an
+    /// unprovable certificate for `leader_ref` of the given flavor (strong
+    /// vs standard) at `block_round`. Bluestreak always uses `strong=false`;
+    /// SparseStarfishSpeed branches based on the cert's bool flag.
+    pub fn has_unprovable_certificate_evidence(
         &self,
         block_round: RoundNumber,
         leader_ref: &BlockReference,
+        strong: bool,
     ) -> bool {
         self.dag_state_inner
             .read()
-            .has_bluestreak_certificate_evidence(block_round, leader_ref, &self.committee)
+            .has_unprovable_certificate_evidence(block_round, leader_ref, strong, &self.committee)
+    }
+
+    /// SparseStarfishSpeed precomputed-tally accessors. Both look up the
+    /// incrementally-maintained `leader_vote_support` /
+    /// `leader_strong_vote_support` for `leader_ref` and return whether the
+    /// entry has reached 2f+1 stake. O(1) lookups suitable for the
+    /// block-creation hot path.
+    pub fn ssfs_leader_vote_quorum(&self, leader_ref: &BlockReference) -> bool {
+        let inner = self.dag_state_inner.read();
+        inner
+            .leader_vote_support
+            .get(leader_ref)
+            .is_some_and(|s| s.is_quorum(&self.committee))
+    }
+
+    pub fn ssfs_leader_strong_vote_quorum(&self, leader_ref: &BlockReference) -> bool {
+        let inner = self.dag_state_inner.read();
+        inner
+            .leader_strong_vote_support
+            .get(leader_ref)
+            .is_some_and(|s| s.is_quorum(&self.committee))
     }
 
     /// Check whether 2f+1 stake is present in the clean DAG at the given round.
@@ -1426,6 +1540,17 @@ impl DagState {
         self.dag_state_inner
             .write()
             .get_pending_acknowledgment(round_number)
+    }
+
+    /// Remove the given block references from the pending acknowledgment
+    /// queue. Used by SparseStarfishSpeed to drop refs that the local commit
+    /// rule already sequenced — they would otherwise be re-published by a
+    /// future leader and waste bandwidth. No-op for protocols that do not
+    /// maintain `pending_acknowledgment`.
+    pub fn purge_pending_acknowledgments(&self, sequenced: &[BlockReference]) {
+        self.dag_state_inner
+            .write()
+            .purge_pending_acknowledgments(sequenced);
     }
 
     pub fn requeue_pending_acknowledgment(&self, block_refs: Vec<BlockReference>) {
@@ -1662,16 +1787,15 @@ impl DagState {
         true
     }
 
-    pub fn starfish_speed_excluded_ack_authorities(&self) -> AuthoritySet {
-        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
-            || !self.starfish_speed_adaptive_acknowledgments
+    pub fn strong_vote_excluded_ack_authorities(&self) -> AuthoritySet {
+        if !self.consensus_protocol.uses_strong_vote() || !self.strong_vote_adaptive_acknowledgments
         {
             return AuthoritySet::default();
         }
 
         let inner = self.dag_state_inner.read();
         let mut scores = vec![0usize; self.committee.len()];
-        for hints in inner.starfish_speed_leader_hints[inner.authority as usize]
+        for hints in inner.strong_vote_leader_hints[inner.authority as usize]
             .iter()
             .rev()
             .take(STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS)
@@ -1698,6 +1822,17 @@ impl DagState {
 
     pub fn is_data_available(&self, reference: &BlockReference) -> bool {
         self.dag_state_inner.read().is_data_available(reference)
+    }
+
+    /// Batched data-availability check that acquires the read lock once for
+    /// the whole input. Hot path for `compute_strong_vote`, which would
+    /// otherwise pay one lock acquisition per ack in the leader's list.
+    pub fn is_data_available_batch(&self, refs: &[BlockReference]) -> Vec<bool> {
+        if refs.is_empty() {
+            return Vec::new();
+        }
+        let inner = self.dag_state_inner.read();
+        refs.iter().map(|r| inner.is_data_available(r)).collect()
     }
 
     pub fn shard_count(&self, block_reference: &BlockReference) -> usize {
@@ -2394,10 +2529,10 @@ impl DagStateInner {
                     frontier.push(parent);
                 }
             }
-            if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
+            if self.consensus_protocol.carries_unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     let parent = self
-                        .get_storage_block(*cert_ref)
+                        .get_storage_block(cert_ref)
                         .expect("Block should be in DagState");
                     if parent.round() >= earlier_block.round() {
                         frontier.push(parent);
@@ -2441,9 +2576,9 @@ impl DagStateInner {
                     }
                 }
             }
-            if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
-                    if let Some(parent) = self.get_storage_block(*cert_ref) {
+            if self.consensus_protocol.carries_unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
+                    if let Some(parent) = self.get_storage_block(cert_ref) {
                         if parent.round() >= target_round {
                             frontier.push(parent);
                         }
@@ -2540,8 +2675,10 @@ impl DagStateInner {
             digest: BlockDigest::default(),
         };
         self.leader_vote_support = self.leader_vote_support.split_off(&split_ref);
-        self.bluestreak_certificate_state = self.bluestreak_certificate_state.split_off(&split_ref);
-        for state in self.bluestreak_certificate_state.values_mut() {
+        self.leader_strong_vote_support = self.leader_strong_vote_support.split_off(&split_ref);
+        let cert_split: CertKey = (split_ref, false);
+        self.unprovable_cert_state = self.unprovable_cert_state.split_off(&cert_split);
+        for state in self.unprovable_cert_state.values_mut() {
             state.waiting_blocks.retain(|block_ref| {
                 block_ref.round >= self.evicted_rounds[block_ref.authority as usize]
             });
@@ -2609,15 +2746,15 @@ impl DagStateInner {
                 missing.push(*parent);
             }
         }
-        // Bluestreak: the unprovable_certificate target is also a
-        // causal dependency that must be ancestor-closed.
-        if self.consensus_protocol.is_bluestreak() {
-            if let Some(cert_ref) = block.unprovable_certificate() {
+        // Bluestreak / SparseStarfishSpeed: the unprovable_certificate target
+        // is also a causal dependency that must be ancestor-closed.
+        if self.consensus_protocol.carries_unprovable_certificate() {
+            if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                 if cert_ref.round > 0
-                    && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
-                    && !missing.contains(cert_ref)
+                    && !self.clean_vertices[cert_ref.authority as usize].contains(&cert_ref)
+                    && !missing.contains(&cert_ref)
                 {
-                    missing.push(*cert_ref);
+                    missing.push(cert_ref);
                 }
             }
         }
@@ -2653,14 +2790,14 @@ impl DagStateInner {
                 }
             }
         }
-        if let Some(cert_ref) = block.unprovable_certificate() {
-            if let Some(state) = self.bluestreak_certificate_state.get_mut(cert_ref) {
+        if let Some((cert_ref, strong)) = block.unprovable_certificate() {
+            if let Some(state) = self.unprovable_cert_state.get_mut(&(cert_ref, strong)) {
                 state.waiting_blocks.remove(&block_ref);
             }
-            if let Some(children) = self.pending_clean_vertex_children.get_mut(cert_ref) {
+            if let Some(children) = self.pending_clean_vertex_children.get_mut(&cert_ref) {
                 children.remove(&block_ref);
                 if children.is_empty() {
-                    self.pending_clean_vertex_children.remove(cert_ref);
+                    self.pending_clean_vertex_children.remove(&cert_ref);
                 }
             }
         }
@@ -2727,9 +2864,14 @@ impl DagStateInner {
 
         *self.round_version.entry(reference.round()).or_insert(0) += 1;
         self.update_data_availability(&block);
-        self.update_starfish_speed_leader_hints(&block);
+        self.update_strong_vote_leader_hints(&block);
         self.update_inferred_clean_support(&block, committee, activated);
-        self.check_bluestreak_pre_clean(&block, committee, activated);
+        // Bluestreak and SparseStarfishSpeed: pre-clean check populates
+        // leader_vote_support (and SSFS's strong-vote tally), then either
+        // activates the block as clean or parks it on pending cert evidence.
+        // For SSFS this also gives `compute_unprovable_certificate` an O(1)
+        // precomputed strong-quorum lookup at block creation.
+        self.check_pre_clean(&block, committee, activated);
         if self.bls_verified_blocks[auth].remove(reference) {
             self.note_clean_vertex(*reference, committee, activated);
         }
@@ -2769,33 +2911,46 @@ impl DagStateInner {
         }
     }
 
-    fn has_bluestreak_certificate_evidence(
+    fn has_unprovable_certificate_evidence(
         &self,
         block_round: RoundNumber,
         leader_ref: &BlockReference,
+        strong: bool,
         committee: &Committee,
     ) -> bool {
         if leader_ref.round + 2 != block_round {
             return false;
         }
-        if self
-            .leader_vote_support
+        let direct_support = if strong {
+            &self.leader_strong_vote_support
+        } else {
+            &self.leader_vote_support
+        };
+        if direct_support
             .get(leader_ref)
             .is_some_and(|support| support.is_quorum(committee))
         {
             return true;
         }
-        self.bluestreak_certificate_state
-            .get(leader_ref)
+        self.unprovable_cert_state
+            .get(&(*leader_ref, strong))
             .is_some_and(|state| state.propagation_support.is_quorum(committee))
     }
 
+    /// Update `leader_vote_support` (every voter referencing a leader) and,
+    /// for SparseStarfishSpeed, `leader_strong_vote_support` (only voters with
+    /// `is_strong_vote()` true). Emits cert keys that just crossed quorum
+    /// into `ready_certificates` so callers can activate waiting blocks.
+    /// Bluestreak always emits `(leader, false)`; SSFS emits `(leader, false)`
+    /// plus `(leader, true)` when the strong-vote tally crosses quorum.
     fn record_leader_vote_support(
         &mut self,
         block: &VerifiedBlock,
         committee: &Committee,
-        ready_certificates: &mut BTreeSet<BlockReference>,
+        ready_certificates: &mut BTreeSet<CertKey>,
     ) {
+        let track_strong = self.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed;
+        let is_strong = track_strong && block.is_strong_vote();
         for parent in block.block_references() {
             if parent.round == 0 || parent.round + 1 != block.round() {
                 continue;
@@ -2803,26 +2958,36 @@ impl DagStateInner {
             if parent.authority != committee.elect_leader(parent.round) {
                 continue;
             }
+            if track_strong && is_strong {
+                let crossed = self
+                    .leader_strong_vote_support
+                    .entry(*parent)
+                    .or_default()
+                    .add(block.authority(), committee);
+                if crossed {
+                    ready_certificates.insert((*parent, true));
+                }
+            }
             if self
                 .leader_vote_support
                 .entry(*parent)
                 .or_default()
                 .add(block.authority(), committee)
             {
-                ready_certificates.insert(*parent);
+                ready_certificates.insert((*parent, false));
             }
         }
     }
 
-    fn activate_bluestreak_waiters(
+    fn activate_certificate_waiters(
         &mut self,
-        leader_ref: BlockReference,
+        cert_key: CertKey,
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
         let waiting_blocks = self
-            .bluestreak_certificate_state
-            .get_mut(&leader_ref)
+            .unprovable_cert_state
+            .get_mut(&cert_key)
             .map(|state| std::mem::take(&mut state.waiting_blocks))
             .unwrap_or_default();
         for block_ref in waiting_blocks {
@@ -2830,20 +2995,21 @@ impl DagStateInner {
         }
     }
 
-    /// Bluestreak pre-clean check: a block is pre-clean if it has no
-    /// `unprovable_certificate`, or its certificate is verified via the dirty
-    /// DAG. Pre-clean blocks then flow into the generic clean-DAG activation
-    /// pipeline above.
-    fn check_bluestreak_pre_clean(
+    /// Pre-clean check for dual-DAG protocols that carry an unprovable
+    /// certificate (Bluestreak + SparseStarfishSpeed): a block is pre-clean
+    /// if it has no certificate, or its certificate (of the declared flavor)
+    /// is verified via the dirty DAG. Pre-clean blocks flow into the generic
+    /// clean-DAG activation pipeline above.
+    fn check_pre_clean(
         &mut self,
         block: &VerifiedBlock,
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
-        if self.consensus_protocol != ConsensusProtocol::Bluestreak {
+        if !self.consensus_protocol.carries_unprovable_certificate() {
             return;
         }
-        let mut ready_certificates = BTreeSet::new();
+        let mut ready_certificates: BTreeSet<CertKey> = BTreeSet::new();
         self.record_leader_vote_support(block, committee, &mut ready_certificates);
 
         let block_ref = *block.reference();
@@ -2851,28 +3017,29 @@ impl DagStateInner {
             None => {
                 self.note_clean_vertex(block_ref, committee, activated);
             }
-            Some(leader_ref)
-                if self.has_bluestreak_certificate_evidence(
+            Some((leader_ref, strong))
+                if self.has_unprovable_certificate_evidence(
                     block_ref.round,
-                    leader_ref,
+                    &leader_ref,
+                    strong,
                     committee,
                 ) =>
             {
                 self.note_clean_vertex(block_ref, committee, activated);
             }
-            Some(leader_ref) => {
+            Some((leader_ref, strong)) => {
                 let state = self
-                    .bluestreak_certificate_state
-                    .entry(*leader_ref)
+                    .unprovable_cert_state
+                    .entry((leader_ref, strong))
                     .or_default();
                 state.waiting_blocks.insert(block_ref);
                 if state.propagation_support.add(block.authority(), committee) {
-                    ready_certificates.insert(*leader_ref);
+                    ready_certificates.insert((leader_ref, strong));
                 }
             }
         }
-        for leader_ref in ready_certificates {
-            self.activate_bluestreak_waiters(leader_ref, committee, activated);
+        for cert_key in ready_certificates {
+            self.activate_certificate_waiters(cert_key, committee, activated);
         }
     }
 
@@ -2912,12 +3079,12 @@ impl DagStateInner {
                     stack.push(*parent);
                 }
             }
-            if self.consensus_protocol.is_bluestreak() {
-                if let Some(cert_ref) = block.unprovable_certificate() {
+            if self.consensus_protocol.carries_unprovable_certificate() {
+                if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     if cert_ref.round > 0
-                        && !self.clean_vertices[cert_ref.authority as usize].contains(cert_ref)
+                        && !self.clean_vertices[cert_ref.authority as usize].contains(&cert_ref)
                     {
-                        stack.push(*cert_ref);
+                        stack.push(cert_ref);
                     }
                 }
             }
@@ -2928,9 +3095,8 @@ impl DagStateInner {
         }
     }
 
-    fn update_starfish_speed_leader_hints(&mut self, block: &VerifiedBlock) {
-        if self.consensus_protocol != ConsensusProtocol::StarfishSpeed
-            || !self.starfish_speed_adaptive_acknowledgments
+    fn update_strong_vote_leader_hints(&mut self, block: &VerifiedBlock) {
+        if !self.consensus_protocol.uses_strong_vote() || !self.strong_vote_adaptive_acknowledgments
         {
             return;
         }
@@ -2951,10 +3117,10 @@ impl DagStateInner {
             return;
         };
 
-        let leader_history = &mut self.starfish_speed_leader_hints[leader_ref.authority as usize];
+        let leader_history = &mut self.strong_vote_leader_hints[leader_ref.authority as usize];
         let entry = leader_history
             .entry(leader_ref.round)
-            .or_insert_with(|| StarfishSpeedLeaderRoundHints::new(self.committee_size));
+            .or_insert_with(|| StrongVoteLeaderRoundHints::new(self.committee_size));
         entry.update_vote(block.authority(), mask);
         while leader_history.len() > STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS {
             let Some(oldest_round) = leader_history.keys().next().copied() else {
@@ -3010,9 +3176,13 @@ impl DagStateInner {
             return Vec::new();
         };
         let current_round = round_number;
+        let only_prior_rounds = matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::SparseStarfishSpeed
+        );
         let (to_return, to_keep): (Vec<_>, Vec<_>) =
             pending_acknowledgment.drain(..).partition(|x| {
-                if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+                if only_prior_rounds {
                     x.round < current_round
                 } else {
                     x.round <= current_round
@@ -3030,6 +3200,21 @@ impl DagStateInner {
             return;
         }
         pending_acknowledgment.extend(block_refs);
+    }
+
+    /// Drop block references already sequenced by the local commit rule from
+    /// the pending queue. Implemented for any protocol that maintains
+    /// `pending_acknowledgment`; SparseStarfishSpeed calls this after each
+    /// subdag to avoid republishing already-committed refs.
+    fn purge_pending_acknowledgments(&mut self, sequenced: &[BlockReference]) {
+        let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
+            return;
+        };
+        if sequenced.is_empty() || pending_acknowledgment.is_empty() {
+            return;
+        }
+        let sequenced: AHashSet<_> = sequenced.iter().copied().collect();
+        pending_acknowledgment.retain(|r| !sequenced.contains(r));
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -3214,8 +3399,9 @@ mod tests {
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, ProvableShard,
-            RoundNumber, SailfishFields, SailfishNoVoteCert, VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
+            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            VerifiedBlock,
         },
     };
 
@@ -3279,7 +3465,7 @@ mod tests {
     fn open_test_dag_state_for_with_feature(
         consensus: &str,
         authority: AuthorityIndex,
-        enable_starfish_speed_adaptive_acknowledgments: bool,
+        enable_strong_vote_adaptive_acknowledgments: bool,
     ) -> DagState {
         let committee = Committee::new_for_benchmarks(4);
         let registry = Registry::new();
@@ -3296,7 +3482,7 @@ mod tests {
             "honest".to_string(),
             consensus.to_string(),
             &StorageBackend::Rocksdb,
-            enable_starfish_speed_adaptive_acknowledgments,
+            enable_strong_vote_adaptive_acknowledgments,
             DisseminationMode::ProtocolDefault,
         )
         .dag_state
@@ -3376,6 +3562,30 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_transaction_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new(
+            authority,
+            round,
+            vec![BlockReference::new_test(authority, round.saturating_sub(1))],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            vec![BaseTransaction::Share(Transaction::new(vec![
+                authority as u8,
+                round as u8,
+            ]))],
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
@@ -3383,6 +3593,26 @@ mod tests {
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishSpeed.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishBls.supports_acknowledgments());
+        assert!(ConsensusProtocol::SparseStarfishSpeed.supports_acknowledgments());
+    }
+
+    #[test]
+    fn sparse_starfish_speed_acknowledgments_wait_for_prior_rounds() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let previous_round_block = make_transaction_block(1, 4);
+        let previous_round_ref = *previous_round_block.reference();
+        let current_round_block = make_transaction_block(2, 5);
+        let current_round_ref = *current_round_block.reference();
+
+        dag_state.insert_general_block(previous_round_block, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(current_round_block, DataSource::BlockBundleStreaming);
+
+        let drained_at_current_round = dag_state.get_pending_acknowledgment(5);
+        assert_eq!(drained_at_current_round, vec![previous_round_ref]);
+        assert_eq!(
+            dag_state.get_pending_acknowledgment(6),
+            vec![current_round_ref]
+        );
     }
 
     #[test]
@@ -3689,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_only_uses_local_leader_history() {
+    fn strong_vote_adaptive_acknowledgments_only_uses_local_leader_history() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let own_leader_ref = BlockReference::new_test(0, 4);
         let other_leader_ref = BlockReference::new_test(1, 1);
@@ -3705,14 +3935,31 @@ mod tests {
             DataSource::BlockBundleStreaming,
         );
 
-        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
         assert!(excluded.contains(1));
         assert!(!excluded.contains(0));
         assert!(!excluded.contains(2));
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
+    fn strong_vote_adaptive_acknowledgments_apply_to_sparse_starfish_speed() {
+        let dag_state = open_test_dag_state_for_with_feature("sparse-starfish-speed", 0, true);
+        let own_leader_ref = BlockReference::new_test(0, 4);
+
+        dag_state.insert_general_blocks(
+            vec![
+                make_starfish_speed_vote_block(1, 5, own_leader_ref, AuthoritySet::singleton(1)),
+                make_starfish_speed_vote_block(2, 5, own_leader_ref, AuthoritySet::singleton(1)),
+            ],
+            DataSource::BlockBundleStreaming,
+        );
+
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
+        assert!(excluded.contains(1));
+    }
+
+    #[test]
+    fn strong_vote_adaptive_acknowledgments_keeps_only_recent_local_leader_rounds() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, true);
         let leader_rounds = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44];
         let mut blocks = Vec::new();
@@ -3732,13 +3979,13 @@ mod tests {
         }
         dag_state.insert_general_blocks(blocks, DataSource::BlockBundleStreaming);
 
-        let excluded = dag_state.starfish_speed_excluded_ack_authorities();
+        let excluded = dag_state.strong_vote_excluded_ack_authorities();
         assert!(!excluded.contains(1));
         assert!(excluded.contains(2));
     }
 
     #[test]
-    fn starfish_speed_adaptive_acknowledgments_can_be_disabled() {
+    fn strong_vote_adaptive_acknowledgments_can_be_disabled() {
         let dag_state = open_test_dag_state_for_with_feature("starfish-speed", 0, false);
         let own_leader_ref = BlockReference::new_test(0, 4);
         dag_state.insert_general_block(
@@ -3746,11 +3993,7 @@ mod tests {
             DataSource::BlockBundleStreaming,
         );
 
-        assert!(
-            dag_state
-                .starfish_speed_excluded_ack_authorities()
-                .is_empty()
-        );
+        assert!(dag_state.strong_vote_excluded_ack_authorities().is_empty());
     }
 
     #[test]
@@ -4178,7 +4421,7 @@ mod tests {
             None,
             None,
             None,
-            Some(leader_ref),
+            Some((leader_ref, false)),
         );
         compress.preserialize();
         let compress = Data::new(compress);
@@ -4217,7 +4460,7 @@ mod tests {
                     None,
                     None,
                     None,
-                    unprovable_certificate,
+                    unprovable_certificate.map(|r| (r, false)),
                 );
                 block.preserialize();
                 Data::new(block)
@@ -4251,6 +4494,223 @@ mod tests {
         assert!(dag_state.has_clean_vertex(&leader_ref));
         assert!(dag_state.has_clean_vertex(compress_a.reference()));
         assert!(dag_state.has_clean_vertex(compress_b.reference()));
+    }
+
+    /// Helper for SSFS dual-DAG tests: build a SparseStarfishSpeed block
+    /// with an explicit `strong_vote` mask and optional unprovable cert.
+    fn make_ssfs_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+        strong_vote: Option<AuthoritySet>,
+        cert: Option<(BlockReference, bool)>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_with_unprovable(
+            authority,
+            round,
+            parents,
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            strong_vote,
+            None,
+            None,
+            cert,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    /// Empty mask ⇒ `is_strong_vote()` returns true: voter has no
+    /// blame and contributes to `leader_strong_vote_support`.
+    fn ssfs_strong_mask() -> Option<AuthoritySet> {
+        Some(AuthoritySet::default())
+    }
+
+    /// Non-empty mask ⇒ standard voter (counts in `leader_vote_support`
+    /// only). Mask bit 3 is arbitrary.
+    fn ssfs_standard_mask() -> Option<AuthoritySet> {
+        let mut mask = AuthoritySet::default();
+        mask.insert(3);
+        Some(mask)
+    }
+
+    /// Build a 4-node round-1 frontier (one block per authority) referencing
+    /// genesis. Returns the four refs in authority order.
+    fn ssfs_round_one_frontier(dag_state: &DagState) -> [BlockReference; 4] {
+        let mut refs = [BlockReference::default(); 4];
+        for auth in 0..4 {
+            let block =
+                make_ssfs_block(auth, 1, vec![BlockReference::new_test(auth, 0)], None, None);
+            refs[auth as usize] = *block.reference();
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        }
+        refs
+    }
+
+    /// SparseStarfishSpeed: a block carrying a *standard* unprovable
+    /// certificate (strong=false) becomes clean once 2f+1 voters of the
+    /// referenced leader exist in the dirty DAG, regardless of whether
+    /// those voters carried `strong_vote == Some(empty)`.
+    #[test]
+    fn sparse_starfish_speed_standard_cert_clears_on_vote_quorum() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let r1 = ssfs_round_one_frontier(&dag_state);
+        // Round-1 leader is authority 1 (1 % 4 = 1).
+        let leader_ref = r1[1];
+
+        // Three voters at round 2 reference the leader and their own
+        // round-1 block. All standard (non-strong) — sufficient for
+        // `leader_vote_support` quorum but not for
+        // `leader_strong_vote_support`.
+        let voter_a = make_ssfs_block(0, 2, vec![r1[0], leader_ref], ssfs_standard_mask(), None);
+        let voter_b = make_ssfs_block(2, 2, vec![r1[2], leader_ref], ssfs_standard_mask(), None);
+        let voter_c = make_ssfs_block(3, 2, vec![r1[3], leader_ref], ssfs_standard_mask(), None);
+
+        // Round-3 block carrying a standard cert pointing at the leader.
+        // Round-2 elected leader is authority 2; cert-block at auth 0
+        // compresses its parents to `[own_prev_at_r2, leader_at_r2]`.
+        let leader_round_two_ref = *voter_b.reference();
+        let cert_block = make_ssfs_block(
+            0,
+            3,
+            vec![*voter_a.reference(), leader_round_two_ref],
+            ssfs_standard_mask(),
+            Some((leader_ref, false)),
+        );
+        let cert_block_ref = *cert_block.reference();
+
+        // Insert the cert block while only 1 voter (voter_a) exists —
+        // standard tally has only 1 supporter, not quorum.
+        dag_state.insert_general_block(voter_a, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(voter_b.clone(), DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(cert_block.clone(), DataSource::BlockBundleStreaming);
+        assert!(!dag_state.has_clean_vertex(&cert_block_ref));
+
+        // The third voter brings leader_vote_support to 2f+1 = 3 → cert
+        // is provable → parked block clears its cert dependency. Its
+        // causal parents (voter_a, voter_b) are already clean.
+        dag_state.insert_general_block(voter_c, DataSource::BlockBundleStreaming);
+
+        assert!(dag_state.has_clean_vertex(&cert_block_ref));
+    }
+
+    /// SparseStarfishSpeed: a block carrying a *strong* unprovable
+    /// certificate (strong=true) needs 2f+1 voters whose `strong_vote`
+    /// is `Some(empty)` (i.e. `is_strong_vote()` true). Standard voters
+    /// alone do NOT unblock the strong cert.
+    #[test]
+    fn sparse_starfish_speed_strong_cert_requires_strong_vote_quorum() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let r1 = ssfs_round_one_frontier(&dag_state);
+        let leader_ref = r1[1];
+
+        // Three voters at round 2 reference the leader, but ALL are
+        // standard (non-strong). leader_vote_support reaches quorum but
+        // leader_strong_vote_support does not.
+        let voter_a = make_ssfs_block(0, 2, vec![r1[0], leader_ref], ssfs_standard_mask(), None);
+        let voter_b = make_ssfs_block(2, 2, vec![r1[2], leader_ref], ssfs_standard_mask(), None);
+        let voter_c = make_ssfs_block(3, 2, vec![r1[3], leader_ref], ssfs_standard_mask(), None);
+
+        let leader_round_two_ref = *voter_b.reference();
+        let cert_block = make_ssfs_block(
+            0,
+            3,
+            vec![*voter_a.reference(), leader_round_two_ref],
+            ssfs_standard_mask(),
+            Some((leader_ref, true)),
+        );
+        let cert_block_ref = *cert_block.reference();
+
+        for block in [voter_a, voter_b, voter_c, cert_block.clone()] {
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        }
+
+        // Strong-cert quorum is not satisfied even though the standard
+        // tally has 3 supporters.
+        assert!(!dag_state.has_clean_vertex(&cert_block_ref));
+    }
+
+    /// SparseStarfishSpeed: a strong-flavor cert is provable once 2f+1
+    /// voters with `is_strong_vote()` exist.
+    #[test]
+    fn sparse_starfish_speed_strong_cert_clears_on_strong_vote_quorum() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let r1 = ssfs_round_one_frontier(&dag_state);
+        let leader_ref = r1[1];
+
+        // Three strong voters at round 2: strong_vote = Some(empty).
+        let voter_a = make_ssfs_block(0, 2, vec![r1[0], leader_ref], ssfs_strong_mask(), None);
+        let voter_b = make_ssfs_block(2, 2, vec![r1[2], leader_ref], ssfs_strong_mask(), None);
+        let voter_c = make_ssfs_block(3, 2, vec![r1[3], leader_ref], ssfs_strong_mask(), None);
+
+        let leader_round_two_ref = *voter_b.reference();
+        let cert_block = make_ssfs_block(
+            0,
+            3,
+            vec![*voter_a.reference(), leader_round_two_ref],
+            ssfs_strong_mask(),
+            Some((leader_ref, true)),
+        );
+        let cert_block_ref = *cert_block.reference();
+
+        for block in [voter_a, voter_b, voter_c, cert_block.clone()] {
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        }
+
+        assert!(dag_state.has_clean_vertex(&cert_block_ref));
+    }
+
+    /// SparseStarfishSpeed: f+1 propagation support unblocks a cert
+    /// flavor even when local dirty-DAG evidence is missing. With
+    /// committee size 4, f+1 = 2 supporters of the same `(leader, strong)`
+    /// claim are enough to flip the cert to "ready".
+    #[test]
+    fn sparse_starfish_speed_propagation_support_unblocks_cert() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let r1 = ssfs_round_one_frontier(&dag_state);
+        let leader_ref = r1[1];
+
+        // Only one voter is inserted — leader_vote_support stays below
+        // the 2f+1 quorum.
+        let voter_a = make_ssfs_block(0, 2, vec![r1[0], leader_ref], ssfs_standard_mask(), None);
+        let round_two_b =
+            make_ssfs_block(2, 2, vec![r1[2], leader_ref], ssfs_standard_mask(), None);
+
+        // Build TWO cert-carrying blocks (f+1 = 2 propagation) referencing
+        // the same `(leader, false)` cert. Each block is authored by a
+        // different authority (0 and 2), so propagation_support gains
+        // 2 distinct supporters.
+        let cert_block_a = make_ssfs_block(
+            0,
+            3,
+            vec![*voter_a.reference(), *round_two_b.reference()],
+            ssfs_standard_mask(),
+            Some((leader_ref, false)),
+        );
+        let cert_block_b = make_ssfs_block(
+            2,
+            3,
+            vec![*round_two_b.reference(), *voter_a.reference()],
+            ssfs_standard_mask(),
+            Some((leader_ref, false)),
+        );
+
+        for block in [
+            voter_a,
+            round_two_b,
+            cert_block_a.clone(),
+            cert_block_b.clone(),
+        ] {
+            dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        }
+
+        // f+1 = 2 distinct supporters (authorities 0 and 2) of the same
+        // (leader, false) cert → propagation_support quorum → cert ready.
+        assert!(dag_state.has_clean_vertex(cert_block_a.reference()));
+        assert!(dag_state.has_clean_vertex(cert_block_b.reference()));
     }
 
     #[test]

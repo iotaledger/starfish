@@ -8,7 +8,7 @@
 This repository is a benchmarking framework for DAG-based BFT
 consensus protocols in the partially synchronous model, implemented
 in Rust.
-It includes 8 protocol implementations with configurable
+It includes 9 protocol implementations with configurable
 dissemination strategies, storage backends, and Byzantine fault
 injection.
 
@@ -20,6 +20,7 @@ injection.
 | Mysticeti-BLS | `mysticeti-bls` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
 | Bluestreak | `bluestreak` | 4.5δ | Uncertified | Full | Pull | O(n²) | O(n³) | [paper](papers/bluestreak.pdf) |
 | Starfish-Speed | `starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | -- |
+| Sparse-Starfish-Speed | `sparse-starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | -- |
 | Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
 | Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |
 | Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
@@ -44,6 +45,13 @@ certificate tracking, similar in architecture to Mysticeti-BLS, but with cheaper
 acknowledgment references between validators.
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
+**Sparse-Starfish-Speed** (work in progress) combines Bluestreak's
+lean DAG with Starfish-Speed's strong-vote mechanism: only the round
+leader carries an explicit acknowledgment list, non-leader voters
+emit a constant-size strong-vote bitmask, and the linearizer derives
+global acks from `(leader.acks, voter.strong_vote)`. The block-header
+unprovable certificate is generalized with a strong/standard flavor
+tag (`Option<(BlockReference, bool)>`).
 **Sailfish++** is a certified DAG protocol using signature-free
 optimistic reliable broadcast (RBC) for vertex certification,
 achieving 2-round optimistic commit latency.
@@ -204,6 +212,25 @@ Grafana is available at `http://localhost:3001` (admin/admin).
 See [local-dryrun/README.md](./local-dryrun/README.md) for the
 full parameter reference.
 
+#### Local dryrun benchmark
+
+The following numbers are from a local Docker dryrun with 10 validators,
+1000 TPS, 60 seconds, default protocol dissemination modes, RocksDB,
+random transaction payloads, lz4 network compression, and WAN latency
+emulation enabled. Latencies and header sizes are p50 values.
+
+| Protocol | Block latency (ms) | Transaction latency (ms) | Header size (B) |
+|---|---:|---:|---:|
+| Mysticeti | 417.1 | 475.2 | 493 |
+| Mysticeti-BLS | 410.4 | 470.3 | 687 |
+| Bluestreak | 414.4 | 473.0 | 279 |
+| Starfish-Speed | 439.3 | 505.1 | 797 |
+| Sparse-Starfish-Speed | 425.2 | 486.8 | 393 |
+| Starfish | 569.0 | 621.6 | 673 |
+| Cordial Miners | 547.2 | 737.6 | 462 |
+| Sailfish++ | 557.1 | 909.2 | 490 |
+| Starfish-BLS | 662.5 | 710.5 | 903 |
+
 ### Distributed Testing using Orchestrator
 
 To run tests on a geo-distributed network, look at instructions in
@@ -212,4 +239,3 @@ To run tests on a geo-distributed network, look at instructions in
 ## License
 
 [Apache 2.0](LICENSE)
-

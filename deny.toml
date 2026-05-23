@@ -33,6 +33,10 @@ allow = [
   "LicenseRef-ring",
   "MIT",
   "MPL-2.0",
+  # Required by aws-lc-sys (transitive via aws-sdk-ec2 -> aws-config ->
+  # aws-smithy-http-client -> rustls -> aws-lc-rs). aws-lc-sys's
+  # license expression is "ISC AND (Apache-2.0 OR ISC) AND OpenSSL".
+  "OpenSSL",
   "Unicode-3.0",
   "Unicode-DFS-2016",
   "Zlib",

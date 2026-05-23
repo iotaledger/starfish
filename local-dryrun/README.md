@@ -33,8 +33,8 @@ NUM_NODES=10 DESIRED_TPS=1000 CONSENSUS=starfish \
 | `TEST_TIME` | `3000` | Experiment duration in seconds |
 
 Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
-`starfish-bls`, `cordial-miners`, `mysticeti`, `sailfish-pp`,
-`bluestreak`, `mysticeti-bls`.
+`sparse-starfish-speed`, `starfish-bls`, `cordial-miners`,
+`mysticeti`, `sailfish-pp`, `bluestreak`, `mysticeti-bls`.
 
 ### Protocol Tuning
 
