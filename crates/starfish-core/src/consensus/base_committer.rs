@@ -120,6 +120,16 @@ impl BaseCommitter {
         voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
+        if self
+            .dag_state
+            .consensus_protocol
+            .carries_unprovable_certificate()
+        {
+            return potential_certificate
+                .unprovable_certificate()
+                .is_some_and(|(certified_ref, _)| certified_ref == leader_ref);
+        }
+
         self.has_quorum_support(
             potential_certificate
                 .block_references()
@@ -181,7 +191,7 @@ impl BaseCommitter {
             })
             .collect();
 
-        if self.dag_state.consensus_protocol.is_sailfish_pp() {
+        if self.requires_clean_leader_for_commit() {
             certified_leader_blocks.retain(|l| self.dag_state.has_clean_vertex(l.reference()));
         }
 
@@ -195,21 +205,25 @@ impl BaseCommitter {
         // the anchor. Otherwise skip it.
         match certified_leader_blocks.pop() {
             Some(certified_leader_block) => {
-                // For StarfishSpeed: Opt if path passes through StrongQC, Std otherwise.
-                let metastate =
-                    if self.dag_state.consensus_protocol == ConsensusProtocol::StarfishSpeed {
-                        let has_strong = potential_certificates.iter().any(|cert| {
-                            self.is_certificate(cert, &certified_leader_block, voter_info)
-                                && self.carries_strong_qc(cert, &certified_leader_block, voter_info)
-                        });
-                        if has_strong {
-                            Some(CommitMetastate::Opt)
-                        } else {
-                            Some(CommitMetastate::Std)
-                        }
+                // For StarfishSpeed-family protocols: Opt if the path passes
+                // through strong support, Std otherwise. Indirect commits are
+                // final, so they must not retain Pending/None metastate.
+                let metastate = if matches!(
+                    self.dag_state.consensus_protocol,
+                    ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed
+                ) {
+                    let has_strong = potential_certificates.iter().any(|cert| {
+                        self.is_certificate(cert, &certified_leader_block, voter_info)
+                            && self.carries_strong_qc(cert, &certified_leader_block, voter_info)
+                    });
+                    if has_strong {
+                        Some(CommitMetastate::Opt)
                     } else {
-                        None
-                    };
+                        Some(CommitMetastate::Std)
+                    }
+                } else {
+                    None
+                };
                 LeaderStatus::Commit(certified_leader_block.clone(), metastate)
             }
             None => LeaderStatus::Skip(leader, leader_round),
@@ -321,10 +335,10 @@ impl BaseCommitter {
         )
     }
 
-    /// Check whether a single certifying-round block carries a StrongQC for the
-    /// leader. A block carries StrongQC if its includes contain >=2f+1
-    /// round-(r+1) blocks that both vote for the leader AND carry
-    /// a strong vote (`strong_vote == Some(empty)`).
+    /// Check whether a single certifying-round block carries strong support for
+    /// the leader. StarfishSpeed derives this from the certifying block's
+    /// included voter refs; SparseStarfishSpeed carries the derived bit in its
+    /// unprovable certificate.
     fn carries_strong_qc(
         &self,
         certifying_block: &Data<VerifiedBlock>,
@@ -332,6 +346,12 @@ impl BaseCommitter {
         voter_info: &VoterInfo,
     ) -> bool {
         let leader_ref = *leader_block.reference();
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed {
+            return certifying_block
+                .unprovable_certificate()
+                .is_some_and(|(certified_ref, strong)| certified_ref == leader_ref && strong);
+        }
+
         self.has_quorum_support(
             certifying_block
                 .block_references()
@@ -345,42 +365,25 @@ impl BaseCommitter {
         )
     }
 
-    /// Determine the commit metastate for StarfishSpeed direct decide.
-    /// Returns `None` for non-StarfishSpeed protocols. SparseStarfishSpeed
-    /// does not flow through this hook — it has its own dedicated commit
-    /// path in `UniversalCommitter::try_commit_sparse_starfish_speed` which
-    /// derives the metastate inline from the round-(r+2) unprovable certs.
+    /// Determine the commit metastate for StarfishSpeed-family protocols.
+    /// Returns `None` for protocols without optimistic/standard commit modes.
     /// - Opt: 2f+1 certifying blocks each carrying a StrongQC
-    /// - Std: strong blame quorum at the voting round
-    /// - Pending: neither strong vote nor strong blame quorum
+    /// - Std: SparseStarfishSpeed certificate quorum without strong quorum, or
+    ///   StarfishSpeed strong blame quorum at the voting round
+    /// - Pending: StarfishSpeed has neither strong vote nor strong blame quorum
     fn determine_metastate(
         &self,
         leader_block: &Data<VerifiedBlock>,
         voting_round: RoundNumber,
         voter_info: &VoterInfo,
     ) -> Option<CommitMetastate> {
-        if self.dag_state.consensus_protocol != ConsensusProtocol::StarfishSpeed {
+        if !matches!(
+            self.dag_state.consensus_protocol,
+            ConsensusProtocol::StarfishSpeed | ConsensusProtocol::SparseStarfishSpeed
+        ) {
             return None;
         }
 
-        // Check for strong blame quorum at round r+1.
-        let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
-        let leader_ref = *leader_block.reference();
-
-        let has_strong_blame_quorum = self.has_quorum_support(
-            voting_blocks
-                .iter()
-                .filter(|b| {
-                    voter_info.voters.contains(&(leader_ref, *b.reference())) && b.is_strong_blame()
-                })
-                .map(|b| b.authority()),
-        );
-        if has_strong_blame_quorum {
-            return Some(CommitMetastate::Std);
-        }
-
-        // Check for quorum of StrongQCs at round r+2: count certifying-round blocks
-        // that each carry a StrongQC, and check if that count reaches 2f+1.
         let leader_round = voting_round - 1;
         let wave = self.wave_number(leader_round);
         let certifying_round = self.certifying_round(wave);
@@ -395,7 +398,32 @@ impl BaseCommitter {
             return Some(CommitMetastate::Opt);
         }
 
+        if self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed {
+            return Some(CommitMetastate::Std);
+        }
+
+        let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
+        let leader_ref = *leader_block.reference();
+        if self.has_quorum_support(
+            voting_blocks
+                .iter()
+                .filter(|b| {
+                    voter_info.voters.contains(&(leader_ref, *b.reference())) && b.is_strong_blame()
+                })
+                .map(|b| b.authority()),
+        ) {
+            return Some(CommitMetastate::Std);
+        }
+
         Some(CommitMetastate::Pending)
+    }
+
+    fn requires_clean_leader_for_commit(&self) -> bool {
+        self.dag_state.consensus_protocol.is_sailfish_pp()
+            || self
+                .dag_state
+                .consensus_protocol
+                .carries_unprovable_certificate()
     }
 
     /// Apply the indirect decision rule to the specified leader
@@ -466,7 +494,7 @@ impl BaseCommitter {
             .filter(|l| {
                 if self.dag_state.consensus_protocol.uses_bls() {
                     self.enough_certified_leader_support(certifying_round, l.reference())
-                } else if self.dag_state.consensus_protocol.is_sailfish_pp() {
+                } else if self.requires_clean_leader_for_commit() {
                     self.dag_state.has_clean_vertex(l.reference())
                         && self.enough_leader_support(certifying_round, l, voter_info)
                 } else {

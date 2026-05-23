@@ -43,11 +43,6 @@ impl UniversalCommitter {
         if self.dag_state.consensus_protocol.is_sailfish_pp() {
             return self.try_commit_sailfish(last_decided);
         }
-        if self.dag_state.consensus_protocol.is_bluestreak()
-            || self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed
-        {
-            return self.try_commit_compressed_refs(last_decided);
-        }
 
         let highest_known_round = self.dag_state.highest_round();
         let last_decided_round = last_decided.round();
@@ -173,292 +168,6 @@ impl UniversalCommitter {
                 }
             })
             .collect()
-    }
-
-    /// Commit path shared by Bluestreak and SparseStarfishSpeed (both use
-    /// compressed references and an on-wire `unprovable_certificate` for
-    /// direct commit). The two protocols differ only in two narrow points
-    /// handled inline: (a) Bluestreak filters the chain walk-back by
-    /// `has_clean_vertex` (which it tracks via dual-DAG support);
-    /// SparseStarfishSpeed has no such tracking. (b) SparseStarfishSpeed
-    /// also derives a `CommitMetastate` from the cert flavors at the
-    /// certifying round; Bluestreak always reports `None`.
-    fn try_commit_compressed_refs(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
-        let protocol = self.dag_state.consensus_protocol;
-        let is_bluestreak = protocol.is_bluestreak();
-        let protocol_name = if is_bluestreak {
-            "Bluestreak"
-        } else {
-            "SparseStarfishSpeed"
-        };
-
-        let highest_known_round = self.dag_state.highest_round();
-        let last_decided_round = last_decided.round();
-        let highest_anchor = highest_known_round.saturating_sub(2);
-        let mut committed = Vec::new();
-        let mut newly_committed = AHashSet::new();
-
-        for round in last_decided_round + 1..=highest_anchor {
-            let leader = self.committee.elect_leader(round);
-
-            // Fast path: reuse finalized decisions from previous calls.
-            // Only re-emit Commits; cached Skips still short-circuit evaluation
-            // but are not pushed to `committed` (matching the original guard
-            // behavior that never re-emitted Skips).
-            let key = (leader, round);
-            if let Some(cached) = self.decided.get(&key) {
-                if cached.is_final() {
-                    if let LeaderStatus::Commit(..) = cached {
-                        committed.push(cached.clone());
-                        newly_committed.insert(key);
-                    }
-                    continue;
-                }
-            }
-
-            if self.check_direct_skip(leader, round) {
-                if !self.decided.contains_key(&key) {
-                    let status = LeaderStatus::Skip(leader, round);
-                    self.decided.insert(key, status.clone());
-                    if self.metrics_emitted.insert(key) {
-                        tracing::debug!("Decided {status}");
-                        self.update_metrics(&status, true);
-                    }
-                    committed.push(status);
-                }
-                continue;
-            }
-
-            let direct = if is_bluestreak {
-                self.try_direct_commit_bluestreak(leader, round)
-                    .map(|b| (b, None))
-            } else {
-                self.try_direct_commit_sparse_starfish_speed(leader, round)
-            };
-            let Some((anchor, anchor_metastate)) = direct else {
-                continue;
-            };
-
-            // SSFS: a Pending direct decision is *not* final. Don't emit
-            // it; don't run the chain walk-back from a Pending anchor.
-            // A future anchor at round >= round+2 will pick this slot
-            // back up via the indirect rule below.
-            if matches!(anchor_metastate, Some(CommitMetastate::Pending)) {
-                continue;
-            }
-
-            // Walk back through prior rounds. Bluestreak additionally
-            // filters by `has_clean_vertex` to skip leaders that the
-            // dual-DAG machinery has not certified.
-            let anchor_for_link = anchor.clone();
-            let mut chain = vec![(anchor.clone(), anchor_metastate)];
-            let mut current = anchor;
-            for prev_round in (last_decided_round + 1..current.round()).rev() {
-                let prev_leader = self.committee.elect_leader(prev_round);
-                let prev_key = (prev_leader, prev_round);
-                if newly_committed.contains(&prev_key) {
-                    continue;
-                }
-
-                let mut linked_leaders: Vec<_> = self
-                    .dag_state
-                    .get_blocks_at_authority_round(prev_leader, prev_round)
-                    .into_iter()
-                    .filter(|block| self.dag_state.has_clean_vertex(block.reference()))
-                    .filter(|block| self.dag_state.linked(&current, block))
-                    .collect();
-
-                if linked_leaders.len() > 1 {
-                    panic!(
-                        "[{protocol_name}] More than one linked leader for {}",
-                        format_authority_round(prev_leader, prev_round)
-                    );
-                }
-
-                if let Some(prev) = linked_leaders.pop() {
-                    // Indirect metastate derivation (SSFS): mirrors
-                    // `BaseCommitter::decide_leader_from_anchor` for
-                    // StarfishSpeed, swapping the explicit-certificate
-                    // check for the on-wire `unprovable_certificate`.
-                    // Among cert blocks at `prev_round + 2` reachable
-                    // from the anchor, any block whose cert targets
-                    // `prev` with `strong=true` yields Opt; any cert
-                    // targeting `prev` (mixed) yields Std. If no such
-                    // cert is in the anchor's closure (e.g. anchor's
-                    // immediate predecessor, whose certs live one round
-                    // above anchor), skip this prev_round — a future
-                    // anchor at round >= prev_round + 2 will resolve it.
-                    // Bluestreak keeps the None metastate it has always
-                    // used.
-                    let prev_metastate = if is_bluestreak {
-                        Some(None)
-                    } else {
-                        let prev_ref = *prev.reference();
-                        let cert_round = prev.round() + 2;
-                        let reachable = self
-                            .dag_state
-                            .reachable_at_round(&anchor_for_link, cert_round);
-                        let mut meta: Option<CommitMetastate> = None;
-                        for block in self.dag_state.get_blocks_by_round_cached(cert_round).iter() {
-                            if !reachable.contains(block.reference()) {
-                                continue;
-                            }
-                            let Some((cref, strong)) = block.unprovable_certificate() else {
-                                continue;
-                            };
-                            if cref != prev_ref {
-                                continue;
-                            }
-                            if strong {
-                                meta = Some(CommitMetastate::Opt);
-                                break;
-                            }
-                            meta = Some(CommitMetastate::Std);
-                        }
-                        meta.map(Some)
-                    };
-                    if let Some(metastate) = prev_metastate {
-                        current = prev.clone();
-                        chain.push((prev, metastate));
-                    }
-                }
-            }
-
-            chain.reverse();
-            for (leader_block, metastate) in chain {
-                let key = (leader_block.authority(), leader_block.round());
-                if !newly_committed.insert(key) {
-                    continue;
-                }
-                let direct_decide = key.1 == round;
-                let status = LeaderStatus::Commit(leader_block, metastate);
-                self.decided.insert(key, status.clone());
-                if self.metrics_emitted.insert(key) {
-                    tracing::debug!("Decided {status}");
-                    self.update_metrics(&status, direct_decide);
-                }
-                committed.push(status);
-            }
-        }
-
-        committed.sort();
-        committed
-    }
-
-    fn try_direct_commit_bluestreak(
-        &self,
-        leader: AuthorityIndex,
-        leader_round: RoundNumber,
-    ) -> Option<crate::data::Data<crate::types::VerifiedBlock>> {
-        let cert_round = leader_round + 2;
-        let leader_blocks = self
-            .dag_state
-            .get_blocks_at_authority_round(leader, leader_round);
-
-        for leader_block in leader_blocks {
-            if !self.dag_state.has_clean_vertex(leader_block.reference()) {
-                continue;
-            }
-            let leader_ref = *leader_block.reference();
-            let cert_blocks = self.dag_state.get_blocks_by_round_cached(cert_round);
-            let mut supporters = StakeAggregator::<QuorumThreshold>::new();
-            for block in cert_blocks.iter() {
-                if block.unprovable_certificate().map(|(r, _)| r) == Some(leader_ref)
-                    && supporters.add(block.authority(), &self.committee)
-                {
-                    return Some(leader_block);
-                }
-            }
-        }
-
-        None
-    }
-
-    /// SparseStarfishSpeed direct-commit: a leader at round r is committed
-    /// when 2f+1 round-(r+2) blocks each carry an `unprovable_certificate`
-    /// pointing to that leader. Returns the (leader_block, metastate) pair.
-    /// Metastate:
-    ///   - Opt    iff 2f+1 of those certs carry `strong = true`
-    ///   - Std    iff 2f+1 mixed AND 2f+1 round-(r+1) voters of the leader are
-    ///     `is_strong_blame()`
-    ///   - Pending otherwise (sequencing blocks until indirect rule resolves)
-    fn try_direct_commit_sparse_starfish_speed(
-        &self,
-        leader: AuthorityIndex,
-        leader_round: RoundNumber,
-    ) -> Option<(
-        crate::data::Data<crate::types::VerifiedBlock>,
-        Option<CommitMetastate>,
-    )> {
-        let cert_round = leader_round + 2;
-        let voting_round = leader_round + 1;
-        let leader_blocks = self
-            .dag_state
-            .get_blocks_at_authority_round(leader, leader_round);
-
-        let cert_blocks = self.dag_state.get_blocks_by_round_cached(cert_round);
-
-        for leader_block in leader_blocks {
-            if !self.dag_state.has_clean_vertex(leader_block.reference()) {
-                continue;
-            }
-            let leader_ref = *leader_block.reference();
-            let mut all_supporters = StakeAggregator::<QuorumThreshold>::new();
-            let mut strong_supporters = StakeAggregator::<QuorumThreshold>::new();
-            for block in cert_blocks.iter() {
-                let Some((cref, strong)) = block.unprovable_certificate() else {
-                    continue;
-                };
-                if cref != leader_ref {
-                    continue;
-                }
-                all_supporters.add(block.authority(), &self.committee);
-                if strong {
-                    strong_supporters.add(block.authority(), &self.committee);
-                }
-            }
-            if !all_supporters.is_quorum(&self.committee) {
-                continue;
-            }
-
-            let metastate = if strong_supporters.is_quorum(&self.committee) {
-                Some(CommitMetastate::Opt)
-            } else {
-                // Mixed certs reached quorum. Check strong-blame at r+1.
-                let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
-                let mut strong_blamers = StakeAggregator::<QuorumThreshold>::new();
-                for vb in voting_blocks.iter() {
-                    let votes_for_leader = vb.block_references().contains(&leader_ref);
-                    if votes_for_leader && vb.is_strong_blame() {
-                        strong_blamers.add(vb.authority(), &self.committee);
-                    }
-                }
-                if strong_blamers.is_quorum(&self.committee) {
-                    Some(CommitMetastate::Std)
-                } else {
-                    Some(CommitMetastate::Pending)
-                }
-            };
-            return Some((leader_block, metastate));
-        }
-
-        None
-    }
-
-    fn check_direct_skip(&self, leader: AuthorityIndex, round: RoundNumber) -> bool {
-        let vote_round = round + 1;
-        let vote_blocks = self.dag_state.get_blocks_by_round_cached(vote_round);
-        let mut non_voters = StakeAggregator::<QuorumThreshold>::new();
-        for block in vote_blocks.iter() {
-            let votes_for = block
-                .block_references()
-                .iter()
-                .any(|r| r.round == round && r.authority == leader);
-            if !votes_for && non_voters.add(block.authority(), &self.committee) {
-                return true;
-            }
-        }
-        false
     }
 
     fn try_commit_sailfish(&mut self, last_decided: BlockReference) -> Vec<LeaderStatus> {
@@ -952,12 +661,12 @@ mod tests {
     // n=4 → f=1 → quorum = 3. For a candidate leader L at round r, the
     // commit decision at round r+2 is one of:
     //
-    //   Opt     iff 2f+1 round-(r+2) blocks carry Some((L.ref, true))
-    //   Std     iff 2f+1 mixed certs at r+2 AND 2f+1 round-(r+1)
-    //               voters of L are `is_strong_blame()`
-    //   Pending iff 2f+1 mixed certs at r+2 but no strong-blame quorum
+    //   Opt     iff 2f+1 round-(r+2) clean blocks carry Some((L.ref, true))
+    //   Std     iff 2f+1 certs at r+2, no strong-cert quorum, AND 2f+1
+    //               round-(r+1) voters of L are `is_strong_blame()`
+    //   Pending iff 2f+1 certs at r+2 without strong-cert or strong-blame quorum
     //   Skip    iff 2f+1 round-(r+1) blocks fail to reference L
-    //   None    iff < 2f+1 certs of any flavor at r+2
+    //   None    iff no direct/indirect rule can finalize the slot yet
     //
     // We exercise each branch by fabricating round-r+1 voters and
     // round-r+2 certifiers directly (the `insert_general_block` path does
@@ -1017,8 +726,17 @@ mod tests {
         committee: &Committee,
         leader_round: RoundNumber,
     ) -> (AuthorityIndex, BlockReference) {
+        insert_leader_with_parents(dag_state, committee, leader_round, vec![])
+    }
+
+    fn insert_leader_with_parents(
+        dag_state: &DagState,
+        committee: &Committee,
+        leader_round: RoundNumber,
+        parents: Vec<BlockReference>,
+    ) -> (AuthorityIndex, BlockReference) {
         let leader_authority = committee.elect_leader(leader_round);
-        let leader = ssfs_block(leader_authority, leader_round, vec![], vec![], None, None);
+        let leader = ssfs_block(leader_authority, leader_round, parents, vec![], None, None);
         let leader_ref = *leader.reference();
         dag_state.insert_general_block(leader, DataSource::BlockBundleStreaming);
         (leader_authority, leader_ref)
@@ -1031,7 +749,7 @@ mod tests {
         cert_round: RoundNumber,
         leader_ref: BlockReference,
         strong: bool,
-    ) {
+    ) -> BlockReference {
         let cert = ssfs_block(
             authority,
             cert_round,
@@ -1040,7 +758,9 @@ mod tests {
             None,
             Some((leader_ref, strong)),
         );
+        let cert_ref = *cert.reference();
         dag_state.insert_general_block(cert, DataSource::BlockBundleStreaming);
+        cert_ref
     }
 
     /// Insert one voter at the voting round, referencing the leader,
@@ -1078,310 +798,259 @@ mod tests {
     #[test]
     fn ssfs_direct_commit_opt_with_strong_cert_quorum() {
         let (committee, dag_state, metrics) = ssfs_setup();
-        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 1);
 
-        // 3 strong certs at the certifying round (cert.round + 2 == 5).
         for auth in [0u16, 1, 2] {
-            insert_cert(&dag_state, auth, 5, leader_ref, true);
+            insert_voter(
+                &dag_state,
+                auth,
+                2,
+                leader_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
         }
 
-        let committer = build_committer(committee, dag_state, metrics);
-        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
-
-        let (anchor, metastate) =
-            result.expect("3 strong certs constitute a quorum — leader must commit");
-        assert_eq!(*anchor.reference(), leader_ref);
-        assert_eq!(
-            metastate,
-            Some(CommitMetastate::Opt),
-            "strong-cert quorum must yield Opt"
-        );
-    }
-
-    // ── 2. Std (mixed certs + strong-blame quorum at the voting round) ─
-    #[test]
-    fn ssfs_direct_commit_std_with_mixed_certs_and_strong_blame_quorum() {
-        let (committee, dag_state, metrics) = ssfs_setup();
-        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
-
-        // Mixed cert quorum: 1 strong + 2 standard at round 5.
-        insert_cert(&dag_state, 0, 5, leader_ref, true);
-        insert_cert(&dag_state, 1, 5, leader_ref, false);
-        insert_cert(&dag_state, 2, 5, leader_ref, false);
-
-        // 3 strong-blame voters at the voting round 4 (they reference L
-        // but emit a non-empty mask — the `is_strong_blame()` quorum).
-        let mask = blame_mask(leader_auth);
         for auth in [0u16, 1, 2] {
-            insert_voter(&dag_state, auth, 4, leader_ref, Some(mask));
+            insert_cert(&dag_state, auth, 3, leader_ref, true);
         }
 
-        let committer = build_committer(committee, dag_state, metrics);
-        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
 
-        let (_anchor, metastate) =
-            result.expect("3 mixed certs constitute a cert quorum — leader must commit");
-        assert_eq!(
-            metastate,
-            Some(CommitMetastate::Std),
-            "mixed cert quorum + 2f+1 strong-blames must yield Std"
-        );
+        let status = committed
+            .iter()
+            .find(|status| status.authority() == leader_auth && status.round() == 1)
+            .expect("leader must commit with a strong-cert quorum");
+        match status {
+            LeaderStatus::Commit(block, metastate) => {
+                assert_eq!(*block.reference(), leader_ref);
+                assert_eq!(*metastate, Some(CommitMetastate::Opt));
+            }
+            other => panic!("expected Commit(Opt), got {other:?}"),
+        }
     }
 
-    // ── 3. Pending (mixed certs but no strong-blame quorum) ───────────
+    // ── 2. Std (standard certs + strong-blame quorum) ────────────────
     #[test]
-    fn ssfs_direct_commit_pending_without_strong_blame_quorum() {
+    fn ssfs_direct_commit_std_with_standard_certs_and_strong_blame_quorum() {
         let (committee, dag_state, metrics) = ssfs_setup();
-        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 1);
 
-        // Same mixed cert quorum as the Std test.
-        insert_cert(&dag_state, 0, 5, leader_ref, true);
-        insert_cert(&dag_state, 1, 5, leader_ref, false);
-        insert_cert(&dag_state, 2, 5, leader_ref, false);
-
-        // Only ONE strong-blame voter at the voting round (below quorum).
-        // Two clean voters keep the strong-blame count under 2f+1.
         let mask = blame_mask(leader_auth);
-        insert_voter(&dag_state, 0, 4, leader_ref, Some(mask));
+        for auth in [0u16, 1, 2] {
+            insert_voter(&dag_state, auth, 2, leader_ref, Some(mask));
+        }
+
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 3, leader_ref, false);
+        }
+
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+
+        let status = committed
+            .iter()
+            .find(|status| status.authority() == leader_auth && status.round() == 1)
+            .expect("leader must commit with standard certs and strong blame");
+        match status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(*metastate, Some(CommitMetastate::Std));
+            }
+            other => panic!("expected Commit(Std), got {other:?}"),
+        }
+    }
+
+    // ── 3. Std (standard certs without strong-blame quorum) ──────────
+    #[test]
+    fn ssfs_direct_commit_std_without_strong_blame_quorum() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 1);
+
+        let mask = blame_mask(leader_auth);
+        insert_voter(&dag_state, 0, 2, leader_ref, Some(mask));
         insert_voter(
             &dag_state,
             1,
-            4,
+            2,
             leader_ref,
             Some(crate::types::AuthoritySet::default()),
         );
         insert_voter(
             &dag_state,
             2,
-            4,
+            2,
             leader_ref,
             Some(crate::types::AuthoritySet::default()),
         );
 
-        let committer = build_committer(committee, dag_state, metrics);
-        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
+        for auth in [0u16, 1, 2] {
+            insert_cert(&dag_state, auth, 3, leader_ref, false);
+        }
 
-        let (_anchor, metastate) =
-            result.expect("3 mixed certs still commit the leader (kind pending)");
-        assert_eq!(
-            metastate,
-            Some(CommitMetastate::Pending),
-            "mixed quorum without 2f+1 strong-blames must defer to indirect rule"
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+        let status = committed
+            .iter()
+            .find(|status| status.authority() == leader_auth && status.round() == 1)
+            .expect("leader must commit standard once a standard-cert quorum exists");
+        match status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(*metastate, Some(CommitMetastate::Std));
+            }
+            other => panic!("expected Commit(Std), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssfs_indirect_commit_opt_keeps_metastate() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (old_auth, old_ref) = insert_leader(&dag_state, &committee, 1);
+
+        for auth in [0u16, 1, 2] {
+            insert_voter(
+                &dag_state,
+                auth,
+                2,
+                old_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+
+        let cert_refs = vec![insert_cert(&dag_state, 0, 3, old_ref, true)];
+
+        let (_anchor_auth, anchor_ref) =
+            insert_leader_with_parents(&dag_state, &committee, 4, cert_refs);
+        for auth in [0u16, 1, 2] {
+            insert_voter(
+                &dag_state,
+                auth,
+                5,
+                anchor_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+            insert_cert(&dag_state, auth, 6, anchor_ref, true);
+        }
+
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+
+        let old_status = committed
+            .iter()
+            .find(|status| status.authority() == old_auth && status.round() == 1)
+            .expect("old leader should commit indirectly through anchor");
+        assert!(
+            committed
+                .iter()
+                .all(|status| !matches!(status, LeaderStatus::Commit(_, None))),
+            "SSFS commits must always carry Opt/Std metastate"
         );
+        match old_status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(*metastate, Some(CommitMetastate::Opt));
+            }
+            other => panic!("expected indirect Commit(Opt), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssfs_indirect_commit_std_keeps_metastate() {
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (old_auth, old_ref) = insert_leader(&dag_state, &committee, 1);
+
+        for auth in [0u16, 1, 2] {
+            insert_voter(
+                &dag_state,
+                auth,
+                2,
+                old_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+
+        let cert_refs = vec![insert_cert(&dag_state, 0, 3, old_ref, false)];
+
+        let (_anchor_auth, anchor_ref) =
+            insert_leader_with_parents(&dag_state, &committee, 4, cert_refs);
+        for auth in [0u16, 1, 2] {
+            insert_voter(
+                &dag_state,
+                auth,
+                5,
+                anchor_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+            insert_cert(&dag_state, auth, 6, anchor_ref, true);
+        }
+
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
+
+        let old_status = committed
+            .iter()
+            .find(|status| status.authority() == old_auth && status.round() == 1)
+            .expect("old leader should commit indirectly through anchor");
+        assert!(
+            committed
+                .iter()
+                .all(|status| !matches!(status, LeaderStatus::Commit(_, None))),
+            "SSFS commits must always carry Opt/Std metastate"
+        );
+        match old_status {
+            LeaderStatus::Commit(_, metastate) => {
+                assert_eq!(*metastate, Some(CommitMetastate::Std));
+            }
+            other => panic!("expected indirect Commit(Std), got {other:?}"),
+        }
     }
 
     // ── 4. No direct commit when cert quorum is missing ───────────────
     #[test]
     fn ssfs_direct_commit_none_below_cert_quorum() {
         let (committee, dag_state, metrics) = ssfs_setup();
-        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 3);
+        let (leader_auth, leader_ref) = insert_leader(&dag_state, &committee, 1);
 
-        // Only 2 certs (any flavor) — short of the 2f+1 = 3 quorum.
-        insert_cert(&dag_state, 0, 5, leader_ref, true);
-        insert_cert(&dag_state, 1, 5, leader_ref, false);
+        for auth in [0u16, 1, 2] {
+            insert_voter(
+                &dag_state,
+                auth,
+                2,
+                leader_ref,
+                Some(crate::types::AuthoritySet::default()),
+            );
+        }
+        insert_cert(&dag_state, 0, 3, leader_ref, true);
+        insert_cert(&dag_state, 1, 3, leader_ref, true);
 
-        let committer = build_committer(committee, dag_state, metrics);
-        let result = committer.try_direct_commit_sparse_starfish_speed(leader_auth, 3);
-
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
         assert!(
-            result.is_none(),
+            committed
+                .iter()
+                .all(|status| status.authority() != leader_auth || status.round() != 1),
             "< 2f+1 certs of any flavor must NOT trigger direct commit"
         );
-    }
-
-    // ────────────────────────────────────────────────────────────────────
-    // ── 6/7/8. (Removed) Opt voter-of-L_r ack-derivation tests ─────────
-    // The Opt path no longer derives acks from round-(r+1) voters of L_r.
-    // It now matches Bluestreak's ancestor-closure semantics; acks are
-    // sequenced by subsequent Std-path BFS commits via the derived
-    // `effective_acknowledgments` rule in the linearizer. The
-    // `build_derivation_dag` helper that supported these tests was
-    // removed alongside them.
-
-    // ── 9 & 10. Indirect (chain-walk-back) metastate derivation ───────
-    //
-    // In `try_commit_compressed_refs`, when a newer leader `L_anchor`
-    // direct-commits and the chain walk-back discovers an older leader
-    // `L_old` that has not yet been decided, the chain walk pushes
-    // `L_old` to the committed sequence with a metastate derived from
-    // `L_old`'s OWN certifying-round certs — not `None`. This means an
-    // older leader can pick up `Opt` (or `Std`) from the indirect path
-    // and the linearizer will run the per-`c` ack derivation for it.
-    //
-    // Direct iteration order is ascending, so in a fresh `try_commit`
-    // call `L_old`'s round is processed before `L_anchor`'s and would
-    // normally direct-commit if certs exist. To exercise the chain-walk
-    // derivation in isolation, we pre-populate `self.decided` with a
-    // `Skip` for `L_old` — the cache check at the top of the loop
-    // short-circuits the direct path, then `L_anchor`'s chain walk
-    // discovers `L_old` (still linked, not yet in `newly_committed`)
-    // and overrides the cached `Skip` with `Commit(L_old, derived)`.
-
-    /// Build a 2-leader chain: L_old at round 1 + L_anchor at round 3,
-    /// each with its own cert quorum at its certifying_round, plus a
-    /// causal linkage from L_anchor to L_old via a round-2 block. Used
-    /// for both indirect-Opt and indirect-Std tests.
-    fn build_indirect_chain_dag() -> (
-        Arc<Committee>,
-        DagState,
-        Arc<crate::metrics::Metrics>,
-        BlockReference, // L_old.ref
-        BlockReference, // L_anchor.ref
-    ) {
-        let (committee, dag_state, metrics) = ssfs_setup();
-        let genesis: Vec<_> = (0u16..4)
-            .map(|auth| {
-                *dag_state
-                    .get_blocks_at_authority_round(auth, 0)
-                    .first()
-                    .expect("genesis block")
-                    .reference()
-            })
-            .collect();
-
-        // L_old at round 1 — authority 1 (= elect_leader(1)).
-        let l_old = ssfs_block(1, 1, vec![genesis[1]], vec![], None, None);
-        let l_old_ref = *l_old.reference();
-        dag_state.insert_general_block(l_old, DataSource::BlockBundleStreaming);
-
-        // Round-2 bridge block (auth 0) that references L_old. This
-        // creates a causal path so L_anchor (at round 3, with this
-        // round-2 block among its parents) reaches L_old via `linked`.
-        let bridge = ssfs_block(0, 2, vec![l_old_ref], vec![], None, None);
-        let bridge_ref = *bridge.reference();
-        dag_state.insert_general_block(bridge, DataSource::BlockBundleStreaming);
-
-        // L_anchor at round 3 — authority 3 (= elect_leader(3)). Refs
-        // include the bridge so linkage to L_old is provable.
-        let l_anchor = ssfs_block(3, 3, vec![bridge_ref], vec![], None, None);
-        let l_anchor_ref = *l_anchor.reference();
-        dag_state.insert_general_block(l_anchor, DataSource::BlockBundleStreaming);
-
-        (committee, dag_state, metrics, l_old_ref, l_anchor_ref)
-    }
-
-    // ── 9. Indirect Opt: chain walk-back derives Opt for L_old ────────
-    #[test]
-    fn ssfs_indirect_chain_walk_derives_opt_for_older_leader() {
-        let (committee, dag_state, metrics, l_old_ref, l_anchor_ref) = build_indirect_chain_dag();
-
-        // L_old (round 1) gets a strong-cert quorum at its certifying
-        // round (cert.round + 2 == 3) — so try_direct_commit returns Opt.
-        for auth in [0u16, 1, 2] {
-            insert_cert(&dag_state, auth, 3, l_old_ref, true);
-        }
-
-        // L_anchor (round 3) gets its own strong-cert quorum at round 5.
-        for auth in [0u16, 1, 2] {
-            insert_cert(&dag_state, auth, 5, l_anchor_ref, true);
-        }
-
-        let mut committer = build_committer(committee, dag_state, metrics);
-
-        // Pre-poison the decided cache: mark L_old as Skip so the
-        // direct-iteration short-circuits at round 1; only the chain
-        // walk from L_anchor will reach it.
-        committer.decided.insert((1, 1), LeaderStatus::Skip(1, 1));
-
-        let committed = committer.try_commit(BlockReference::new_test(0, 0));
-
-        let l_old_status = committed
-            .iter()
-            .find(|s| s.round() == 1 && s.authority() == 1)
-            .expect("L_old must appear in committed sequence via chain walk");
-        match l_old_status {
-            LeaderStatus::Commit(_, metastate) => {
-                assert_eq!(
-                    *metastate,
-                    Some(CommitMetastate::Opt),
-                    "indirect chain walk should derive Opt from L_old's own \
-                     strong-cert quorum at its certifying round"
-                );
-            }
-            other => panic!("expected Commit, got {other:?}"),
-        }
-    }
-
-    // ── 10. Indirect Std: chain walk-back derives Std for L_old ───────
-    #[test]
-    fn ssfs_indirect_chain_walk_derives_std_for_older_leader() {
-        let (committee, dag_state, metrics, l_old_ref, l_anchor_ref) = build_indirect_chain_dag();
-
-        // L_old certs at its certifying round 3: 1 strong + 2 standard
-        // (cert quorum exists but no STRONG quorum) AND 3 strong-blame
-        // voters at the voting round 2 — recipe for Std.
-        insert_cert(&dag_state, 0, 3, l_old_ref, true);
-        insert_cert(&dag_state, 1, 3, l_old_ref, false);
-        insert_cert(&dag_state, 2, 3, l_old_ref, false);
-        // Strong-blame voters at L_old's voting_round = 2.
-        // The bridge block at (auth 0, round 2) already references
-        // L_old, but it has strong_vote = None. We add three voter
-        // blocks at distinct authorities (1, 2, 3) with non-empty
-        // masks to satisfy the strong-blame quorum.
-        let blame = blame_mask(1);
-        insert_voter(&dag_state, 1, 2, l_old_ref, Some(blame));
-        insert_voter(&dag_state, 2, 2, l_old_ref, Some(blame));
-        insert_voter(&dag_state, 3, 2, l_old_ref, Some(blame));
-
-        // L_anchor strong-cert quorum at round 5 — direct Opt.
-        for auth in [0u16, 1, 2] {
-            insert_cert(&dag_state, auth, 5, l_anchor_ref, true);
-        }
-
-        let mut committer = build_committer(committee, dag_state, metrics);
-        committer.decided.insert((1, 1), LeaderStatus::Skip(1, 1));
-
-        let committed = committer.try_commit(BlockReference::new_test(0, 0));
-
-        let l_old_status = committed
-            .iter()
-            .find(|s| s.round() == 1 && s.authority() == 1)
-            .expect("L_old must appear in committed sequence via chain walk");
-        match l_old_status {
-            LeaderStatus::Commit(_, metastate) => {
-                assert_eq!(
-                    *metastate,
-                    Some(CommitMetastate::Std),
-                    "indirect chain walk should derive Std when L_old has \
-                     mixed certs + strong-blame quorum at the voting round"
-                );
-            }
-            other => panic!("expected Commit, got {other:?}"),
-        }
     }
 
     // ── 5. Skip when 2f+1 round-(r+1) blocks fail to reference L ──────
     #[test]
     fn ssfs_skip_when_quorum_of_non_voters_at_voting_round() {
-        let (committee, dag_state, _metrics) = ssfs_setup();
-        let (leader_auth, _leader_ref) = insert_leader(&dag_state, &committee, 3);
+        let (committee, dag_state, metrics) = ssfs_setup();
+        let (leader_auth, _leader_ref) = insert_leader(&dag_state, &committee, 1);
 
-        // 3 round-4 blocks whose refs do NOT include leader_ref. We use
+        // 3 round-2 blocks whose refs do NOT include leader_ref. We use
         // a dummy ref so they parse as non-voters of L.
         let dummy = BlockReference::new_test(0, 0);
         for auth in [0u16, 1, 2] {
-            let b = ssfs_block(auth, 4, vec![dummy], vec![], None, None);
+            let b = ssfs_block(auth, 2, vec![dummy], vec![], None, None);
             dag_state.insert_general_block(b, DataSource::BlockBundleStreaming);
         }
 
-        let committer = UniversalCommitterBuilder::new(
-            committee.clone(),
-            dag_state,
-            // metrics not needed for this assertion path
-            {
-                let registry = Registry::new();
-                let (m, _r) = Metrics::new(
-                    &registry,
-                    Some(committee.as_ref()),
-                    Some("sparse-starfish-speed"),
-                    None,
-                );
-                m
-            },
-        )
-        .build();
+        let mut committer = build_committer(committee, dag_state, metrics);
+        let committed = committer.try_commit(BlockReference::new_test(0, 0));
         assert!(
-            committer.check_direct_skip(leader_auth, 3),
+            committed
+                .iter()
+                .any(|status| matches!(status, LeaderStatus::Skip(authority, 1) if *authority == leader_auth)),
             "2f+1 non-voters at voting round must trigger skip"
         );
     }

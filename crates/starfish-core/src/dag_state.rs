@@ -148,10 +148,8 @@ pub enum ConsensusProtocol {
     ///   - 2f+1 strong certs at r       => `CommitMetastate::Opt`; the
     ///     linearizer derives per-`c` acks for `c ∈ L.acks` by counting voters
     ///     `v` with `!v.strong_vote.contains(c.authority)`.
-    ///   - 2f+1 mixed certs at r AND 2f+1 strong blames at r-1    =>
-    ///     `CommitMetastate::Std`; commit L only (no ack derivation).
-    ///   - 2f+1 mixed certs at r without a strong-blame quorum at r-1 =>
-    ///     `CommitMetastate::Pending`; wait for the indirect rule.
+    ///   - 2f+1 mixed certs at r        => `CommitMetastate::Std`; the
+    ///     linearizer uses the standard quorum-acknowledgment mechanism.
     ///   - Fewer than 2f+1 certs at r   => skip (recoverable later).
     ///
     /// Data availability without DAC/BLS: 2f+1 strong-vote-clean voters
@@ -2532,7 +2530,7 @@ impl DagStateInner {
                     frontier.push(parent);
                 }
             }
-            if self.consensus_protocol.is_bluestreak() {
+            if self.consensus_protocol.carries_unprovable_certificate() {
                 if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     let parent = self
                         .get_storage_block(cert_ref)
@@ -2579,7 +2577,7 @@ impl DagStateInner {
                     }
                 }
             }
-            if self.consensus_protocol.is_bluestreak() {
+            if self.consensus_protocol.carries_unprovable_certificate() {
                 if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
                     if let Some(parent) = self.get_storage_block(cert_ref) {
                         if parent.round() >= target_round {
@@ -3180,9 +3178,13 @@ impl DagStateInner {
             return Vec::new();
         };
         let current_round = round_number;
+        let only_prior_rounds = matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::SparseStarfishSpeed
+        );
         let (to_return, to_keep): (Vec<_>, Vec<_>) =
             pending_acknowledgment.drain(..).partition(|x| {
-                if self.consensus_protocol == ConsensusProtocol::StarfishBls {
+                if only_prior_rounds {
                     x.round < current_round
                 } else {
                     x.round <= current_round
@@ -3204,8 +3206,8 @@ impl DagStateInner {
 
     /// Drop block references already sequenced by the local commit rule from
     /// the pending queue. Implemented for any protocol that maintains
-    /// `pending_acknowledgment`; the SparseStarfishSpeed commit path calls
-    /// this after each subdag to avoid republishing already-committed refs.
+    /// `pending_acknowledgment`; SparseStarfishSpeed calls this after each
+    /// subdag to avoid republishing already-committed refs.
     fn purge_pending_acknowledgments(&mut self, sequenced: &[BlockReference]) {
         let Some(pending_acknowledgment) = self.pending_acknowledgment.as_mut() else {
             return;
@@ -3399,8 +3401,9 @@ mod tests {
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BlockReference, BlsAggregateCertificate, ProvableShard,
-            RoundNumber, SailfishFields, SailfishNoVoteCert, VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
+            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            VerifiedBlock,
         },
     };
 
@@ -3561,6 +3564,30 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_transaction_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new(
+            authority,
+            round,
+            vec![BlockReference::new_test(authority, round.saturating_sub(1))],
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            vec![BaseTransaction::Share(Transaction::new(vec![
+                authority as u8,
+                round as u8,
+            ]))],
+            None,
+            None,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
@@ -3568,6 +3595,26 @@ mod tests {
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishSpeed.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishBls.supports_acknowledgments());
+        assert!(ConsensusProtocol::SparseStarfishSpeed.supports_acknowledgments());
+    }
+
+    #[test]
+    fn sparse_starfish_speed_acknowledgments_wait_for_prior_rounds() {
+        let dag_state = open_test_dag_state_for("sparse-starfish-speed", 0);
+        let previous_round_block = make_transaction_block(1, 4);
+        let previous_round_ref = *previous_round_block.reference();
+        let current_round_block = make_transaction_block(2, 5);
+        let current_round_ref = *current_round_block.reference();
+
+        dag_state.insert_general_block(previous_round_block, DataSource::BlockBundleStreaming);
+        dag_state.insert_general_block(current_round_block, DataSource::BlockBundleStreaming);
+
+        let drained_at_current_round = dag_state.get_pending_acknowledgment(5);
+        assert_eq!(drained_at_current_round, vec![previous_round_ref]);
+        assert_eq!(
+            dag_state.get_pending_acknowledgment(6),
+            vec![current_round_ref]
+        );
     }
 
     #[test]

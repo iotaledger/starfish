@@ -54,8 +54,8 @@ pub enum CommitMetastate {
 /// debugging, testing, and composition with advanced commit strategies.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum LeaderStatus {
-    /// Committed leader block with optional metastate (Some for StarfishSpeed,
-    /// None for others).
+    /// Committed leader block with optional metastate (Some for StarfishSpeed
+    /// family protocols, None for others).
     Commit(Data<VerifiedBlock>, Option<CommitMetastate>),
     Skip(AuthorityIndex, RoundNumber),
     Undecided(AuthorityIndex, RoundNumber),
@@ -89,8 +89,7 @@ impl LeaderStatus {
 
     /// Whether the leader slot is final for sequencing purposes.
     /// A Commit(Pending) is decided but NOT final — it blocks the sequencing
-    /// prefix. For non-StarfishSpeed protocols (metastate is None), is_final =>
-    /// is_decided.
+    /// prefix. For protocols without metastate, is_final => is_decided.
     pub fn is_final(&self) -> bool {
         match self {
             Self::Commit(_, Some(CommitMetastate::Pending)) => false,

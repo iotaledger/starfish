@@ -312,6 +312,46 @@ impl Linearizer {
         holders
     }
 
+    fn add_optimistic_acknowledgments(
+        &mut self,
+        dag_state: &DagState,
+        sub_dag: &mut CommittedSubDag,
+        ack_refs: Vec<BlockReference>,
+        data_holders: &StakeAggregator<QuorumThreshold>,
+    ) {
+        let data_holder_votes: Vec<_> = data_holders.voters().collect();
+        let mut refs_to_fetch = Vec::new();
+        for ack_ref in ack_refs {
+            let votes = self.votes.entry(ack_ref).or_default();
+            for authority in &data_holder_votes {
+                votes.add(*authority, &self.committee);
+            }
+            if self.committed.insert(ack_ref) {
+                refs_to_fetch.push(ack_ref);
+            }
+        }
+
+        let mut blocks_to_add: Vec<_> = dag_state
+            .get_storage_blocks(&refs_to_fetch)
+            .into_iter()
+            .flatten()
+            .map(|block| {
+                let round = block.round();
+                let author = block.authority();
+                let digest = block.digest();
+                (round, author, digest, block)
+            })
+            .collect();
+
+        blocks_to_add.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+
+        for (round, author, _, block) in blocks_to_add {
+            if self.committed_slots.insert((round, author)) {
+                sub_dag.blocks.push(block);
+            }
+        }
+    }
+
     pub fn handle_commit(
         &mut self,
         dag_state: &DagState,
@@ -321,6 +361,7 @@ impl Linearizer {
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
             // Collect the sub-dag generated using each of these leaders as anchor.
+            let leader_ref = *leader_block.reference();
             let leader_acks = leader_block.acknowledgments();
             let optimistic_data_holders = (metastate == Some(CommitMetastate::Opt))
                 .then(|| self.collect_strong_vote_holders(dag_state, leader_block.round() + 1));
@@ -342,34 +383,33 @@ impl Linearizer {
                 }
             };
 
-            // For StarfishSpeed Opt: additionally include blocks from the leader's
-            // acknowledgment_references. The strong vote quorum guarantees data
-            // availability.
-            if consensus_protocol == ConsensusProtocol::StarfishSpeed {
-                if let Some(data_holders) = optimistic_data_holders.as_ref() {
-                    let data_holder_votes: Vec<_> = data_holders.voters().collect();
-                    let mut refs_to_fetch = Vec::new();
-                    for ack_ref in &leader_acks {
-                        let votes = self.votes.entry(*ack_ref).or_default();
-                        for authority in &data_holder_votes {
-                            votes.add(*authority, &self.committee);
-                        }
-                        if self.committed.insert(*ack_ref) {
-                            refs_to_fetch.push(*ack_ref);
-                        }
+            // Optimistic Starfish-family commits can immediately sequence
+            // data covered by the strong-vote quorum. StarfishSpeed directly
+            // sequences the leader's explicit acks; SparseStarfishSpeed also
+            // sequences the committed leader itself so the leader's own
+            // transactions have gap 0.
+            if let Some(data_holders) = optimistic_data_holders.as_ref() {
+                match consensus_protocol {
+                    ConsensusProtocol::StarfishSpeed => {
+                        self.add_optimistic_acknowledgments(
+                            dag_state,
+                            &mut sub_dag,
+                            leader_acks,
+                            data_holders,
+                        );
                     }
-                    for block in dag_state
-                        .get_storage_blocks(&refs_to_fetch)
-                        .into_iter()
-                        .flatten()
-                    {
-                        if self
-                            .committed_slots
-                            .insert((block.round(), block.authority()))
-                        {
-                            sub_dag.blocks.push(block);
-                        }
+                    ConsensusProtocol::SparseStarfishSpeed => {
+                        let mut optimistic_refs = Vec::with_capacity(1 + leader_acks.len());
+                        optimistic_refs.push(leader_ref);
+                        optimistic_refs.extend(leader_acks);
+                        self.add_optimistic_acknowledgments(
+                            dag_state,
+                            &mut sub_dag,
+                            optimistic_refs,
+                            data_holders,
+                        );
                     }
+                    _ => {}
                 }
             }
             // [Optional] sort the sub-dag using a deterministic algorithm.
@@ -399,5 +439,152 @@ impl fmt::Debug for CommittedSubDag {
             write!(f, "{}, ", block.reference())?;
         }
         write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{DisseminationMode, StorageBackend},
+        crypto::SignatureBytes,
+        dag_state::DataSource,
+        metrics::Metrics,
+        types::AuthoritySet,
+    };
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    fn open_test_dag_state_for(consensus: &str) -> (Committee, DagState) {
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) =
+            Metrics::new(&registry, Some(committee.as_ref()), Some(consensus), None);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        let dag_state = DagState::open(
+            0,
+            path,
+            metrics,
+            committee.clone(),
+            "honest".to_string(),
+            consensus.to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        )
+        .dag_state;
+        ((*committee).clone(), dag_state)
+    }
+
+    fn make_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+        acks: Vec<BlockReference>,
+        strong_vote: Option<AuthoritySet>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new(
+            authority,
+            round,
+            parents,
+            acks,
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            strong_vote,
+            None,
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    #[test]
+    fn ssfs_opt_sequences_leader_and_leader_acknowledgments() {
+        let (committee, dag_state) = open_test_dag_state_for("sparse-starfish-speed");
+        let acknowledged = make_block(0, 1, vec![], vec![], None);
+        let acknowledged_ref = *acknowledged.reference();
+        dag_state.insert_general_block(acknowledged, DataSource::BlockBundleStreaming);
+
+        let leader_round = 3;
+        let leader_authority = committee.elect_leader(leader_round);
+        let leader = make_block(
+            leader_authority,
+            leader_round,
+            vec![],
+            vec![acknowledged_ref],
+            None,
+        );
+        let leader_ref = *leader.reference();
+        dag_state.insert_general_block(leader.clone(), DataSource::BlockBundleStreaming);
+
+        for authority in [0u16, 1, 2] {
+            let voter = make_block(
+                authority,
+                leader_round + 1,
+                vec![leader_ref],
+                vec![],
+                Some(AuthoritySet::default()),
+            );
+            dag_state.insert_general_block(voter, DataSource::BlockBundleStreaming);
+        }
+
+        let mut linearizer = Linearizer::new(committee);
+        let committed =
+            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Opt))]);
+
+        let blocks: BTreeSet<_> = committed[0]
+            .0
+            .blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        assert!(blocks.contains(&leader_ref), "Opt must sequence leader");
+        assert!(
+            blocks.contains(&acknowledged_ref),
+            "Opt must sequence leader acknowledgments"
+        );
+    }
+
+    #[test]
+    fn ssfs_std_does_not_directly_sequence_leader_acknowledgments() {
+        let (committee, dag_state) = open_test_dag_state_for("sparse-starfish-speed");
+        let acknowledged = make_block(0, 1, vec![], vec![], None);
+        let acknowledged_ref = *acknowledged.reference();
+        dag_state.insert_general_block(acknowledged, DataSource::BlockBundleStreaming);
+
+        let leader_round = 3;
+        let leader_authority = committee.elect_leader(leader_round);
+        let leader = make_block(
+            leader_authority,
+            leader_round,
+            vec![],
+            vec![acknowledged_ref],
+            None,
+        );
+        let leader_ref = *leader.reference();
+        dag_state.insert_general_block(leader.clone(), DataSource::BlockBundleStreaming);
+
+        let mut linearizer = Linearizer::new(committee);
+        let committed =
+            linearizer.handle_commit(&dag_state, vec![(leader, Some(CommitMetastate::Std))]);
+
+        let blocks: BTreeSet<_> = committed[0]
+            .0
+            .blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        assert!(
+            !blocks.contains(&leader_ref),
+            "Std uses only the quorum-acknowledgment mechanism"
+        );
+        assert!(
+            !blocks.contains(&acknowledged_ref),
+            "Std must not directly sequence leader acknowledgments"
+        );
     }
 }
