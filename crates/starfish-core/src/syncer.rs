@@ -260,15 +260,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         self.subscriber_stake = stake;
     }
 
-    /// Attempt block creation with relaxed readiness (skips StarfishSpeed
-    /// strong-vote quorum requirement) for a specific threshold-clock round.
-    /// This acts only once we are still in that round and have not yet proposed
-    /// into it.
-    pub fn try_new_block_relaxed(&mut self, threshold_round: RoundNumber) -> bool {
-        if self.core.dag_state().threshold_clock_round() != threshold_round {
+    /// Attempt block creation with relaxed readiness (skips the strong-vote
+    /// quorum requirement) for a specific proposal round. This acts only once
+    /// we are still in that round and have not yet proposed into it. Keyed
+    /// on the proposal round so dual-DAG protocols (where the proposal
+    /// round can lag the threshold clock) target the round they can
+    /// actually enter.
+    pub fn try_new_block_relaxed(&mut self, proposal_round: RoundNumber) -> bool {
+        if self.core.dag_state().proposal_round() != proposal_round {
             return false;
         }
-        if self.core.last_proposed() >= threshold_round {
+        if self.core.last_proposed() >= proposal_round {
             return false;
         }
         self.maybe_update_proposal_wait();

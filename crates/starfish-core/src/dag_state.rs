@@ -1740,8 +1740,7 @@ impl DagState {
             if leader_round >= 2 {
                 let prev_leader_round = leader_round - 1;
                 let prev_leader = committee.elect_leader(prev_leader_round);
-                let count_strong_votes =
-                    !relaxed && self.consensus_protocol == ConsensusProtocol::StarfishSpeed;
+                let count_strong_votes = !relaxed && self.consensus_protocol.uses_strong_vote();
                 let mut votes = StakeAggregator::<QuorumThreshold>::new();
                 let mut strong_votes = StakeAggregator::<QuorumThreshold>::new();
                 let mut non_votes = StakeAggregator::<QuorumThreshold>::new();

@@ -1832,12 +1832,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let mut connections: HashMap<usize, JoinHandle<Option<()>>> = HashMap::new();
         let handle = Handle::current();
         let leader_timeout_task = handle.spawn(Self::leader_timeout_task(inner.clone()));
-        let soft_block_timeout_task =
-            if inner.dag_state.consensus_protocol == ConsensusProtocol::StarfishSpeed {
-                Some(handle.spawn(Self::soft_block_timeout_task(inner.clone())))
-            } else {
-                None
-            };
+        let soft_block_timeout_task = if inner.dag_state.consensus_protocol.uses_strong_vote() {
+            Some(handle.spawn(Self::soft_block_timeout_task(inner.clone())))
+        } else {
+            None
+        };
 
         let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
         let cleanup_task = handle.spawn(Self::cleanup_task(
@@ -2031,13 +2030,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
     }
 
-    /// StarfishSpeed soft timeout: attempt block creation using the base
-    /// Starfish readiness check (no strong-vote quorum requirement).
+    /// Strong-vote soft timeout (StarfishSpeed / SparseStarfishSpeed): once a
+    /// proposal round can be entered but the strong-vote quorum has not formed,
+    /// fall back to the base Starfish readiness check and propose a blame
+    /// block. Armed on the proposal round so dual-DAG protocols (where the
+    /// proposal round can lag the threshold clock) fire for the round they
+    /// can actually enter.
     async fn soft_block_timeout_task(inner: Arc<NetworkSyncerInner<H, C>>) -> Option<()> {
         let soft_timeout = inner.soft_block_timeout;
-        let mut armed_round = inner.dag_state.threshold_clock_round();
+        let mut armed_round = inner.dag_state.proposal_round();
         loop {
-            while inner.dag_state.threshold_clock_round() <= armed_round {
+            while inner.dag_state.proposal_round() <= armed_round {
                 let notified = inner.proposal_round_notify.notified();
                 select! {
                     _notified = notified => {}
@@ -2047,13 +2050,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             }
 
-            armed_round = inner.dag_state.threshold_clock_round();
+            armed_round = inner.dag_state.proposal_round();
             let notified = inner.proposal_round_notify.notified();
             select! {
                 _sleep = sleep(soft_timeout) => {
-                    tracing::debug!(
-                        "StarfishSpeed soft block timeout in threshold round {armed_round}"
-                    );
+                    tracing::debug!("Soft block timeout in proposal round {armed_round}");
                     inner.syncer.try_new_block_relaxed(armed_round).await;
                 }
                 _notified = notified => {
