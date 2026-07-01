@@ -41,7 +41,12 @@ use crate::{
     committee::Committee,
     crypto,
     crypto::{
-        AsBytes, BlsSignatureBytes, BlsSigner, CryptoHash, SignatureBytes, Signer,
+        AsBytes,
+        BlsSignatureBytes,
+        BlsSigner,
+        CryptoHash,
+        SignatureBytes,
+        Signer,
         TransactionsCommitment,
     },
     dag_state::ConsensusProtocol,

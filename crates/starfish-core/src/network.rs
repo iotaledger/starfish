@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
-        TcpListener, TcpSocket, TcpStream,
+        TcpListener,
+        TcpSocket,
+        TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     runtime::Handle,
@@ -30,8 +32,17 @@ use crate::{
     runtime::JoinHandle,
     stat::HistogramSender,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, PartialSig,
-        ProvableShard, RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, VerifiedBlock,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockReference,
+        CertMessage,
+        CertMessageKind,
+        PartialSig,
+        ProvableShard,
+        RoundNumber,
+        SailfishNoVoteMsg,
+        SailfishTimeoutMsg,
+        VerifiedBlock,
     },
 };
 

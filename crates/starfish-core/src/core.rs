@@ -6,7 +6,6 @@ use std::{mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
-
 use tokio::sync::mpsc;
 
 use crate::{
@@ -22,7 +21,12 @@ use crate::{
     },
     crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
     dag_state::{
-        ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, DataSource,
+        ByzantineStrategy,
+        CACHED_ROUNDS,
+        CommitData,
+        ConsensusProtocol,
+        DagState,
+        DataSource,
         OwnBlockData,
     },
     data::Data,
@@ -32,9 +36,20 @@ use crate::{
     state::RecoveredState,
     store::Store,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-        Encoder, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
-        RoundNumber, SailfishFields, Shard, VerifiedBlock,
+        AuthorityIndex,
+        AuthoritySet,
+        BaseTransaction,
+        BlockReference,
+        BlsAggregateCertificate,
+        Encoder,
+        PartialSig,
+        PartialSigKind,
+        ProvableShard,
+        ReconstructedTransactionData,
+        RoundNumber,
+        SailfishFields,
+        Shard,
+        VerifiedBlock,
     },
 };
 
