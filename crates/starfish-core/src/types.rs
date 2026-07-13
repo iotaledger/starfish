@@ -35,7 +35,7 @@ use ahash::AHashSet;
 use bytes::Bytes;
 use eyre::{bail, ensure};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
     committee::Committee,
@@ -258,8 +258,71 @@ pub enum BlockAuthentication {
     /// Only valid for locally constructed genesis blocks.
     None,
     Ed25519(SignatureBytes),
-    MacVector(Vec<MacTag>),
+    MacVector(#[serde(with = "flat_mac_vector")] Vec<MacTag>),
     MlDsa44(MlDsa44SignatureBytes),
+}
+
+mod flat_mac_vector {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(tags: &[MacTag], serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return tags.serialize(serializer);
+        }
+
+        let mut bytes = Vec::with_capacity(tags.len() * crypto::MAC_TAG_SIZE);
+        for tag in tags {
+            bytes.extend_from_slice(tag.as_ref());
+        }
+        serializer.serialize_bytes(&bytes)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<MacTag>, D::Error> {
+        if deserializer.is_human_readable() {
+            return Vec::<MacTag>::deserialize(deserializer);
+        }
+
+        deserializer.deserialize_bytes(FlatMacVectorVisitor)
+    }
+
+    struct FlatMacVectorVisitor;
+
+    impl<'de> de::Visitor<'de> for FlatMacVectorVisitor {
+        type Value = Vec<MacTag>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "a flat byte string containing 32 bytes per MAC tag"
+            )
+        }
+
+        #[allow(clippy::manual_is_multiple_of)]
+        fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            if bytes.len() % crypto::MAC_TAG_SIZE != 0 {
+                return Err(E::custom(format!(
+                    "invalid flat MAC vector length {}; expected a multiple of {}",
+                    bytes.len(),
+                    crypto::MAC_TAG_SIZE
+                )));
+            }
+
+            Ok(bytes
+                .chunks_exact(crypto::MAC_TAG_SIZE)
+                .map(|chunk| {
+                    let mut tag = [0; crypto::MAC_TAG_SIZE];
+                    tag.copy_from_slice(chunk);
+                    MacTag::from_bytes(tag)
+                })
+                .collect())
+        }
+
+        fn visit_byte_buf<E: de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+            self.visit_bytes(&bytes)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Debug)]
@@ -2407,6 +2470,44 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn mac_vector_uses_flat_binary_encoding() {
+        let committee = Committee::new_for_benchmarks(10);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+
+        let encoded = bincode::serialize(block.authentication()).unwrap();
+        let expected_size = 4 + 8 + committee.len() * crypto::MAC_TAG_SIZE;
+        assert_eq!(encoded.len(), expected_size);
+
+        let decoded: BlockAuthentication = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded, *block.authentication());
+
+        let yaml = serde_yaml::to_string(block.authentication()).unwrap();
+        let decoded_yaml: BlockAuthentication = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(decoded_yaml, *block.authentication());
+    }
+
+    #[test]
+    fn flat_mac_vector_rejects_partial_tags() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+
+        let mut encoded = bincode::serialize(block.authentication()).unwrap();
+        let invalid_payload_len = committee.len() * crypto::MAC_TAG_SIZE - 1;
+        encoded[4..12].copy_from_slice(&(invalid_payload_len as u64).to_le_bytes());
+        encoded.truncate(12 + invalid_payload_len);
+
+        assert!(bincode::deserialize::<BlockAuthentication>(&encoded).is_err());
     }
 
     #[test]

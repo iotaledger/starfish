@@ -558,6 +558,12 @@ impl AsBytes for MacTag {
     }
 }
 
+impl MacTag {
+    pub(crate) fn from_bytes(bytes: [u8; MAC_TAG_SIZE]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl PartialEq for MacTag {
     fn eq(&self, other: &Self) -> bool {
         blake3::Hash::from_bytes(self.0) == blake3::Hash::from_bytes(other.0)
