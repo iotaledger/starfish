@@ -135,7 +135,8 @@ pub enum Operation {
         skip_testbed_configuration: bool,
 
         /// Protocols to benchmark in order. Available options:
-        /// starfish | starfish-speed | sparse-starfish-speed |
+        /// starfish | starfish-mac | starfish-ml-dsa-44 |
+        /// starfish-speed | sparse-starfish-speed |
         /// starfish-bls | mysticeti | mysticeti-bls |
         /// cordial-miners | bluestreak | sailfish-pp
         #[clap(

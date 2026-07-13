@@ -59,6 +59,28 @@ achieving 2-round optimistic commit latency.
 leader, data availability) in block headers, with async verification
 offloaded from the critical path.
 
+### Starfish block authentication experiments
+
+Plain Starfish can be run with three interchangeable block-authentication
+schemes:
+
+| CLI name | Block authentication |
+|---|---|
+| `starfish` | Ed25519 signature |
+| `starfish-mac` | Full vector of pairwise keyed-BLAKE3 MAC tags |
+| `starfish-ml-dsa-44` | ML-DSA-44 signature |
+
+For all three variants, `BlockReference.digest` is the BLAKE3 hash of the
+canonical block content only. The authentication proof is a separate header
+field and does not change the block reference. A `starfish-mac` block carries
+exactly one tag for every committee member; each receiver verifies only its
+own tag. Benchmark genesis deterministically generates the pairwise MAC keys,
+ML-DSA seeds, and public keys in the node configuration.
+
+This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
+here states that it has not been independently audited and should not be
+treated as production-ready cryptography.
+
 ## Dissemination Modes
 
 Every protocol can run with any of three dissemination strategies

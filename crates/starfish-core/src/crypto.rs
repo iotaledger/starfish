@@ -5,8 +5,12 @@
 use std::fmt;
 
 use blst::min_sig as bls;
-use ed25519_consensus::Signature;
-use rand::{SeedableRng, rngs::StdRng};
+use ml_dsa::{
+    Keypair as _, MlDsa44, Signature as MlDsaSignature, Signer as MlDsaSignerTrait,
+    SigningKey as MlDsaSigningKey, Verifier as MlDsaVerifierTrait,
+    VerifyingKey as MlDsaVerifyingKey,
+};
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use rs_merkle::{Hasher, MerkleProof, MerkleTree};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use zeroize::Zeroize;
@@ -15,8 +19,8 @@ use crate::{
     committee::Committee,
     crypto,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockHeader, BlockReference, RoundNumber,
-        Shard, TimestampNs,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, RoundNumber, Shard,
+        TimestampNs,
     },
 };
 
@@ -73,6 +77,11 @@ pub fn sailfish_novote_digest(round: RoundNumber, leader: AuthorityIndex) -> [u8
 
 pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
+pub const MAC_KEY_SIZE: usize = 32;
+pub const MAC_TAG_SIZE: usize = 32;
+pub const ML_DSA_44_SEED_SIZE: usize = 32;
+pub const ML_DSA_44_PUBLIC_KEY_SIZE: usize = 1_312;
+pub const ML_DSA_44_SIGNATURE_SIZE: usize = 2_420;
 
 pub const TRANSACTIONS_DIGEST_SIZE: usize = 32;
 
@@ -87,6 +96,23 @@ pub struct PublicKey(ed25519_consensus::VerificationKey);
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq, Hash)]
 pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
+
+/// A pairwise secret key shared by exactly two validators.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MacKey([u8; MAC_KEY_SIZE]);
+
+#[derive(Clone, Copy, Ord, PartialOrd)]
+pub struct MacTag([u8; MAC_TAG_SIZE]);
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct MlDsa44SignatureBytes(Box<[u8; ML_DSA_44_SIGNATURE_SIZE]>);
+
+#[derive(Clone)]
+pub struct MlDsa44PublicKey(MlDsaVerifyingKey<MlDsa44>);
+
+/// Boxed so moving this wrapper does not copy private key material.
+#[derive(Clone)]
+pub struct MlDsa44Signer(Box<MlDsaSigningKey<MlDsa44>>);
 
 // Box ensures value is not copied in memory when Signer itself is moved around
 // for better security
@@ -175,13 +201,16 @@ impl TransactionsCommitment {
     }
 }
 impl BlockDigest {
+    pub fn as_array(&self) -> &[u8; BLOCK_DIGEST_SIZE] {
+        &self.0
+    }
+
     pub fn new_without_transactions(
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
@@ -191,7 +220,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            signature,
             merkle_root,
             strong_vote,
             None,
@@ -204,13 +232,12 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         merkle_root: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
-        Self::digest_without_signature(
+        Self::digest_contents(
             &mut hasher,
             authority,
             round,
@@ -221,7 +248,6 @@ impl BlockDigest {
             strong_vote,
         );
         Self::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
@@ -231,7 +257,6 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
     ) -> Self {
@@ -241,7 +266,6 @@ impl BlockDigest {
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
-            signature,
             transactions_commitment,
             strong_vote,
             None,
@@ -254,13 +278,12 @@ impl BlockDigest {
         block_references: &[BlockReference],
         acknowledgment_references: &[BlockReference],
         meta_creation_time_ns: TimestampNs,
-        signature: &SignatureBytes,
         transactions_commitment: Option<TransactionsCommitment>,
         strong_vote: Option<AuthoritySet>,
         unprovable_certificate: Option<&(BlockReference, bool)>,
     ) -> Self {
         let mut hasher = Blake3Hasher::new();
-        Self::digest_without_signature(
+        Self::digest_contents(
             &mut hasher,
             authority,
             round,
@@ -271,11 +294,10 @@ impl BlockDigest {
             strong_vote,
         );
         Self::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        hasher.update(signature.as_bytes());
         Self(hasher.finalize().into())
     }
 
-    pub(crate) fn digest_without_signature(
+    pub(crate) fn digest_contents(
         hasher: &mut Blake3Hasher,
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -305,7 +327,7 @@ impl BlockDigest {
 
     /// Extend a block digest hasher with the generalized unprovable
     /// certificate reference + strong/standard flavor flag. Called after
-    /// `digest_without_signature` and before finalizing. No-op when `None`,
+    /// `digest_contents` and before finalizing. No-op when `None`,
     /// preserving backward compatibility.
     pub(crate) fn hash_unprovable_certificate(
         hasher: &mut Blake3Hasher,
@@ -473,33 +495,234 @@ fn deserialize_fixed_bytes<'de, D: Deserializer<'de>, const N: usize>(
     }
 }
 
-impl PublicKey {
-    pub fn verify_signature_in_block(
+impl MacKey {
+    pub fn compute_tag(
         &self,
-        header: &BlockHeader,
-        transactions_commitment: Option<TransactionsCommitment>,
-    ) -> Result<(), ed25519_consensus::Error> {
-        let signature = Signature::from(header.signature().0);
-        let acknowledgments = header.acknowledgments();
-        let mut hasher = Blake3Hasher::new();
-        BlockDigest::digest_without_signature(
-            &mut hasher,
-            header.authority(),
-            header.round(),
-            header.block_references(),
-            &acknowledgments,
-            header.meta_creation_time_ns(),
-            transactions_commitment,
-            header.strong_vote(),
-        );
-        BlockDigest::hash_unprovable_certificate(
-            &mut hasher,
-            header.unprovable_certificate.as_ref(),
-        );
-        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
-        self.0.verify(&signature, digest.as_ref())
+        author: AuthorityIndex,
+        recipient: AuthorityIndex,
+        content_digest: &BlockDigest,
+    ) -> MacTag {
+        let mut hasher = Blake3Hasher::new_keyed(&self.0);
+        hasher.update(&author.to_be_bytes());
+        hasher.update(&recipient.to_be_bytes());
+        hasher.update(content_digest.as_ref());
+        MacTag(hasher.finalize().into())
+    }
+}
+
+/// Generate deterministic, symmetric pairwise keyrings for local benchmarks
+/// and tests. Entry `keyrings[a][b]` equals `keyrings[b][a]`.
+#[allow(clippy::needless_range_loop)]
+pub fn mac_keyrings_for_test(n: usize) -> Vec<Vec<MacKey>> {
+    let mut rng = StdRng::seed_from_u64(0x5354_4152_4649_5348);
+    let mut keyrings = vec![vec![MacKey([0; MAC_KEY_SIZE]); n]; n];
+    for author in 0..n {
+        for recipient in author..n {
+            let mut bytes = [0; MAC_KEY_SIZE];
+            rng.fill_bytes(&mut bytes);
+            let key = MacKey(bytes);
+            keyrings[author][recipient] = key.clone();
+            keyrings[recipient][author] = key;
+        }
+    }
+    keyrings
+}
+
+impl Drop for MacKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for MacKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MacKey(REDACTED)")
+    }
+}
+
+impl Serialize for MacKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_fixed_bytes(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MacKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_fixed_bytes::<D, MAC_KEY_SIZE>(deserializer, "MAC key").map(Self)
+    }
+}
+
+impl AsBytes for MacTag {
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq for MacTag {
+    fn eq(&self, other: &Self) -> bool {
+        blake3::Hash::from_bytes(self.0) == blake3::Hash::from_bytes(other.0)
+    }
+}
+
+impl Eq for MacTag {}
+
+impl std::hash::Hash for MacTag {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
+    }
+}
+
+impl AsRef<[u8]> for MacTag {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MacTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Mac({})", &hex::encode(&self.0[..4]))
+    }
+}
+
+impl Serialize for MacTag {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_fixed_bytes(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MacTag {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_fixed_bytes::<D, MAC_TAG_SIZE>(deserializer, "MAC tag").map(Self)
+    }
+}
+
+impl MlDsa44SignatureBytes {
+    pub fn from_bytes(bytes: [u8; ML_DSA_44_SIGNATURE_SIZE]) -> Self {
+        Self(Box::new(bytes))
+    }
+}
+
+impl AsRef<[u8]> for MlDsa44SignatureBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl fmt::Debug for MlDsa44SignatureBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MlDsa44Sig({})", &hex::encode(&self.0[..4]))
+    }
+}
+
+impl Serialize for MlDsa44SignatureBytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_fixed_bytes(self.0.as_ref(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MlDsa44SignatureBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_fixed_bytes::<D, ML_DSA_44_SIGNATURE_SIZE>(deserializer, "ML-DSA-44 signature")
+            .map(Self::from_bytes)
+    }
+}
+
+impl MlDsa44PublicKey {
+    pub fn from_bytes(bytes: &[u8; ML_DSA_44_PUBLIC_KEY_SIZE]) -> Self {
+        let encoded = ml_dsa::EncodedVerifyingKey::<MlDsa44>::from(*bytes);
+        Self(MlDsaVerifyingKey::decode(&encoded))
     }
 
+    pub fn to_bytes(&self) -> [u8; ML_DSA_44_PUBLIC_KEY_SIZE] {
+        self.0.encode().into()
+    }
+
+    pub fn verify_digest_signature(
+        &self,
+        digest: &BlockDigest,
+        signature: &MlDsa44SignatureBytes,
+    ) -> Result<(), ml_dsa::signature::Error> {
+        let signature = MlDsaSignature::<MlDsa44>::try_from(signature.as_ref())?;
+        self.0.verify(digest.as_ref(), &signature)
+    }
+}
+
+impl PartialEq for MlDsa44PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_bytes() == other.to_bytes()
+    }
+}
+
+impl Eq for MlDsa44PublicKey {}
+
+impl fmt::Debug for MlDsa44PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MlDsa44Pk({})", &hex::encode(&self.to_bytes()[..4]))
+    }
+}
+
+impl Serialize for MlDsa44PublicKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_fixed_bytes(&self.to_bytes(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MlDsa44PublicKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = deserialize_fixed_bytes::<D, ML_DSA_44_PUBLIC_KEY_SIZE>(
+            deserializer,
+            "ML-DSA-44 public key",
+        )?;
+        Ok(Self::from_bytes(&bytes))
+    }
+}
+
+impl MlDsa44Signer {
+    pub fn new_for_test(n: usize) -> Vec<Self> {
+        let mut rng = StdRng::seed_from_u64(0x4d4c_4453_4134_3400);
+        (0..n)
+            .map(|_| {
+                let mut bytes = [0; ML_DSA_44_SEED_SIZE];
+                rng.fill_bytes(&mut bytes);
+                let seed = ml_dsa::Seed::from(bytes);
+                Self(Box::new(MlDsaSigningKey::from_seed(&seed)))
+            })
+            .collect()
+    }
+
+    pub fn sign_digest(&self, digest: &BlockDigest) -> MlDsa44SignatureBytes {
+        let signature: MlDsaSignature<MlDsa44> = self.0.sign(digest.as_ref());
+        MlDsa44SignatureBytes::from_bytes(signature.encode().into())
+    }
+
+    pub fn public_key(&self) -> MlDsa44PublicKey {
+        MlDsa44PublicKey(self.0.verifying_key())
+    }
+}
+
+impl fmt::Debug for MlDsa44Signer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MlDsa44Signer(public_key={:?})", self.public_key())
+    }
+}
+
+impl Serialize for MlDsa44Signer {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let seed: [u8; ML_DSA_44_SEED_SIZE] = self.0.to_seed().into();
+        serialize_fixed_bytes(&seed, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MlDsa44Signer {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes =
+            deserialize_fixed_bytes::<D, ML_DSA_44_SEED_SIZE>(deserializer, "ML-DSA-44 seed")?;
+        let seed = ml_dsa::Seed::from(bytes);
+        Ok(Self(Box::new(MlDsaSigningKey::from_seed(&seed))))
+    }
+}
+
+impl PublicKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(self.0.as_ref());
@@ -528,56 +751,6 @@ impl Signer {
         (0..n)
             .map(|_| Self(Box::new(ed25519_consensus::SigningKey::new(&mut rng))))
             .collect()
-    }
-
-    pub fn sign_block(
-        &self,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        block_references: &[BlockReference],
-        acknowledgment_references: &[BlockReference],
-        meta_creation_time_ns: TimestampNs,
-        transactions_commitment: Option<TransactionsCommitment>,
-        strong_vote: Option<AuthoritySet>,
-    ) -> SignatureBytes {
-        self.sign_block_with_unprovable(
-            authority,
-            round,
-            block_references,
-            acknowledgment_references,
-            meta_creation_time_ns,
-            transactions_commitment,
-            strong_vote,
-            None,
-        )
-    }
-
-    pub fn sign_block_with_unprovable(
-        &self,
-        authority: AuthorityIndex,
-        round: RoundNumber,
-        block_references: &[BlockReference],
-        acknowledgment_references: &[BlockReference],
-        meta_creation_time_ns: TimestampNs,
-        transactions_commitment: Option<TransactionsCommitment>,
-        strong_vote: Option<AuthoritySet>,
-        unprovable_certificate: Option<&(BlockReference, bool)>,
-    ) -> SignatureBytes {
-        let mut hasher = Blake3Hasher::new();
-        BlockDigest::digest_without_signature(
-            &mut hasher,
-            authority,
-            round,
-            block_references,
-            acknowledgment_references,
-            meta_creation_time_ns,
-            transactions_commitment,
-            strong_vote,
-        );
-        BlockDigest::hash_unprovable_certificate(&mut hasher, unprovable_certificate);
-        let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
-        let signature = self.0.sign(digest.as_ref());
-        SignatureBytes(signature.to_bytes())
     }
 
     /// Sign a pre-computed 32-byte digest. Used for Sailfish++ control
@@ -742,6 +915,15 @@ pub fn dummy_signer() -> Signer {
 
 pub fn dummy_public_key() -> PublicKey {
     dummy_signer().public_key()
+}
+
+pub fn dummy_ml_dsa_44_signer() -> MlDsa44Signer {
+    let seed = ml_dsa::Seed::from([0; ML_DSA_44_SEED_SIZE]);
+    MlDsa44Signer(Box::new(MlDsaSigningKey::from_seed(&seed)))
+}
+
+pub fn dummy_ml_dsa_44_public_key() -> MlDsa44PublicKey {
+    dummy_ml_dsa_44_signer().public_key()
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1235,44 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[test]
+    fn mac_keyrings_are_symmetric_and_bind_recipient() {
+        let keyrings = mac_keyrings_for_test(4);
+        let digest = BlockDigest([7; BLOCK_DIGEST_SIZE]);
+        let tag = keyrings[1][3].compute_tag(1, 3, &digest);
+
+        assert_eq!(tag, keyrings[3][1].compute_tag(1, 3, &digest));
+        assert_ne!(tag, keyrings[3][1].compute_tag(1, 2, &digest));
+        assert_ne!(tag, keyrings[3][1].compute_tag(2, 3, &digest));
+    }
+
+    #[test]
+    fn ml_dsa_44_sign_verify_and_serde_roundtrip() {
+        let signer = MlDsa44Signer::new_for_test(1).pop().unwrap();
+        let public_key = signer.public_key();
+        let digest = BlockDigest([9; BLOCK_DIGEST_SIZE]);
+        let signature = signer.sign_digest(&digest);
+
+        assert!(
+            public_key
+                .verify_digest_signature(&digest, &signature)
+                .is_ok()
+        );
+        assert!(
+            public_key
+                .verify_digest_signature(&BlockDigest([8; BLOCK_DIGEST_SIZE]), &signature)
+                .is_err()
+        );
+
+        let encoded_key = bincode::serialize(&public_key).unwrap();
+        let decoded_key: MlDsa44PublicKey = bincode::deserialize(&encoded_key).unwrap();
+        let encoded_signature = bincode::serialize(&signature).unwrap();
+        let decoded_signature: MlDsa44SignatureBytes =
+            bincode::deserialize(&encoded_signature).unwrap();
+        assert_eq!(public_key, decoded_key);
+        assert_eq!(signature, decoded_signature);
+    }
+
+    #[test]
     fn bls_sign_verify_roundtrip() {
         let signers = BlsSigner::new_for_test(3);
         for signer in &signers {
@@ -1111,6 +1331,11 @@ mod tests {
         bls_signer: BlsSigner,
         bls_public_key: BlsPublicKey,
         bls_signature: BlsSignatureBytes,
+        mac_key: MacKey,
+        mac_tag: MacTag,
+        ml_dsa_44_signer: MlDsa44Signer,
+        ml_dsa_44_public_key: MlDsa44PublicKey,
+        ml_dsa_44_signature: MlDsa44SignatureBytes,
     }
 
     #[test]
@@ -1118,15 +1343,24 @@ mod tests {
         let signer = Signer::new_for_test(1).pop().unwrap();
         let public_key = signer.public_key();
         let bls_signer = dummy_bls_signer();
+        let mac_key = MacKey([10; MAC_KEY_SIZE]);
+        let block_digest = BlockDigest([7u8; BLOCK_DIGEST_SIZE]);
+        let mac_tag = mac_key.compute_tag(0, 1, &block_digest);
+        let ml_dsa_44_signer = dummy_ml_dsa_44_signer();
         let fixture = CryptoYamlFixture {
             signer,
             public_key,
-            block_digest: BlockDigest([7u8; BLOCK_DIGEST_SIZE]),
+            block_digest,
             transactions_commitment: TransactionsCommitment([8u8; TRANSACTIONS_DIGEST_SIZE]),
             signature: SignatureBytes([9u8; SIGNATURE_SIZE]),
             bls_public_key: bls_signer.public_key(),
             bls_signature: bls_signer.sign_digest(&[5u8; 32]),
             bls_signer,
+            mac_key,
+            mac_tag,
+            ml_dsa_44_public_key: ml_dsa_44_signer.public_key(),
+            ml_dsa_44_signature: ml_dsa_44_signer.sign_digest(&block_digest),
+            ml_dsa_44_signer,
         };
 
         let yaml = serde_yaml::to_string(&fixture).unwrap();
@@ -1142,6 +1376,14 @@ mod tests {
         assert!(fixture.signature == decoded.signature);
         assert_eq!(fixture.bls_public_key, decoded.bls_public_key);
         assert_eq!(fixture.bls_signature, decoded.bls_signature);
+        assert_eq!(fixture.mac_key, decoded.mac_key);
+        assert_eq!(fixture.mac_tag, decoded.mac_tag);
+        assert_eq!(fixture.ml_dsa_44_public_key, decoded.ml_dsa_44_public_key);
+        assert_eq!(fixture.ml_dsa_44_signature, decoded.ml_dsa_44_signature);
+        assert_eq!(
+            fixture.ml_dsa_44_signer.public_key(),
+            decoded.ml_dsa_44_signer.public_key()
+        );
         assert_eq!(
             fixture.bls_signer.public_key(),
             decoded.bls_signer.public_key()

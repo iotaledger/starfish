@@ -297,18 +297,15 @@ impl BlsCertificateAggregator {
                     } else if let Some(&origin_index) = seen_leader_certs.get(&(*leader_ref, *cert))
                     {
                         push_task_source(&mut origins[origin_index], source);
-                    } else {
-                        if let Some(task) = self.aggregate_same_message_task(
-                            crypto::bls_leader_message(leader_ref),
-                            cert,
-                        ) {
-                            tasks.push(BlsVerificationTask {
-                                block_index: origins.len(),
-                                ..task
-                            });
-                            seen_leader_certs.insert((*leader_ref, *cert), origins.len());
-                            origins.push(TaskOrigin::AggLeader(*leader_ref, *cert, vec![source]));
-                        }
+                    } else if let Some(task) = self
+                        .aggregate_same_message_task(crypto::bls_leader_message(leader_ref), cert)
+                    {
+                        tasks.push(BlsVerificationTask {
+                            block_index: origins.len(),
+                            ..task
+                        });
+                        seen_leader_certs.insert((*leader_ref, *cert), origins.len());
+                        origins.push(TaskOrigin::AggLeader(*leader_ref, *cert, vec![source]));
                     }
                 }
             }

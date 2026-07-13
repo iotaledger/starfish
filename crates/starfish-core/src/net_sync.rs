@@ -34,7 +34,7 @@ use crate::{
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::BlsSigner,
+    crypto::{BlsSigner, MacKey},
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -435,12 +435,14 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 }
                 let mut block: VerifiedBlock = (*data_block).clone();
                 tracing::debug!("Received {} from {}", block, peer);
-                match block.verify(
+                match block.verify_with_authentication(
                     &inner.committee,
                     own_id as usize,
                     peer_id as usize,
                     &mut encoder,
                     consensus_protocol,
+                    inner.dag_state.block_authentication_scheme,
+                    &inner.mac_keys,
                 ) {
                     Ok(shard) => {
                         debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
@@ -975,12 +977,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            let shard = match block.verify(
+            let shard = match block.verify_with_authentication(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
+                self.inner.dag_state.block_authentication_scheme,
+                &self.inner.mac_keys,
             ) {
                 Ok(shard) => shard,
                 Err(e) => {
@@ -1329,6 +1333,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub block_ready_notify: Arc<Notify>,
     pub proposal_round_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
+    pub mac_keys: Arc<Vec<MacKey>>,
     pub dissemination_mode: DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
@@ -1367,6 +1372,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
+        let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
         let dissemination_mode = dag_state
             .consensus_protocol
@@ -1459,6 +1465,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             syncer,
             proposal_round_notify,
             committee,
+            mac_keys,
             dissemination_mode,
             causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
             stop: stop_sender.clone(),

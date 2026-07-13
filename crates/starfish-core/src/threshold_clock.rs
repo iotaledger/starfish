@@ -75,10 +75,7 @@ impl ThresholdClockAggregator {
 mod tests {
 
     use super::*;
-    use crate::{
-        crypto::SignatureBytes,
-        types::{AckFields, AuthorityIndex, BlockDigest, RoundNumber},
-    };
+    use crate::types::{AckFields, AuthorityIndex, BlockAuthentication, BlockDigest, RoundNumber};
 
     fn make_header(
         authority: AuthorityIndex,
@@ -100,14 +97,13 @@ mod tests {
                     &block_references,
                     &ack_refs,
                     0,
-                    &SignatureBytes::default(),
                     None,
                     None,
                 ),
             },
             block_references,
             meta_creation_time_ns: 0,
-            signature: SignatureBytes::default(),
+            authentication: BlockAuthentication::None,
             transactions_commitment: None,
             ack: Some(AckFields {
                 intersection: None,

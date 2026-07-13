@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ImportExport,
-    crypto::{BlsPublicKey, BlsSigner, PublicKey, Signer, dummy_bls_public_key, dummy_public_key},
+    crypto::{
+        BlsPublicKey, BlsSigner, MlDsa44PublicKey, MlDsa44Signer, PublicKey, Signer,
+        dummy_bls_public_key, dummy_ml_dsa_44_public_key, dummy_public_key,
+    },
     data::Data,
     types::{AuthorityIndex, AuthoritySet, RoundNumber, Stake, VerifiedBlock},
 };
@@ -143,6 +146,12 @@ impl Committee {
             .map(Authority::bls_public_key)
     }
 
+    pub fn get_ml_dsa_44_public_key(&self, authority: AuthorityIndex) -> Option<&MlDsa44PublicKey> {
+        self.authorities
+            .get(authority as usize)
+            .map(Authority::ml_dsa_44_public_key)
+    }
+
     pub fn known_authority(&self, authority: AuthorityIndex) -> bool {
         (authority as usize) < self.len()
     }
@@ -206,14 +215,17 @@ impl Committee {
     pub fn new_for_benchmarks(committee_size: usize) -> Arc<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
+        let ml_dsa_signers = MlDsa44Signer::new_for_test(committee_size);
         Self::new(
             signers
                 .into_iter()
                 .zip(bls_signers)
-                .map(|(keypair, bls_keypair)| Authority {
+                .zip(ml_dsa_signers)
+                .map(|((keypair, bls_keypair), ml_dsa_keypair)| Authority {
                     stake: 1,
                     public_key: keypair.public_key(),
                     bls_public_key: bls_keypair.public_key(),
+                    ml_dsa_44_public_key: ml_dsa_keypair.public_key(),
                 })
                 .collect(),
         )
@@ -225,6 +237,7 @@ pub struct Authority {
     stake: Stake,
     public_key: PublicKey,
     bls_public_key: BlsPublicKey,
+    ml_dsa_44_public_key: MlDsa44PublicKey,
 }
 
 impl Authority {
@@ -233,6 +246,7 @@ impl Authority {
             stake,
             public_key: dummy_public_key(),
             bls_public_key: dummy_bls_public_key(),
+            ml_dsa_44_public_key: dummy_ml_dsa_44_public_key(),
         }
     }
 
@@ -246,6 +260,10 @@ impl Authority {
 
     pub fn bls_public_key(&self) -> &BlsPublicKey {
         &self.bls_public_key
+    }
+
+    pub fn ml_dsa_44_public_key(&self) -> &MlDsa44PublicKey {
+        &self.ml_dsa_44_public_key
     }
 }
 

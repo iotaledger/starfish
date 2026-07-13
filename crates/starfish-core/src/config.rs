@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    crypto::{BlsPublicKey, BlsSigner, Signer, dummy_bls_signer, dummy_signer},
+    crypto::{
+        BlsPublicKey, BlsSigner, MacKey, MlDsa44Signer, Signer, dummy_bls_signer,
+        dummy_ml_dsa_44_signer, dummy_signer, mac_keyrings_for_test,
+    },
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
 
@@ -270,6 +273,8 @@ pub struct NodePrivateConfig {
     authority: AuthorityIndex,
     pub keypair: Signer,
     pub bls_keypair: BlsSigner,
+    pub ml_dsa_44_keypair: MlDsa44Signer,
+    pub mac_keys: Vec<MacKey>,
     pub storage_path: PathBuf,
 }
 
@@ -279,6 +284,8 @@ impl NodePrivateConfig {
             authority: index,
             keypair: dummy_signer(),
             bls_keypair: dummy_bls_signer(),
+            ml_dsa_44_keypair: dummy_ml_dsa_44_signer(),
+            mac_keys: Vec::new(),
             storage_path: PathBuf::from("storage"),
         }
     }
@@ -286,20 +293,28 @@ impl NodePrivateConfig {
     pub fn new_for_benchmarks(working_dir: &Path, committee_size: usize) -> Vec<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
+        let ml_dsa_signers = MlDsa44Signer::new_for_test(committee_size);
+        let mac_keyrings = mac_keyrings_for_test(committee_size);
         signers
             .into_iter()
             .zip(bls_signers)
+            .zip(ml_dsa_signers)
+            .zip(mac_keyrings)
             .enumerate()
-            .map(|(i, (keypair, bls_keypair))| {
-                let authority = i as AuthorityIndex;
-                let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
-                Self {
-                    authority,
-                    keypair,
-                    bls_keypair,
-                    storage_path: path,
-                }
-            })
+            .map(
+                |(i, (((keypair, bls_keypair), ml_dsa_44_keypair), mac_keys))| {
+                    let authority = i as AuthorityIndex;
+                    let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
+                    Self {
+                        authority,
+                        keypair,
+                        bls_keypair,
+                        ml_dsa_44_keypair,
+                        mac_keys,
+                        storage_path: path,
+                    }
+                },
+            )
             .collect()
     }
 
