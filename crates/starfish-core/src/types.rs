@@ -258,7 +258,10 @@ pub enum BlockAuthentication {
     /// Only valid for locally constructed genesis blocks.
     None,
     Ed25519(SignatureBytes),
+    /// Complete author-generated authenticator retained by direct recipients.
     MacVector(#[serde(with = "flat_mac_vector")] Vec<MacTag>),
+    /// Recipient-specific authenticator selected from a full vector by a relay.
+    MacTag(MacTag),
     MlDsa44(MlDsa44SignatureBytes),
 }
 
@@ -1297,6 +1300,21 @@ impl VerifiedBlock {
         }
     }
 
+    /// Clone a block for relaying to `recipient`, replacing its complete MAC
+    /// vector with only that recipient's tag. A block that was itself received
+    /// with a single tag cannot be relayed again.
+    pub fn with_recipient_mac(&self, recipient: AuthorityIndex) -> Option<Self> {
+        let BlockAuthentication::MacVector(tags) = &self.header.authentication else {
+            return None;
+        };
+        let tag = *tags.get(recipient as usize)?;
+
+        let mut block = self.clone();
+        block.header.authentication = BlockAuthentication::MacTag(tag);
+        block.header.serialized = None;
+        Some(block)
+    }
+
     // --- Decomposition ---
 
     /// Extract the header, consuming self.
@@ -1507,13 +1525,23 @@ impl VerifiedBlock {
                     bail!("Block Ed25519 verification has failed: {error:?}");
                 }
             }
-            (BlockAuthenticationScheme::MacVector, BlockAuthentication::MacVector(tags)) => {
-                ensure!(
-                    tags.len() == committee.len(),
-                    "MAC vector length {} does not match committee size {}",
-                    tags.len(),
-                    committee.len(),
-                );
+            (BlockAuthenticationScheme::MacVector, authentication) => {
+                let tag = match authentication {
+                    BlockAuthentication::MacVector(tags) => {
+                        ensure!(
+                            tags.len() == committee.len(),
+                            "MAC vector length {} does not match committee size {}",
+                            tags.len(),
+                            committee.len(),
+                        );
+                        tags.get(own_id)
+                            .ok_or_else(|| eyre::eyre!("Own authority index is out of bounds"))?
+                    }
+                    BlockAuthentication::MacTag(tag) => tag,
+                    actual => {
+                        bail!("Expected MacVector block authentication, received {actual:?}")
+                    }
+                };
                 ensure!(
                     own_id < committee.len(),
                     "Own authority index is out of bounds"
@@ -1529,10 +1557,7 @@ impl VerifiedBlock {
                     bail!("Unknown block author {}", self.authority())
                 };
                 let expected = key.compute_tag(self.authority(), own_id as AuthorityIndex, &digest);
-                ensure!(
-                    tags[own_id] == expected,
-                    "Block MAC verification has failed"
-                );
+                ensure!(*tag == expected, "Block MAC verification has failed");
             }
             (BlockAuthenticationScheme::MlDsa44, BlockAuthentication::MlDsa44(signature)) => {
                 let Some(public_key) = committee.get_ml_dsa_44_public_key(self.authority()) else {
@@ -2491,6 +2516,59 @@ mod tests {
         let yaml = serde_yaml::to_string(block.authentication()).unwrap();
         let decoded_yaml: BlockAuthentication = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(decoded_yaml, *block.authentication());
+    }
+
+    #[test]
+    fn relay_selects_only_the_destination_mac() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        let BlockAuthentication::MacVector(full_vector) = block.authentication() else {
+            panic!("expected full MAC vector")
+        };
+
+        let mut relayed = block.with_recipient_mac(2).unwrap();
+        let BlockAuthentication::MacTag(tag) = relayed.authentication() else {
+            panic!("expected recipient MAC tag")
+        };
+        assert_eq!(*tag, full_vector[2]);
+        assert_eq!(relayed.reference(), block.reference());
+        assert_eq!(
+            bincode::serialize(relayed.authentication()).unwrap().len(),
+            4 + 8 + crypto::MAC_TAG_SIZE,
+        );
+
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        relayed
+            .verify_with_authentication(
+                &committee,
+                2,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Starfish,
+                BlockAuthenticationScheme::MacVector,
+                &keyrings[2],
+            )
+            .unwrap();
+
+        let mut wrong_recipient = block.with_recipient_mac(2).unwrap();
+        assert!(
+            wrong_recipient
+                .verify_with_authentication(
+                    &committee,
+                    1,
+                    2,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MacVector,
+                    &keyrings[1],
+                )
+                .is_err()
+        );
+        assert!(relayed.with_recipient_mac(3).is_none());
     }
 
     #[test]
