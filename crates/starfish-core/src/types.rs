@@ -1292,6 +1292,48 @@ impl VerifiedBlock {
         self.transaction_data.is_some()
     }
 
+    /// Returns whether this copy retains the author's complete MAC vector and
+    /// can therefore be specialized for another recipient.
+    pub fn has_full_mac_vector(&self) -> bool {
+        matches!(
+            &self.header.authentication,
+            BlockAuthentication::MacVector(_)
+        )
+    }
+
+    /// Merge two verified copies of the same content-addressed block, keeping
+    /// the richest independently transported components from either copy:
+    /// transaction data and the author's complete MAC vector.
+    ///
+    /// Returns `None` when the references differ or the merge adds nothing.
+    pub fn merge_same_block(&self, incoming: &Self) -> Option<Self> {
+        if self.reference() != incoming.reference() {
+            return None;
+        }
+
+        let mut merged = self.clone();
+        let mut changed = false;
+
+        if merged.transaction_data.is_none() && incoming.transaction_data.is_some() {
+            merged.transaction_data = incoming.transaction_data.clone();
+            changed = true;
+        }
+
+        if matches!(
+            &merged.header.authentication,
+            BlockAuthentication::MacTag(_)
+        ) && matches!(
+            &incoming.header.authentication,
+            BlockAuthentication::MacVector(_)
+        ) {
+            merged.header.authentication = incoming.header.authentication.clone();
+            merged.header.serialized = None;
+            changed = true;
+        }
+
+        changed.then_some(merged)
+    }
+
     /// Create a lightweight copy with only the header (no transaction data).
     pub fn as_header_only(&self) -> Self {
         Self {
@@ -2569,6 +2611,32 @@ mod tests {
                 .is_err()
         );
         assert!(relayed.with_recipient_mac(3).is_none());
+    }
+
+    #[test]
+    fn same_block_merge_keeps_full_mac_and_transaction_data_in_either_order() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let full = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        let mut tagged_with_transactions = full.with_recipient_mac(1).unwrap();
+        tagged_with_transactions.transaction_data =
+            Some(TransactionData::new(vec![BaseTransaction::Share(
+                Transaction::new(vec![1, 2, 3]),
+            )]));
+
+        let tag_then_full = tagged_with_transactions.merge_same_block(&full).unwrap();
+        assert!(tag_then_full.has_full_mac_vector());
+        assert!(tag_then_full.has_transaction_data());
+
+        let full_then_tag = full
+            .as_header_only()
+            .merge_same_block(&tagged_with_transactions)
+            .unwrap();
+        assert!(full_then_tag.has_full_mac_vector());
+        assert!(full_then_tag.has_transaction_data());
     }
 
     #[test]
