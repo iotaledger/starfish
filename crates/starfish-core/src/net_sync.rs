@@ -46,14 +46,57 @@ use crate::{
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, PartialSig, PartialSigKind,
-        ProvableShard, RoundNumber, VerifiedBlock, format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
+        BlockReference, PartialSig, PartialSigKind, ProvableShard, RoundNumber, VerifiedBlock,
+        format_authority_index,
     },
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
 const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
+
+/// Enforce the MAC experiment's transport contract before cryptographic
+/// verification:
+///
+/// - a full vector is accepted only on proactive block streaming directly
+///   from the block's claimed author;
+/// - every relay and synchronization path must carry one recipient tag;
+/// - a direct author stream must carry the full vector, so recipients retain
+///   the material needed for one-hop relay.
+fn verify_mac_transport(
+    block: &VerifiedBlock,
+    authentication_scheme: BlockAuthenticationScheme,
+    peer_id: AuthorityIndex,
+    source: DataSource,
+) -> eyre::Result<()> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return Ok(());
+    }
+
+    let direct_author_stream = peer_id == block.authority()
+        && matches!(
+            source,
+            DataSource::BlockBundleStreaming | DataSource::BlockBundleStreamingHeader
+        );
+
+    match block.authentication() {
+        BlockAuthentication::MacVector(_) if direct_author_stream => Ok(()),
+        BlockAuthentication::MacVector(_) => eyre::bail!(
+            "Full MAC vector for block {} must arrive via direct author block streaming; \
+             received from authority {} with source {}",
+            block.reference(),
+            peer_id,
+            source,
+        ),
+        BlockAuthentication::MacTag(_) if !direct_author_stream => Ok(()),
+        BlockAuthentication::MacTag(_) => eyre::bail!(
+            "Direct author block stream for block {} must carry the full MAC vector",
+            block.reference(),
+        ),
+        _ => Ok(()),
+    }
+}
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -466,6 +509,20 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 }
                 let mut block: VerifiedBlock = (*data_block).clone();
                 tracing::debug!("Received {} from {}", block, peer);
+                if let Err(e) = verify_mac_transport(
+                    &block,
+                    inner.dag_state.block_authentication_scheme,
+                    peer_id,
+                    source,
+                ) {
+                    tracing::warn!(
+                        "Rejected incorrectly transported block {} from {}: {:?}",
+                        block.reference(),
+                        peer,
+                        e
+                    );
+                    break;
+                }
                 match block.verify_with_authentication(
                     &inner.committee,
                     own_id as usize,
@@ -1013,6 +1070,20 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
+            if let Err(e) = verify_mac_transport(
+                &block,
+                self.inner.dag_state.block_authentication_scheme,
+                self.peer_id,
+                source,
+            ) {
+                tracing::warn!(
+                    "Rejected incorrectly transported block {} from {}: {:?}",
+                    block.reference(),
+                    self.peer,
+                    e
+                );
+                break;
+            }
             let shard = match block.verify_with_authentication(
                 &self.inner.committee,
                 self.own_id as usize,
@@ -2414,7 +2485,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::SignatureBytes,
+        crypto::{self, SignatureBytes},
         types::{BaseTransaction, BlockReference},
     };
 
@@ -2453,6 +2524,97 @@ mod tests {
         );
         assert_eq!(filter.needed_headers(&[(digest, true)]), vec![false]);
         assert_eq!(filter.contains_full_mac_batch(&[digest]), vec![true]);
+    }
+
+    #[test]
+    fn full_mac_vectors_require_direct_author_block_streaming() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut full = VerifiedBlock::new(
+            1,
+            1,
+            Vec::new(),
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let tags = keyrings[1]
+            .iter()
+            .enumerate()
+            .map(|(recipient, key)| key.compute_tag(1, recipient as AuthorityIndex, &full.digest()))
+            .collect();
+        full.header.authentication = BlockAuthentication::MacVector(tags);
+
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreamingHeader,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_err()
+        );
+
+        let tagged = full.with_recipient_mac(0).unwrap();
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
     }
 
     #[test]

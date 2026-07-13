@@ -2428,7 +2428,14 @@ mod tests {
         committee: &Committee,
         authorizer: &BlockAuthorizer<'_>,
     ) -> VerifiedBlock {
-        let authority = 0;
+        make_authenticated_starfish_block_for_author(committee, 0, authorizer)
+    }
+
+    fn make_authenticated_starfish_block_for_author(
+        committee: &Committee,
+        authority: AuthorityIndex,
+        authorizer: &BlockAuthorizer<'_>,
+    ) -> VerifiedBlock {
         let round = 1;
         let transactions = Vec::new();
         let mut encoder = Encoder::new(2, 4, 2).unwrap();
@@ -2611,6 +2618,94 @@ mod tests {
                 .is_err()
         );
         assert!(relayed.with_recipient_mac(3).is_none());
+    }
+
+    #[test]
+    fn mac_verification_authenticates_the_claimed_block_author() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut correctly_authenticated = make_authenticated_starfish_block_for_author(
+            &committee,
+            1,
+            &BlockAuthorizer::MacVector(&keyrings[1]),
+        );
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        correctly_authenticated
+            .verify_with_authentication(
+                &committee,
+                2,
+                1,
+                &mut encoder,
+                ConsensusProtocol::Starfish,
+                BlockAuthenticationScheme::MacVector,
+                &keyrings[2],
+            )
+            .unwrap();
+
+        // The content claims authority 1, but authority 0's pairwise keys
+        // produced the vector. Recipient 2 must reject it when selecting the
+        // key associated with the claimed author.
+        let mut wrong_author_keys = make_authenticated_starfish_block_for_author(
+            &committee,
+            1,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        assert!(
+            wrong_author_keys
+                .verify_with_authentication(
+                    &committee,
+                    2,
+                    1,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MacVector,
+                    &keyrings[2],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mac_vector_verification_is_limited_to_the_receivers_own_tag() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        let mut tampered = block.clone();
+        let BlockAuthentication::MacVector(tags) = &mut tampered.header.authentication else {
+            panic!("expected full MAC vector")
+        };
+        tags[3] = MacTag::from_bytes([0; crypto::MAC_TAG_SIZE]);
+
+        let mut receiver_one = tampered.clone();
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        receiver_one
+            .verify_with_authentication(
+                &committee,
+                1,
+                0,
+                &mut encoder,
+                ConsensusProtocol::Starfish,
+                BlockAuthenticationScheme::MacVector,
+                &keyrings[1],
+            )
+            .unwrap();
+
+        assert!(
+            tampered
+                .verify_with_authentication(
+                    &committee,
+                    3,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MacVector,
+                    &keyrings[3],
+                )
+                .is_err()
+        );
     }
 
     #[test]
