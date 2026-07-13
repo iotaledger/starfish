@@ -161,6 +161,7 @@ fn eligible_missing_parent_refs(
 
 struct FilterForBlocks {
     digests: parking_lot::RwLock<AHashSet<BlockDigest>>,
+    full_mac_vectors: parking_lot::RwLock<AHashSet<BlockDigest>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
 }
 
@@ -168,6 +169,7 @@ impl FilterForBlocks {
     fn new() -> Self {
         Self {
             digests: parking_lot::RwLock::new(AHashSet::new()),
+            full_mac_vectors: parking_lot::RwLock::new(AHashSet::new()),
             queue: parking_lot::RwLock::new(VecDeque::new()),
         }
     }
@@ -177,58 +179,84 @@ impl FilterForBlocks {
         digests.iter().map(|d| set.contains(d)).collect()
     }
 
-    fn insert_batch(&self, new_digests: &[BlockDigest]) {
+    fn contains_full_mac_batch(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let set = self.full_mac_vectors.read();
+        digests.iter().map(|d| set.contains(d)).collect()
+    }
+
+    fn insert_batch(&self, blocks: &[(BlockDigest, bool)]) {
         let mut digests = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        for digest in new_digests {
+        for (digest, has_full_mac_vector) in blocks {
             if digests.insert(*digest) {
                 queue.push_back(*digest);
+            }
+            if *has_full_mac_vector {
+                full_mac_vectors.insert(*digest);
             }
         }
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 digests.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
     }
 
-    /// Inserts all digests and returns `true` for each that was genuinely new
-    /// (not already in the filter and not duplicated earlier in the batch).
-    fn insert_and_report_new(&self, digests: &[BlockDigest]) -> Vec<bool> {
+    /// Inserts all verified copies and returns `true` for each copy that adds
+    /// either a new block reference or the first full MAC vector for a
+    /// previously recipient-tag-only reference.
+    fn insert_and_report_useful(&self, blocks: &[(BlockDigest, bool)]) -> Vec<bool> {
         let mut set = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        let is_new: Vec<bool> = digests
+        let is_useful: Vec<bool> = blocks
             .iter()
-            .map(|d| {
-                if set.insert(*d) {
-                    queue.push_back(*d);
-                    true
-                } else {
-                    false
+            .map(|(digest, has_full_mac_vector)| {
+                let is_new = set.insert(*digest);
+                if is_new {
+                    queue.push_back(*digest);
                 }
+                let is_mac_upgrade = *has_full_mac_vector && full_mac_vectors.insert(*digest);
+                is_new || is_mac_upgrade
             })
             .collect();
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 set.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
-        is_new
+        is_useful
     }
 
-    /// For each header digest, returns `true` if the digest has not been seen
-    /// before (neither in the filter nor earlier in this batch).
-    fn needed_headers(&self, batch: &[BlockDigest]) -> Vec<bool> {
+    /// For each header, returns `true` if it is either unseen or upgrades a
+    /// previously seen recipient-only MAC to a full vector.
+    fn needed_headers(&self, batch: &[(BlockDigest, bool)]) -> Vec<bool> {
         let digests = self.digests.read();
-        let mut seen_in_batch = AHashSet::with_capacity(batch.len());
+        let full_mac_vectors = self.full_mac_vectors.read();
+        let mut seen_in_batch = AHashMap::with_capacity(batch.len());
 
         batch
             .iter()
-            .map(|digest| !digests.contains(digest) && seen_in_batch.insert(*digest))
+            .map(|(digest, has_full_mac_vector)| {
+                let was_seen = digests.contains(digest) || seen_in_batch.contains_key(digest);
+                let had_full_mac_vector = seen_in_batch
+                    .get(digest)
+                    .copied()
+                    .unwrap_or_else(|| full_mac_vectors.contains(digest));
+                let is_needed = !was_seen || (*has_full_mac_vector && !had_full_mac_vector);
+                seen_in_batch
+                    .entry(*digest)
+                    .and_modify(|full| *full |= *has_full_mac_vector)
+                    .or_insert(*has_full_mac_vector);
+                is_needed
+            })
             .collect()
     }
 }
@@ -424,8 +452,11 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         while let Some((blocks, source)) = rx.recv().await {
             let connection_knowledge = inner.cordial_knowledge.connection_knowledge(peer_id);
-            let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
-            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_digests);
+            let incoming_headers: Vec<_> = blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_headers);
             let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
 
             for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
@@ -466,11 +497,14 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 ck.mark_headers_useful_from_peer(&refs);
             }
 
-            let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
-            let is_new = filter_for_blocks.insert_and_report_new(&digests);
+            let filter_entries: Vec<_> = verified_blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let is_useful = filter_for_blocks.insert_and_report_useful(&filter_entries);
             let mut new_data_blocks = Vec::new();
-            for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
-                if is_new {
+            for (storage_block, is_useful) in verified_blocks.into_iter().zip(is_useful) {
+                if is_useful {
                     let mut storage_block = storage_block;
                     storage_block.preserialize();
                     debug_assert!(
@@ -962,16 +996,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         // --- batch pre-filter (one read lock each) ---
         let block_known = self.filter_for_blocks.contains_batch(&incoming_digests);
+        let full_mac_known = self
+            .filter_for_blocks
+            .contains_full_mac_batch(&incoming_digests);
         let shard_full = self.filter_for_shards.has_full_batch(&incoming_digests);
 
         // --- verify loop (no lock acquisitions) ---
         let mut verified: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
-        for ((data_block, _digest), (bk, sf)) in blocks
-            .into_iter()
-            .zip(incoming_digests)
-            .zip(block_known.into_iter().zip(shard_full))
-        {
-            if bk && sf {
+        for (index, data_block) in blocks.into_iter().enumerate() {
+            let bk = block_known[index];
+            let sf = shard_full[index];
+            let incoming_has_full_mac = data_block.has_full_mac_vector();
+            if bk && sf && (!incoming_has_full_mac || full_mac_known[index]) {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
@@ -1012,8 +1048,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // --- batch filter updates (one write lock each) ---
-        let verified_digests: Vec<_> = verified.iter().map(|(b, _)| b.digest()).collect();
-        self.filter_for_blocks.insert_batch(&verified_digests);
+        let verified_filter_entries: Vec<_> = verified
+            .iter()
+            .map(|(block, _)| (block.digest(), block.has_full_mac_vector()))
+            .collect();
+        let verified_digests: Vec<_> = verified_filter_entries
+            .iter()
+            .map(|(digest, _)| *digest)
+            .collect();
+        self.filter_for_blocks
+            .insert_batch(&verified_filter_entries);
         self.filter_for_shards.mark_full_batch(&verified_digests);
 
         // --- preserialize + collect ---
@@ -2386,6 +2430,29 @@ mod tests {
         let wait = proposal_round_notify.notified();
         signals.proposal_round_advanced(5);
         wait.await;
+    }
+
+    #[test]
+    fn block_filter_allows_exactly_one_tag_to_full_mac_upgrade() {
+        let filter = FilterForBlocks::new();
+        let digest = BlockReference::new_test(1, 7).digest;
+
+        assert_eq!(
+            filter.needed_headers(&[(digest, false), (digest, true), (digest, true)]),
+            vec![true, true, false]
+        );
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, false)]),
+            vec![true]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, false)]), vec![false]);
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![true]);
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, true), (digest, true)]),
+            vec![true, false]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![false]);
+        assert_eq!(filter.contains_full_mac_batch(&[digest]), vec![true]);
     }
 
     #[test]

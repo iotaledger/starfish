@@ -32,8 +32,8 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockDigest, BlockReference,
-        BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishNoVoteCert,
+        AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
+        BlockReference, BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishNoVoteCert,
         SailfishTimeoutCert, TransactionData, VerifiedBlock,
     },
 };
@@ -1161,6 +1161,66 @@ impl DagState {
 
     pub fn get_storage_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
         self.dag_state_inner.read().get_storage_block(reference)
+    }
+
+    /// Upgrade an already stored recipient-only MAC copy with a later verified
+    /// full-vector copy. This intentionally updates only the persisted header
+    /// and the matching in-memory value: the block is not re-added to the DAG,
+    /// so threshold clocks, votes, consensus notifications, and acceptance
+    /// metrics are left untouched.
+    pub(crate) fn upgrade_mac_authentication(&self, incoming: &VerifiedBlock) -> bool {
+        if !incoming.has_full_mac_vector() {
+            return false;
+        }
+
+        let reference = *incoming.reference();
+        let Some(existing) = self.get_storage_block(reference) else {
+            return false;
+        };
+        if !matches!(existing.authentication(), BlockAuthentication::MacTag(_)) {
+            return false;
+        }
+        let Some(mut upgraded) = existing.merge_same_block(incoming) else {
+            return false;
+        };
+        upgraded.preserialize();
+
+        let store_start = std::time::Instant::now();
+        self.store
+            .store_header_bytes(
+                upgraded.reference(),
+                upgraded
+                    .serialized_header_bytes()
+                    .expect("upgraded header should be preserialized"),
+            )
+            .expect("Failed to store upgraded MAC-vector header");
+        self.metrics
+            .store_block_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_block_count.inc();
+
+        // Preserve any transaction data that may have arrived concurrently
+        // with the authentication upgrade.
+        let mut inner = self.dag_state_inner.write();
+        let authority = reference.authority as usize;
+        let Some(blocks_at_round) = inner.index[authority].get_mut(&reference.round) else {
+            // The block was evicted; the persistent header update above is the
+            // authoritative copy and it should remain evicted from memory.
+            return true;
+        };
+        let Some(current) = blocks_at_round.get_mut(&reference.digest) else {
+            return true;
+        };
+        if matches!(current.authentication(), BlockAuthentication::MacTag(_)) {
+            let mut memory_upgrade = current
+                .merge_same_block(incoming)
+                .expect("tag-only copy should accept a full-vector upgrade");
+            memory_upgrade.preserialize();
+            *current = Data::new(memory_upgrade);
+            *inner.round_version.entry(reference.round).or_insert(0) += 1;
+        }
+
+        true
     }
 
     /// Look up the `transactions_commitment` for a block in the DAG.
@@ -3431,15 +3491,16 @@ mod tests {
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
         crypto::{
-            BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
+            self, BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
             TransactionsCommitment,
         },
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme,
-            BlockReference, BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishFields,
-            SailfishNoVoteCert, Transaction, VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthentication,
+            BlockAuthenticationScheme, BlockAuthorizer, BlockReference, BlsAggregateCertificate,
+            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            VerifiedBlock,
         },
     };
 
@@ -3694,6 +3755,65 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![*block.reference()]
         );
+    }
+
+    #[test]
+    fn full_mac_vector_upgrades_tag_only_block_in_memory_and_storage() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut full = VerifiedBlock::new_with_authorizer_and_unprovable(
+            1,
+            1,
+            committee
+                .authorities()
+                .map(|authority| BlockReference::new_test(authority, 0))
+                .collect(),
+            None,
+            Vec::new(),
+            0,
+            &BlockAuthorizer::MacVector(&keyrings[1]),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            ConsensusProtocol::Starfish,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        full.preserialize();
+        let reference = *full.reference();
+
+        let mut tagged = full.with_recipient_mac(0).unwrap();
+        tagged.preserialize();
+        let dag_state = open_test_dag_state_for("starfish-mac", 0);
+        dag_state.insert_general_block(Data::new(tagged), DataSource::BlockBundleStreaming);
+
+        assert!(matches!(
+            dag_state
+                .get_storage_block(reference)
+                .unwrap()
+                .authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(matches!(
+            dag_state.get_blocks_by_round_cached(1)[0].authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(dag_state.upgrade_mac_authentication(&full));
+
+        let upgraded = dag_state.get_storage_block(reference).unwrap();
+        assert!(upgraded.has_full_mac_vector());
+        assert!(upgraded.with_recipient_mac(2).is_some());
+        assert!(dag_state.get_blocks_by_round_cached(1)[0].has_full_mac_vector());
+        let persisted = dag_state.store.get_block(&reference).unwrap().unwrap();
+        assert!(persisted.has_full_mac_vector());
+        assert!(!dag_state.upgrade_mac_authentication(&full));
     }
 
     #[test]

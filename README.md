@@ -76,9 +76,11 @@ field and does not change the block reference. A `starfish-mac` author sends
 the full vector, with exactly one tag for every committee member, to its direct
 recipients. A direct recipient retains that vector and, when relaying a header
 or answering a missing-parent request, sends only the destination's tag. A
-tag-only copy cannot be relayed a second time. Benchmark genesis
-deterministically generates the pairwise MAC keys, ML-DSA seeds, and public
-keys in the node configuration.
+tag-only copy cannot be relayed a second time. If the same node later receives
+the author's full-vector copy, it upgrades the stored authentication without
+adding a second DAG vertex and can then relay recipient-specific tags.
+Benchmark genesis deterministically generates the pairwise MAC keys, ML-DSA
+seeds, and public keys in the node configuration.
 
 This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
 here states that it has not been independently audited and should not be
