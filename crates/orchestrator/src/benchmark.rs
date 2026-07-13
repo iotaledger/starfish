@@ -57,7 +57,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     // Consensus protocol to deploy
     // (starfish | starfish-mac | starfish-ml-dsa-44 | starfish-speed |
     // starfish-speed-mac | starfish-speed-ml-dsa-44 |
-    // sparse-starfish-speed | starfish-bls |
+    // sparse-starfish-speed | sparse-starfish-speed-mac |
+    // sparse-starfish-speed-ml-dsa-44 | starfish-bls |
     // mysticeti | mysticeti-bls | cordial-miners | bluestreak | sailfish-pp)
     pub consensus_protocol: String,
     /// number Byzantine nodes

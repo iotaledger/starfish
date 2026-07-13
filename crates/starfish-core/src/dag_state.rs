@@ -306,6 +306,14 @@ impl ProtocolConfig {
                 ConsensusProtocol::StarfishSpeed,
                 BlockAuthenticationScheme::MlDsa44,
             ),
+            "sparse-starfish-speed-mac" => (
+                ConsensusProtocol::SparseStarfishSpeed,
+                BlockAuthenticationScheme::MacVector,
+            ),
+            "sparse-starfish-speed-ml-dsa-44" => (
+                ConsensusProtocol::SparseStarfishSpeed,
+                BlockAuthenticationScheme::MlDsa44,
+            ),
             known => (
                 ConsensusProtocol::from_known_str(known)
                     .ok_or_else(|| format!("Unknown consensus protocol '{known}'"))?,
@@ -4960,7 +4968,29 @@ mod tests {
                 block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
             }
         );
+        assert_eq!(
+            ProtocolConfig::from_str("sparse-starfish-speed").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
+                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("sparse-starfish-speed-mac").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
+                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("sparse-starfish-speed-ml-dsa-44").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
+            }
+        );
         assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
         assert!(ProtocolConfig::from_str("starfish-speed-unknown").is_err());
+        assert!(ProtocolConfig::from_str("sparse-starfish-speed-unknown").is_err());
     }
 }

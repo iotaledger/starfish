@@ -137,7 +137,8 @@ pub enum Operation {
         /// Protocols to benchmark in order. Available options:
         /// starfish | starfish-mac | starfish-ml-dsa-44 |
         /// starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 |
-        /// sparse-starfish-speed |
+        /// sparse-starfish-speed | sparse-starfish-speed-mac |
+        /// sparse-starfish-speed-ml-dsa-44 |
         /// starfish-bls | mysticeti | mysticeti-bls |
         /// cordial-miners | bluestreak | sailfish-pp
         #[clap(

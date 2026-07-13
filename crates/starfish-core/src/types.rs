@@ -2492,40 +2492,48 @@ mod tests {
     }
 
     #[test]
-    fn all_authentication_schemes_verify_for_starfish_and_starfish_speed() {
+    fn all_authentication_schemes_verify_for_starfish_protocols() {
         let committee = Committee::new_for_benchmarks(4);
         let ed_signers = Signer::new_for_test(committee.len());
         let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
         let mac_keyrings = crypto::mac_keyrings_for_test(committee.len());
 
-        let cases = [
-            (
-                make_authenticated_starfish_block(
-                    &committee,
-                    &BlockAuthorizer::Ed25519(&ed_signers[0]),
-                ),
-                BlockAuthenticationScheme::Ed25519,
-            ),
-            (
-                make_authenticated_starfish_block(
-                    &committee,
-                    &BlockAuthorizer::MacVector(&mac_keyrings[0]),
-                ),
-                BlockAuthenticationScheme::MacVector,
-            ),
-            (
-                make_authenticated_starfish_block(
-                    &committee,
-                    &BlockAuthorizer::MlDsa44(&ml_dsa_signers[0]),
-                ),
-                BlockAuthenticationScheme::MlDsa44,
-            ),
-        ];
-
         for consensus_protocol in [
             ConsensusProtocol::Starfish,
             ConsensusProtocol::StarfishSpeed,
+            ConsensusProtocol::SparseStarfishSpeed,
         ] {
+            // A Sparse-Starfish-Speed non-leader has compressed references,
+            // while its leader carries the full frontier used by this test
+            // block. Using the round-one leader makes the same authenticated
+            // content structurally valid under all three protocols.
+            let author = committee.elect_leader(1) as usize;
+            let cases = [
+                (
+                    make_authenticated_starfish_block_for_author(
+                        &committee,
+                        author as AuthorityIndex,
+                        &BlockAuthorizer::Ed25519(&ed_signers[author]),
+                    ),
+                    BlockAuthenticationScheme::Ed25519,
+                ),
+                (
+                    make_authenticated_starfish_block_for_author(
+                        &committee,
+                        author as AuthorityIndex,
+                        &BlockAuthorizer::MacVector(&mac_keyrings[author]),
+                    ),
+                    BlockAuthenticationScheme::MacVector,
+                ),
+                (
+                    make_authenticated_starfish_block_for_author(
+                        &committee,
+                        author as AuthorityIndex,
+                        &BlockAuthorizer::MlDsa44(&ml_dsa_signers[author]),
+                    ),
+                    BlockAuthenticationScheme::MlDsa44,
+                ),
+            ];
             for (block, scheme) in &cases {
                 for (receiver, receiver_keys) in mac_keyrings.iter().enumerate() {
                     let mut received = block.clone();
