@@ -2492,7 +2492,7 @@ mod tests {
     }
 
     #[test]
-    fn all_authentication_schemes_verify_for_starfish() {
+    fn all_authentication_schemes_verify_for_starfish_and_starfish_speed() {
         let committee = Committee::new_for_benchmarks(4);
         let ed_signers = Signer::new_for_test(committee.len());
         let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
@@ -2522,26 +2522,31 @@ mod tests {
             ),
         ];
 
-        for (block, scheme) in cases {
-            for (receiver, receiver_keys) in mac_keyrings.iter().enumerate() {
-                let mut received = block.clone();
-                let mut encoder = Encoder::new(2, 4, 2).unwrap();
-                let mac_keys = if scheme == BlockAuthenticationScheme::MacVector {
-                    receiver_keys.as_slice()
-                } else {
-                    &[]
-                };
-                received
-                    .verify_with_authentication(
-                        &committee,
-                        receiver,
-                        0,
-                        &mut encoder,
-                        ConsensusProtocol::Starfish,
-                        scheme,
-                        mac_keys,
-                    )
-                    .unwrap();
+        for consensus_protocol in [
+            ConsensusProtocol::Starfish,
+            ConsensusProtocol::StarfishSpeed,
+        ] {
+            for (block, scheme) in &cases {
+                for (receiver, receiver_keys) in mac_keyrings.iter().enumerate() {
+                    let mut received = block.clone();
+                    let mut encoder = Encoder::new(2, 4, 2).unwrap();
+                    let mac_keys = if *scheme == BlockAuthenticationScheme::MacVector {
+                        receiver_keys.as_slice()
+                    } else {
+                        &[]
+                    };
+                    received
+                        .verify_with_authentication(
+                            &committee,
+                            receiver,
+                            0,
+                            &mut encoder,
+                            consensus_protocol,
+                            *scheme,
+                            mac_keys,
+                        )
+                        .unwrap();
+                }
             }
         }
     }

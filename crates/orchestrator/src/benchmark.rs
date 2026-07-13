@@ -56,6 +56,7 @@ pub struct BenchmarkParametersGeneric<N, C> {
     pub use_internal_ip_address: bool,
     // Consensus protocol to deploy
     // (starfish | starfish-mac | starfish-ml-dsa-44 | starfish-speed |
+    // starfish-speed-mac | starfish-speed-ml-dsa-44 |
     // sparse-starfish-speed | starfish-bls |
     // mysticeti | mysticeti-bls | cordial-miners | bluestreak | sailfish-pp)
     pub consensus_protocol: String,

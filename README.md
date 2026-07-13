@@ -61,27 +61,26 @@ offloaded from the critical path.
 
 ### Starfish block authentication experiments
 
-Plain Starfish can be run with three interchangeable block-authentication
-schemes:
+Plain Starfish and Starfish Speed can each be run with three interchangeable
+block-authentication schemes:
 
-| CLI name | Block authentication |
-|---|---|
-| `starfish` | Ed25519 signature |
-| `starfish-mac` | Full vector of pairwise keyed-BLAKE3 MAC tags |
-| `starfish-ml-dsa-44` | ML-DSA-44 signature |
+| Protocol | Ed25519 | MAC vector | ML-DSA-44 |
+|---|---|---|---|
+| Starfish | `starfish` | `starfish-mac` | `starfish-ml-dsa-44` |
+| Starfish Speed | `starfish-speed` | `starfish-speed-mac` | `starfish-speed-ml-dsa-44` |
 
-For all three variants, `BlockReference.digest` is the BLAKE3 hash of the
+For all six variants, `BlockReference.digest` is the BLAKE3 hash of the
 canonical block content only. The authentication proof is a separate header
-field and does not change the block reference. A `starfish-mac` author sends
-the full vector, with exactly one tag for every committee member, to its direct
-recipients. A direct recipient retains that vector and, when relaying a header
-or answering a missing-parent request, sends only the destination's tag. A
-tag-only copy cannot be relayed a second time. Receivers accept a full vector
-only through proactive block streaming directly from the block's claimed
-author; relay and synchronization traffic must contain exactly one recipient
-tag. If the same node later receives the author's directly streamed
-full-vector copy, it upgrades the stored authentication without adding a
-second DAG vertex and can then relay recipient-specific tags. Benchmark
+field and does not change the block reference. An author using either MAC
+variant sends the full vector, with exactly one tag for every committee member,
+to its direct recipients. A direct recipient retains that vector and, when
+relaying a header or answering a missing-parent request, sends only the
+destination's tag. A tag-only copy cannot be relayed a second time. Receivers
+accept a full vector only through proactive block streaming directly from the
+block's claimed author; relay and synchronization traffic must contain exactly
+one recipient tag. If the same node later receives the author's directly
+streamed full-vector copy, it upgrades the stored authentication without adding
+a second DAG vertex and can then relay recipient-specific tags. Benchmark
 genesis deterministically generates the pairwise MAC keys, ML-DSA seeds, and
 public keys in the node configuration.
 
