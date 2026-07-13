@@ -61,18 +61,19 @@ offloaded from the critical path.
 
 ### Starfish block authentication experiments
 
-Plain Starfish and Starfish Speed can each be run with three interchangeable
-block-authentication schemes:
+Starfish, Starfish Speed, and Sparse-Starfish-Speed can each be run with three
+interchangeable block-authentication schemes:
 
 | Protocol | Ed25519 | MAC vector | ML-DSA-44 |
 |---|---|---|---|
 | Starfish | `starfish` | `starfish-mac` | `starfish-ml-dsa-44` |
 | Starfish Speed | `starfish-speed` | `starfish-speed-mac` | `starfish-speed-ml-dsa-44` |
+| Sparse-Starfish-Speed | `sparse-starfish-speed` | `sparse-starfish-speed-mac` | `sparse-starfish-speed-ml-dsa-44` |
 
-For all six variants, `BlockReference.digest` is the BLAKE3 hash of the
+For all nine variants, `BlockReference.digest` is the BLAKE3 hash of the
 canonical block content only. The authentication proof is a separate header
-field and does not change the block reference. An author using either MAC
-variant sends the full vector, with exactly one tag for every committee member,
+field and does not change the block reference. An author using a MAC variant
+sends the full vector, with exactly one tag for every committee member,
 to its direct recipients. A direct recipient retains that vector and, when
 relaying a header or answering a missing-parent request, sends only the
 destination's tag. A tag-only copy cannot be relayed a second time. Receivers

@@ -98,6 +98,38 @@ fn verify_mac_transport(
     }
 }
 
+/// Prepare blocks forwarded through relay or synchronization paths for a
+/// specific peer. MAC-authenticated blocks retain their complete vector only
+/// at direct recipients; forwarding selects the destination's tag. A
+/// tag-only copy cannot be forwarded again and is therefore omitted.
+pub(crate) fn prepare_forwarded_blocks_for_peer(
+    authentication_scheme: BlockAuthenticationScheme,
+    recipient: AuthorityIndex,
+    blocks: Vec<Data<VerifiedBlock>>,
+) -> Vec<Data<VerifiedBlock>> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return blocks;
+    }
+
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            block
+                .with_recipient_mac(recipient)
+                .map(Data::new)
+                .or_else(|| {
+                    tracing::debug!(
+                        "Cannot forward MAC-authenticated block {} to authority {}: \
+                         complete MAC vector is unavailable",
+                        block.reference(),
+                        recipient,
+                    );
+                    None
+                })
+        })
+        .collect()
+}
+
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
     message: NetworkMessage,
@@ -1400,6 +1432,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .into_iter()
             .filter(|b| !known_authorities.contains(b.authority()))
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.peer_id,
+            missing,
+        );
         if missing.is_empty() {
             return true;
         }
@@ -2614,6 +2651,26 @@ mod tests {
                 DataSource::BlockBundleStreaming,
             )
             .is_err()
+        );
+
+        let round_gap_blocks = prepare_forwarded_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            0,
+            vec![Data::new(full)],
+        );
+        assert_eq!(round_gap_blocks.len(), 1);
+        assert!(matches!(
+            round_gap_blocks[0].authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(
+            verify_mac_transport(
+                &round_gap_blocks[0],
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::RoundGapResponse,
+            )
+            .is_ok()
         );
     }
 

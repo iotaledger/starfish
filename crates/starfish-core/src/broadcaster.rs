@@ -21,47 +21,15 @@ use crate::{
     dag_state::{ByzantineStrategy, ConsensusProtocol, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
-    net_sync::NetworkSyncerInner,
+    net_sync::{NetworkSyncerInner, prepare_forwarded_blocks_for_peer},
     network::{BlockBatch, NetworkMessage, ShardPayload},
     runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{
-        AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockReference, RoundNumber,
-        VerifiedBlock, format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
+        format_authority_index,
     },
 };
-
-/// Prepare blocks sent through relay and missing-parent response paths for a
-/// specific peer. In the MAC experiment, a direct recipient retains the
-/// complete vector and selects only the destination's tag for these paths. A
-/// tag-only copy cannot be relayed a second time and is therefore omitted.
-fn prepare_relay_blocks_for_peer(
-    authentication_scheme: BlockAuthenticationScheme,
-    recipient: AuthorityIndex,
-    blocks: Vec<Data<VerifiedBlock>>,
-) -> Vec<Data<VerifiedBlock>> {
-    if authentication_scheme != BlockAuthenticationScheme::MacVector {
-        return blocks;
-    }
-
-    blocks
-        .into_iter()
-        .filter_map(|block| {
-            block
-                .with_recipient_mac(recipient)
-                .map(Data::new)
-                .or_else(|| {
-                    tracing::debug!(
-                        "Cannot relay MAC-authenticated block {} to authority {}: \
-                         complete MAC vector is unavailable",
-                        block.reference(),
-                        recipient,
-                    );
-                    None
-                })
-        })
-        .collect()
-}
 
 fn peer_can_serve_missing_data(
     consensus_protocol: ConsensusProtocol,
@@ -462,7 +430,7 @@ where
                     .inner
                     .dag_state
                     .get_transmission_parts(&refs_to_send, &refs_to_send);
-                let headers = prepare_relay_blocks_for_peer(
+                let headers = prepare_forwarded_blocks_for_peer(
                     self.inner.dag_state.block_authentication_scheme,
                     peer_id,
                     headers,
@@ -1375,7 +1343,7 @@ where
             let (headers, shards) = inner
                 .dag_state
                 .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
-            let headers = prepare_relay_blocks_for_peer(
+            let headers = prepare_forwarded_blocks_for_peer(
                 inner.dag_state.block_authentication_scheme,
                 to_whom_authority_index,
                 headers,
@@ -1572,7 +1540,7 @@ mod tests {
     use crate::{
         committee::Committee,
         crypto::{SignatureBytes, mac_keyrings_for_test},
-        types::{BaseTransaction, BlockAuthentication},
+        types::{BaseTransaction, BlockAuthentication, BlockAuthenticationScheme},
     };
 
     fn holder_set(authorities: &[AuthorityIndex]) -> StakeAggregator<QuorumThreshold> {
@@ -1649,7 +1617,7 @@ mod tests {
         let expected = tags[2];
         block.header.authentication = BlockAuthentication::MacVector(tags);
 
-        let relayed = prepare_relay_blocks_for_peer(
+        let relayed = prepare_forwarded_blocks_for_peer(
             BlockAuthenticationScheme::MacVector,
             2,
             vec![Data::new(block)],
@@ -1661,7 +1629,7 @@ mod tests {
         ));
 
         let second_hop =
-            prepare_relay_blocks_for_peer(BlockAuthenticationScheme::MacVector, 3, relayed);
+            prepare_forwarded_blocks_for_peer(BlockAuthenticationScheme::MacVector, 3, relayed);
         assert!(second_hop.is_empty());
     }
 }
