@@ -439,6 +439,7 @@ mod smoke_tests {
     #[test_case("mysticeti", 100)]
     #[test_case("cordial-miners", 140)]
     #[test_case("starfish", 160)]
+    #[test_case("starfish-mac", 740)]
     #[test_case("starfish-speed", 180)]
     #[test_case("starfish-bls", 200)]
     #[test_case("sailfish++", 220)]

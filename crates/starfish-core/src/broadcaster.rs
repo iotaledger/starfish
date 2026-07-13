@@ -26,10 +26,42 @@ use crate::{
     runtime::{Handle, sleep},
     syncer::CommitObserver,
     types::{
-        AuthorityIndex, AuthoritySet, BlockReference, RoundNumber, VerifiedBlock,
-        format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockReference, RoundNumber,
+        VerifiedBlock, format_authority_index,
     },
 };
+
+/// Prepare blocks sent through relay and missing-parent response paths for a
+/// specific peer. In the MAC experiment, a direct recipient retains the
+/// complete vector and selects only the destination's tag for these paths. A
+/// tag-only copy cannot be relayed a second time and is therefore omitted.
+fn prepare_relay_blocks_for_peer(
+    authentication_scheme: BlockAuthenticationScheme,
+    recipient: AuthorityIndex,
+    blocks: Vec<Data<VerifiedBlock>>,
+) -> Vec<Data<VerifiedBlock>> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return blocks;
+    }
+
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            block
+                .with_recipient_mac(recipient)
+                .map(Data::new)
+                .or_else(|| {
+                    tracing::debug!(
+                        "Cannot relay MAC-authenticated block {} to authority {}: \
+                         complete MAC vector is unavailable",
+                        block.reference(),
+                        recipient,
+                    );
+                    None
+                })
+        })
+        .collect()
+}
 
 fn peer_can_serve_missing_data(
     consensus_protocol: ConsensusProtocol,
@@ -430,6 +462,11 @@ where
                     .inner
                     .dag_state
                     .get_transmission_parts(&refs_to_send, &refs_to_send);
+                let headers = prepare_relay_blocks_for_peer(
+                    self.inner.dag_state.block_authentication_scheme,
+                    peer_id,
+                    headers,
+                );
                 {
                     let mut sent = self.sent_to_peer.write();
                     for block in headers.iter() {
@@ -1308,6 +1345,7 @@ where
 
 fn materialize_push_batch<H, C>(
     inner: &Arc<NetworkSyncerInner<H, C>>,
+    to_whom_authority_index: AuthorityIndex,
     plan: PushBatchParts,
 ) -> BlockBatch
 where
@@ -1337,6 +1375,11 @@ where
             let (headers, shards) = inner
                 .dag_state
                 .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
+            let headers = prepare_relay_blocks_for_peer(
+                inner.dag_state.block_authentication_scheme,
+                to_whom_authority_index,
+                headers,
+            );
             BlockBatch {
                 source: DataSource::BlockBundleStreaming,
                 full_blocks: plan.own_blocks,
@@ -1417,7 +1460,7 @@ where
     // Drop own blocks from the plan — already shipped in the fast batch.
     plan.own_blocks = Vec::new();
 
-    let slow_batch = materialize_push_batch(&inner, plan);
+    let slow_batch = materialize_push_batch(&inner, to_whom_authority_index, plan);
     if slow_batch.is_empty() {
         return Some(());
     }
@@ -1526,7 +1569,11 @@ impl BlockFetcherWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::committee::Committee;
+    use crate::{
+        committee::Committee,
+        crypto::{SignatureBytes, mac_keyrings_for_test},
+        types::{BaseTransaction, BlockAuthentication},
+    };
 
     fn holder_set(authorities: &[AuthorityIndex]) -> StakeAggregator<QuorumThreshold> {
         let committee = Committee::new_test(vec![1, 1, 1, 1]);
@@ -1573,5 +1620,48 @@ mod tests {
         assert_eq!(ramp_up_chain_bomb_release_probability(90.0), 0.5);
         assert_eq!(ramp_up_chain_bomb_release_probability(180.0), 1.0);
         assert_eq!(ramp_up_chain_bomb_release_probability(240.0), 1.0);
+    }
+
+    #[test]
+    fn relay_preparation_selects_recipient_tag_and_stops_after_one_hop() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = mac_keyrings_for_test(committee.len());
+        let mut block = VerifiedBlock::new(
+            0,
+            1,
+            Vec::new(),
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::<BaseTransaction>::new(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let tags: Vec<_> = keyrings[0]
+            .iter()
+            .enumerate()
+            .map(|(recipient, key)| {
+                key.compute_tag(0, recipient as AuthorityIndex, &block.digest())
+            })
+            .collect();
+        let expected = tags[2];
+        block.header.authentication = BlockAuthentication::MacVector(tags);
+
+        let relayed = prepare_relay_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            2,
+            vec![Data::new(block)],
+        );
+        assert_eq!(relayed.len(), 1);
+        assert!(matches!(
+            relayed[0].authentication(),
+            BlockAuthentication::MacTag(tag) if *tag == expected
+        ));
+
+        let second_hop =
+            prepare_relay_blocks_for_peer(BlockAuthenticationScheme::MacVector, 3, relayed);
+        assert!(second_hop.is_empty());
     }
 }

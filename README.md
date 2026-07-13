@@ -72,10 +72,13 @@ schemes:
 
 For all three variants, `BlockReference.digest` is the BLAKE3 hash of the
 canonical block content only. The authentication proof is a separate header
-field and does not change the block reference. A `starfish-mac` block carries
-exactly one tag for every committee member; each receiver verifies only its
-own tag. Benchmark genesis deterministically generates the pairwise MAC keys,
-ML-DSA seeds, and public keys in the node configuration.
+field and does not change the block reference. A `starfish-mac` author sends
+the full vector, with exactly one tag for every committee member, to its direct
+recipients. A direct recipient retains that vector and, when relaying a header
+or answering a missing-parent request, sends only the destination's tag. A
+tag-only copy cannot be relayed a second time. Benchmark genesis
+deterministically generates the pairwise MAC keys, ML-DSA seeds, and public
+keys in the node configuration.
 
 This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
 here states that it has not been independently audited and should not be
