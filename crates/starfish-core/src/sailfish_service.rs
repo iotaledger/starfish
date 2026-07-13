@@ -551,7 +551,6 @@ mod tests {
                 &[],
                 &[],
                 1,
-                &crate::crypto::SignatureBytes::default(),
                 None,
                 None,
             ),

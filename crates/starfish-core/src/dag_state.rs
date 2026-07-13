@@ -32,9 +32,9 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
-        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, TransactionData,
-        VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockDigest, BlockReference,
+        BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishNoVoteCert,
+        SailfishTimeoutCert, TransactionData, VerifiedBlock,
     },
 };
 
@@ -113,7 +113,7 @@ pub enum DacCertificateVerificationState {
     Rejected,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, Eq, PartialEq)]
 pub enum ConsensusProtocol {
     Mysticeti,
     CordialMiners,
@@ -167,19 +167,25 @@ pub enum ConsensusProtocol {
 
 impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
+        ProtocolConfig::from_str(s)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .consensus_protocol
+    }
+
+    fn from_known_str(s: &str) -> Option<Self> {
         match s {
-            "mysticeti" => ConsensusProtocol::Mysticeti,
-            "cordial-miners" => ConsensusProtocol::CordialMiners,
-            "starfish" => ConsensusProtocol::Starfish,
-            "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
-            "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
-            "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
-            "bluestreak" => ConsensusProtocol::Bluestreak,
-            "mysticeti-bls" | "mysticeti-l" => ConsensusProtocol::MysticetiBls,
+            "mysticeti" => Some(ConsensusProtocol::Mysticeti),
+            "cordial-miners" => Some(ConsensusProtocol::CordialMiners),
+            "starfish" => Some(ConsensusProtocol::Starfish),
+            "starfish-bls" | "starfish-l" => Some(ConsensusProtocol::StarfishBls),
+            "starfish-speed" | "starfish-s" => Some(ConsensusProtocol::StarfishSpeed),
+            "sailfish++" | "sailfish-pp" => Some(ConsensusProtocol::SailfishPlusPlus),
+            "bluestreak" => Some(ConsensusProtocol::Bluestreak),
+            "mysticeti-bls" | "mysticeti-l" => Some(ConsensusProtocol::MysticetiBls),
             "sparse-starfish-speed" | "sparse-starfish" | "ssfs" => {
-                ConsensusProtocol::SparseStarfishSpeed
+                Some(ConsensusProtocol::SparseStarfishSpeed)
             }
-            _ => ConsensusProtocol::Starfish,
+            _ => None,
         }
     }
 
@@ -275,6 +281,36 @@ impl ConsensusProtocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolConfig {
+    pub consensus_protocol: ConsensusProtocol,
+    pub block_authentication_scheme: BlockAuthenticationScheme,
+}
+
+impl ProtocolConfig {
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        let (consensus_protocol, block_authentication_scheme) = match value {
+            "starfish-mac" => (
+                ConsensusProtocol::Starfish,
+                BlockAuthenticationScheme::MacVector,
+            ),
+            "starfish-ml-dsa-44" => (
+                ConsensusProtocol::Starfish,
+                BlockAuthenticationScheme::MlDsa44,
+            ),
+            known => (
+                ConsensusProtocol::from_known_str(known)
+                    .ok_or_else(|| format!("Unknown consensus protocol '{known}'"))?,
+                BlockAuthenticationScheme::Ed25519,
+            ),
+        };
+        Ok(Self {
+            consensus_protocol,
+            block_authentication_scheme,
+        })
+    }
+}
+
 const STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS: usize = 10;
 
 #[allow(unused)]
@@ -324,6 +360,7 @@ pub struct DagState {
     store: Arc<dyn Store>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
+    pub(crate) block_authentication_scheme: BlockAuthenticationScheme,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
     committee: Arc<Committee>,
@@ -528,7 +565,8 @@ impl DagState {
                 Arc::new(RocksStore::open(&path).expect("Failed to open RocksDB"))
             }
         };
-        let consensus_protocol = ConsensusProtocol::from_str(&consensus);
+        let protocol_config = ProtocolConfig::from_str(&consensus).expect("validated protocol");
+        let consensus_protocol = protocol_config.consensus_protocol;
         let resolved_dissemination =
             consensus_protocol.resolve_dissemination_mode(dissemination_mode);
         let push_mode = matches!(
@@ -815,6 +853,7 @@ impl DagState {
             dag_state_inner: Arc::new(RwLock::new(inner)),
             metrics,
             consensus_protocol,
+            block_authentication_scheme: protocol_config.block_authentication_scheme,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
             strong_vote_adaptive_acknowledgments,
@@ -3386,7 +3425,7 @@ mod tests {
 
     use super::{
         ByzantineStrategy, CACHED_ROUNDS, CertificateEvent, ConsensusProtocol,
-        DacCertificateVerificationState, DagState, DataSource, OwnBlockData,
+        DacCertificateVerificationState, DagState, DataSource, OwnBlockData, ProtocolConfig,
     };
     use crate::{
         committee::Committee,
@@ -3398,9 +3437,9 @@ mod tests {
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
-            VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme,
+            BlockReference, BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishFields,
+            SailfishNoVoteCert, Transaction, VerifiedBlock,
         },
     };
 
@@ -4747,5 +4786,31 @@ mod tests {
             ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushCausal),
             DisseminationMode::PushCausal
         );
+    }
+
+    #[test]
+    fn protocol_config_selects_starfish_block_authentication() {
+        assert_eq!(
+            ProtocolConfig::from_str("starfish").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Starfish,
+                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("starfish-mac").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Starfish,
+                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("starfish-ml-dsa-44").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Starfish,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
+            }
+        );
+        assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
     }
 }

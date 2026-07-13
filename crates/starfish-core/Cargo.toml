@@ -22,6 +22,7 @@ hex = "0.4.3"
 libc = "0.2.146"
 lz4_flex = "0.11"
 memmap2 = "0.7.0"
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "zeroize"] }
 
 parking_lot = "0.12.1"
 prettytable-rs = "0.10"

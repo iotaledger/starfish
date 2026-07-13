@@ -18,14 +18,14 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
-    dag_state::{ConsensusProtocol, DagState},
+    dag_state::{DagState, ProtocolConfig},
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::{AuthorityIndex, PartialSig},
+    types::{AuthorityIndex, BlockAuthenticationScheme, PartialSig},
 };
 
 pub struct Validator {
@@ -45,6 +45,35 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
+        let protocol_config = ProtocolConfig::from_str(&consensus).map_err(|error| eyre!(error))?;
+        match protocol_config.block_authentication_scheme {
+            BlockAuthenticationScheme::Ed25519 => {
+                if committee.get_public_key(authority) != Some(&private_config.keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "Ed25519 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MacVector => {
+                if private_config.mac_keys.len() != committee.len() {
+                    return Err(eyre!(
+                        "MAC keyring length {} does not match committee size {}",
+                        private_config.mac_keys.len(),
+                        committee.len(),
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MlDsa44 => {
+                if committee.get_ml_dsa_44_public_key(authority)
+                    != Some(&private_config.ml_dsa_44_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-44 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+        }
         // Network and metrics setup remains the same
         let network_address = public_config
             .network_address(authority)
@@ -76,7 +105,8 @@ impl Validator {
                 .register(Box::new(pc))
                 .wrap_err("Failed to register ProcessCollector")?;
         }
-        let resolved_dissemination = ConsensusProtocol::from_str(&consensus)
+        let resolved_dissemination = protocol_config
+            .consensus_protocol
             .resolve_dissemination_mode(public_config.parameters.dissemination_mode);
         let dissemination_str = resolved_dissemination.to_string();
         let (metrics, reporter) = Metrics::new(
@@ -307,6 +337,8 @@ mod smoke_tests {
     #[test_case("mysticeti", 0)]
     #[test_case("cordial-miners", 40)]
     #[test_case("starfish", 60)]
+    #[test_case("starfish-mac", 700)]
+    #[test_case("starfish-ml-dsa-44", 720)]
     #[test_case("starfish-speed", 80)]
     #[test_case("starfish-bls", 100)]
     #[test_case("sailfish++", 120)]

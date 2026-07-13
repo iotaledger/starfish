@@ -41,8 +41,8 @@ use crate::{
     committee::Committee,
     crypto,
     crypto::{
-        AsBytes, BlsSignatureBytes, BlsSigner, CryptoHash, SignatureBytes, Signer,
-        TransactionsCommitment,
+        AsBytes, BlsSignatureBytes, BlsSigner, CryptoHash, MacKey, MacTag, MlDsa44SignatureBytes,
+        MlDsa44Signer, SignatureBytes, Signer, TransactionsCommitment,
     },
     dag_state::ConsensusProtocol,
     data::{Data, IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
@@ -87,9 +87,7 @@ impl PartialOrd for BlockReference {
 }
 
 // ---------------------------------------------------------------------------
-// BlockHeader — signed, content-addressed block identity.
-// Contains exactly the fields that feed into BlockDigest::new() and
-// sign_block().
+// BlockHeader — authenticated, content-addressed block identity.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -239,7 +237,7 @@ pub struct SailfishNoVoteCert {
 }
 
 /// Protocol-specific fields embedded in SailfishPlusPlus block headers.
-/// Part of the signed block hash.
+/// Part of the authenticated block content hash.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SailfishFields {
     /// Timeout certificate for the previous round, if this block advances
@@ -252,10 +250,55 @@ pub struct SailfishFields {
 }
 
 // ---------------------------------------------------------------------------
-// BlockHeader — signed, content-addressed block identity.
-// Contains exactly the fields that feed into BlockDigest::new() and
-// sign_block().
+// BlockHeader — authenticated, content-addressed block identity.
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
+pub enum BlockAuthentication {
+    /// Only valid for locally constructed genesis blocks.
+    None,
+    Ed25519(SignatureBytes),
+    MacVector(Vec<MacTag>),
+    MlDsa44(MlDsa44SignatureBytes),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Debug)]
+pub enum BlockAuthenticationScheme {
+    Ed25519,
+    MacVector,
+    MlDsa44,
+}
+
+pub enum BlockAuthorizer<'a> {
+    Ed25519(&'a Signer),
+    MacVector(&'a [MacKey]),
+    MlDsa44(&'a MlDsa44Signer),
+}
+
+impl BlockAuthorizer<'_> {
+    fn authenticate(
+        &self,
+        author: AuthorityIndex,
+        content_digest: &BlockDigest,
+    ) -> BlockAuthentication {
+        match self {
+            Self::Ed25519(signer) => {
+                BlockAuthentication::Ed25519(signer.sign_digest(content_digest.as_array()))
+            }
+            Self::MacVector(keys) => BlockAuthentication::MacVector(
+                keys.iter()
+                    .enumerate()
+                    .map(|(recipient, key)| {
+                        key.compute_tag(author, recipient as AuthorityIndex, content_digest)
+                    })
+                    .collect(),
+            ),
+            Self::MlDsa44(signer) => {
+                BlockAuthentication::MlDsa44(signer.sign_digest(content_digest))
+            }
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -267,8 +310,9 @@ pub struct BlockHeader {
     pub(crate) block_references: Vec<BlockReference>,
     /// Creation time as reported by creator (currently not enforced).
     pub(crate) meta_creation_time_ns: TimestampNs,
-    /// Signature by the block author over the header fields.
-    pub(crate) signature: SignatureBytes,
+    /// Authentication proof over `reference.digest`. This field is not part of
+    /// the content-addressed block identity.
+    pub(crate) authentication: BlockAuthentication,
     /// Explicit payload commitment stored in the header.
     /// Starfish-family protocols carry the Merkle root over encoded shards.
     /// Full-block protocols leave this as `None` and recompute the raw
@@ -367,8 +411,8 @@ impl BlockHeader {
         self.reference.author_round()
     }
 
-    pub fn signature(&self) -> &SignatureBytes {
-        &self.signature
+    pub fn authentication(&self) -> &BlockAuthentication {
+        &self.authentication
     }
 
     pub fn meta_creation_time_ns(&self) -> TimestampNs {
@@ -777,7 +821,6 @@ impl VerifiedBlock {
                     &block_references,
                     &acknowledgments,
                     meta_creation_time_ns,
-                    &signature,
                     merkle_root,
                     strong_vote,
                     unprovable_certificate.as_ref(),
@@ -785,7 +828,7 @@ impl VerifiedBlock {
             },
             block_references,
             meta_creation_time_ns,
-            signature,
+            authentication: BlockAuthentication::Ed25519(signature),
             transactions_commitment: merkle_root,
             ack: Some(AckFields {
                 intersection: acknowledgment_intersection,
@@ -822,14 +865,13 @@ impl VerifiedBlock {
                     &block_refs,
                     &ack_refs,
                     0,
-                    &SignatureBytes::default(),
                     None,
                     None,
                 ),
             },
             block_references: block_refs,
             meta_creation_time_ns: 0,
-            signature: SignatureBytes::default(),
+            authentication: BlockAuthentication::None,
             transactions_commitment: None,
             ack: None,
             strong_vote: None,
@@ -916,6 +958,54 @@ impl VerifiedBlock {
         sailfish: Option<SailfishFields>,
         unprovable_certificate: Option<(BlockReference, bool)>,
     ) -> Self {
+        let authorizer = BlockAuthorizer::Ed25519(signer);
+        Self::new_with_authorizer_and_unprovable(
+            authority,
+            round,
+            block_references,
+            voted_leader_ref,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            &authorizer,
+            bls_signer,
+            committee_opt,
+            aggregate_dac_sigs,
+            transactions,
+            encoded_transactions,
+            consensus_protocol,
+            strong_vote,
+            aggregate_round_sig,
+            certified_leader,
+            precomputed_round_sig,
+            precomputed_leader_sig,
+            sailfish,
+            unprovable_certificate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_authorizer_and_unprovable(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        voted_leader_ref: Option<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        authorizer: &BlockAuthorizer<'_>,
+        bls_signer: Option<&BlsSigner>,
+        committee_opt: Option<&Committee>,
+        aggregate_dac_sigs: Vec<BlsAggregateCertificate>,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
+        consensus_protocol: ConsensusProtocol,
+        strong_vote: Option<AuthoritySet>,
+        aggregate_round_sig: Option<BlsAggregateCertificate>,
+        certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
+        precomputed_round_sig: Option<BlsSignatureBytes>,
+        precomputed_leader_sig: Option<BlsSignatureBytes>,
+        sailfish: Option<SailfishFields>,
+        unprovable_certificate: Option<(BlockReference, bool)>,
+    ) -> Self {
         let supports_acknowledgments = consensus_protocol.supports_acknowledgments();
         let header_transactions_commitment = if consensus_protocol.supports_acknowledgments() {
             Some(if let Some(ref encoded) = encoded_transactions {
@@ -950,7 +1040,7 @@ impl VerifiedBlock {
             &acknowledgment_references,
             aggregate_dac_sigs,
         );
-        let signature = signer.sign_block_with_unprovable(
+        let content_digest = BlockDigest::new_without_transactions_with_unprovable(
             authority,
             round,
             &block_references,
@@ -960,6 +1050,7 @@ impl VerifiedBlock {
             strong_vote,
             unprovable_certificate.as_ref(),
         );
+        let authentication = authorizer.authenticate(authority, &content_digest);
 
         // Build BLS fields when the StarfishBls path is active. Partial round
         // and leader signatures are embedded as belt-and-suspenders alongside
@@ -996,21 +1087,11 @@ impl VerifiedBlock {
             reference: BlockReference {
                 authority,
                 round,
-                digest: BlockDigest::new_without_transactions_with_unprovable(
-                    authority,
-                    round,
-                    &block_references,
-                    &acknowledgments,
-                    meta_creation_time_ns,
-                    &signature,
-                    digest_transactions_commitment,
-                    strong_vote,
-                    unprovable_certificate.as_ref(),
-                ),
+                digest: content_digest,
             },
             block_references,
             meta_creation_time_ns,
-            signature,
+            authentication,
             transactions_commitment: header_transactions_commitment,
             ack: supports_acknowledgments.then_some(AckFields {
                 intersection: acknowledgment_intersection,
@@ -1075,8 +1156,8 @@ impl VerifiedBlock {
         self.header.author_round()
     }
 
-    pub fn signature(&self) -> &SignatureBytes {
-        self.header.signature()
+    pub fn authentication(&self) -> &BlockAuthentication {
+        self.header.authentication()
     }
 
     pub fn meta_creation_time_ns(&self) -> TimestampNs {
@@ -1209,11 +1290,35 @@ impl VerifiedBlock {
         encoder: &mut Encoder,
         consensus_protocol: ConsensusProtocol,
     ) -> eyre::Result<Option<ProvableShard>> {
+        self.verify_with_authentication(
+            committee,
+            own_id,
+            _peer_id,
+            encoder,
+            consensus_protocol,
+            BlockAuthenticationScheme::Ed25519,
+            &[],
+        )
+    }
+
+    pub fn verify_with_authentication(
+        &mut self,
+        committee: &Committee,
+        own_id: usize,
+        _peer_id: usize,
+        encoder: &mut Encoder,
+        consensus_protocol: ConsensusProtocol,
+        authentication_scheme: BlockAuthenticationScheme,
+        mac_keys: &[MacKey],
+    ) -> eyre::Result<Option<ProvableShard>> {
         let (shard, digest_transactions_commitment) =
             self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
         self.verify_block_structure(
             committee,
+            own_id,
             consensus_protocol,
+            authentication_scheme,
+            mac_keys,
             digest_transactions_commitment,
         )?;
         Ok(shard)
@@ -1280,11 +1385,14 @@ impl VerifiedBlock {
         }
     }
 
-    /// Verify digest, signature, includes, and threshold clock.
+    /// Verify content digest, authentication, includes, and threshold clock.
     fn verify_block_structure(
         &self,
         committee: &Committee,
+        own_id: usize,
         consensus_protocol: ConsensusProtocol,
+        authentication_scheme: BlockAuthenticationScheme,
+        mac_keys: &[MacKey],
         digest_transactions_commitment: Option<TransactionsCommitment>,
     ) -> eyre::Result<()> {
         let round = self.round();
@@ -1313,7 +1421,6 @@ impl VerifiedBlock {
             &self.header.block_references,
             &acknowledgments,
             self.header.meta_creation_time_ns,
-            &self.header.signature,
             digest_transactions_commitment,
             self.header.strong_vote,
             self.header.unprovable_certificate.as_ref(),
@@ -1324,17 +1431,57 @@ impl VerifiedBlock {
             digest,
             self.digest()
         );
-        let pub_key = committee.get_public_key(self.authority());
-        let Some(pub_key) = pub_key else {
-            bail!("Unknown block author {}", self.authority())
-        };
         if round == GENESIS_ROUND {
             bail!("Genesis block should not go through verification");
         }
-        if let Err(e) =
-            pub_key.verify_signature_in_block(&self.header, digest_transactions_commitment)
-        {
-            bail!("Block signature verification has failed: {:?}", e);
+        match (authentication_scheme, &self.header.authentication) {
+            (BlockAuthenticationScheme::Ed25519, BlockAuthentication::Ed25519(signature)) => {
+                let Some(public_key) = committee.get_public_key(self.authority()) else {
+                    bail!("Unknown block author {}", self.authority())
+                };
+                if let Err(error) = public_key.verify_digest_signature(digest.as_array(), signature)
+                {
+                    bail!("Block Ed25519 verification has failed: {error:?}");
+                }
+            }
+            (BlockAuthenticationScheme::MacVector, BlockAuthentication::MacVector(tags)) => {
+                ensure!(
+                    tags.len() == committee.len(),
+                    "MAC vector length {} does not match committee size {}",
+                    tags.len(),
+                    committee.len(),
+                );
+                ensure!(
+                    own_id < committee.len(),
+                    "Own authority index is out of bounds"
+                );
+                ensure!(
+                    mac_keys.len() == committee.len(),
+                    "MAC keyring length {} does not match committee size {}",
+                    mac_keys.len(),
+                    committee.len(),
+                );
+                let author = self.authority() as usize;
+                let Some(key) = mac_keys.get(author) else {
+                    bail!("Unknown block author {}", self.authority())
+                };
+                let expected = key.compute_tag(self.authority(), own_id as AuthorityIndex, &digest);
+                ensure!(
+                    tags[own_id] == expected,
+                    "Block MAC verification has failed"
+                );
+            }
+            (BlockAuthenticationScheme::MlDsa44, BlockAuthentication::MlDsa44(signature)) => {
+                let Some(public_key) = committee.get_ml_dsa_44_public_key(self.authority()) else {
+                    bail!("Unknown block author {}", self.authority())
+                };
+                if let Err(error) = public_key.verify_digest_signature(&digest, signature) {
+                    bail!("Block ML-DSA-44 verification has failed: {error:?}");
+                }
+            }
+            (expected, actual) => {
+                bail!("Expected {expected:?} block authentication, received {actual:?}")
+            }
         }
         for include in &self.header.block_references {
             ensure!(
@@ -2147,6 +2294,191 @@ impl std::hash::Hash for VerifiedBlock {
 mod tests {
     use super::*;
 
+    fn make_authenticated_starfish_block(
+        committee: &Committee,
+        authorizer: &BlockAuthorizer<'_>,
+    ) -> VerifiedBlock {
+        let authority = 0;
+        let round = 1;
+        let transactions = Vec::new();
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let encoded_transactions = encoder.encode_transactions(
+            &transactions,
+            committee.info_length(),
+            committee.len() - committee.info_length(),
+        );
+        VerifiedBlock::new_with_authorizer_and_unprovable(
+            authority,
+            round,
+            committee
+                .authorities()
+                .map(|authority| BlockReference::new_test(authority, 0))
+                .collect(),
+            None,
+            Vec::new(),
+            0,
+            authorizer,
+            None,
+            None,
+            Vec::new(),
+            transactions,
+            Some(encoded_transactions),
+            ConsensusProtocol::Starfish,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn block_reference_depends_only_on_content_across_authentication_schemes() {
+        let committee = Committee::new_for_benchmarks(4);
+        let ed_signers = Signer::new_for_test(committee.len());
+        let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let mac_keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let ed = BlockAuthorizer::Ed25519(&ed_signers[0]);
+        let mac = BlockAuthorizer::MacVector(&mac_keyrings[0]);
+        let ml_dsa = BlockAuthorizer::MlDsa44(&ml_dsa_signers[0]);
+
+        let ed_block = make_authenticated_starfish_block(&committee, &ed);
+        let mac_block = make_authenticated_starfish_block(&committee, &mac);
+        let ml_dsa_block = make_authenticated_starfish_block(&committee, &ml_dsa);
+
+        assert_eq!(ed_block.reference(), mac_block.reference());
+        assert_eq!(ed_block.reference(), ml_dsa_block.reference());
+        assert_ne!(ed_block.authentication(), mac_block.authentication());
+        assert_ne!(ed_block.authentication(), ml_dsa_block.authentication());
+    }
+
+    #[test]
+    fn all_authentication_schemes_verify_for_starfish() {
+        let committee = Committee::new_for_benchmarks(4);
+        let ed_signers = Signer::new_for_test(committee.len());
+        let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let mac_keyrings = crypto::mac_keyrings_for_test(committee.len());
+
+        let cases = [
+            (
+                make_authenticated_starfish_block(
+                    &committee,
+                    &BlockAuthorizer::Ed25519(&ed_signers[0]),
+                ),
+                BlockAuthenticationScheme::Ed25519,
+            ),
+            (
+                make_authenticated_starfish_block(
+                    &committee,
+                    &BlockAuthorizer::MacVector(&mac_keyrings[0]),
+                ),
+                BlockAuthenticationScheme::MacVector,
+            ),
+            (
+                make_authenticated_starfish_block(
+                    &committee,
+                    &BlockAuthorizer::MlDsa44(&ml_dsa_signers[0]),
+                ),
+                BlockAuthenticationScheme::MlDsa44,
+            ),
+        ];
+
+        for (block, scheme) in cases {
+            for (receiver, receiver_keys) in mac_keyrings.iter().enumerate() {
+                let mut received = block.clone();
+                let mut encoder = Encoder::new(2, 4, 2).unwrap();
+                let mac_keys = if scheme == BlockAuthenticationScheme::MacVector {
+                    receiver_keys.as_slice()
+                } else {
+                    &[]
+                };
+                received
+                    .verify_with_authentication(
+                        &committee,
+                        receiver,
+                        0,
+                        &mut encoder,
+                        ConsensusProtocol::Starfish,
+                        scheme,
+                        mac_keys,
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_mac_vector_and_wrong_authentication_scheme() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut mac_block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        let BlockAuthentication::MacVector(tags) = &mut mac_block.header.authentication else {
+            panic!("expected MAC vector")
+        };
+        tags.pop();
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        assert!(
+            mac_block
+                .verify_with_authentication(
+                    &committee,
+                    1,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MacVector,
+                    &keyrings[1],
+                )
+                .is_err()
+        );
+
+        let mut wrong_tag_block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::MacVector(&keyrings[0]),
+        );
+        let BlockAuthentication::MacVector(tags) = &mut wrong_tag_block.header.authentication
+        else {
+            panic!("expected MAC vector")
+        };
+        tags.swap(1, 2);
+        assert!(
+            wrong_tag_block
+                .verify_with_authentication(
+                    &committee,
+                    1,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MacVector,
+                    &keyrings[1],
+                )
+                .is_err()
+        );
+
+        let ed_signers = Signer::new_for_test(committee.len());
+        let mut ed_block = make_authenticated_starfish_block(
+            &committee,
+            &BlockAuthorizer::Ed25519(&ed_signers[0]),
+        );
+        assert!(
+            ed_block
+                .verify_with_authentication(
+                    &committee,
+                    1,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::Starfish,
+                    BlockAuthenticationScheme::MlDsa44,
+                    &[],
+                )
+                .is_err()
+        );
+    }
+
     fn single_signer_cert(
         digest: [u8; 32],
         signer: AuthorityIndex,
@@ -2368,7 +2700,7 @@ mod tests {
             reference: BlockReference::new_test(0, 2),
             block_references: vec![a],
             meta_creation_time_ns: 0,
-            signature: SignatureBytes::default(),
+            authentication: BlockAuthentication::None,
             transactions_commitment: None,
             ack: Some(AckFields {
                 intersection: None,
