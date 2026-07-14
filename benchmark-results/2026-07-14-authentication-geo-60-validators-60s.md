@@ -1,7 +1,8 @@
 # Authentication comparison — 60-validator geographic emulation
 
 Date: 2026-07-14<br>
-Source revision: `4553e5e`<br>
+Source revisions: `4553e5e` (original matrix), `3a82c04` (ML-DSA-65
+extension)<br>
 Host: Apple Silicon (`arm64`), macOS 15.7.4<br>
 Build: Rust 1.86.0, release profile
 
@@ -42,18 +43,27 @@ target/release/starfish local-benchmark \
 | Starfish | Ed25519 | 664.45 | 728.77 | 444.30 | 515.02 | 8.59 | 8.58 | 39.59 |
 | Starfish | MAC vector | 680.68 | 753.42 | 414.87 | 449.23 | 8.35 | 8.34 | 41.21 |
 | Starfish | ML-DSA-44 | 849.38 | 937.02 | 427.77 | 417.95 | 9.72 | 9.71 | 46.53 |
+| Starfish | ML-DSA-65† | 749.38 | 837.48 | 413.53 | 443.48 | 13.98 | 13.98 | 69.25 |
 | Starfish Speed | Ed25519 | 592.13 | 673.87 | 460.37 | 467.12 | 6.63 | 6.62 | 29.49 |
 | Starfish Speed | MAC vector | 670.80 | 783.93 | 430.95 | 439.30 | 7.30 | 7.30 | 34.70 |
 | Starfish Speed | ML-DSA-44 | 641.70 | 726.03 | 433.63 | 461.57 | 11.06 | 11.05 | 52.22 |
+| Starfish Speed | ML-DSA-65 | 641.40 | 727.28 | 421.98 | 415.88 | 12.10 | 12.09 | 58.71 |
 | Sparse-Starfish-Speed | Ed25519 | 467.70 | 525.98 | 466.22 | 535.57 | 0.88 | 0.88 | 3.87 |
 | Sparse-Starfish-Speed | MAC vector | 467.67 | 528.23 | 466.62 | 551.88 | 1.84 | 1.84 | 8.08 |
 | Sparse-Starfish-Speed | ML-DSA-44 | 464.87 | 526.97 | 467.07 | 528.88 | 2.98 | 2.98 | 13.08 |
+| Sparse-Starfish-Speed | ML-DSA-65 | 461.05 | 516.02 | 469.62 | 560.13 | 3.95 | 3.95 | 17.24 |
 | Bluestreak | Ed25519 | 422.53 | 480.58 | 468.22 | 551.08 | 0.52 | 0.52 | 2.28 |
 | Bluestreak | MAC vector | 421.62 | 480.37 | 467.63 | 545.72 | 1.47 | 1.46 | 6.42 |
 | Bluestreak | ML-DSA-44 | 422.72 | 481.70 | 467.88 | 547.13 | 1.75 | 1.75 | 7.67 |
+| Bluestreak | ML-DSA-65 | 423.98 | 482.82 | 470.25 | 548.02 | 2.22 | 2.22 | 9.66 |
 
-All twelve commands exited successfully after emitting their metrics. No
-authentication, deserialize, socket-buffer, or transport errors were observed.
+All sixteen commands exited successfully after emitting their metrics. The
+Starfish ML-DSA-65 run marked † crossed this host's socket-buffer ceiling at
+second 20: three writes reported `No buffer space available`, followed by
+three decompress/deserialize warnings. Its metrics are retained as a
+host-contended stress result, not a clean protocol comparison. The other
+three ML-DSA-65 runs had no authentication, deserialize, socket-buffer, or
+transport errors.
 
 ## Warm-up-adjusted offered-rate utilization
 
@@ -67,15 +77,19 @@ seconds. The following values estimate the active rate as `TPS × 60 / 47`.
 | Starfish | Ed25519 | 567.19 | 94.5% |
 | Starfish | MAC vector | 529.62 | 88.3% |
 | Starfish | ML-DSA-44 | 546.09 | 91.0% |
+| Starfish | ML-DSA-65† | 527.91 | 88.0% |
 | Starfish Speed | Ed25519 | 587.71 | 98.0% |
 | Starfish Speed | MAC vector | 550.15 | 91.7% |
 | Starfish Speed | ML-DSA-44 | 553.57 | 92.3% |
+| Starfish Speed | ML-DSA-65 | 538.70 | 89.8% |
 | Sparse-Starfish-Speed | Ed25519 | 595.17 | 99.2% |
 | Sparse-Starfish-Speed | MAC vector | 595.69 | 99.3% |
 | Sparse-Starfish-Speed | ML-DSA-44 | 596.26 | 99.4% |
+| Sparse-Starfish-Speed | ML-DSA-65 | 599.51 | 99.9% |
 | Bluestreak | Ed25519 | 597.73 | 99.6% |
 | Bluestreak | MAC vector | 596.97 | 99.5% |
 | Bluestreak | ML-DSA-44 | 597.29 | 99.5% |
+| Bluestreak | ML-DSA-65 | 600.32 | 100.1% |
 
 ## Relative to Ed25519 within each protocol
 
@@ -83,41 +97,50 @@ seconds. The following values estimate the active rate as `TPS × 60 / 47`.
 |---|---|---:|---:|---:|---:|---:|
 | Starfish | MAC vector | +2.4% | +3.4% | -6.6% | -12.8% | -2.8% |
 | Starfish | ML-DSA-44 | +27.8% | +28.6% | -3.7% | -18.8% | +13.2% |
+| Starfish | ML-DSA-65† | +12.8% | +14.9% | -6.9% | -13.9% | +62.7% |
 | Starfish Speed | MAC vector | +13.3% | +16.3% | -6.4% | -6.0% | +10.1% |
 | Starfish Speed | ML-DSA-44 | +8.4% | +7.7% | -5.8% | -1.2% | +66.8% |
+| Starfish Speed | ML-DSA-65 | +8.3% | +7.9% | -8.3% | -11.0% | +82.5% |
 | Sparse-Starfish-Speed | MAC vector | 0.0% | +0.4% | +0.1% | +3.0% | +109.1% |
 | Sparse-Starfish-Speed | ML-DSA-44 | -0.6% | +0.2% | +0.2% | -1.2% | +238.6% |
+| Sparse-Starfish-Speed | ML-DSA-65 | -1.4% | -1.9% | +0.7% | +4.6% | +348.9% |
 | Bluestreak | MAC vector | -0.2% | 0.0% | -0.1% | -1.0% | +182.7% |
 | Bluestreak | ML-DSA-44 | 0.0% | +0.2% | -0.1% | -0.7% | +236.5% |
+| Bluestreak | ML-DSA-65 | +0.3% | +0.5% | +0.4% | -0.6% | +326.9% |
 
 Raw bandwidth can fall despite a larger authentication proof when a run
 produces fewer blocks, as in plain Starfish MAC. The bandwidth-efficiency
 metric—the ratio of bytes sent to committed transaction-payload bytes—rises
-from 39.59 to 41.21 and captures the normalized increase.
+from 39.59 to 41.21 for MAC and 69.25 for ML-DSA-65, capturing the normalized
+increase even when raw block production varies.
 
 ## Interpretation
 
 - Sixty validators are feasible on this machine at a 600 tx/s aggregate
   offered load, but headroom depends strongly on the protocol family.
-- Sparse-Starfish-Speed and Bluestreak sustain 99.2-99.6% of the active offered
-  rate for every authentication scheme. Their latency and throughput vary by
-  at most 0.6% and 0.2%, respectively, within each family.
-- Plain Starfish sustains 88.3-94.5% of the active offered rate, while
-  Starfish Speed sustains 91.7-98.0%. Their authentication comparisons are
-  therefore partly measurements of shared-host contention. In particular,
-  plain Starfish ML-DSA-44 has 27.8% higher block latency than its Ed25519 run.
+- Sparse-Starfish-Speed and Bluestreak sustain 99.2-100.1% of the active
+  offered rate across all four authentication schemes. Within each family,
+  block latency varies by at most 1.4% and throughput by at most 0.7%.
+- Plain Starfish sustains 88.0-94.5% of the active offered rate, while
+  Starfish Speed sustains 89.8-98.0%. Their authentication comparisons are
+  therefore partly measurements of shared-host contention. Plain Starfish
+  ML-DSA-65 is the clearest limit: its 13.98 MB/s full-mesh traffic triggered
+  the host's socket-buffer errors, so that row is not a clean protocol result.
 - Bluestreak has the lowest latency and absolute bandwidth across every
-  authentication scheme: 422-423 ms block latency, 480-482 ms end-to-end
-  latency, and 0.52-1.75 MB/s outbound.
+  authentication scheme: 422-424 ms block latency, 480-483 ms end-to-end
+  latency, and 0.52-2.22 MB/s outbound.
 - Relative to matching Sparse-Starfish-Speed authentication, Bluestreak lowers
-  block latency by 9.1-9.8%, end-to-end latency by 8.6-9.1%, and outbound
-  bandwidth by 20.1-41.3%, with nearly identical throughput.
+  block latency by 8.0-9.8%, end-to-end latency by 6.4-9.1%, and outbound
+  bandwidth by 20.1-43.8%, with nearly identical throughput.
 - At 60 validators, a full author MAC vector contains 60 × 32 = 1,920 bytes,
   compared with a 64-byte Ed25519 signature and a 2,420-byte ML-DSA-44
-  signature. Relays and synchronization responses still carry only one
-  32-byte recipient tag. Because Bluestreak and Sparse-Starfish-Speed remove
-  most other traffic, these authentication bytes produce large percentages
-  while their absolute bandwidth remains well below the denser protocols.
+  signature; an ML-DSA-65 signature is 3,309 bytes. ML-DSA-65 public keys are
+  1,952 bytes and are provisioned in committee configuration rather than sent
+  in each block. Relays and synchronization responses for MAC blocks still
+  carry only one 32-byte recipient tag. Because Bluestreak and
+  Sparse-Starfish-Speed remove most other traffic, authentication bytes
+  produce large percentages while absolute bandwidth remains well below the
+  denser protocols.
 - For repeatable all-protocol authentication comparisons on this single host,
   40 validators remains the safer configuration. Sixty validators is a useful
   stress configuration and a clean operating point for the sparse and
@@ -128,6 +151,10 @@ from 39.59 to 41.21 and captures the normalized increase.
 
 - There is one sequential run per configuration, with no randomized order or
   confidence interval. Host scheduling and thermal state can affect results.
+- The ML-DSA-65 rows were appended after the original matrix on source
+  revision `3a82c04`. The marked plain-Starfish row encountered host transport
+  errors and should be treated only as evidence that this configuration
+  exceeds the local machine's clean operating point.
 - The 600 tx/s load differs from the earlier 40-validator 1,000 tx/s matrix;
   the two experiments should not be treated as a pure committee-size scaling
   comparison.
