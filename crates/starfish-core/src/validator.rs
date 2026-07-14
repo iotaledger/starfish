@@ -18,14 +18,14 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
-    dag_state::{ConsensusProtocol, DagState},
+    dag_state::{DagState, ProtocolConfig},
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
     runtime::{JoinError, JoinHandle},
     transactions_generator::TransactionGenerator,
-    types::{AuthorityIndex, PartialSig},
+    types::{AuthorityIndex, BlockAuthenticationScheme, PartialSig},
 };
 
 pub struct Validator {
@@ -45,6 +45,48 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
+        let protocol_config = ProtocolConfig::from_selection(
+            &consensus,
+            public_config.parameters.block_authentication.as_deref(),
+        )
+        .map_err(|error| eyre!(error))?;
+        match protocol_config.block_authentication_scheme {
+            BlockAuthenticationScheme::Ed25519 => {
+                if committee.get_public_key(authority) != Some(&private_config.keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "Ed25519 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MacVector => {
+                if private_config.mac_keys.len() != committee.len() {
+                    return Err(eyre!(
+                        "MAC keyring length {} does not match committee size {}",
+                        private_config.mac_keys.len(),
+                        committee.len(),
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MlDsa44 => {
+                if committee.get_ml_dsa_44_public_key(authority)
+                    != Some(&private_config.ml_dsa_44_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-44 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MlDsa65 => {
+                if committee.get_ml_dsa_65_public_key(authority)
+                    != Some(&private_config.ml_dsa_65_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-65 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+        }
         // Network and metrics setup remains the same
         let network_address = public_config
             .network_address(authority)
@@ -76,7 +118,8 @@ impl Validator {
                 .register(Box::new(pc))
                 .wrap_err("Failed to register ProcessCollector")?;
         }
-        let resolved_dissemination = ConsensusProtocol::from_str(&consensus)
+        let resolved_dissemination = protocol_config
+            .consensus_protocol
             .resolve_dissemination_mode(public_config.parameters.dissemination_mode);
         let dissemination_str = resolved_dissemination.to_string();
         let (metrics, reporter) = Metrics::new(
@@ -96,13 +139,13 @@ impl Validator {
 
         // Open the DAG state.
         let rocks_path = private_config.rocksdb();
-        let recovered = DagState::open(
+        let recovered = DagState::open_with_protocol_config(
             authority,
             rocks_path,
             metrics.clone(),
             committee.clone(),
             byzantine_strategy,
-            consensus,
+            protocol_config,
             &parameters.storage_backend,
             public_config
                 .parameters
@@ -256,11 +299,16 @@ mod smoke_tests {
         }
     }
 
-    async fn run_commit_test(consensus: &str, port_offset: u16) {
+    async fn run_commit_test(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -304,30 +352,52 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 0)]
-    #[test_case("cordial-miners", 40)]
-    #[test_case("starfish", 60)]
-    #[test_case("starfish-speed", 80)]
-    #[test_case("starfish-bls", 100)]
-    #[test_case("sailfish++", 120)]
-    #[test_case("bluestreak", 140)]
-    #[test_case("mysticeti-bls", 160)]
-    #[test_case("sparse-starfish-speed", 180)]
+    #[test_case("mysticeti", None, 0)]
+    #[test_case("mysticeti", Some("ml-dsa-65"), 1280)]
+    #[test_case("cordial-miners", None, 40)]
+    #[test_case("cordial-miners", Some("ml-dsa-65"), 1300)]
+    #[test_case("starfish", None, 60)]
+    #[test_case("starfish-mac", None, 700)]
+    #[test_case("starfish", Some("ml-dsa-44"), 720)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1000)]
+    #[test_case("starfish-speed", None, 80)]
+    #[test_case("starfish-speed-mac", None, 760)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 780)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1040)]
+    #[test_case("starfish-bls", None, 100)]
+    #[test_case("starfish-bls", Some("ml-dsa-65"), 1320)]
+    #[test_case("sailfish++", None, 120)]
+    #[test_case("sailfish++", Some("ml-dsa-65"), 1340)]
+    #[test_case("bluestreak", None, 140)]
+    #[test_case("mysticeti-bls", None, 160)]
+    #[test_case("mysticeti-bls", Some("ml-dsa-65"), 1360)]
+    #[test_case("sparse-starfish-speed", None, 180)]
+    #[test_case("sparse-starfish-speed-mac", None, 840)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 860)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1080)]
+    #[test_case("bluestreak-mac", None, 920)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 940)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1120)]
     #[tokio::test]
-    async fn validator_commit(consensus: &str, port_offset: u16) {
-        run_commit_test(consensus, port_offset).await;
+    async fn validator_commit(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
+        run_commit_test(consensus, block_authentication, port_offset).await;
     }
 
     #[tokio::test]
     async fn validator_commit_bluestreak_basic() {
-        run_commit_test("bluestreak", 150).await;
+        run_commit_test("bluestreak", None, 150).await;
     }
 
-    async fn run_sync_test(consensus: &str, port_offset: u16) {
+    async fn run_sync_test(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -404,18 +474,30 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 100)]
-    #[test_case("cordial-miners", 140)]
-    #[test_case("starfish", 160)]
-    #[test_case("starfish-speed", 180)]
-    #[test_case("starfish-bls", 200)]
-    #[test_case("sailfish++", 220)]
-    #[test_case("bluestreak", 260)]
-    #[test_case("mysticeti-bls", 280)]
-    #[test_case("sparse-starfish-speed", 320)]
+    #[test_case("mysticeti", None, 100)]
+    #[test_case("cordial-miners", None, 140)]
+    #[test_case("starfish", None, 160)]
+    #[test_case("starfish-mac", None, 740)]
+    #[test_case("starfish", Some("ml-dsa-44"), 1020)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1200)]
+    #[test_case("starfish-speed", None, 180)]
+    #[test_case("starfish-speed-mac", None, 800)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 820)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1220)]
+    #[test_case("starfish-bls", None, 200)]
+    #[test_case("sailfish++", None, 220)]
+    #[test_case("bluestreak", None, 260)]
+    #[test_case("mysticeti-bls", None, 280)]
+    #[test_case("sparse-starfish-speed", None, 320)]
+    #[test_case("sparse-starfish-speed-mac", None, 880)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 900)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1240)]
+    #[test_case("bluestreak-mac", None, 960)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 980)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1260)]
     #[tokio::test]
-    async fn validator_sync(consensus: &str, port_offset: u16) {
-        run_sync_test(consensus, port_offset).await;
+    async fn validator_sync(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
+        run_sync_test(consensus, block_authentication, port_offset).await;
     }
 
     async fn run_crash_faults_test(consensus: &str, port_offset: u16) {

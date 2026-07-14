@@ -20,7 +20,9 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
+    crypto::{
+        self, AsBytes, BlsSignatureBytes, BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer,
+    },
     dag_state::{
         ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, DataSource,
         OwnBlockData,
@@ -32,9 +34,10 @@ use crate::{
     state::RecoveredState,
     store::Store,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-        Encoder, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
-        RoundNumber, SailfishFields, Shard, VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
+        BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
+        ProvableShard, ReconstructedTransactionData, RoundNumber, SailfishFields, Shard,
+        VerifiedBlock,
     },
 };
 
@@ -60,6 +63,9 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
+    ml_dsa_44_signer: MlDsa44Signer,
+    ml_dsa_65_signer: MlDsa65Signer,
+    mac_keys: Arc<Vec<MacKey>>,
     partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
@@ -185,6 +191,9 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
+            ml_dsa_44_signer: private_config.ml_dsa_44_keypair,
+            ml_dsa_65_signer: private_config.ml_dsa_65_keypair,
+            mac_keys: Arc::new(private_config.mac_keys),
             partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
@@ -204,6 +213,10 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn get_signer(&self) -> &Signer {
         &self.signer
+    }
+
+    pub fn mac_keys(&self) -> Arc<Vec<MacKey>> {
+        self.mac_keys.clone()
     }
 
     pub fn get_universal_committer(&self) -> UniversalCommitter {
@@ -991,14 +1004,20 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
+        let authorizer = match self.dag_state.block_authentication_scheme {
+            BlockAuthenticationScheme::Ed25519 => BlockAuthorizer::Ed25519(&self.signer),
+            BlockAuthenticationScheme::MacVector => BlockAuthorizer::MacVector(&self.mac_keys),
+            BlockAuthenticationScheme::MlDsa44 => BlockAuthorizer::MlDsa44(&self.ml_dsa_44_signer),
+            BlockAuthenticationScheme::MlDsa65 => BlockAuthorizer::MlDsa65(&self.ml_dsa_65_signer),
+        };
+        let mut block = VerifiedBlock::new_with_authorizer_and_unprovable(
             self.authority,
             clock_round,
             block_references,
             voted_leader_ref,
             acknowledgment_references.to_vec(),
             time_ns,
-            &self.signer,
+            &authorizer,
             bls_signer_opt,
             committee_opt,
             aggregate_dac_sigs,

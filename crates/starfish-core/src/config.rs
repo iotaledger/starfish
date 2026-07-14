@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    crypto::{BlsPublicKey, BlsSigner, Signer, dummy_bls_signer, dummy_signer},
+    crypto::{
+        BlsPublicKey, BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer, dummy_bls_signer,
+        dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
+    },
     types::{AuthorityIndex, PublicKey, RoundNumber},
 };
 
@@ -54,6 +57,10 @@ pub struct NodeParameters {
     pub bls_verification_workers: usize,
     #[serde(default)]
     pub dissemination_mode: DisseminationMode,
+    /// Block signature scheme. `None` selects Ed25519. Experimental MAC
+    /// protocols select their authentication through the consensus name.
+    #[serde(default)]
+    pub block_authentication: Option<String>,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -127,6 +134,7 @@ impl Default for NodeParameters {
             compress_network: node_defaults::default_compress_network(),
             bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),
+            block_authentication: None,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
@@ -270,6 +278,9 @@ pub struct NodePrivateConfig {
     authority: AuthorityIndex,
     pub keypair: Signer,
     pub bls_keypair: BlsSigner,
+    pub ml_dsa_44_keypair: MlDsa44Signer,
+    pub ml_dsa_65_keypair: MlDsa65Signer,
+    pub mac_keys: Vec<MacKey>,
     pub storage_path: PathBuf,
 }
 
@@ -279,6 +290,9 @@ impl NodePrivateConfig {
             authority: index,
             keypair: dummy_signer(),
             bls_keypair: dummy_bls_signer(),
+            ml_dsa_44_keypair: dummy_ml_dsa_44_signer(),
+            ml_dsa_65_keypair: dummy_ml_dsa_65_signer(),
+            mac_keys: Vec::new(),
             storage_path: PathBuf::from("storage"),
         }
     }
@@ -286,20 +300,34 @@ impl NodePrivateConfig {
     pub fn new_for_benchmarks(working_dir: &Path, committee_size: usize) -> Vec<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
+        let ml_dsa_44_signers = MlDsa44Signer::new_for_test(committee_size);
+        let ml_dsa_65_signers = MlDsa65Signer::new_for_test(committee_size);
+        let mac_keyrings = mac_keyrings_for_test(committee_size);
         signers
             .into_iter()
             .zip(bls_signers)
+            .zip(ml_dsa_44_signers)
+            .zip(ml_dsa_65_signers)
+            .zip(mac_keyrings)
             .enumerate()
-            .map(|(i, (keypair, bls_keypair))| {
-                let authority = i as AuthorityIndex;
-                let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
-                Self {
-                    authority,
-                    keypair,
-                    bls_keypair,
-                    storage_path: path,
-                }
-            })
+            .map(
+                |(
+                    i,
+                    ((((keypair, bls_keypair), ml_dsa_44_keypair), ml_dsa_65_keypair), mac_keys),
+                )| {
+                    let authority = i as AuthorityIndex;
+                    let path = working_dir.join(NodePrivateConfig::default_storage_path(authority));
+                    Self {
+                        authority,
+                        keypair,
+                        bls_keypair,
+                        ml_dsa_44_keypair,
+                        ml_dsa_65_keypair,
+                        mac_keys,
+                        storage_path: path,
+                    }
+                },
+            )
             .collect()
     }
 

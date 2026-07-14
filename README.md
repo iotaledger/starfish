@@ -59,6 +59,55 @@ achieving 2-round optimistic commit latency.
 leader, data availability) in block headers, with async verification
 offloaded from the critical path.
 
+### Block authentication
+
+Every consensus protocol can select its block signature independently:
+
+| Scheme | CLI option |
+|---|---|
+| Ed25519 (default) | `--block-authentication ed25519` or omit the option |
+| ML-DSA-44 | `--block-authentication ml-dsa-44` |
+| ML-DSA-65 | `--block-authentication ml-dsa-65` |
+
+For example, `--consensus mysticeti --block-authentication ml-dsa-65` changes
+Mysticeti's block signature without creating another consensus protocol. This
+selection is also available through the orchestrator. Protocol-specific BLS
+certificates are unaffected. These digital-signature selections retain the
+transferable public verification assumed by the protocols and do not change
+their message flow or proof structure. The same value can be set as
+`block_authentication` in the node-parameters YAML; the CLI option overrides
+that setting.
+
+`BlockReference.digest` is the BLAKE3 hash of the canonical block content only.
+The modular authentication proof is a separate header field and does not change
+the block reference. Benchmark genesis generates all Ed25519 and ML-DSA key
+material regardless of the selected signature scheme.
+
+The ML-DSA wrappers are generated from a common parameter-set definition.
+ML-DSA-44 uses 1,312-byte public keys and 2,420-byte signatures; ML-DSA-65
+uses 1,952-byte public keys and 3,309-byte signatures.
+
+This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
+here states that it has not been independently audited and should not be
+treated as production-ready cryptography.
+
+#### Experimental MAC protocols
+
+`starfish-mac`, `starfish-speed-mac`, `sparse-starfish-speed-mac`, and
+`bluestreak-mac` remain separate work-in-progress benchmark protocols. They are
+not interchangeable signature selections and cannot be combined with
+`--block-authentication`.
+
+These variants measure a lower bound for pairwise-MAC authentication. Direct
+author streaming carries the full committee-sized MAC vector; relays and
+synchronization responses carry only the destination's tag. Pairwise MACs do
+not provide transferable authorship, and a Byzantine author can give different
+recipients valid and invalid tags for the same block reference. The current
+prototype does not add the quorum-authentication/RBC exchange needed to bind
+the author to an available authenticator. It therefore makes no safety or
+liveness claim and must not be treated as a proven variant of the underlying
+protocol.
+
 ## Dissemination Modes
 
 Every protocol can run with any of three dissemination strategies

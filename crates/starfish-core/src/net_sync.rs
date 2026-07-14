@@ -34,7 +34,7 @@ use crate::{
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::BlsSigner,
+    crypto::{BlsSigner, MacKey},
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -46,14 +46,89 @@ use crate::{
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, PartialSig, PartialSigKind,
-        ProvableShard, RoundNumber, VerifiedBlock, format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
+        BlockReference, PartialSig, PartialSigKind, ProvableShard, RoundNumber, VerifiedBlock,
+        format_authority_index,
     },
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
 const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
+
+/// Enforce the MAC experiment's transport contract before cryptographic
+/// verification:
+///
+/// - a full vector is accepted only on proactive block streaming directly from
+///   the block's claimed author;
+/// - every relay and synchronization path must carry one recipient tag;
+/// - a direct author stream must carry the full vector, so recipients retain
+///   the material needed for one-hop relay.
+fn verify_mac_transport(
+    block: &VerifiedBlock,
+    authentication_scheme: BlockAuthenticationScheme,
+    peer_id: AuthorityIndex,
+    source: DataSource,
+) -> eyre::Result<()> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return Ok(());
+    }
+
+    let direct_author_stream = peer_id == block.authority()
+        && matches!(
+            source,
+            DataSource::BlockBundleStreaming | DataSource::BlockBundleStreamingHeader
+        );
+
+    match block.authentication() {
+        BlockAuthentication::MacVector(_) if direct_author_stream => Ok(()),
+        BlockAuthentication::MacVector(_) => eyre::bail!(
+            "Full MAC vector for block {} must arrive via direct author block streaming; \
+             received from authority {} with source {}",
+            block.reference(),
+            peer_id,
+            source,
+        ),
+        BlockAuthentication::MacTag(_) if !direct_author_stream => Ok(()),
+        BlockAuthentication::MacTag(_) => eyre::bail!(
+            "Direct author block stream for block {} must carry the full MAC vector",
+            block.reference(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Prepare blocks forwarded through relay or synchronization paths for a
+/// specific peer. MAC-authenticated blocks retain their complete vector only
+/// at direct recipients; forwarding selects the destination's tag. A
+/// tag-only copy cannot be forwarded again and is therefore omitted.
+pub(crate) fn prepare_forwarded_blocks_for_peer(
+    authentication_scheme: BlockAuthenticationScheme,
+    recipient: AuthorityIndex,
+    blocks: Vec<Data<VerifiedBlock>>,
+) -> Vec<Data<VerifiedBlock>> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return blocks;
+    }
+
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            block
+                .with_recipient_mac(recipient)
+                .map(Data::new)
+                .or_else(|| {
+                    tracing::debug!(
+                        "Cannot forward MAC-authenticated block {} to authority {}: \
+                         complete MAC vector is unavailable",
+                        block.reference(),
+                        recipient,
+                    );
+                    None
+                })
+        })
+        .collect()
+}
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -161,6 +236,7 @@ fn eligible_missing_parent_refs(
 
 struct FilterForBlocks {
     digests: parking_lot::RwLock<AHashSet<BlockDigest>>,
+    full_mac_vectors: parking_lot::RwLock<AHashSet<BlockDigest>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
 }
 
@@ -168,6 +244,7 @@ impl FilterForBlocks {
     fn new() -> Self {
         Self {
             digests: parking_lot::RwLock::new(AHashSet::new()),
+            full_mac_vectors: parking_lot::RwLock::new(AHashSet::new()),
             queue: parking_lot::RwLock::new(VecDeque::new()),
         }
     }
@@ -177,58 +254,84 @@ impl FilterForBlocks {
         digests.iter().map(|d| set.contains(d)).collect()
     }
 
-    fn insert_batch(&self, new_digests: &[BlockDigest]) {
+    fn contains_full_mac_batch(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let set = self.full_mac_vectors.read();
+        digests.iter().map(|d| set.contains(d)).collect()
+    }
+
+    fn insert_batch(&self, blocks: &[(BlockDigest, bool)]) {
         let mut digests = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        for digest in new_digests {
+        for (digest, has_full_mac_vector) in blocks {
             if digests.insert(*digest) {
                 queue.push_back(*digest);
+            }
+            if *has_full_mac_vector {
+                full_mac_vectors.insert(*digest);
             }
         }
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 digests.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
     }
 
-    /// Inserts all digests and returns `true` for each that was genuinely new
-    /// (not already in the filter and not duplicated earlier in the batch).
-    fn insert_and_report_new(&self, digests: &[BlockDigest]) -> Vec<bool> {
+    /// Inserts all verified copies and returns `true` for each copy that adds
+    /// either a new block reference or the first full MAC vector for a
+    /// previously recipient-tag-only reference.
+    fn insert_and_report_useful(&self, blocks: &[(BlockDigest, bool)]) -> Vec<bool> {
         let mut set = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        let is_new: Vec<bool> = digests
+        let is_useful: Vec<bool> = blocks
             .iter()
-            .map(|d| {
-                if set.insert(*d) {
-                    queue.push_back(*d);
-                    true
-                } else {
-                    false
+            .map(|(digest, has_full_mac_vector)| {
+                let is_new = set.insert(*digest);
+                if is_new {
+                    queue.push_back(*digest);
                 }
+                let is_mac_upgrade = *has_full_mac_vector && full_mac_vectors.insert(*digest);
+                is_new || is_mac_upgrade
             })
             .collect();
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 set.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
-        is_new
+        is_useful
     }
 
-    /// For each header digest, returns `true` if the digest has not been seen
-    /// before (neither in the filter nor earlier in this batch).
-    fn needed_headers(&self, batch: &[BlockDigest]) -> Vec<bool> {
+    /// For each header, returns `true` if it is either unseen or upgrades a
+    /// previously seen recipient-only MAC to a full vector.
+    fn needed_headers(&self, batch: &[(BlockDigest, bool)]) -> Vec<bool> {
         let digests = self.digests.read();
-        let mut seen_in_batch = AHashSet::with_capacity(batch.len());
+        let full_mac_vectors = self.full_mac_vectors.read();
+        let mut seen_in_batch = AHashMap::with_capacity(batch.len());
 
         batch
             .iter()
-            .map(|digest| !digests.contains(digest) && seen_in_batch.insert(*digest))
+            .map(|(digest, has_full_mac_vector)| {
+                let was_seen = digests.contains(digest) || seen_in_batch.contains_key(digest);
+                let had_full_mac_vector = seen_in_batch
+                    .get(digest)
+                    .copied()
+                    .unwrap_or_else(|| full_mac_vectors.contains(digest));
+                let is_needed = !was_seen || (*has_full_mac_vector && !had_full_mac_vector);
+                seen_in_batch
+                    .entry(*digest)
+                    .and_modify(|full| *full |= *has_full_mac_vector)
+                    .or_insert(*has_full_mac_vector);
+                is_needed
+            })
             .collect()
     }
 }
@@ -424,8 +527,11 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         while let Some((blocks, source)) = rx.recv().await {
             let connection_knowledge = inner.cordial_knowledge.connection_knowledge(peer_id);
-            let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
-            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_digests);
+            let incoming_headers: Vec<_> = blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_headers);
             let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
 
             for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
@@ -435,12 +541,28 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 }
                 let mut block: VerifiedBlock = (*data_block).clone();
                 tracing::debug!("Received {} from {}", block, peer);
-                match block.verify(
+                if let Err(e) = verify_mac_transport(
+                    &block,
+                    inner.dag_state.block_authentication_scheme,
+                    peer_id,
+                    source,
+                ) {
+                    tracing::warn!(
+                        "Rejected incorrectly transported block {} from {}: {:?}",
+                        block.reference(),
+                        peer,
+                        e
+                    );
+                    break;
+                }
+                match block.verify_with_authentication(
                     &inner.committee,
                     own_id as usize,
                     peer_id as usize,
                     &mut encoder,
                     consensus_protocol,
+                    inner.dag_state.block_authentication_scheme,
+                    &inner.mac_keys,
                 ) {
                     Ok(shard) => {
                         debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
@@ -464,11 +586,14 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 ck.mark_headers_useful_from_peer(&refs);
             }
 
-            let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
-            let is_new = filter_for_blocks.insert_and_report_new(&digests);
+            let filter_entries: Vec<_> = verified_blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let is_useful = filter_for_blocks.insert_and_report_useful(&filter_entries);
             let mut new_data_blocks = Vec::new();
-            for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
-                if is_new {
+            for (storage_block, is_useful) in verified_blocks.into_iter().zip(is_useful) {
+                if is_useful {
                     let mut storage_block = storage_block;
                     storage_block.preserialize();
                     debug_assert!(
@@ -960,27 +1085,45 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         // --- batch pre-filter (one read lock each) ---
         let block_known = self.filter_for_blocks.contains_batch(&incoming_digests);
+        let full_mac_known = self
+            .filter_for_blocks
+            .contains_full_mac_batch(&incoming_digests);
         let shard_full = self.filter_for_shards.has_full_batch(&incoming_digests);
 
         // --- verify loop (no lock acquisitions) ---
         let mut verified: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
-        for ((data_block, _digest), (bk, sf)) in blocks
-            .into_iter()
-            .zip(incoming_digests)
-            .zip(block_known.into_iter().zip(shard_full))
-        {
-            if bk && sf {
+        for (index, data_block) in blocks.into_iter().enumerate() {
+            let bk = block_known[index];
+            let sf = shard_full[index];
+            let incoming_has_full_mac = data_block.has_full_mac_vector();
+            if bk && sf && (!incoming_has_full_mac || full_mac_known[index]) {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            let shard = match block.verify(
+            if let Err(e) = verify_mac_transport(
+                &block,
+                self.inner.dag_state.block_authentication_scheme,
+                self.peer_id,
+                source,
+            ) {
+                tracing::warn!(
+                    "Rejected incorrectly transported block {} from {}: {:?}",
+                    block.reference(),
+                    self.peer,
+                    e
+                );
+                break;
+            }
+            let shard = match block.verify_with_authentication(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
+                self.inner.dag_state.block_authentication_scheme,
+                &self.inner.mac_keys,
             ) {
                 Ok(shard) => shard,
                 Err(e) => {
@@ -1008,8 +1151,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // --- batch filter updates (one write lock each) ---
-        let verified_digests: Vec<_> = verified.iter().map(|(b, _)| b.digest()).collect();
-        self.filter_for_blocks.insert_batch(&verified_digests);
+        let verified_filter_entries: Vec<_> = verified
+            .iter()
+            .map(|(block, _)| (block.digest(), block.has_full_mac_vector()))
+            .collect();
+        let verified_digests: Vec<_> = verified_filter_entries
+            .iter()
+            .map(|(digest, _)| *digest)
+            .collect();
+        self.filter_for_blocks
+            .insert_batch(&verified_filter_entries);
         self.filter_for_shards.mark_full_batch(&verified_digests);
 
         // --- preserialize + collect ---
@@ -1246,6 +1397,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 !known_voters.contains(b.authority()) && b.block_references().contains(&leader_ref)
             })
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.peer_id,
+            missing,
+        );
         tracing::debug!(
             "UnprovableCertificateRequest from peer {:?} for leader {}: \
              known_voters={}, serving_blocks={}",
@@ -1281,6 +1437,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .into_iter()
             .filter(|b| !known_authorities.contains(b.authority()))
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.peer_id,
+            missing,
+        );
         if missing.is_empty() {
             return true;
         }
@@ -1329,6 +1490,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub block_ready_notify: Arc<Notify>,
     pub proposal_round_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
+    pub mac_keys: Arc<Vec<MacKey>>,
     pub dissemination_mode: DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
@@ -1367,6 +1529,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
+        let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
         let dissemination_mode = dag_state
             .consensus_protocol
@@ -1459,6 +1622,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             syncer,
             proposal_round_notify,
             committee,
+            mac_keys,
             dissemination_mode,
             causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
             stop: stop_sender.clone(),
@@ -2363,7 +2527,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::SignatureBytes,
+        crypto::{self, SignatureBytes},
         types::{BaseTransaction, BlockReference},
     };
 
@@ -2379,6 +2543,140 @@ mod tests {
         let wait = proposal_round_notify.notified();
         signals.proposal_round_advanced(5);
         wait.await;
+    }
+
+    #[test]
+    fn block_filter_allows_exactly_one_tag_to_full_mac_upgrade() {
+        let filter = FilterForBlocks::new();
+        let digest = BlockReference::new_test(1, 7).digest;
+
+        assert_eq!(
+            filter.needed_headers(&[(digest, false), (digest, true), (digest, true)]),
+            vec![true, true, false]
+        );
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, false)]),
+            vec![true]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, false)]), vec![false]);
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![true]);
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, true), (digest, true)]),
+            vec![true, false]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![false]);
+        assert_eq!(filter.contains_full_mac_batch(&[digest]), vec![true]);
+    }
+
+    #[test]
+    fn full_mac_vectors_require_direct_author_block_streaming() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut full = VerifiedBlock::new(
+            1,
+            1,
+            Vec::new(),
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let tags = keyrings[1]
+            .iter()
+            .enumerate()
+            .map(|(recipient, key)| key.compute_tag(1, recipient as AuthorityIndex, &full.digest()))
+            .collect();
+        full.header.authentication = BlockAuthentication::MacVector(tags);
+
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreamingHeader,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_err()
+        );
+
+        let tagged = full.with_recipient_mac(0).unwrap();
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
+
+        let round_gap_blocks = prepare_forwarded_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            0,
+            vec![Data::new(full)],
+        );
+        assert_eq!(round_gap_blocks.len(), 1);
+        assert!(matches!(
+            round_gap_blocks[0].authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(
+            verify_mac_transport(
+                &round_gap_blocks[0],
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::RoundGapResponse,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
