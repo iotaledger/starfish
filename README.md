@@ -93,7 +93,9 @@ treated as production-ready cryptography.
 See the
 [40-validator geographic authentication comparison](benchmark-results/2026-07-13-starfish-authentication-geo-40-validators-60s.md)
 for matching Ed25519, MAC-vector, and ML-DSA-44 measurements across all four
-protocol families.
+protocol families. A separate
+[60-validator moderate-load comparison](benchmark-results/2026-07-14-authentication-geo-60-validators-60s.md)
+records the single-machine scaling boundary at 600 tx/s aggregate load.
 
 ## Dissemination Modes
 
