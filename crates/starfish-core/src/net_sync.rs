@@ -1397,6 +1397,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 !known_voters.contains(b.authority()) && b.block_references().contains(&leader_ref)
             })
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.peer_id,
+            missing,
+        );
         tracing::debug!(
             "UnprovableCertificateRequest from peer {:?} for leader {}: \
              known_voters={}, serving_blocks={}",

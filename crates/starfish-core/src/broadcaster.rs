@@ -471,6 +471,11 @@ where
                     .into_iter()
                     .flatten()
                     .collect();
+                let all_blocks = prepare_forwarded_blocks_for_peer(
+                    self.inner.dag_state.block_authentication_scheme,
+                    peer_id,
+                    all_blocks,
+                );
                 let chunk_size = batch_block_size.max(1);
 
                 // MissingParentsRequest responses must serve the entire requested
@@ -1323,13 +1328,18 @@ where
     match push_transport_format(inner.dag_state.consensus_protocol) {
         PushOtherBlocksFormat::FullBlocks => {
             let mut full_blocks = plan.own_blocks;
-            full_blocks.extend(
-                inner
-                    .dag_state
-                    .get_transmission_blocks(&plan.other_refs)
-                    .into_iter()
-                    .flatten(),
+            let other_blocks = inner
+                .dag_state
+                .get_transmission_blocks(&plan.other_refs)
+                .into_iter()
+                .flatten()
+                .collect();
+            let other_blocks = prepare_forwarded_blocks_for_peer(
+                inner.dag_state.block_authentication_scheme,
+                to_whom_authority_index,
+                other_blocks,
             );
+            full_blocks.extend(other_blocks);
             BlockBatch {
                 source: DataSource::BlockBundleStreaming,
                 full_blocks,

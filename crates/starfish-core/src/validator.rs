@@ -349,6 +349,8 @@ mod smoke_tests {
     #[test_case("sparse-starfish-speed", 180)]
     #[test_case("sparse-starfish-speed-mac", 840)]
     #[test_case("sparse-starfish-speed-ml-dsa-44", 860)]
+    #[test_case("bluestreak-mac", 920)]
+    #[test_case("bluestreak-ml-dsa-44", 940)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -454,6 +456,8 @@ mod smoke_tests {
     #[test_case("sparse-starfish-speed", 320)]
     #[test_case("sparse-starfish-speed-mac", 880)]
     #[test_case("sparse-starfish-speed-ml-dsa-44", 900)]
+    #[test_case("bluestreak-mac", 960)]
+    #[test_case("bluestreak-ml-dsa-44", 980)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;
