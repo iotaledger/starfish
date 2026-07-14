@@ -67,7 +67,7 @@ enum Operation {
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
         /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-44`).
+        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
     },
@@ -97,7 +97,7 @@ enum Operation {
         #[clap(long, value_name = "INT", default_value_t = 34)]
         adversarial_latency_percent: u32,
         /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-44`).
+        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         /// Directory to store validator data (default: current directory)
@@ -149,7 +149,7 @@ enum Operation {
         #[clap(long, value_name = "INT", default_value_t = 34)]
         adversarial_latency_percent: u32,
         /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-44`).
+        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
         #[clap(long, value_name = "INT", default_value_t = 600)]

@@ -129,7 +129,7 @@ each load generator submits a fixed load of 100 tx/s
 or more precisely 10 tx every 100ms.
 Performance measurements are collected by regularly scraping
 the Prometheus metrics exposed by the load generators.
-Available consensus protocols: `starfish`, `starfish-mac`, `starfish-ml-dsa-44`, `starfish-speed`, `starfish-speed-mac`, `starfish-speed-ml-dsa-44`, `sparse-starfish-speed`, `sparse-starfish-speed-mac`, `sparse-starfish-speed-ml-dsa-44`, `bluestreak`, `bluestreak-mac`, `bluestreak-ml-dsa-44`, `starfish-bls`, `mysticeti`, `mysticeti-bls`, `cordial-miners`, `sailfish-pp`.
+Available consensus protocols: `starfish`, `starfish-mac`, `starfish-ml-dsa-44`, `starfish-ml-dsa-65`, `starfish-speed`, `starfish-speed-mac`, `starfish-speed-ml-dsa-44`, `starfish-speed-ml-dsa-65`, `sparse-starfish-speed`, `sparse-starfish-speed-mac`, `sparse-starfish-speed-ml-dsa-44`, `sparse-starfish-speed-ml-dsa-65`, `bluestreak`, `bluestreak-mac`, `bluestreak-ml-dsa-44`, `bluestreak-ml-dsa-65`, `starfish-bls`, `mysticeti`, `mysticeti-bls`, `cordial-miners`, `sailfish-pp`.
 
 To run with Byzantine validators:
 

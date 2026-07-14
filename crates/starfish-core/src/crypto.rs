@@ -6,7 +6,7 @@ use std::fmt;
 
 use blst::min_sig as bls;
 use ml_dsa::{
-    Keypair as _, MlDsa44, Signature as MlDsaSignature, Signer as MlDsaSignerTrait,
+    Keypair as _, MlDsa44, MlDsa65, Signature as MlDsaSignature, Signer as MlDsaSignerTrait,
     SigningKey as MlDsaSigningKey, Verifier as MlDsaVerifierTrait,
     VerifyingKey as MlDsaVerifyingKey,
 };
@@ -79,9 +79,13 @@ pub const SIGNATURE_SIZE: usize = 64;
 pub const BLOCK_DIGEST_SIZE: usize = 32;
 pub const MAC_KEY_SIZE: usize = 32;
 pub const MAC_TAG_SIZE: usize = 32;
-pub const ML_DSA_44_SEED_SIZE: usize = 32;
+pub const ML_DSA_SEED_SIZE: usize = 32;
+pub const ML_DSA_44_SEED_SIZE: usize = ML_DSA_SEED_SIZE;
 pub const ML_DSA_44_PUBLIC_KEY_SIZE: usize = 1_312;
 pub const ML_DSA_44_SIGNATURE_SIZE: usize = 2_420;
+pub const ML_DSA_65_SEED_SIZE: usize = ML_DSA_SEED_SIZE;
+pub const ML_DSA_65_PUBLIC_KEY_SIZE: usize = 1_952;
+pub const ML_DSA_65_SIGNATURE_SIZE: usize = 3_309;
 
 pub const TRANSACTIONS_DIGEST_SIZE: usize = 32;
 
@@ -103,16 +107,6 @@ pub struct MacKey([u8; MAC_KEY_SIZE]);
 
 #[derive(Clone, Copy, Ord, PartialOrd)]
 pub struct MacTag([u8; MAC_TAG_SIZE]);
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct MlDsa44SignatureBytes(Box<[u8; ML_DSA_44_SIGNATURE_SIZE]>);
-
-#[derive(Clone)]
-pub struct MlDsa44PublicKey(MlDsaVerifyingKey<MlDsa44>);
-
-/// Boxed so moving this wrapper does not copy private key material.
-#[derive(Clone)]
-pub struct MlDsa44Signer(Box<MlDsaSigningKey<MlDsa44>>);
 
 // Box ensures value is not copied in memory when Signer itself is moved around
 // for better security
@@ -602,131 +596,199 @@ impl<'de> Deserialize<'de> for MacTag {
     }
 }
 
-impl MlDsa44SignatureBytes {
-    pub fn from_bytes(bytes: [u8; ML_DSA_44_SIGNATURE_SIZE]) -> Self {
-        Self(Box::new(bytes))
-    }
-}
+macro_rules! define_ml_dsa_variant {
+    (
+        parameter_set = $parameter_set:ty,
+        signature = $signature:ident,
+        public_key = $public_key:ident,
+        signer = $signer:ident,
+        seed_size = $seed_size:ident,
+        public_key_size = $public_key_size:ident,
+        signature_size = $signature_size:ident,
+        test_rng_seed = $test_rng_seed:expr,
+        label = $label:literal,
+        dummy_signer = $dummy_signer:ident,
+        dummy_public_key = $dummy_public_key:ident
+    ) => {
+        #[derive(Clone, Eq, PartialEq)]
+        pub struct $signature(Box<[u8; $signature_size]>);
 
-impl AsRef<[u8]> for MlDsa44SignatureBytes {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
+        #[derive(Clone)]
+        pub struct $public_key(MlDsaVerifyingKey<$parameter_set>);
 
-impl fmt::Debug for MlDsa44SignatureBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MlDsa44Sig({})", &hex::encode(&self.0[..4]))
-    }
-}
+        /// Boxed so moving this wrapper does not copy private key material.
+        #[derive(Clone)]
+        pub struct $signer(Box<MlDsaSigningKey<$parameter_set>>);
 
-impl Serialize for MlDsa44SignatureBytes {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_fixed_bytes(self.0.as_ref(), serializer)
-    }
-}
+        impl $signature {
+            pub fn from_bytes(bytes: [u8; $signature_size]) -> Self {
+                Self(Box::new(bytes))
+            }
+        }
 
-impl<'de> Deserialize<'de> for MlDsa44SignatureBytes {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_fixed_bytes::<D, ML_DSA_44_SIGNATURE_SIZE>(deserializer, "ML-DSA-44 signature")
-            .map(Self::from_bytes)
-    }
-}
+        impl AsRef<[u8]> for $signature {
+            fn as_ref(&self) -> &[u8] {
+                self.0.as_ref()
+            }
+        }
 
-impl MlDsa44PublicKey {
-    pub fn from_bytes(bytes: &[u8; ML_DSA_44_PUBLIC_KEY_SIZE]) -> Self {
-        let encoded = ml_dsa::EncodedVerifyingKey::<MlDsa44>::from(*bytes);
-        Self(MlDsaVerifyingKey::decode(&encoded))
-    }
+        impl fmt::Debug for $signature {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}Sig({})", $label, &hex::encode(&self.0[..4]))
+            }
+        }
 
-    pub fn to_bytes(&self) -> [u8; ML_DSA_44_PUBLIC_KEY_SIZE] {
-        self.0.encode().into()
-    }
+        impl Serialize for $signature {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serialize_fixed_bytes(self.0.as_ref(), serializer)
+            }
+        }
 
-    pub fn verify_digest_signature(
-        &self,
-        digest: &BlockDigest,
-        signature: &MlDsa44SignatureBytes,
-    ) -> Result<(), ml_dsa::signature::Error> {
-        let signature = MlDsaSignature::<MlDsa44>::try_from(signature.as_ref())?;
-        self.0.verify(digest.as_ref(), &signature)
-    }
-}
+        impl<'de> Deserialize<'de> for $signature {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                deserialize_fixed_bytes::<D, $signature_size>(
+                    deserializer,
+                    concat!($label, " signature"),
+                )
+                .map(Self::from_bytes)
+            }
+        }
 
-impl PartialEq for MlDsa44PublicKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.to_bytes() == other.to_bytes()
-    }
-}
+        impl $public_key {
+            pub fn from_bytes(bytes: &[u8; $public_key_size]) -> Self {
+                let encoded = ml_dsa::EncodedVerifyingKey::<$parameter_set>::from(*bytes);
+                Self(MlDsaVerifyingKey::decode(&encoded))
+            }
 
-impl Eq for MlDsa44PublicKey {}
+            pub fn to_bytes(&self) -> [u8; $public_key_size] {
+                self.0.encode().into()
+            }
 
-impl fmt::Debug for MlDsa44PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MlDsa44Pk({})", &hex::encode(&self.to_bytes()[..4]))
-    }
-}
+            pub fn verify_digest_signature(
+                &self,
+                digest: &BlockDigest,
+                signature: &$signature,
+            ) -> Result<(), ml_dsa::signature::Error> {
+                let signature = MlDsaSignature::<$parameter_set>::try_from(signature.as_ref())?;
+                self.0.verify(digest.as_ref(), &signature)
+            }
+        }
 
-impl Serialize for MlDsa44PublicKey {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_fixed_bytes(&self.to_bytes(), serializer)
-    }
-}
+        impl PartialEq for $public_key {
+            fn eq(&self, other: &Self) -> bool {
+                self.to_bytes() == other.to_bytes()
+            }
+        }
 
-impl<'de> Deserialize<'de> for MlDsa44PublicKey {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bytes = deserialize_fixed_bytes::<D, ML_DSA_44_PUBLIC_KEY_SIZE>(
-            deserializer,
-            "ML-DSA-44 public key",
-        )?;
-        Ok(Self::from_bytes(&bytes))
-    }
-}
+        impl Eq for $public_key {}
 
-impl MlDsa44Signer {
-    pub fn new_for_test(n: usize) -> Vec<Self> {
-        let mut rng = StdRng::seed_from_u64(0x4d4c_4453_4134_3400);
-        (0..n)
-            .map(|_| {
-                let mut bytes = [0; ML_DSA_44_SEED_SIZE];
-                rng.fill_bytes(&mut bytes);
+        impl fmt::Debug for $public_key {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}Pk({})", $label, &hex::encode(&self.to_bytes()[..4]))
+            }
+        }
+
+        impl Serialize for $public_key {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serialize_fixed_bytes(&self.to_bytes(), serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $public_key {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let bytes = deserialize_fixed_bytes::<D, $public_key_size>(
+                    deserializer,
+                    concat!($label, " public key"),
+                )?;
+                Ok(Self::from_bytes(&bytes))
+            }
+        }
+
+        impl $signer {
+            pub fn new_for_test(n: usize) -> Vec<Self> {
+                let mut rng = StdRng::seed_from_u64($test_rng_seed);
+                (0..n)
+                    .map(|_| {
+                        let mut bytes = [0; $seed_size];
+                        rng.fill_bytes(&mut bytes);
+                        let seed = ml_dsa::Seed::from(bytes);
+                        Self(Box::new(MlDsaSigningKey::from_seed(&seed)))
+                    })
+                    .collect()
+            }
+
+            pub fn sign_digest(&self, digest: &BlockDigest) -> $signature {
+                let signature: MlDsaSignature<$parameter_set> = self.0.sign(digest.as_ref());
+                $signature::from_bytes(signature.encode().into())
+            }
+
+            pub fn public_key(&self) -> $public_key {
+                $public_key(self.0.verifying_key())
+            }
+        }
+
+        impl fmt::Debug for $signer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}Signer(public_key={:?})", $label, self.public_key())
+            }
+        }
+
+        impl Serialize for $signer {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let seed: [u8; $seed_size] = self.0.to_seed().into();
+                serialize_fixed_bytes(&seed, serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $signer {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let bytes = deserialize_fixed_bytes::<D, $seed_size>(
+                    deserializer,
+                    concat!($label, " seed"),
+                )?;
                 let seed = ml_dsa::Seed::from(bytes);
-                Self(Box::new(MlDsaSigningKey::from_seed(&seed)))
-            })
-            .collect()
-    }
+                Ok(Self(Box::new(MlDsaSigningKey::from_seed(&seed))))
+            }
+        }
 
-    pub fn sign_digest(&self, digest: &BlockDigest) -> MlDsa44SignatureBytes {
-        let signature: MlDsaSignature<MlDsa44> = self.0.sign(digest.as_ref());
-        MlDsa44SignatureBytes::from_bytes(signature.encode().into())
-    }
+        pub fn $dummy_signer() -> $signer {
+            let seed = ml_dsa::Seed::from([0; $seed_size]);
+            $signer(Box::new(MlDsaSigningKey::from_seed(&seed)))
+        }
 
-    pub fn public_key(&self) -> MlDsa44PublicKey {
-        MlDsa44PublicKey(self.0.verifying_key())
-    }
+        pub fn $dummy_public_key() -> $public_key {
+            $dummy_signer().public_key()
+        }
+    };
 }
 
-impl fmt::Debug for MlDsa44Signer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MlDsa44Signer(public_key={:?})", self.public_key())
-    }
-}
+define_ml_dsa_variant!(
+    parameter_set = MlDsa44,
+    signature = MlDsa44SignatureBytes,
+    public_key = MlDsa44PublicKey,
+    signer = MlDsa44Signer,
+    seed_size = ML_DSA_44_SEED_SIZE,
+    public_key_size = ML_DSA_44_PUBLIC_KEY_SIZE,
+    signature_size = ML_DSA_44_SIGNATURE_SIZE,
+    test_rng_seed = 0x4d4c_4453_4134_3400,
+    label = "ML-DSA-44",
+    dummy_signer = dummy_ml_dsa_44_signer,
+    dummy_public_key = dummy_ml_dsa_44_public_key
+);
 
-impl Serialize for MlDsa44Signer {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let seed: [u8; ML_DSA_44_SEED_SIZE] = self.0.to_seed().into();
-        serialize_fixed_bytes(&seed, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for MlDsa44Signer {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bytes =
-            deserialize_fixed_bytes::<D, ML_DSA_44_SEED_SIZE>(deserializer, "ML-DSA-44 seed")?;
-        let seed = ml_dsa::Seed::from(bytes);
-        Ok(Self(Box::new(MlDsaSigningKey::from_seed(&seed))))
-    }
-}
+define_ml_dsa_variant!(
+    parameter_set = MlDsa65,
+    signature = MlDsa65SignatureBytes,
+    public_key = MlDsa65PublicKey,
+    signer = MlDsa65Signer,
+    seed_size = ML_DSA_65_SEED_SIZE,
+    public_key_size = ML_DSA_65_PUBLIC_KEY_SIZE,
+    signature_size = ML_DSA_65_SIGNATURE_SIZE,
+    test_rng_seed = 0x4d4c_4453_4136_3500,
+    label = "ML-DSA-65",
+    dummy_signer = dummy_ml_dsa_65_signer,
+    dummy_public_key = dummy_ml_dsa_65_public_key
+);
 
 impl PublicKey {
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -921,15 +983,6 @@ pub fn dummy_signer() -> Signer {
 
 pub fn dummy_public_key() -> PublicKey {
     dummy_signer().public_key()
-}
-
-pub fn dummy_ml_dsa_44_signer() -> MlDsa44Signer {
-    let seed = ml_dsa::Seed::from([0; ML_DSA_44_SEED_SIZE]);
-    MlDsa44Signer(Box::new(MlDsaSigningKey::from_seed(&seed)))
-}
-
-pub fn dummy_ml_dsa_44_public_key() -> MlDsa44PublicKey {
-    dummy_ml_dsa_44_signer().public_key()
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,6 +1332,33 @@ mod tests {
     }
 
     #[test]
+    fn ml_dsa_65_sign_verify_and_serde_roundtrip() {
+        let signer = MlDsa65Signer::new_for_test(1).pop().unwrap();
+        let public_key = signer.public_key();
+        let digest = BlockDigest([9; BLOCK_DIGEST_SIZE]);
+        let signature = signer.sign_digest(&digest);
+
+        assert!(
+            public_key
+                .verify_digest_signature(&digest, &signature)
+                .is_ok()
+        );
+        assert!(
+            public_key
+                .verify_digest_signature(&BlockDigest([8; BLOCK_DIGEST_SIZE]), &signature)
+                .is_err()
+        );
+
+        let encoded_key = bincode::serialize(&public_key).unwrap();
+        let decoded_key: MlDsa65PublicKey = bincode::deserialize(&encoded_key).unwrap();
+        let encoded_signature = bincode::serialize(&signature).unwrap();
+        let decoded_signature: MlDsa65SignatureBytes =
+            bincode::deserialize(&encoded_signature).unwrap();
+        assert_eq!(public_key, decoded_key);
+        assert_eq!(signature, decoded_signature);
+    }
+
+    #[test]
     fn bls_sign_verify_roundtrip() {
         let signers = BlsSigner::new_for_test(3);
         for signer in &signers {
@@ -1342,6 +1422,9 @@ mod tests {
         ml_dsa_44_signer: MlDsa44Signer,
         ml_dsa_44_public_key: MlDsa44PublicKey,
         ml_dsa_44_signature: MlDsa44SignatureBytes,
+        ml_dsa_65_signer: MlDsa65Signer,
+        ml_dsa_65_public_key: MlDsa65PublicKey,
+        ml_dsa_65_signature: MlDsa65SignatureBytes,
     }
 
     #[test]
@@ -1353,6 +1436,7 @@ mod tests {
         let block_digest = BlockDigest([7u8; BLOCK_DIGEST_SIZE]);
         let mac_tag = mac_key.compute_tag(0, 1, &block_digest);
         let ml_dsa_44_signer = dummy_ml_dsa_44_signer();
+        let ml_dsa_65_signer = dummy_ml_dsa_65_signer();
         let fixture = CryptoYamlFixture {
             signer,
             public_key,
@@ -1367,6 +1451,9 @@ mod tests {
             ml_dsa_44_public_key: ml_dsa_44_signer.public_key(),
             ml_dsa_44_signature: ml_dsa_44_signer.sign_digest(&block_digest),
             ml_dsa_44_signer,
+            ml_dsa_65_public_key: ml_dsa_65_signer.public_key(),
+            ml_dsa_65_signature: ml_dsa_65_signer.sign_digest(&block_digest),
+            ml_dsa_65_signer,
         };
 
         let yaml = serde_yaml::to_string(&fixture).unwrap();
@@ -1389,6 +1476,12 @@ mod tests {
         assert_eq!(
             fixture.ml_dsa_44_signer.public_key(),
             decoded.ml_dsa_44_signer.public_key()
+        );
+        assert_eq!(fixture.ml_dsa_65_public_key, decoded.ml_dsa_65_public_key);
+        assert_eq!(fixture.ml_dsa_65_signature, decoded.ml_dsa_65_signature);
+        assert_eq!(
+            fixture.ml_dsa_65_signer.public_key(),
+            decoded.ml_dsa_65_signer.public_key()
         );
         assert_eq!(
             fixture.bls_signer.public_key(),
