@@ -32,9 +32,14 @@ NUM_NODES=10 DESIRED_TPS=1000 CONSENSUS=starfish \
 | `CONSENSUS` | `bluestreak` | Consensus protocol (see below) |
 | `TEST_TIME` | `3000` | Experiment duration in seconds |
 
-Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
-`sparse-starfish-speed`, `starfish-bls`, `cordial-miners`,
-`mysticeti`, `sailfish-pp`, `bluestreak`, `mysticeti-bls`.
+Supported `CONSENSUS` values include the Ed25519, MAC, and ML-DSA-44 variants
+of Starfish, Starfish Speed, Sparse-Starfish-Speed, and Bluestreak:
+`starfish`, `starfish-mac`, `starfish-ml-dsa-44`, `starfish-speed`,
+`starfish-speed-mac`, `starfish-speed-ml-dsa-44`,
+`sparse-starfish-speed`, `sparse-starfish-speed-mac`,
+`sparse-starfish-speed-ml-dsa-44`, `bluestreak`, `bluestreak-mac`,
+`bluestreak-ml-dsa-44`, `starfish-bls`, `cordial-miners`, `mysticeti`,
+`sailfish-pp`, and `mysticeti-bls`.
 
 ### Protocol Tuning
 

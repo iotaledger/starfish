@@ -1,7 +1,7 @@
-# Starfish authentication comparison — 40-validator geographic emulation
+# Starfish and Bluestreak authentication comparison — 40-validator geographic emulation
 
-Date: 2026-07-13<br>
-Source revision: `c90f8fb`<br>
+Date: 2026-07-13–14<br>
+Source revisions: `c90f8fb` (Starfish families), `3562890` (Bluestreak)<br>
 Host: Apple Silicon (`arm64`), macOS 15.7.4<br>
 Build: Rust 1.86.0, release profile
 
@@ -10,7 +10,8 @@ Build: Rust 1.86.0, release profile
 - 40 honest validators in one local process
 - 1,000 tx/s aggregate offered load (25 tx/s per validator)
 - 60-second measurement window
-- Default `push-useful` dissemination for all three protocol families
+- Protocol-default dissemination: `push-useful` for the Starfish families and
+  `pull` for Bluestreak
 - One run per configuration
 - Geographic latency emulation enabled; no uniform-latency override
 
@@ -50,8 +51,11 @@ target/release/starfish local-benchmark \
 | Sparse-Starfish-Speed | Ed25519 | 446.98 | 507.93 | 795.08 | 367.70 | 0.85 | 0.85 | 2.19 |
 | Sparse-Starfish-Speed | MAC vector | 441.60 | 502.15 | 790.58 | 366.55 | 1.23 | 1.23 | 3.19 |
 | Sparse-Starfish-Speed | ML-DSA-44 | 435.23 | 499.48 | 794.33 | 371.28 | 2.38 | 2.38 | 6.14 |
+| Bluestreak | Ed25519 | 417.65 | 477.93 | 793.48 | 389.53 | 0.59 | 0.59 | 1.53 |
+| Bluestreak | MAC vector | 418.95 | 478.07 | 793.38 | 363.75 | 0.99 | 0.99 | 2.56 |
+| Bluestreak | ML-DSA-44 | 420.70 | 478.43 | 795.43 | 368.57 | 1.41 | 1.41 | 3.62 |
 
-All nine commands exited successfully after printing their metrics. No
+All twelve commands exited successfully after printing their metrics. No
 deserialize, socket-buffer, or transport errors were observed during these
 runs.
 
@@ -65,6 +69,8 @@ runs.
 | Starfish Speed | ML-DSA-44 | -8.9% | -13.1% | 0.0% | +4.8% | +49.0% |
 | Sparse-Starfish-Speed | MAC vector | -1.2% | -1.1% | -0.6% | -0.3% | +44.7% |
 | Sparse-Starfish-Speed | ML-DSA-44 | -2.6% | -1.7% | -0.1% | +1.0% | +180.0% |
+| Bluestreak | MAC vector | +0.3% | 0.0% | 0.0% | -6.6% | +67.8% |
+| Bluestreak | ML-DSA-44 | +0.7% | +0.1% | +0.2% | -5.4% | +139.0% |
 
 The lower latency values in some MAC and ML-DSA runs must not be interpreted
 as an authentication speedup. These are single, sequential trials without a
@@ -80,21 +86,28 @@ randomized order or variance estimates.
 | Sparse-Starfish-Speed | Ed25519 | -24.4% | -21.2% | +0.6% | -9.7% | -83.9% |
 | Sparse-Starfish-Speed | MAC vector | -25.5% | -22.3% | -0.3% | -6.8% | -78.2% |
 | Sparse-Starfish-Speed | ML-DSA-44 | -23.8% | -20.3% | +0.3% | -7.2% | -68.0% |
+| Bluestreak | Ed25519 | -29.3% | -25.9% | +0.4% | -4.3% | -88.8% |
+| Bluestreak | MAC vector | -29.3% | -26.0% | +0.1% | -7.6% | -82.4% |
+| Bluestreak | ML-DSA-44 | -26.4% | -23.7% | +0.4% | -7.8% | -81.0% |
 
 ## Interpretation
 
 - The corrected workload is 1,000 tx/s total, not 4,000 tx/s. The harness
   divides the total evenly, so every validator generates 25 tx/s.
 - Authentication choice did not materially affect committed throughput. All
-  variants reported 790.58-795.08 TPS, a spread of 0.6% across the complete
+  variants reported 790.58-795.43 TPS, a spread of 0.6% across the complete
   matrix.
 - The local harness includes the 12-second connection warm-up in its
   60-second TPS denominator: the default 10 seconds plus 2 seconds for a
   40-validator committee. Roughly 48 seconds therefore submit transactions;
-  the measured 790.58-795.08 TPS corresponds to about 988-994 tx/s during the
+  the measured 790.58-795.43 TPS corresponds to about 988-994 tx/s during the
   active submission window, close to the offered 1,000 tx/s.
 - For plain Starfish and Starfish Speed, MAC raises outbound bandwidth by
   6.6% over Ed25519. ML-DSA-44 raises it by 40.9% and 49.0%, respectively.
+- Bluestreak's baseline protocol traffic is even leaner. Its MAC vector raises
+  outbound bandwidth from 0.59 to 0.99 MB/s (+67.8%), while ML-DSA-44 raises
+  it to 1.41 MB/s (+139.0%). Latency and throughput remain within 0.7% of its
+  Ed25519 baseline.
 - Sparse-Starfish-Speed removes so much baseline protocol traffic that
   authentication bytes become a larger fraction of the remainder. Its MAC
   variant rises from 0.85 to 1.23 MB/s (+44.7%), and ML-DSA-44 rises to
@@ -104,9 +117,12 @@ randomized order or variance estimates.
   streaming carries the full committee-sized MAC vector, while relay and
   synchronization paths carry one recipient tag. Consequently, the remaining
   author-stream authentication cost grows with committee size.
-- Sparse-Starfish-Speed is the strongest 40-validator result in this local
-  emulation: 435-447 ms block latency, 499-508 ms end-to-end latency, and
-  0.85-2.38 MB/s outbound across the three authentication schemes.
+- Bluestreak is the strongest 40-validator result in this local emulation:
+  418-421 ms block latency, about 478 ms end-to-end latency, and
+  0.59-1.41 MB/s outbound across the three authentication schemes. Relative
+  to matching Sparse-Starfish-Speed authentication, it reduces block latency
+  by 3.3-6.6%, end-to-end latency by 4.2-5.9%, and outbound bandwidth by
+  19.5-40.8%.
 - Starfish Speed alone was slower than plain Starfish at 40 validators even
   though it was faster in the earlier 10-validator experiment. This reversal
   points to a single-host scaling or run-variance effect and needs randomized,
@@ -117,6 +133,8 @@ randomized order or variance estimates.
 - There is one run per configuration and no randomized run order, warm-up
   exclusion, or confidence interval. Relative authentication bandwidth is the
   clearest result; latency differences need repeated trials.
+- The Bluestreak runs were made one day after the Starfish-family runs using
+  the same host and benchmark configuration but a newer source revision.
 - Four validators share each synthetic region profile. This produces the AWS
   delay distribution but does not model independent machines or real WAN
   bandwidth constraints.

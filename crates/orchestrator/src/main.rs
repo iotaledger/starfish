@@ -139,8 +139,9 @@ pub enum Operation {
         /// starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 |
         /// sparse-starfish-speed | sparse-starfish-speed-mac |
         /// sparse-starfish-speed-ml-dsa-44 |
+        /// bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 |
         /// starfish-bls | mysticeti | mysticeti-bls |
-        /// cordial-miners | bluestreak | sailfish-pp
+        /// cordial-miners | sailfish-pp
         #[clap(
             long,
             value_name = "STRING",

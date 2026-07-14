@@ -6,9 +6,10 @@
 NUM_NODES=${NUM_NODES:-10}
 NUM_CRASHED_NODES=${NUM_CRASHED_NODES:-0}
 DESIRED_TPS=${DESIRED_TPS:-100}
-# Options: starfish, starfish-speed, sparse-starfish-speed,
-#          starfish-bls, cordial-miners, mysticeti, sailfish-pp,
-#          bluestreak, mysticeti-bls
+# Authentication variants append -mac or -ml-dsa-44 to starfish,
+# starfish-speed, sparse-starfish-speed, or bluestreak.
+# Other options: starfish-bls, cordial-miners, mysticeti,
+# sailfish-pp, mysticeti-bls
 CONSENSUS=${CONSENSUS:- sparse-starfish-speed}
 NUM_BYZANTINE_NODES=${NUM_BYZANTINE_NODES:-0}
 # Options: timeout-leader, leader-withholding,
