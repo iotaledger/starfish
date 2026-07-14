@@ -135,11 +135,11 @@ pub enum Operation {
         skip_testbed_configuration: bool,
 
         /// Protocols to benchmark in order. Available options:
-        /// starfish | starfish-mac | starfish-ml-dsa-44 |
-        /// starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 |
+        /// starfish | starfish-mac | starfish-ml-dsa-44 | starfish-ml-dsa-65 |
+        /// starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 | starfish-speed-ml-dsa-65 |
         /// sparse-starfish-speed | sparse-starfish-speed-mac |
-        /// sparse-starfish-speed-ml-dsa-44 |
-        /// bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 |
+        /// sparse-starfish-speed-ml-dsa-44 | sparse-starfish-speed-ml-dsa-65 |
+        /// bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 | bluestreak-ml-dsa-65 |
         /// starfish-bls | mysticeti | mysticeti-bls |
         /// cordial-miners | sailfish-pp
         #[clap(

@@ -73,6 +73,15 @@ impl Validator {
                     ));
                 }
             }
+            BlockAuthenticationScheme::MlDsa65 => {
+                if committee.get_ml_dsa_65_public_key(authority)
+                    != Some(&private_config.ml_dsa_65_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-65 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
         }
         // Network and metrics setup remains the same
         let network_address = public_config
@@ -339,9 +348,11 @@ mod smoke_tests {
     #[test_case("starfish", 60)]
     #[test_case("starfish-mac", 700)]
     #[test_case("starfish-ml-dsa-44", 720)]
+    #[test_case("starfish-ml-dsa-65", 1000)]
     #[test_case("starfish-speed", 80)]
     #[test_case("starfish-speed-mac", 760)]
     #[test_case("starfish-speed-ml-dsa-44", 780)]
+    #[test_case("starfish-speed-ml-dsa-65", 1040)]
     #[test_case("starfish-bls", 100)]
     #[test_case("sailfish++", 120)]
     #[test_case("bluestreak", 140)]
@@ -349,8 +360,10 @@ mod smoke_tests {
     #[test_case("sparse-starfish-speed", 180)]
     #[test_case("sparse-starfish-speed-mac", 840)]
     #[test_case("sparse-starfish-speed-ml-dsa-44", 860)]
+    #[test_case("sparse-starfish-speed-ml-dsa-65", 1080)]
     #[test_case("bluestreak-mac", 920)]
     #[test_case("bluestreak-ml-dsa-44", 940)]
+    #[test_case("bluestreak-ml-dsa-65", 1120)]
     #[tokio::test]
     async fn validator_commit(consensus: &str, port_offset: u16) {
         run_commit_test(consensus, port_offset).await;
@@ -446,9 +459,12 @@ mod smoke_tests {
     #[test_case("cordial-miners", 140)]
     #[test_case("starfish", 160)]
     #[test_case("starfish-mac", 740)]
+    #[test_case("starfish-ml-dsa-44", 1020)]
+    #[test_case("starfish-ml-dsa-65", 1200)]
     #[test_case("starfish-speed", 180)]
     #[test_case("starfish-speed-mac", 800)]
     #[test_case("starfish-speed-ml-dsa-44", 820)]
+    #[test_case("starfish-speed-ml-dsa-65", 1220)]
     #[test_case("starfish-bls", 200)]
     #[test_case("sailfish++", 220)]
     #[test_case("bluestreak", 260)]
@@ -456,8 +472,10 @@ mod smoke_tests {
     #[test_case("sparse-starfish-speed", 320)]
     #[test_case("sparse-starfish-speed-mac", 880)]
     #[test_case("sparse-starfish-speed-ml-dsa-44", 900)]
+    #[test_case("sparse-starfish-speed-ml-dsa-65", 1240)]
     #[test_case("bluestreak-mac", 960)]
     #[test_case("bluestreak-ml-dsa-44", 980)]
+    #[test_case("bluestreak-ml-dsa-65", 1260)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, port_offset: u16) {
         run_sync_test(consensus, port_offset).await;

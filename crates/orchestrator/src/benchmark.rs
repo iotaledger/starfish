@@ -55,11 +55,13 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
     // Consensus protocol to deploy
-    // (starfish | starfish-mac | starfish-ml-dsa-44 | starfish-speed |
-    // starfish-speed-mac | starfish-speed-ml-dsa-44 |
+    // (starfish | starfish-mac | starfish-ml-dsa-44 | starfish-ml-dsa-65 |
+    // starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 |
+    // starfish-speed-ml-dsa-65 |
     // sparse-starfish-speed | sparse-starfish-speed-mac |
-    // sparse-starfish-speed-ml-dsa-44 | bluestreak | bluestreak-mac |
-    // bluestreak-ml-dsa-44 | starfish-bls | mysticeti | mysticeti-bls |
+    // sparse-starfish-speed-ml-dsa-44 | sparse-starfish-speed-ml-dsa-65 |
+    // bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 |
+    // bluestreak-ml-dsa-65 | starfish-bls | mysticeti | mysticeti-bls |
     // cordial-miners | sailfish-pp)
     pub consensus_protocol: String,
     /// number Byzantine nodes

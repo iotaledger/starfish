@@ -20,7 +20,9 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, MacKey, MlDsa44Signer, Signer},
+    crypto::{
+        self, AsBytes, BlsSignatureBytes, BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer,
+    },
     dag_state::{
         ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, DataSource,
         OwnBlockData,
@@ -62,6 +64,7 @@ pub struct Core<H: BlockHandler> {
     signer: Signer,
     bls_signer: BlsSigner,
     ml_dsa_44_signer: MlDsa44Signer,
+    ml_dsa_65_signer: MlDsa65Signer,
     mac_keys: Arc<Vec<MacKey>>,
     partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
@@ -189,6 +192,7 @@ impl<H: BlockHandler> Core<H> {
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
             ml_dsa_44_signer: private_config.ml_dsa_44_keypair,
+            ml_dsa_65_signer: private_config.ml_dsa_65_keypair,
             mac_keys: Arc::new(private_config.mac_keys),
             partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
@@ -1004,6 +1008,7 @@ impl<H: BlockHandler> Core<H> {
             BlockAuthenticationScheme::Ed25519 => BlockAuthorizer::Ed25519(&self.signer),
             BlockAuthenticationScheme::MacVector => BlockAuthorizer::MacVector(&self.mac_keys),
             BlockAuthenticationScheme::MlDsa44 => BlockAuthorizer::MlDsa44(&self.ml_dsa_44_signer),
+            BlockAuthenticationScheme::MlDsa65 => BlockAuthorizer::MlDsa65(&self.ml_dsa_65_signer),
         };
         let mut block = VerifiedBlock::new_with_authorizer_and_unprovable(
             self.authority,

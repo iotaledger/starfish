@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::ImportExport,
     crypto::{
-        BlsPublicKey, BlsSigner, MlDsa44PublicKey, MlDsa44Signer, PublicKey, Signer,
-        dummy_bls_public_key, dummy_ml_dsa_44_public_key, dummy_public_key,
+        BlsPublicKey, BlsSigner, MlDsa44PublicKey, MlDsa44Signer, MlDsa65PublicKey, MlDsa65Signer,
+        PublicKey, Signer, dummy_bls_public_key, dummy_ml_dsa_44_public_key,
+        dummy_ml_dsa_65_public_key, dummy_public_key,
     },
     data::Data,
     types::{AuthorityIndex, AuthoritySet, RoundNumber, Stake, VerifiedBlock},
@@ -152,6 +153,12 @@ impl Committee {
             .map(Authority::ml_dsa_44_public_key)
     }
 
+    pub fn get_ml_dsa_65_public_key(&self, authority: AuthorityIndex) -> Option<&MlDsa65PublicKey> {
+        self.authorities
+            .get(authority as usize)
+            .map(Authority::ml_dsa_65_public_key)
+    }
+
     pub fn known_authority(&self, authority: AuthorityIndex) -> bool {
         (authority as usize) < self.len()
     }
@@ -215,18 +222,23 @@ impl Committee {
     pub fn new_for_benchmarks(committee_size: usize) -> Arc<Self> {
         let signers = Signer::new_for_test(committee_size);
         let bls_signers = BlsSigner::new_for_test(committee_size);
-        let ml_dsa_signers = MlDsa44Signer::new_for_test(committee_size);
+        let ml_dsa_44_signers = MlDsa44Signer::new_for_test(committee_size);
+        let ml_dsa_65_signers = MlDsa65Signer::new_for_test(committee_size);
         Self::new(
             signers
                 .into_iter()
                 .zip(bls_signers)
-                .zip(ml_dsa_signers)
-                .map(|((keypair, bls_keypair), ml_dsa_keypair)| Authority {
-                    stake: 1,
-                    public_key: keypair.public_key(),
-                    bls_public_key: bls_keypair.public_key(),
-                    ml_dsa_44_public_key: ml_dsa_keypair.public_key(),
-                })
+                .zip(ml_dsa_44_signers)
+                .zip(ml_dsa_65_signers)
+                .map(
+                    |(((keypair, bls_keypair), ml_dsa_44_keypair), ml_dsa_65_keypair)| Authority {
+                        stake: 1,
+                        public_key: keypair.public_key(),
+                        bls_public_key: bls_keypair.public_key(),
+                        ml_dsa_44_public_key: ml_dsa_44_keypair.public_key(),
+                        ml_dsa_65_public_key: ml_dsa_65_keypair.public_key(),
+                    },
+                )
                 .collect(),
         )
     }
@@ -238,6 +250,7 @@ pub struct Authority {
     public_key: PublicKey,
     bls_public_key: BlsPublicKey,
     ml_dsa_44_public_key: MlDsa44PublicKey,
+    ml_dsa_65_public_key: MlDsa65PublicKey,
 }
 
 impl Authority {
@@ -247,6 +260,7 @@ impl Authority {
             public_key: dummy_public_key(),
             bls_public_key: dummy_bls_public_key(),
             ml_dsa_44_public_key: dummy_ml_dsa_44_public_key(),
+            ml_dsa_65_public_key: dummy_ml_dsa_65_public_key(),
         }
     }
 
@@ -264,6 +278,10 @@ impl Authority {
 
     pub fn ml_dsa_44_public_key(&self) -> &MlDsa44PublicKey {
         &self.ml_dsa_44_public_key
+    }
+
+    pub fn ml_dsa_65_public_key(&self) -> &MlDsa65PublicKey {
+        &self.ml_dsa_65_public_key
     }
 }
 

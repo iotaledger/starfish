@@ -62,16 +62,16 @@ offloaded from the critical path.
 ### Block authentication experiments
 
 Starfish, Starfish Speed, Sparse-Starfish-Speed, and Bluestreak can each be run
-with three interchangeable block-authentication schemes:
+with four interchangeable block-authentication schemes:
 
-| Protocol | Ed25519 | MAC vector | ML-DSA-44 |
-|---|---|---|---|
-| Starfish | `starfish` | `starfish-mac` | `starfish-ml-dsa-44` |
-| Starfish Speed | `starfish-speed` | `starfish-speed-mac` | `starfish-speed-ml-dsa-44` |
-| Sparse-Starfish-Speed | `sparse-starfish-speed` | `sparse-starfish-speed-mac` | `sparse-starfish-speed-ml-dsa-44` |
-| Bluestreak | `bluestreak` | `bluestreak-mac` | `bluestreak-ml-dsa-44` |
+| Protocol | Ed25519 | MAC vector | ML-DSA-44 | ML-DSA-65 |
+|---|---|---|---|---|
+| Starfish | `starfish` | `starfish-mac` | `starfish-ml-dsa-44` | `starfish-ml-dsa-65` |
+| Starfish Speed | `starfish-speed` | `starfish-speed-mac` | `starfish-speed-ml-dsa-44` | `starfish-speed-ml-dsa-65` |
+| Sparse-Starfish-Speed | `sparse-starfish-speed` | `sparse-starfish-speed-mac` | `sparse-starfish-speed-ml-dsa-44` | `sparse-starfish-speed-ml-dsa-65` |
+| Bluestreak | `bluestreak` | `bluestreak-mac` | `bluestreak-ml-dsa-44` | `bluestreak-ml-dsa-65` |
 
-For all twelve variants, `BlockReference.digest` is the BLAKE3 hash of the
+For all sixteen variants, `BlockReference.digest` is the BLAKE3 hash of the
 canonical block content only. The authentication proof is a separate header
 field and does not change the block reference. An author using a MAC variant
 sends the full vector, with exactly one tag for every committee member,
@@ -85,6 +85,10 @@ directly streamed full-vector copy, it upgrades the stored authentication
 without adding a second DAG vertex and can then relay recipient-specific tags.
 Benchmark genesis deterministically generates the pairwise MAC keys, ML-DSA
 seeds, and public keys in the node configuration.
+
+The ML-DSA wrappers are generated from a common parameter-set definition.
+ML-DSA-44 uses 1,312-byte public keys and 2,420-byte signatures; ML-DSA-65
+uses 1,952-byte public keys and 3,309-byte signatures.
 
 This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
 here states that it has not been independently audited and should not be

@@ -289,45 +289,30 @@ pub struct ProtocolConfig {
 
 impl ProtocolConfig {
     pub fn from_str(value: &str) -> Result<Self, String> {
-        let (consensus_protocol, block_authentication_scheme) = match value {
-            "starfish-mac" => (
-                ConsensusProtocol::Starfish,
-                BlockAuthenticationScheme::MacVector,
-            ),
-            "starfish-ml-dsa-44" => (
-                ConsensusProtocol::Starfish,
-                BlockAuthenticationScheme::MlDsa44,
-            ),
-            "starfish-speed-mac" => (
-                ConsensusProtocol::StarfishSpeed,
-                BlockAuthenticationScheme::MacVector,
-            ),
-            "starfish-speed-ml-dsa-44" => (
-                ConsensusProtocol::StarfishSpeed,
-                BlockAuthenticationScheme::MlDsa44,
-            ),
-            "sparse-starfish-speed-mac" => (
-                ConsensusProtocol::SparseStarfishSpeed,
-                BlockAuthenticationScheme::MacVector,
-            ),
-            "sparse-starfish-speed-ml-dsa-44" => (
-                ConsensusProtocol::SparseStarfishSpeed,
-                BlockAuthenticationScheme::MlDsa44,
-            ),
-            "bluestreak-mac" => (
-                ConsensusProtocol::Bluestreak,
-                BlockAuthenticationScheme::MacVector,
-            ),
-            "bluestreak-ml-dsa-44" => (
-                ConsensusProtocol::Bluestreak,
-                BlockAuthenticationScheme::MlDsa44,
-            ),
-            known => (
-                ConsensusProtocol::from_known_str(known)
-                    .ok_or_else(|| format!("Unknown consensus protocol '{known}'"))?,
-                BlockAuthenticationScheme::Ed25519,
-            ),
-        };
+        let (protocol_name, block_authentication_scheme) = [
+            ("-ml-dsa-65", BlockAuthenticationScheme::MlDsa65),
+            ("-ml-dsa-44", BlockAuthenticationScheme::MlDsa44),
+            ("-mac", BlockAuthenticationScheme::MacVector),
+        ]
+        .into_iter()
+        .find_map(|(suffix, scheme)| value.strip_suffix(suffix).map(|base| (base, scheme)))
+        .unwrap_or((value, BlockAuthenticationScheme::Ed25519));
+
+        let consensus_protocol = ConsensusProtocol::from_known_str(protocol_name)
+            .ok_or_else(|| format!("Unknown consensus protocol '{value}'"))?;
+        if block_authentication_scheme != BlockAuthenticationScheme::Ed25519
+            && !matches!(
+                consensus_protocol,
+                ConsensusProtocol::Starfish
+                    | ConsensusProtocol::StarfishSpeed
+                    | ConsensusProtocol::SparseStarfishSpeed
+                    | ConsensusProtocol::Bluestreak
+            )
+        {
+            return Err(format!(
+                "Block authentication variants are not supported for '{protocol_name}'"
+            ));
+        }
         Ok(Self {
             consensus_protocol,
             block_authentication_scheme,
@@ -4956,6 +4941,13 @@ mod tests {
             }
         );
         assert_eq!(
+            ProtocolConfig::from_str("starfish-ml-dsa-65").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Starfish,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
+            }
+        );
+        assert_eq!(
             ProtocolConfig::from_str("starfish-speed").unwrap(),
             ProtocolConfig {
                 consensus_protocol: ConsensusProtocol::StarfishSpeed,
@@ -4974,6 +4966,13 @@ mod tests {
             ProtocolConfig {
                 consensus_protocol: ConsensusProtocol::StarfishSpeed,
                 block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("starfish-speed-ml-dsa-65").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::StarfishSpeed,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
             }
         );
         assert_eq!(
@@ -4998,6 +4997,13 @@ mod tests {
             }
         );
         assert_eq!(
+            ProtocolConfig::from_str("sparse-starfish-speed-ml-dsa-65").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
+            }
+        );
+        assert_eq!(
             ProtocolConfig::from_str("bluestreak").unwrap(),
             ProtocolConfig {
                 consensus_protocol: ConsensusProtocol::Bluestreak,
@@ -5018,6 +5024,14 @@ mod tests {
                 block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
             }
         );
+        assert_eq!(
+            ProtocolConfig::from_str("bluestreak-ml-dsa-65").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Bluestreak,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
+            }
+        );
+        assert!(ProtocolConfig::from_str("mysticeti-ml-dsa-65").is_err());
         assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
         assert!(ProtocolConfig::from_str("starfish-speed-unknown").is_err());
         assert!(ProtocolConfig::from_str("sparse-starfish-speed-unknown").is_err());

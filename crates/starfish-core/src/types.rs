@@ -42,7 +42,8 @@ use crate::{
     crypto,
     crypto::{
         AsBytes, BlsSignatureBytes, BlsSigner, CryptoHash, MacKey, MacTag, MlDsa44SignatureBytes,
-        MlDsa44Signer, SignatureBytes, Signer, TransactionsCommitment,
+        MlDsa44Signer, MlDsa65SignatureBytes, MlDsa65Signer, SignatureBytes, Signer,
+        TransactionsCommitment,
     },
     dag_state::ConsensusProtocol,
     data::{Data, IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
@@ -263,6 +264,7 @@ pub enum BlockAuthentication {
     /// Recipient-specific authenticator selected from a full vector by a relay.
     MacTag(MacTag),
     MlDsa44(MlDsa44SignatureBytes),
+    MlDsa65(MlDsa65SignatureBytes),
 }
 
 mod flat_mac_vector {
@@ -333,12 +335,14 @@ pub enum BlockAuthenticationScheme {
     Ed25519,
     MacVector,
     MlDsa44,
+    MlDsa65,
 }
 
 pub enum BlockAuthorizer<'a> {
     Ed25519(&'a Signer),
     MacVector(&'a [MacKey]),
     MlDsa44(&'a MlDsa44Signer),
+    MlDsa65(&'a MlDsa65Signer),
 }
 
 impl BlockAuthorizer<'_> {
@@ -361,6 +365,9 @@ impl BlockAuthorizer<'_> {
             ),
             Self::MlDsa44(signer) => {
                 BlockAuthentication::MlDsa44(signer.sign_digest(content_digest))
+            }
+            Self::MlDsa65(signer) => {
+                BlockAuthentication::MlDsa65(signer.sign_digest(content_digest))
             }
         }
     }
@@ -1609,6 +1616,14 @@ impl VerifiedBlock {
                     bail!("Block ML-DSA-44 verification has failed: {error:?}");
                 }
             }
+            (BlockAuthenticationScheme::MlDsa65, BlockAuthentication::MlDsa65(signature)) => {
+                let Some(public_key) = committee.get_ml_dsa_65_public_key(self.authority()) else {
+                    bail!("Unknown block author {}", self.authority())
+                };
+                if let Err(error) = public_key.verify_digest_signature(&digest, signature) {
+                    bail!("Block ML-DSA-65 verification has failed: {error:?}");
+                }
+            }
             (expected, actual) => {
                 bail!("Expected {expected:?} block authentication, received {actual:?}")
             }
@@ -2475,27 +2490,33 @@ mod tests {
     fn block_reference_depends_only_on_content_across_authentication_schemes() {
         let committee = Committee::new_for_benchmarks(4);
         let ed_signers = Signer::new_for_test(committee.len());
-        let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let ml_dsa_44_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let ml_dsa_65_signers = crypto::MlDsa65Signer::new_for_test(committee.len());
         let mac_keyrings = crypto::mac_keyrings_for_test(committee.len());
         let ed = BlockAuthorizer::Ed25519(&ed_signers[0]);
         let mac = BlockAuthorizer::MacVector(&mac_keyrings[0]);
-        let ml_dsa = BlockAuthorizer::MlDsa44(&ml_dsa_signers[0]);
+        let ml_dsa_44 = BlockAuthorizer::MlDsa44(&ml_dsa_44_signers[0]);
+        let ml_dsa_65 = BlockAuthorizer::MlDsa65(&ml_dsa_65_signers[0]);
 
         let ed_block = make_authenticated_starfish_block(&committee, &ed);
         let mac_block = make_authenticated_starfish_block(&committee, &mac);
-        let ml_dsa_block = make_authenticated_starfish_block(&committee, &ml_dsa);
+        let ml_dsa_44_block = make_authenticated_starfish_block(&committee, &ml_dsa_44);
+        let ml_dsa_65_block = make_authenticated_starfish_block(&committee, &ml_dsa_65);
 
         assert_eq!(ed_block.reference(), mac_block.reference());
-        assert_eq!(ed_block.reference(), ml_dsa_block.reference());
+        assert_eq!(ed_block.reference(), ml_dsa_44_block.reference());
+        assert_eq!(ed_block.reference(), ml_dsa_65_block.reference());
         assert_ne!(ed_block.authentication(), mac_block.authentication());
-        assert_ne!(ed_block.authentication(), ml_dsa_block.authentication());
+        assert_ne!(ed_block.authentication(), ml_dsa_44_block.authentication());
+        assert_ne!(ed_block.authentication(), ml_dsa_65_block.authentication());
     }
 
     #[test]
     fn all_authentication_schemes_verify_for_starfish_protocols() {
         let committee = Committee::new_for_benchmarks(4);
         let ed_signers = Signer::new_for_test(committee.len());
-        let ml_dsa_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let ml_dsa_44_signers = crypto::MlDsa44Signer::new_for_test(committee.len());
+        let ml_dsa_65_signers = crypto::MlDsa65Signer::new_for_test(committee.len());
         let mac_keyrings = crypto::mac_keyrings_for_test(committee.len());
 
         for consensus_protocol in [
@@ -2529,9 +2550,17 @@ mod tests {
                     make_authenticated_starfish_block_for_author(
                         &committee,
                         author as AuthorityIndex,
-                        &BlockAuthorizer::MlDsa44(&ml_dsa_signers[author]),
+                        &BlockAuthorizer::MlDsa44(&ml_dsa_44_signers[author]),
                     ),
                     BlockAuthenticationScheme::MlDsa44,
+                ),
+                (
+                    make_authenticated_starfish_block_for_author(
+                        &committee,
+                        author as AuthorityIndex,
+                        &BlockAuthorizer::MlDsa65(&ml_dsa_65_signers[author]),
+                    ),
+                    BlockAuthenticationScheme::MlDsa65,
                 ),
             ];
             for (block, scheme) in &cases {
