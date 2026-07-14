@@ -28,7 +28,6 @@ use starfish_core::{
     types::AuthorityIndex,
     validator::Validator,
 };
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
 
@@ -329,7 +328,6 @@ fn benchmark_genesis(
     Ok(())
 }
 
-#[allow(clippy::manual_is_multiple_of)]
 async fn local_benchmark(
     committee_size: usize,
     mut load: usize,
@@ -387,7 +385,8 @@ async fn local_benchmark(
     let base_dir = PathBuf::from("local-benchmark");
     fs::create_dir_all(&base_dir)?;
 
-    let mut validator_tasks = JoinSet::new();
+    let mut handles = Vec::with_capacity(committee_size);
+    let mut abort_handles = Vec::with_capacity(committee_size);
     let mut metrics_of_honest_validators = Vec::new();
     let mut reporters_of_honest_validators = Vec::new();
 
@@ -429,7 +428,7 @@ async fn local_benchmark(
                 ));
             }
         }
-        let is_byzantine = authority % 3 == 0 && authority / 3 < num_byzantine_nodes;
+        let is_byzantine = authority.is_multiple_of(3) && authority / 3 < num_byzantine_nodes;
         let validator = if is_byzantine {
             Validator::start(
                 authority as AuthorityIndex,
@@ -459,10 +458,12 @@ async fn local_benchmark(
         }
 
         // Use the same pattern as the run method
-        validator_tasks.spawn(async move {
+        let handle = tokio::spawn(async move {
             let (network_result, _metrics_result) = validator.await_completion().await;
             network_result
         });
+        abort_handles.push(handle.abort_handle());
+        handles.push(handle);
     }
 
     // Run for specified duration
@@ -479,25 +480,23 @@ async fn local_benchmark(
                 duration_secs,
             );
 
-            // Abort and fully drain validator tasks before deleting their
-            // RocksDB directories. On macOS, removing storage while aborted
-            // tasks are still dropping database handles can leave the
-            // benchmark parent stuck in an uninterruptible exit state.
-            validator_tasks.abort_all();
-            while validator_tasks.join_next().await.is_some() {
+            // Abort all tasks
+            for abort_handle in abort_handles {
+                abort_handle.abort();
             }
 
             // Clean up
             fs::remove_dir_all(base_dir)?;
             Ok(())
         }
-        result = validator_tasks.join_next() => {
-            running.store(false, Ordering::SeqCst);
-            tracing::warn!("Validator terminated before benchmark timeout: {result:?}");
-            validator_tasks.abort_all();
-            while validator_tasks.join_next().await.is_some() {
+        _ = async {
+            for handle in handles {
+                if let Err(e) = handle.await {
+                    tracing::warn!("Validator terminated with error: {}", e);
+                }
             }
-            println!("A validator completed before timeout");
+        } => {
+            println!("All validators completed before timeout");
             Metrics::aggregate_and_display(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,

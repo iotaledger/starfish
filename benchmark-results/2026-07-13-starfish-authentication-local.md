@@ -1,8 +1,8 @@
 # Starfish authentication comparison — local Apple Silicon
 
-Date: 2026-07-13  
+Date: 2026-07-13<br>
 Source revision: `8a3bded` plus the Sparse authentication changes committed with this report<br>
-Host: Apple Silicon (`arm64`), macOS 15.7.4  
+Host: Apple Silicon (`arm64`), macOS 15.7.4<br>
 Build: Rust 1.86.0, release profile
 
 ## Configuration
@@ -95,14 +95,7 @@ target/release/starfish local-benchmark \
   storage, and network stack. These results are useful for directional local
   comparison, not distributed capacity claims.
 
-## Benchmark harness fix
-
-The previous local benchmark shutdown aborted validator tasks and immediately
-deleted their RocksDB directories. On macOS this left benchmark parents stuck
-in an uninterruptible exiting state. The harness now uses a `JoinSet`, aborts
-all validator tasks, drains them completely, and only then removes storage.
-The validation run and all nine measured protocol/authentication combinations
-exited normally.
+## Benchmark validation note
 
 During the first Sparse MAC run, the receiver-side transport guard exposed a
 round-gap response that still carried full MAC vectors. The sender now routes

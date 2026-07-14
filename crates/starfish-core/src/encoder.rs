@@ -42,7 +42,6 @@ impl ShardEncoder for Encoder {
         data
     }
 
-    #[allow(clippy::manual_is_multiple_of)]
     fn encode_transactions(
         &mut self,
         block: &[BaseTransaction],
@@ -58,7 +57,7 @@ impl ShardEncoder for Encoder {
         let mut shard_bytes = (bytes_length + 4).div_ceil(info_length);
 
         // Ensure shard_bytes meets alignment requirements (must be multiple of 2).
-        if shard_bytes % 2 != 0 {
+        if !shard_bytes.is_multiple_of(2) {
             shard_bytes += 1;
         }
 
