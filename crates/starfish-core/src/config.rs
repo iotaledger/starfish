@@ -57,6 +57,10 @@ pub struct NodeParameters {
     pub bls_verification_workers: usize,
     #[serde(default)]
     pub dissemination_mode: DisseminationMode,
+    /// Block signature scheme. `None` selects Ed25519. Experimental MAC
+    /// protocols select their authentication through the consensus name.
+    #[serde(default)]
+    pub block_authentication: Option<String>,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -130,6 +134,7 @@ impl Default for NodeParameters {
             compress_network: node_defaults::default_compress_network(),
             bls_verification_workers: node_defaults::default_bls_verification_workers(),
             dissemination_mode: DisseminationMode::default(),
+            block_authentication: None,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
