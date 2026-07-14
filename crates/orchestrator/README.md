@@ -129,7 +129,13 @@ each load generator submits a fixed load of 100 tx/s
 or more precisely 10 tx every 100ms.
 Performance measurements are collected by regularly scraping
 the Prometheus metrics exposed by the load generators.
-Available consensus protocols: `starfish`, `starfish-mac`, `starfish-ml-dsa-44`, `starfish-ml-dsa-65`, `starfish-speed`, `starfish-speed-mac`, `starfish-speed-ml-dsa-44`, `starfish-speed-ml-dsa-65`, `sparse-starfish-speed`, `sparse-starfish-speed-mac`, `sparse-starfish-speed-ml-dsa-44`, `sparse-starfish-speed-ml-dsa-65`, `bluestreak`, `bluestreak-mac`, `bluestreak-ml-dsa-44`, `bluestreak-ml-dsa-65`, `starfish-bls`, `mysticeti`, `mysticeti-bls`, `cordial-miners`, `sailfish-pp`.
+Available consensus protocols: `starfish`, `starfish-speed`,
+`sparse-starfish-speed`, `bluestreak`, `starfish-bls`, `mysticeti`,
+`mysticeti-bls`, `cordial-miners`, and `sailfish-pp`. Select the block signature
+for any protocol with `--block-authentication ed25519|ml-dsa-44|ml-dsa-65`;
+Ed25519 is the default. The `starfish-mac`, `starfish-speed-mac`,
+`sparse-starfish-speed-mac`, and `bluestreak-mac` names are separate
+experimental protocols and cannot be combined with that option.
 
 To run with Byzantine validators:
 

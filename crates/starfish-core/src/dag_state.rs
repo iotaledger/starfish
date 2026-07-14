@@ -289,30 +289,53 @@ pub struct ProtocolConfig {
 
 impl ProtocolConfig {
     pub fn from_str(value: &str) -> Result<Self, String> {
-        let (protocol_name, block_authentication_scheme) = [
-            ("-ml-dsa-65", BlockAuthenticationScheme::MlDsa65),
-            ("-ml-dsa-44", BlockAuthenticationScheme::MlDsa44),
-            ("-mac", BlockAuthenticationScheme::MacVector),
-        ]
-        .into_iter()
-        .find_map(|(suffix, scheme)| value.strip_suffix(suffix).map(|base| (base, scheme)))
-        .unwrap_or((value, BlockAuthenticationScheme::Ed25519));
+        Self::from_selection(value, None)
+    }
 
+    pub fn from_selection(
+        consensus: &str,
+        block_authentication: Option<&str>,
+    ) -> Result<Self, String> {
+        let (protocol_name, is_mac_experiment) = consensus
+            .strip_suffix("-mac")
+            .map(|base| (base, true))
+            .unwrap_or((consensus, false));
         let consensus_protocol = ConsensusProtocol::from_known_str(protocol_name)
-            .ok_or_else(|| format!("Unknown consensus protocol '{value}'"))?;
-        if block_authentication_scheme != BlockAuthenticationScheme::Ed25519
-            && !matches!(
+            .ok_or_else(|| format!("Unknown consensus protocol '{consensus}'"))?;
+
+        let block_authentication_scheme = if is_mac_experiment {
+            if block_authentication.is_some() {
+                return Err(format!(
+                    "'{consensus}' is an experimental MAC protocol and cannot be combined with \
+                     --block-authentication"
+                ));
+            }
+            if !matches!(
                 consensus_protocol,
                 ConsensusProtocol::Starfish
                     | ConsensusProtocol::StarfishSpeed
                     | ConsensusProtocol::SparseStarfishSpeed
                     | ConsensusProtocol::Bluestreak
-            )
-        {
-            return Err(format!(
-                "Block authentication variants are not supported for '{protocol_name}'"
-            ));
-        }
+            ) {
+                return Err(format!(
+                    "The experimental MAC protocol is not available for '{protocol_name}'"
+                ));
+            }
+            BlockAuthenticationScheme::MacVector
+        } else {
+            match block_authentication.unwrap_or("ed25519") {
+                "ed25519" => BlockAuthenticationScheme::Ed25519,
+                "ml-dsa-44" => BlockAuthenticationScheme::MlDsa44,
+                "ml-dsa-65" => BlockAuthenticationScheme::MlDsa65,
+                value => {
+                    return Err(format!(
+                        "Unknown block authentication scheme '{value}'. Use 'ed25519', \
+                         'ml-dsa-44', or 'ml-dsa-65'."
+                    ));
+                }
+            }
+        };
+
         Ok(Self {
             consensus_protocol,
             block_authentication_scheme,
@@ -552,6 +575,32 @@ impl DagState {
         strong_vote_adaptive_acknowledgments: bool,
         dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
+        let protocol_config = ProtocolConfig::from_str(&consensus).expect("validated protocol");
+        Self::open_with_protocol_config(
+            authority,
+            path,
+            metrics,
+            committee,
+            byzantine_strategy,
+            protocol_config,
+            storage_backend,
+            strong_vote_adaptive_acknowledgments,
+            dissemination_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_with_protocol_config(
+        authority: AuthorityIndex,
+        path: impl AsRef<Path>,
+        metrics: Arc<Metrics>,
+        committee: Arc<Committee>,
+        byzantine_strategy: String,
+        protocol_config: ProtocolConfig,
+        storage_backend: &StorageBackend,
+        strong_vote_adaptive_acknowledgments: bool,
+        dissemination_mode: DisseminationMode,
+    ) -> RecoveredState {
         assert!(
             committee.len() <= crate::types::MAX_COMMITTEE_SIZE as usize,
             "Committee size {} exceeds MAX_COMMITTEE_SIZE ({})",
@@ -574,7 +623,6 @@ impl DagState {
                 Arc::new(RocksStore::open(&path).expect("Failed to open RocksDB"))
             }
         };
-        let protocol_config = ProtocolConfig::from_str(&consensus).expect("validated protocol");
         let consensus_protocol = protocol_config.consensus_protocol;
         let resolved_dissemination =
             consensus_protocol.resolve_dissemination_mode(dissemination_mode);
@@ -4919,122 +4967,60 @@ mod tests {
 
     #[test]
     fn protocol_config_selects_block_authentication() {
-        assert_eq!(
-            ProtocolConfig::from_str("starfish").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Starfish,
-                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
+        let protocols = [
+            ("mysticeti", ConsensusProtocol::Mysticeti),
+            ("cordial-miners", ConsensusProtocol::CordialMiners),
+            ("starfish", ConsensusProtocol::Starfish),
+            ("starfish-speed", ConsensusProtocol::StarfishSpeed),
+            ("starfish-bls", ConsensusProtocol::StarfishBls),
+            ("sailfish-pp", ConsensusProtocol::SailfishPlusPlus),
+            ("bluestreak", ConsensusProtocol::Bluestreak),
+            ("mysticeti-bls", ConsensusProtocol::MysticetiBls),
+            (
+                "sparse-starfish-speed",
+                ConsensusProtocol::SparseStarfishSpeed,
+            ),
+        ];
+        let signature_schemes = [
+            (None, BlockAuthenticationScheme::Ed25519),
+            (Some("ed25519"), BlockAuthenticationScheme::Ed25519),
+            (Some("ml-dsa-44"), BlockAuthenticationScheme::MlDsa44),
+            (Some("ml-dsa-65"), BlockAuthenticationScheme::MlDsa65),
+        ];
+
+        for (name, consensus_protocol) in protocols {
+            for (selection, block_authentication_scheme) in signature_schemes {
+                assert_eq!(
+                    ProtocolConfig::from_selection(name, selection).unwrap(),
+                    ProtocolConfig {
+                        consensus_protocol,
+                        block_authentication_scheme,
+                    }
+                );
             }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-mac").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Starfish,
-                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-ml-dsa-44").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Starfish,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-ml-dsa-65").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Starfish,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-speed").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::StarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-speed-mac").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::StarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-speed-ml-dsa-44").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::StarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("starfish-speed-ml-dsa-65").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::StarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("sparse-starfish-speed").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("sparse-starfish-speed-mac").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("sparse-starfish-speed-ml-dsa-44").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("sparse-starfish-speed-ml-dsa-65").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::SparseStarfishSpeed,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("bluestreak").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Bluestreak,
-                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("bluestreak-mac").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Bluestreak,
-                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("bluestreak-ml-dsa-44").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Bluestreak,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
-            }
-        );
-        assert_eq!(
-            ProtocolConfig::from_str("bluestreak-ml-dsa-65").unwrap(),
-            ProtocolConfig {
-                consensus_protocol: ConsensusProtocol::Bluestreak,
-                block_authentication_scheme: BlockAuthenticationScheme::MlDsa65,
-            }
-        );
-        assert!(ProtocolConfig::from_str("mysticeti-ml-dsa-65").is_err());
+        }
+
+        for (name, consensus_protocol) in [
+            ("starfish-mac", ConsensusProtocol::Starfish),
+            ("starfish-speed-mac", ConsensusProtocol::StarfishSpeed),
+            (
+                "sparse-starfish-speed-mac",
+                ConsensusProtocol::SparseStarfishSpeed,
+            ),
+            ("bluestreak-mac", ConsensusProtocol::Bluestreak),
+        ] {
+            assert_eq!(
+                ProtocolConfig::from_str(name).unwrap(),
+                ProtocolConfig {
+                    consensus_protocol,
+                    block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+                }
+            );
+            assert!(ProtocolConfig::from_selection(name, Some("ed25519")).is_err());
+        }
+
+        assert!(ProtocolConfig::from_str("mysticeti-mac").is_err());
+        assert!(ProtocolConfig::from_selection("starfish", Some("unknown")).is_err());
         assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
-        assert!(ProtocolConfig::from_str("starfish-speed-unknown").is_err());
-        assert!(ProtocolConfig::from_str("sparse-starfish-speed-unknown").is_err());
-        assert!(ProtocolConfig::from_str("bluestreak-unknown").is_err());
     }
 }

@@ -54,15 +54,8 @@ pub struct BenchmarkParametersGeneric<N, C> {
     /// single VPC, they should use their internal IPs to avoid
     /// paying for data sent between the nodes.
     pub use_internal_ip_address: bool,
-    // Consensus protocol to deploy
-    // (starfish | starfish-mac | starfish-ml-dsa-44 | starfish-ml-dsa-65 |
-    // starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 |
-    // starfish-speed-ml-dsa-65 |
-    // sparse-starfish-speed | sparse-starfish-speed-mac |
-    // sparse-starfish-speed-ml-dsa-44 | sparse-starfish-speed-ml-dsa-65 |
-    // bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 |
-    // bluestreak-ml-dsa-65 | starfish-bls | mysticeti | mysticeti-bls |
-    // cordial-miners | sailfish-pp)
+    /// Consensus protocol to deploy. The block signature is configured in
+    /// `node_parameters`; the `*-mac` names denote experimental protocols.
     pub consensus_protocol: String,
     /// number Byzantine nodes
     pub byzantine_nodes: usize,

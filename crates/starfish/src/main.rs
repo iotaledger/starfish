@@ -65,10 +65,13 @@ enum Operation {
         parameters_path: String,
         #[clap(long, value_name = "STRING", default_value = "")]
         byzantine_strategy: String,
-        /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
+        /// Consensus protocol. The `*-mac` names are experimental protocols.
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme. Defaults to Ed25519 and is not applicable
+        /// to the experimental `*-mac` protocols.
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        block_authentication: Option<String>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -95,10 +98,13 @@ enum Operation {
         /// `--adversarial-latency` is enabled (0-100).
         #[clap(long, value_name = "INT", default_value_t = 34)]
         adversarial_latency_percent: u32,
-        /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
+        /// Consensus protocol. The `*-mac` names are experimental protocols.
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme. Defaults to Ed25519 and is not applicable
+        /// to the experimental `*-mac` protocols.
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        block_authentication: Option<String>,
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
@@ -147,10 +153,13 @@ enum Operation {
         /// `--adversarial-latency` is enabled (0-100).
         #[clap(long, value_name = "INT", default_value_t = 34)]
         adversarial_latency_percent: u32,
-        /// Consensus/authentication variant (for example `starfish-mac`,
-        /// `bluestreak-mac`, or `sparse-starfish-speed-ml-dsa-65`).
+        /// Consensus protocol. The `*-mac` names are experimental protocols.
         #[clap(long, value_name = "STRING", default_value = "starfish")]
         consensus: String,
+        /// Block signature scheme. Defaults to Ed25519 and is not applicable
+        /// to the experimental `*-mac` protocols.
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        block_authentication: Option<String>,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
         /// Dissemination mode override:
@@ -184,6 +193,7 @@ async fn main() -> Result<()> {
             parameters_path,
             byzantine_strategy,
             consensus: consensus_protocol,
+            block_authentication,
         } => {
             run(
                 authority,
@@ -193,6 +203,7 @@ async fn main() -> Result<()> {
                 parameters_path,
                 byzantine_strategy,
                 consensus_protocol,
+                block_authentication,
             )
             .await?
         }
@@ -206,6 +217,7 @@ async fn main() -> Result<()> {
             adversarial_latency,
             adversarial_latency_percent,
             consensus: consensus_protocol,
+            block_authentication,
             data_dir,
             base_ip,
             storage_backend,
@@ -224,6 +236,7 @@ async fn main() -> Result<()> {
                 adversarial_latency,
                 adversarial_latency_percent,
                 consensus_protocol,
+                block_authentication,
                 data_dir,
                 base_ip,
                 storage_backend,
@@ -244,6 +257,7 @@ async fn main() -> Result<()> {
             adversarial_latency,
             adversarial_latency_percent,
             consensus: consensus_protocol,
+            block_authentication,
             duration_secs,
             dissemination_mode,
         } => {
@@ -253,6 +267,7 @@ async fn main() -> Result<()> {
             }
             node_parameters.adversarial_latency = adversarial_latency;
             node_parameters.adversarial_latency_percent = adversarial_latency_percent;
+            node_parameters.block_authentication = block_authentication;
             if let Some(ref mode) = dissemination_mode {
                 node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
@@ -345,6 +360,17 @@ async fn local_benchmark(
     }
     println!("Transaction Load: {load} tx/s");
     println!("Consensus Protocol: {consensus_protocol}");
+    println!(
+        "Block Authentication: {}",
+        if consensus_protocol.ends_with("-mac") {
+            "mac-vector (experimental)"
+        } else {
+            node_parameters
+                .block_authentication
+                .as_deref()
+                .unwrap_or("ed25519")
+        }
+    );
     if let Some(latency) = node_parameters.uniform_latency_ms {
         println!("Network Latency: {latency} ms (uniform)");
     } else {
@@ -517,14 +543,18 @@ async fn run(
     parameters_path: String,
     byzantine_strategy: String,
     consensus_protocol: String,
+    block_authentication: Option<String>,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
     let committee = Committee::load(&committee_path)
         .wrap_err(format!("Failed to load committee file '{committee_path}'"))?;
-    let public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
+    let mut public_config = NodePublicConfig::load(&public_config_path).wrap_err(format!(
         "Failed to load parameters file '{public_config_path}'"
     ))?;
+    if block_authentication.is_some() {
+        public_config.parameters.block_authentication = block_authentication;
+    }
     let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{private_config_path}'"
     ))?;
@@ -561,6 +591,7 @@ async fn dryrun(
     adversarial_latency: bool,
     adversarial_latency_percent: u32,
     consensus_protocol: String,
+    block_authentication: Option<String>,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
     storage_backend: Option<String>,
@@ -602,6 +633,7 @@ async fn dryrun(
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
+    node_parameters.block_authentication = block_authentication;
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -710,7 +742,9 @@ pub fn default_table_format() -> format::TableFormat {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use super::ipv4_add_offset;
+    use clap::Parser;
+
+    use super::{Args, Operation, ipv4_add_offset};
 
     #[test]
     fn ipv4_add_offset_crosses_octet_boundary() {
@@ -725,5 +759,33 @@ mod tests {
     fn ipv4_add_offset_errors_on_overflow() {
         let base = Ipv4Addr::new(255, 255, 255, 255);
         assert!(ipv4_add_offset(base, 1).is_err());
+    }
+
+    #[test]
+    fn dry_run_parses_block_authentication_separately_from_consensus() {
+        let args = Args::try_parse_from([
+            "starfish",
+            "dry-run",
+            "--authority",
+            "0",
+            "--committee-size",
+            "4",
+            "--consensus",
+            "mysticeti",
+            "--block-authentication",
+            "ml-dsa-65",
+        ])
+        .unwrap();
+
+        let Operation::DryRun {
+            consensus,
+            block_authentication,
+            ..
+        } = args.operation
+        else {
+            panic!("expected dry-run operation");
+        };
+        assert_eq!(consensus, "mysticeti");
+        assert_eq!(block_authentication.as_deref(), Some("ml-dsa-65"));
     }
 }

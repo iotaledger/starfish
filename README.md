@@ -59,32 +59,29 @@ achieving 2-round optimistic commit latency.
 leader, data availability) in block headers, with async verification
 offloaded from the critical path.
 
-### Block authentication experiments
+### Block authentication
 
-Starfish, Starfish Speed, Sparse-Starfish-Speed, and Bluestreak can each be run
-with four interchangeable block-authentication schemes:
+Every consensus protocol can select its block signature independently:
 
-| Protocol | Ed25519 | MAC vector | ML-DSA-44 | ML-DSA-65 |
-|---|---|---|---|---|
-| Starfish | `starfish` | `starfish-mac` | `starfish-ml-dsa-44` | `starfish-ml-dsa-65` |
-| Starfish Speed | `starfish-speed` | `starfish-speed-mac` | `starfish-speed-ml-dsa-44` | `starfish-speed-ml-dsa-65` |
-| Sparse-Starfish-Speed | `sparse-starfish-speed` | `sparse-starfish-speed-mac` | `sparse-starfish-speed-ml-dsa-44` | `sparse-starfish-speed-ml-dsa-65` |
-| Bluestreak | `bluestreak` | `bluestreak-mac` | `bluestreak-ml-dsa-44` | `bluestreak-ml-dsa-65` |
+| Scheme | CLI option |
+|---|---|
+| Ed25519 (default) | `--block-authentication ed25519` or omit the option |
+| ML-DSA-44 | `--block-authentication ml-dsa-44` |
+| ML-DSA-65 | `--block-authentication ml-dsa-65` |
 
-For all sixteen variants, `BlockReference.digest` is the BLAKE3 hash of the
-canonical block content only. The authentication proof is a separate header
-field and does not change the block reference. An author using a MAC variant
-sends the full vector, with exactly one tag for every committee member,
-to its direct recipients. A direct recipient retains that vector and, when
-relaying a block or header, or answering a synchronization request, sends only
-the destination's tag. A tag-only copy cannot be relayed a second time.
-Receivers accept a full vector only through proactive block streaming directly
-from the block's claimed author; relay and synchronization traffic must contain
-exactly one recipient tag. If the same node later receives the author's
-directly streamed full-vector copy, it upgrades the stored authentication
-without adding a second DAG vertex and can then relay recipient-specific tags.
-Benchmark genesis deterministically generates the pairwise MAC keys, ML-DSA
-seeds, and public keys in the node configuration.
+For example, `--consensus mysticeti --block-authentication ml-dsa-65` changes
+Mysticeti's block signature without creating another consensus protocol. This
+selection is also available through the orchestrator. Protocol-specific BLS
+certificates are unaffected. These digital-signature selections retain the
+transferable public verification assumed by the protocols and do not change
+their message flow or proof structure. The same value can be set as
+`block_authentication` in the node-parameters YAML; the CLI option overrides
+that setting.
+
+`BlockReference.digest` is the BLAKE3 hash of the canonical block content only.
+The modular authentication proof is a separate header field and does not change
+the block reference. Benchmark genesis generates all Ed25519 and ML-DSA key
+material regardless of the selected signature scheme.
 
 The ML-DSA wrappers are generated from a common parameter-set definition.
 ML-DSA-44 uses 1,312-byte public keys and 2,420-byte signatures; ML-DSA-65
@@ -94,12 +91,22 @@ This is research/benchmark code. The RustCrypto `ml-dsa` implementation used
 here states that it has not been independently audited and should not be
 treated as production-ready cryptography.
 
-See the
-[40-validator geographic authentication comparison](benchmark-results/2026-07-13-starfish-authentication-geo-40-validators-60s.md)
-for matching Ed25519, MAC-vector, ML-DSA-44, and ML-DSA-65 measurements across
-all four protocol families. A separate
-[60-validator moderate-load comparison](benchmark-results/2026-07-14-authentication-geo-60-validators-60s.md)
-records the single-machine scaling boundary at 600 tx/s aggregate load.
+#### Experimental MAC protocols
+
+`starfish-mac`, `starfish-speed-mac`, `sparse-starfish-speed-mac`, and
+`bluestreak-mac` remain separate work-in-progress benchmark protocols. They are
+not interchangeable signature selections and cannot be combined with
+`--block-authentication`.
+
+These variants measure a lower bound for pairwise-MAC authentication. Direct
+author streaming carries the full committee-sized MAC vector; relays and
+synchronization responses carry only the destination's tag. Pairwise MACs do
+not provide transferable authorship, and a Byzantine author can give different
+recipients valid and invalid tags for the same block reference. The current
+prototype does not add the quorum-authentication/RBC exchange needed to bind
+the author to an available authenticator. It therefore makes no safety or
+liveness claim and must not be treated as a proven variant of the underlying
+protocol.
 
 ## Dissemination Modes
 

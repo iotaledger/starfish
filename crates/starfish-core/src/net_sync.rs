@@ -59,8 +59,8 @@ const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
 /// Enforce the MAC experiment's transport contract before cryptographic
 /// verification:
 ///
-/// - a full vector is accepted only on proactive block streaming directly
-///   from the block's claimed author;
+/// - a full vector is accepted only on proactive block streaming directly from
+///   the block's claimed author;
 /// - every relay and synchronization path must carry one recipient tag;
 /// - a direct author stream must carry the full vector, so recipients retain
 ///   the material needed for one-hop relay.

@@ -58,6 +58,11 @@ pub struct Opts {
     )]
     settings_path: String,
 
+    /// Block signature scheme used by every selected consensus protocol.
+    /// Defaults to Ed25519. Not applicable to experimental `*-mac` protocols.
+    #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65", global = true)]
+    block_authentication: Option<String>,
+
     /// The type of operation to run.
     #[clap(subcommand)]
     operation: Operation,
@@ -134,14 +139,9 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Protocols to benchmark in order. Available options:
-        /// starfish | starfish-mac | starfish-ml-dsa-44 | starfish-ml-dsa-65 |
-        /// starfish-speed | starfish-speed-mac | starfish-speed-ml-dsa-44 | starfish-speed-ml-dsa-65 |
-        /// sparse-starfish-speed | sparse-starfish-speed-mac |
-        /// sparse-starfish-speed-ml-dsa-44 | sparse-starfish-speed-ml-dsa-65 |
-        /// bluestreak | bluestreak-mac | bluestreak-ml-dsa-44 | bluestreak-ml-dsa-65 |
-        /// starfish-bls | mysticeti | mysticeti-bls |
-        /// cordial-miners | sailfish-pp
+        /// Consensus protocols to benchmark in order. The `*-mac` names are
+        /// separate experimental protocols; signature schemes are selected
+        /// with `--block-authentication`.
         #[clap(
             long,
             value_name = "STRING",
@@ -851,6 +851,7 @@ fn load_benchmark_configs(
     dissemination_mode: &Option<String>,
     compress_network: Option<bool>,
     bls_workers: Option<usize>,
+    block_authentication: &Option<String>,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
@@ -858,6 +859,9 @@ fn load_benchmark_configs(
     };
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
+    if block_authentication.is_some() {
+        node_parameters.block_authentication = block_authentication.clone();
+    }
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -1037,6 +1041,7 @@ async fn run<C: ServerProviderClient>(
         .await
         .wrap_err("Failed to crate testbed")?;
 
+    let block_authentication = opts.block_authentication.clone();
     match opts.operation {
         Operation::Testbed { action } => match action {
             // Display the current status of the testbed.
@@ -1233,6 +1238,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
             )?;
 
             display::newline();
@@ -1399,6 +1405,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
             )?;
 
             display::newline();
@@ -1605,6 +1612,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
             )?;
 
             display::newline();
@@ -1770,6 +1778,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
             )?;
 
             display::newline();
@@ -1975,6 +1984,7 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
             )?;
 
             display::newline();
@@ -2283,6 +2293,8 @@ mod tests {
         let opts = Opts::try_parse_from([
             "orchestrator",
             "benchmark",
+            "--block-authentication",
+            "ml-dsa-65",
             "--protocols",
             "starfish",
             "mysticeti",
@@ -2293,6 +2305,8 @@ mod tests {
             "2",
         ])
         .unwrap();
+
+        assert_eq!(opts.block_authentication.as_deref(), Some("ml-dsa-65"));
 
         match opts.operation {
             Operation::Benchmark {

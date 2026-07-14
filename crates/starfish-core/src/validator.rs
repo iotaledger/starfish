@@ -45,7 +45,11 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
-        let protocol_config = ProtocolConfig::from_str(&consensus).map_err(|error| eyre!(error))?;
+        let protocol_config = ProtocolConfig::from_selection(
+            &consensus,
+            public_config.parameters.block_authentication.as_deref(),
+        )
+        .map_err(|error| eyre!(error))?;
         match protocol_config.block_authentication_scheme {
             BlockAuthenticationScheme::Ed25519 => {
                 if committee.get_public_key(authority) != Some(&private_config.keypair.public_key())
@@ -135,13 +139,13 @@ impl Validator {
 
         // Open the DAG state.
         let rocks_path = private_config.rocksdb();
-        let recovered = DagState::open(
+        let recovered = DagState::open_with_protocol_config(
             authority,
             rocks_path,
             metrics.clone(),
             committee.clone(),
             byzantine_strategy,
-            consensus,
+            protocol_config,
             &parameters.storage_backend,
             public_config
                 .parameters
@@ -295,11 +299,16 @@ mod smoke_tests {
         }
     }
 
-    async fn run_commit_test(consensus: &str, port_offset: u16) {
+    async fn run_commit_test(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -343,42 +352,52 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 0)]
-    #[test_case("cordial-miners", 40)]
-    #[test_case("starfish", 60)]
-    #[test_case("starfish-mac", 700)]
-    #[test_case("starfish-ml-dsa-44", 720)]
-    #[test_case("starfish-ml-dsa-65", 1000)]
-    #[test_case("starfish-speed", 80)]
-    #[test_case("starfish-speed-mac", 760)]
-    #[test_case("starfish-speed-ml-dsa-44", 780)]
-    #[test_case("starfish-speed-ml-dsa-65", 1040)]
-    #[test_case("starfish-bls", 100)]
-    #[test_case("sailfish++", 120)]
-    #[test_case("bluestreak", 140)]
-    #[test_case("mysticeti-bls", 160)]
-    #[test_case("sparse-starfish-speed", 180)]
-    #[test_case("sparse-starfish-speed-mac", 840)]
-    #[test_case("sparse-starfish-speed-ml-dsa-44", 860)]
-    #[test_case("sparse-starfish-speed-ml-dsa-65", 1080)]
-    #[test_case("bluestreak-mac", 920)]
-    #[test_case("bluestreak-ml-dsa-44", 940)]
-    #[test_case("bluestreak-ml-dsa-65", 1120)]
+    #[test_case("mysticeti", None, 0)]
+    #[test_case("mysticeti", Some("ml-dsa-65"), 1280)]
+    #[test_case("cordial-miners", None, 40)]
+    #[test_case("cordial-miners", Some("ml-dsa-65"), 1300)]
+    #[test_case("starfish", None, 60)]
+    #[test_case("starfish-mac", None, 700)]
+    #[test_case("starfish", Some("ml-dsa-44"), 720)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1000)]
+    #[test_case("starfish-speed", None, 80)]
+    #[test_case("starfish-speed-mac", None, 760)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 780)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1040)]
+    #[test_case("starfish-bls", None, 100)]
+    #[test_case("starfish-bls", Some("ml-dsa-65"), 1320)]
+    #[test_case("sailfish++", None, 120)]
+    #[test_case("sailfish++", Some("ml-dsa-65"), 1340)]
+    #[test_case("bluestreak", None, 140)]
+    #[test_case("mysticeti-bls", None, 160)]
+    #[test_case("mysticeti-bls", Some("ml-dsa-65"), 1360)]
+    #[test_case("sparse-starfish-speed", None, 180)]
+    #[test_case("sparse-starfish-speed-mac", None, 840)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 860)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1080)]
+    #[test_case("bluestreak-mac", None, 920)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 940)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1120)]
     #[tokio::test]
-    async fn validator_commit(consensus: &str, port_offset: u16) {
-        run_commit_test(consensus, port_offset).await;
+    async fn validator_commit(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
+        run_commit_test(consensus, block_authentication, port_offset).await;
     }
 
     #[tokio::test]
     async fn validator_commit_bluestreak_basic() {
-        run_commit_test("bluestreak", 150).await;
+        run_commit_test("bluestreak", None, 150).await;
     }
 
-    async fn run_sync_test(consensus: &str, port_offset: u16) {
+    async fn run_sync_test(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -455,30 +474,30 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 100)]
-    #[test_case("cordial-miners", 140)]
-    #[test_case("starfish", 160)]
-    #[test_case("starfish-mac", 740)]
-    #[test_case("starfish-ml-dsa-44", 1020)]
-    #[test_case("starfish-ml-dsa-65", 1200)]
-    #[test_case("starfish-speed", 180)]
-    #[test_case("starfish-speed-mac", 800)]
-    #[test_case("starfish-speed-ml-dsa-44", 820)]
-    #[test_case("starfish-speed-ml-dsa-65", 1220)]
-    #[test_case("starfish-bls", 200)]
-    #[test_case("sailfish++", 220)]
-    #[test_case("bluestreak", 260)]
-    #[test_case("mysticeti-bls", 280)]
-    #[test_case("sparse-starfish-speed", 320)]
-    #[test_case("sparse-starfish-speed-mac", 880)]
-    #[test_case("sparse-starfish-speed-ml-dsa-44", 900)]
-    #[test_case("sparse-starfish-speed-ml-dsa-65", 1240)]
-    #[test_case("bluestreak-mac", 960)]
-    #[test_case("bluestreak-ml-dsa-44", 980)]
-    #[test_case("bluestreak-ml-dsa-65", 1260)]
+    #[test_case("mysticeti", None, 100)]
+    #[test_case("cordial-miners", None, 140)]
+    #[test_case("starfish", None, 160)]
+    #[test_case("starfish-mac", None, 740)]
+    #[test_case("starfish", Some("ml-dsa-44"), 1020)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1200)]
+    #[test_case("starfish-speed", None, 180)]
+    #[test_case("starfish-speed-mac", None, 800)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 820)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1220)]
+    #[test_case("starfish-bls", None, 200)]
+    #[test_case("sailfish++", None, 220)]
+    #[test_case("bluestreak", None, 260)]
+    #[test_case("mysticeti-bls", None, 280)]
+    #[test_case("sparse-starfish-speed", None, 320)]
+    #[test_case("sparse-starfish-speed-mac", None, 880)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 900)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1240)]
+    #[test_case("bluestreak-mac", None, 960)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 980)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1260)]
     #[tokio::test]
-    async fn validator_sync(consensus: &str, port_offset: u16) {
-        run_sync_test(consensus, port_offset).await;
+    async fn validator_sync(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
+        run_sync_test(consensus, block_authentication, port_offset).await;
     }
 
     async fn run_crash_faults_test(consensus: &str, port_offset: u16) {
