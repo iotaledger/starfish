@@ -328,6 +328,14 @@ impl ProtocolConfig {
                 ConsensusProtocol::SparseStarfishSpeed,
                 BlockAuthenticationScheme::MlDsa44,
             ),
+            "bluestreak-mac" => (
+                ConsensusProtocol::Bluestreak,
+                BlockAuthenticationScheme::MacVector,
+            ),
+            "bluestreak-ml-dsa-44" => (
+                ConsensusProtocol::Bluestreak,
+                BlockAuthenticationScheme::MlDsa44,
+            ),
             known => (
                 ConsensusProtocol::from_known_str(known)
                     .ok_or_else(|| format!("Unknown consensus protocol '{known}'"))?,
@@ -4939,7 +4947,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_config_selects_starfish_block_authentication() {
+    fn protocol_config_selects_block_authentication() {
         assert_eq!(
             ProtocolConfig::from_str("starfish").unwrap(),
             ProtocolConfig {
@@ -5003,8 +5011,30 @@ mod tests {
                 block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
             }
         );
+        assert_eq!(
+            ProtocolConfig::from_str("bluestreak").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Bluestreak,
+                block_authentication_scheme: BlockAuthenticationScheme::Ed25519,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("bluestreak-mac").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Bluestreak,
+                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+            }
+        );
+        assert_eq!(
+            ProtocolConfig::from_str("bluestreak-ml-dsa-44").unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::Bluestreak,
+                block_authentication_scheme: BlockAuthenticationScheme::MlDsa44,
+            }
+        );
         assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
         assert!(ProtocolConfig::from_str("starfish-speed-unknown").is_err());
         assert!(ProtocolConfig::from_str("sparse-starfish-speed-unknown").is_err());
+        assert!(ProtocolConfig::from_str("bluestreak-unknown").is_err());
     }
 }
