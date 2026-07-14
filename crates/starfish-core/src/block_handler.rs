@@ -33,9 +33,8 @@ const REAL_BLOCK_HANDLER_TXN_GEN_STEP: usize = 32;
 const _: () = assert_constants();
 
 #[allow(dead_code)]
-#[allow(clippy::manual_is_multiple_of)]
 const fn assert_constants() {
-    if REAL_BLOCK_HANDLER_TXN_SIZE % REAL_BLOCK_HANDLER_TXN_GEN_STEP != 0 {
+    if !REAL_BLOCK_HANDLER_TXN_SIZE.is_multiple_of(REAL_BLOCK_HANDLER_TXN_GEN_STEP) {
         panic!("REAL_BLOCK_HANDLER_TXN_SIZE % REAL_BLOCK_HANDLER_TXN_GEN_STEP != 0")
     }
 }
@@ -265,7 +264,6 @@ impl RealCommitHandler {
 }
 
 impl CommitObserver for RealCommitHandler {
-    #[allow(clippy::manual_is_multiple_of)]
     fn handle_commit(
         &mut self,
         dag_state: &DagState,
@@ -294,7 +292,7 @@ impl CommitObserver for RealCommitHandler {
             let digest_short =
                 u16::from_le_bytes([self.commit_digest[0], self.commit_digest[1]]) & 0x3FF;
             self.metrics.commit_digest_latest.set(digest_short as i64);
-            if commit_index % 100 == 0 {
+            if commit_index.is_multiple_of(100) {
                 self.metrics.commit_digest.set(digest_short as i64);
             }
 

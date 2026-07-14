@@ -304,9 +304,9 @@ mod flat_mac_vector {
             )
         }
 
-        #[allow(clippy::manual_is_multiple_of)]
         fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-            if bytes.len() % crypto::MAC_TAG_SIZE != 0 {
+            let chunks = bytes.chunks_exact(crypto::MAC_TAG_SIZE);
+            if !chunks.remainder().is_empty() {
                 return Err(E::custom(format!(
                     "invalid flat MAC vector length {}; expected a multiple of {}",
                     bytes.len(),
@@ -314,8 +314,7 @@ mod flat_mac_vector {
                 )));
             }
 
-            Ok(bytes
-                .chunks_exact(crypto::MAC_TAG_SIZE)
+            Ok(chunks
                 .map(|chunk| {
                     let mut tag = [0; crypto::MAC_TAG_SIZE];
                     tag.copy_from_slice(chunk);

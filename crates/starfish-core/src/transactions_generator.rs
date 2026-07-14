@@ -59,7 +59,6 @@ impl TransactionGenerator {
         );
     }
 
-    #[allow(clippy::manual_is_multiple_of)]
     pub async fn run(mut self) {
         let load = self.parameters.load;
         let max_transactions_per_block_interval = load.div_ceil(Self::BATCHES_IN_SECOND);
@@ -183,7 +182,7 @@ impl TransactionGenerator {
                 return;
             }
 
-            if counter % 10_000 == 0 {
+            if counter.is_multiple_of(10_000) {
                 self.metrics
                     .submitted_transactions_bytes
                     .inc_by(tx_to_report * tx_size as u64);
