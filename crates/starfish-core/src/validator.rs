@@ -76,8 +76,9 @@ impl Validator {
                 .register(Box::new(pc))
                 .wrap_err("Failed to register ProcessCollector")?;
         }
-        let resolved_dissemination = ConsensusProtocol::from_str(&consensus)
-            .resolve_dissemination_mode(public_config.parameters.dissemination_mode);
+        let protocol = ConsensusProtocol::from_str(&consensus);
+        let resolved_dissemination =
+            protocol.resolve_dissemination_mode(public_config.parameters.dissemination_mode);
         let dissemination_str = resolved_dissemination.to_string();
         let (metrics, reporter) = Metrics::new(
             &registry,
@@ -89,9 +90,13 @@ impl Validator {
         let metrics_handle =
             prometheus::start_prometheus_server(binding_metrics_address, &registry);
 
-        // Apply timeouts from Parameters to the consensus config.
+        // Apply timeouts from Parameters to the consensus config. An explicit
+        // leader timeout wins; otherwise use the protocol's pacemaker default
+        // (2Δ for Push, 8Δ for Lazy-Push; see Table III).
         let mut public_config = public_config;
-        public_config.parameters.leader_timeout = parameters.leader_timeout;
+        public_config.parameters.leader_timeout = parameters
+            .leader_timeout
+            .unwrap_or_else(|| protocol.default_leader_timeout());
         public_config.parameters.soft_block_timeout = parameters.soft_block_timeout;
 
         // Open the DAG state.
