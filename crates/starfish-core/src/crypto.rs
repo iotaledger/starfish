@@ -676,7 +676,7 @@ impl Default for SignatureBytes {
 
 impl fmt::Debug for SignatureBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Sig({})", &hex::encode(&self.0[..4]))
+        write!(f, "Sig({})", hex::encode(&self.0[..4]))
     }
 }
 
@@ -800,7 +800,7 @@ impl<'de> Deserialize<'de> for BlsSignatureBytes {
 
 impl fmt::Debug for BlsSignatureBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlsSig({})", &hex::encode(&self.0[..4]))
+        write!(f, "BlsSig({})", hex::encode(&self.0[..4]))
     }
 }
 
@@ -892,7 +892,7 @@ impl<'de> Deserialize<'de> for BlsPublicKey {
 
 impl fmt::Debug for BlsPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlsPk({})", &hex::encode(&self.to_bytes()[..4]))
+        write!(f, "BlsPk({})", hex::encode(&self.to_bytes()[..4]))
     }
 }
 
