@@ -386,9 +386,12 @@ pub struct Parameters {
     /// Which storage backend to use for the DAG.
     #[serde(default)]
     pub storage_backend: StorageBackend,
-    /// Leader timeout for the consensus protocol.
-    #[serde(default = "param_defaults::default_leader_timeout")]
-    pub leader_timeout: Duration,
+    /// Leader timeout for the consensus protocol. When unset, each protocol
+    /// uses its pacemaker default: 2Δ for Push, 8Δ for Lazy-Push (see
+    /// `ConsensusProtocol::default_leader_timeout`). An explicit value
+    /// overrides the protocol default.
+    #[serde(default)]
+    pub leader_timeout: Option<Duration>,
     /// StarfishSpeed soft block-creation timeout (relaxed readiness).
     #[serde(default = "param_defaults::default_soft_block_timeout")]
     pub soft_block_timeout: Duration,
@@ -429,8 +432,15 @@ pub(crate) mod param_defaults {
         Duration::from_secs(10)
     }
 
+    /// Push pacemaker leader timeout: δ_LT = 2Δ with Δ = 300ms (Table III).
     pub fn default_leader_timeout() -> Duration {
         Duration::from_millis(600)
+    }
+
+    /// Lazy-Push pacemaker leader timeout: δ_LT = 8Δ with the same Δ = 300ms,
+    /// as the Lazy-Push liveness proof prescribes (Table III).
+    pub fn default_lazy_push_leader_timeout() -> Duration {
+        Duration::from_millis(2400)
     }
 
     pub fn default_soft_block_timeout() -> Duration {
@@ -446,7 +456,7 @@ impl Default for Parameters {
             initial_delay: param_defaults::default_initial_delay(),
             transaction_mode: TransactionMode::default(),
             storage_backend: StorageBackend::default(),
-            leader_timeout: param_defaults::default_leader_timeout(),
+            leader_timeout: None,
             soft_block_timeout: param_defaults::default_soft_block_timeout(),
             benchmark_duration: None,
         }

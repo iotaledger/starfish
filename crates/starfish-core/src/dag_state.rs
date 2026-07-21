@@ -273,6 +273,20 @@ impl ConsensusProtocol {
             other => other,
         }
     }
+
+    /// Leader timeout prescribed by the pacemaker analysis (Table III):
+    /// δ_LT = 2Δ for the Push pacemaker and δ_LT = 8Δ for Lazy-Push, with
+    /// Δ = 300ms in this testbed. Starfish-BLS and Mysticeti-BLS instantiate
+    /// the Lazy-Push variants (Starfish-L, Mysticeti-L); all other protocols
+    /// use the Push pacemaker timeout.
+    pub fn default_leader_timeout(self) -> std::time::Duration {
+        match self {
+            ConsensusProtocol::StarfishBls | ConsensusProtocol::MysticetiBls => {
+                crate::config::param_defaults::default_lazy_push_leader_timeout()
+            }
+            _ => crate::config::param_defaults::default_leader_timeout(),
+        }
+    }
 }
 
 const STARFISH_SPEED_HINT_WINDOW_LEADER_ROUNDS: usize = 10;

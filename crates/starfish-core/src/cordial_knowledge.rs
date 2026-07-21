@@ -920,7 +920,7 @@ impl DagKnowledgeInner {
         let from = after_round.saturating_add(1);
         for auth_dag in self.dag.iter_mut() {
             for (_, entries) in auth_dag.range_mut(from..) {
-                for (_, (_, known_by)) in entries.iter_mut() {
+                for (_, known_by) in entries.values_mut() {
                     *known_by &= bit;
                 }
             }

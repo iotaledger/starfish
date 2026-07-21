@@ -1913,7 +1913,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 display::config("Pre-built updated", updated_at);
             }
         } else {
-            display::config("Commit", format!("'{}'", &self.settings.repository.commit));
+            display::config("Commit", format!("'{}'", self.settings.repository.commit));
         }
         fs::create_dir_all(&self.suite_results_dir).expect("Failed to create results directory");
         display::config("Results directory", self.suite_results_dir.display());

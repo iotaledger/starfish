@@ -244,7 +244,7 @@ impl ServerProviderClient for VultrClient {
     async fn delete_instance(&self, instance: Instance) -> CloudProviderResult<()> {
         let url = self
             .base_url
-            .join(&format!("instances/{}", &instance.id))
+            .join(&format!("instances/{}", instance.id))
             .unwrap();
 
         let response = self
