@@ -444,6 +444,9 @@ impl fmt::Debug for CommittedSubDag {
 
 #[cfg(test)]
 mod tests {
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
     use super::*;
     use crate::{
         config::{DisseminationMode, StorageBackend},
@@ -452,8 +455,6 @@ mod tests {
         metrics::Metrics,
         types::AuthoritySet,
     };
-    use prometheus::Registry;
-    use tempfile::TempDir;
 
     fn open_test_dag_state_for(consensus: &str) -> (Committee, DagState) {
         let committee = Committee::new_for_benchmarks(4);

@@ -15,8 +15,14 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, BlockReference, ProvableShard, ReconstructedTransactionData, RoundNumber,
-        SailfishNoVoteCert, SailfishTimeoutCert, VerifiedBlock,
+        AuthorityIndex,
+        BlockReference,
+        ProvableShard,
+        ReconstructedTransactionData,
+        RoundNumber,
+        SailfishNoVoteCert,
+        SailfishTimeoutCert,
+        VerifiedBlock,
     },
 };
 

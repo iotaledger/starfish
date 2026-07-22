@@ -32,8 +32,16 @@ use crate::{
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
-        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, TransactionData,
+        AuthorityIndex,
+        AuthoritySet,
+        BlockDigest,
+        BlockReference,
+        BlsAggregateCertificate,
+        ProvableShard,
+        RoundNumber,
+        SailfishNoVoteCert,
+        SailfishTimeoutCert,
+        TransactionData,
         VerifiedBlock,
     },
 };
@@ -3399,21 +3407,38 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ByzantineStrategy, CACHED_ROUNDS, CertificateEvent, ConsensusProtocol,
-        DacCertificateVerificationState, DagState, DataSource, OwnBlockData,
+        ByzantineStrategy,
+        CACHED_ROUNDS,
+        CertificateEvent,
+        ConsensusProtocol,
+        DacCertificateVerificationState,
+        DagState,
+        DataSource,
+        OwnBlockData,
     };
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
         crypto::{
-            BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
+            BLS_SIGNATURE_SIZE,
+            BlockDigest,
+            BlsSignatureBytes,
+            SignatureBytes,
             TransactionsCommitment,
         },
         data::Data,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            AuthorityIndex,
+            AuthoritySet,
+            BaseTransaction,
+            BlockReference,
+            BlsAggregateCertificate,
+            ProvableShard,
+            RoundNumber,
+            SailfishFields,
+            SailfishNoVoteCert,
+            Transaction,
             VerifiedBlock,
         },
     };

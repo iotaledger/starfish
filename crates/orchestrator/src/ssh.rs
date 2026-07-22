@@ -20,7 +20,8 @@ use tokio::{
 
 use crate::{
     client::Instance,
-    display, ensure,
+    display,
+    ensure,
     error::{SshError, SshResult},
 };
 
