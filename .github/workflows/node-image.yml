@@ -1,0 +1,40 @@
+# Build the starfish node docker image and push it to GHCR on every push to main,
+# tagged by commit SHA (+ latest). wan-bench (see ~/code/wan-bench) pulls
+# ghcr.io/<owner>/starfish-node:<sha>. The Actions GITHUB_TOKEN has
+# packages:write, so no PAT is needed.
+name: node-image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # The RocksDB C++ build is large; GitHub's ~14 GB free root disk overflows
+      # (hit live on an 8 GB EBS root). Reclaim ~30 GB of preinstalled toolchains.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache
+          sudo docker image prune -af || true
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/starfish-node:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/starfish-node:latest
