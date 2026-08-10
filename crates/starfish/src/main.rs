@@ -70,7 +70,7 @@ enum Operation {
         consensus: String,
         /// Block signature scheme. Defaults to Ed25519 and is not applicable
         /// to the experimental `*-mac` protocols.
-        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
     },
     /// Deploy a local validator for test. Dryrun mode uses
@@ -103,7 +103,7 @@ enum Operation {
         consensus: String,
         /// Block signature scheme. Defaults to Ed25519 and is not applicable
         /// to the experimental `*-mac` protocols.
-        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
@@ -158,7 +158,7 @@ enum Operation {
         consensus: String,
         /// Block signature scheme. Defaults to Ed25519 and is not applicable
         /// to the experimental `*-mac` protocols.
-        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65")]
+        #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
@@ -268,6 +268,9 @@ async fn main() -> Result<()> {
             node_parameters.adversarial_latency = adversarial_latency;
             node_parameters.adversarial_latency_percent = adversarial_latency_percent;
             node_parameters.block_authentication = block_authentication;
+            if consensus_protocol == "starfish-rbc" {
+                node_parameters.refresh_starfish_rbc_protocol_instance();
+            }
             if let Some(ref mode) = dissemination_mode {
                 node_parameters.dissemination_mode = parse_dissemination_mode(mode)?;
             }
@@ -308,13 +311,16 @@ fn benchmark_genesis(
     tracing::info!("Generated committee file: {}", committee_path.display());
 
     // Generate the public node config file.
-    let node_parameters = match node_parameters_path {
+    let mut node_parameters = match node_parameters_path {
         Some(path) => NodeParameters::load(&path).wrap_err(format!(
             "Failed to load parameters file '{}'",
             path.display()
         ))?,
         None => NodeParameters::default(),
     };
+    if node_parameters.starfish_rbc_protocol_instance.is_none() {
+        node_parameters.refresh_starfish_rbc_protocol_instance();
+    }
 
     let node_public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters));
     let mut node_public_config_path = working_directory.clone();
@@ -787,5 +793,31 @@ mod tests {
         };
         assert_eq!(consensus, "mysticeti");
         assert_eq!(block_authentication.as_deref(), Some("ml-dsa-65"));
+    }
+
+    #[test]
+    fn local_benchmark_parses_starfish_rbc_mac_authentication() {
+        let args = Args::try_parse_from([
+            "starfish",
+            "local-benchmark",
+            "--committee-size",
+            "4",
+            "--consensus",
+            "starfish-rbc",
+            "--block-authentication",
+            "mac",
+        ])
+        .unwrap();
+
+        let Operation::LocalBenchmark {
+            consensus,
+            block_authentication,
+            ..
+        } = args.operation
+        else {
+            panic!("expected local-benchmark operation");
+        };
+        assert_eq!(consensus, "starfish-rbc");
+        assert_eq!(block_authentication.as_deref(), Some("mac"));
     }
 }

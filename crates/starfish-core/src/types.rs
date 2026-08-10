@@ -48,6 +48,7 @@ use crate::{
     dag_state::ConsensusProtocol,
     data::{Data, IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
     encoder::ShardEncoder,
+    starfish_rbc::RbcCanonicalHeader,
     threshold_clock::threshold_clock_valid_block_header,
 };
 
@@ -833,6 +834,66 @@ pub struct VerifiedBlock {
 }
 
 impl VerifiedBlock {
+    /// Construct the authentication-free block carrier used by Starfish-RBC.
+    ///
+    /// The header identity is the canonical Starfish-RBC content digest. The
+    /// author proof is carried separately by the RBC INIT message and is never
+    /// serialized into this block header. Transaction data remains unchanged
+    /// from plain Starfish so the existing shard layer can be reused.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_starfish_rbc(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
+    ) -> Self {
+        let transactions_commitment = if let Some(ref encoded) = encoded_transactions {
+            TransactionsCommitment::new_from_encoded_transactions(encoded, authority as usize).0
+        } else {
+            TransactionsCommitment::default()
+        };
+        let (intersection, extra_references) =
+            compress_acknowledgments(&block_references, &acknowledgment_references);
+        let logical_acknowledgments =
+            expand_acknowledgments(&block_references, intersection, &extra_references);
+        let digest = BlockDigest::new_starfish_rbc_header(
+            authority,
+            round,
+            &block_references,
+            &logical_acknowledgments,
+            meta_creation_time_ns,
+            transactions_commitment,
+        );
+        let transaction_data =
+            (!transactions.is_empty()).then(|| TransactionData::new(transactions));
+        Self {
+            header: BlockHeader {
+                reference: BlockReference {
+                    authority,
+                    round,
+                    digest,
+                },
+                block_references,
+                meta_creation_time_ns,
+                authentication: BlockAuthentication::None,
+                transactions_commitment: Some(transactions_commitment),
+                ack: Some(AckFields {
+                    intersection,
+                    extra_references,
+                }),
+                strong_vote: None,
+                bls: None,
+                sailfish: None,
+                unprovable_certificate: None,
+                serialized: None,
+            },
+            transaction_data,
+        }
+    }
+
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -1440,6 +1501,20 @@ impl VerifiedBlock {
         authentication_scheme: BlockAuthenticationScheme,
         mac_keys: &[MacKey],
     ) -> eyre::Result<Option<ProvableShard>> {
+        if consensus_protocol.is_starfish_rbc() {
+            ensure!(
+                matches!(&self.header.authentication, BlockAuthentication::None),
+                "Starfish-RBC block carriers must not embed authentication"
+            );
+            let (shard, _) =
+                self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
+            let canonical = RbcCanonicalHeader::from_block_header(&self.header)
+                .map_err(|error| eyre::eyre!(error))?;
+            canonical
+                .validate_for_committee(committee)
+                .map_err(|error| eyre::eyre!(error))?;
+            return Ok(shard);
+        }
         let (shard, digest_transactions_commitment) =
             self.verify_transactions(committee, own_id, encoder, consensus_protocol)?;
         self.verify_block_structure(
@@ -1830,7 +1905,9 @@ impl VerifiedBlock {
                     );
                 }
             }
-            ConsensusProtocol::Starfish | ConsensusProtocol::StarfishSpeed => {
+            ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishSpeed => {
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),
                     "Threshold clock is not valid"
@@ -3059,6 +3136,84 @@ mod tests {
         assert_eq!(block.extra_acknowledgment_references(), &vec![d]);
         assert_eq!(block.acknowledgment_count(), 2);
         assert_eq!(block.acknowledgments(), vec![c, d]);
+    }
+
+    #[test]
+    fn starfish_rbc_carrier_uses_canonical_content_identity_without_authentication() {
+        let parents = vec![
+            BlockReference::new_test(0, 1),
+            BlockReference::new_test(1, 1),
+            BlockReference::new_test(2, 1),
+        ];
+        let extra = BlockReference::new_test(3, 1);
+        let raw_acknowledgments = vec![extra, parents[2]];
+        let block = VerifiedBlock::new_starfish_rbc(
+            0,
+            2,
+            parents.clone(),
+            raw_acknowledgments,
+            17,
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(block.authentication(), &BlockAuthentication::None);
+        assert_eq!(block.acknowledgments(), vec![parents[2], extra]);
+        let commitment = block
+            .header()
+            .transactions_commitment
+            .expect("RBC carrier must commit its Starfish payload");
+        assert_eq!(
+            block.digest(),
+            BlockDigest::new_starfish_rbc_header(
+                0,
+                2,
+                &parents,
+                &[parents[2], extra],
+                17,
+                commitment,
+            )
+        );
+    }
+
+    #[test]
+    fn starfish_rbc_carrier_verification_is_content_only() {
+        let committee = Committee::new_for_benchmarks(4);
+        let parents: Vec<_> = committee
+            .authorities()
+            .map(|authority| BlockReference::new_test(authority, 0))
+            .collect();
+        let mut block =
+            VerifiedBlock::new_starfish_rbc(0, 1, parents, Vec::new(), 19, Vec::new(), None);
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        assert!(
+            block
+                .verify_with_authentication(
+                    &committee,
+                    0,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::StarfishRbc,
+                    BlockAuthenticationScheme::Ed25519,
+                    &[],
+                )
+                .is_ok()
+        );
+
+        block.header.authentication = BlockAuthentication::Ed25519(SignatureBytes::default());
+        assert!(
+            block
+                .verify_with_authentication(
+                    &committee,
+                    0,
+                    0,
+                    &mut encoder,
+                    ConsensusProtocol::StarfishRbc,
+                    BlockAuthenticationScheme::Ed25519,
+                    &[],
+                )
+                .is_err()
+        );
     }
 
     #[test]

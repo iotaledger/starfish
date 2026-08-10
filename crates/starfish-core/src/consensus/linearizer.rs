@@ -219,6 +219,7 @@ impl Linearizer {
         tracing::debug!("Starting collection with leader {:?}", leader_block);
         let leader_block_ref = *leader_block.reference();
         let min_round = leader_block_ref.round.saturating_sub(MAX_TRAVERSAL_DEPTH);
+        let clean_only = dag_state.consensus_protocol.is_starfish_rbc();
 
         let mut committed_ack_refs = BTreeSet::new();
         let mut current_level = vec![leader_block];
@@ -228,9 +229,22 @@ impl Linearizer {
         while !current_level.is_empty() {
             let mut next_refs = Vec::new();
             for x in &current_level {
+                if clean_only && !dag_state.has_clean_vertex(x.reference()) {
+                    tracing::warn!(
+                        "Ignoring dirty Starfish-RBC block {} at the linearization boundary",
+                        x.reference()
+                    );
+                    continue;
+                }
                 let who_votes = x.authority();
                 for ack_ref in self.effective_acknowledgments(dag_state, x) {
                     if ack_ref.round < min_round {
+                        continue;
+                    }
+                    if clean_only && !dag_state.has_clean_vertex(&ack_ref) {
+                        tracing::warn!(
+                            "Ignoring dirty Starfish-RBC acknowledgment target {ack_ref}"
+                        );
                         continue;
                     }
                     if direct_ack {
@@ -247,7 +261,10 @@ impl Linearizer {
                 }
                 self.traversed_blocks.insert(*x.reference());
                 for reference in x.block_references() {
-                    if reference.round >= min_round && self.traversed_blocks.insert(*reference) {
+                    if reference.round >= min_round
+                        && (!clean_only || dag_state.has_clean_vertex(reference))
+                        && self.traversed_blocks.insert(*reference)
+                    {
                         next_refs.push(*reference);
                     }
                 }
@@ -265,6 +282,7 @@ impl Linearizer {
         // Phase 2: batch-fetch the newly committed ack refs.
         let new_ack_refs: Vec<_> = committed_ack_refs
             .into_iter()
+            .filter(|reference| !clean_only || dag_state.has_clean_vertex(reference))
             .filter(|r| self.committed.insert(*r))
             .collect();
 
@@ -360,6 +378,15 @@ impl Linearizer {
         let consensus_protocol = dag_state.consensus_protocol;
         let mut committed = vec![];
         for (leader_block, metastate) in committed_leaders {
+            if consensus_protocol.is_starfish_rbc()
+                && !dag_state.has_clean_vertex(leader_block.reference())
+            {
+                tracing::warn!(
+                    "Ignoring dirty Starfish-RBC leader {} at the linearization boundary",
+                    leader_block.reference()
+                );
+                continue;
+            }
             // Collect the sub-dag generated using each of these leaders as anchor.
             let leader_ref = *leader_block.reference();
             let leader_acks = leader_block.acknowledgments();
@@ -370,6 +397,7 @@ impl Linearizer {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, true)
                 }
                 ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::SparseStarfishSpeed => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, false)
@@ -502,6 +530,25 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_rbc_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+        acks: Vec<BlockReference>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_starfish_rbc(
+            authority,
+            round,
+            parents,
+            acks,
+            round as u64,
+            Vec::new(),
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     #[test]
     fn ssfs_opt_sequences_leader_and_leader_acknowledgments() {
         let (committee, dag_state) = open_test_dag_state_for("sparse-starfish-speed");
@@ -585,6 +632,54 @@ mod tests {
         assert!(
             !blocks.contains(&acknowledged_ref),
             "Std must not directly sequence leader acknowledgments"
+        );
+    }
+
+    #[test]
+    fn starfish_rbc_linearizer_ignores_dirty_history_and_sequences_clean_quorum_acks() {
+        let (committee, dag_state) = open_test_dag_state_for("starfish-rbc");
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let target = make_rbc_block(0, 1, genesis.clone(), Vec::new());
+        let parent_a = make_rbc_block(1, 1, genesis.clone(), Vec::new());
+        let parent_b = make_rbc_block(2, 1, genesis, Vec::new());
+        let target_ref = *target.reference();
+        let round_one_refs = vec![target_ref, *parent_a.reference(), *parent_b.reference()];
+        let voters: Vec<_> = (0..3)
+            .map(|authority| make_rbc_block(authority, 2, round_one_refs.clone(), vec![target_ref]))
+            .collect();
+        let voter_refs: Vec<_> = voters.iter().map(|block| *block.reference()).collect();
+        let leader = make_rbc_block(3, 3, voter_refs.clone(), Vec::new());
+        let leader_ref = *leader.reference();
+        let mut all_blocks = vec![target, parent_a, parent_b];
+        all_blocks.extend(voters);
+        all_blocks.push(leader.clone());
+        dag_state.insert_general_blocks(all_blocks, DataSource::BlockBundleStreaming);
+
+        let mut dirty_linearizer = Linearizer::new(committee.clone());
+        assert!(
+            dirty_linearizer
+                .handle_commit(&dag_state, vec![(leader.clone(), None)])
+                .is_empty(),
+            "a dirty leader cannot enter the Starfish-RBC linearizer"
+        );
+
+        let mut delivered = round_one_refs;
+        delivered.extend(voter_refs);
+        delivered.push(leader_ref);
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&delivered));
+
+        let mut clean_linearizer = Linearizer::new(committee);
+        let committed = clean_linearizer.handle_commit(&dag_state, vec![(leader, None)]);
+        assert_eq!(committed.len(), 1);
+        assert!(
+            committed[0]
+                .0
+                .blocks
+                .iter()
+                .any(|block| block.reference() == &target_ref),
+            "only clean voting headers may form acknowledgment quorum"
         );
     }
 }

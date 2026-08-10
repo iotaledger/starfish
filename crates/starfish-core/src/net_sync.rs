@@ -44,6 +44,10 @@ use crate::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
+    starfish_rbc::RbcProtocolInstanceId,
+    starfish_rbc_service::{
+        RbcInitialAuthenticator, RbcServiceEvent, RbcServiceHandle, start_starfish_rbc_service,
+    },
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
@@ -55,6 +59,7 @@ use crate::{
 const MAX_FILTER_SIZE: usize = 100_000;
 const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
+const STARFISH_RBC_HEADER_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Enforce the MAC experiment's transport contract before cryptographic
 /// verification:
@@ -99,15 +104,20 @@ fn verify_mac_transport(
 }
 
 /// Prepare blocks forwarded through relay or synchronization paths for a
-/// specific peer. MAC-authenticated blocks retain their complete vector only
-/// at direct recipients; forwarding selects the destination's tag. A
+/// specific peer. Legacy MAC-experiment blocks retain their complete vector
+/// only at direct recipients; forwarding selects the destination's tag. A
 /// tag-only copy cannot be forwarded again and is therefore omitted.
+/// Starfish-RBC carriers are authentication-free and remain forwardable: the
+/// separate RBC service, rather than the carrier, controls clean admission.
 pub(crate) fn prepare_forwarded_blocks_for_peer(
     authentication_scheme: BlockAuthenticationScheme,
+    consensus_protocol: ConsensusProtocol,
     recipient: AuthorityIndex,
     blocks: Vec<Data<VerifiedBlock>>,
 ) -> Vec<Data<VerifiedBlock>> {
-    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector
+        || consensus_protocol.is_starfish_rbc()
+    {
         return blocks;
     }
 
@@ -691,6 +701,7 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     header_tx: mpsc::UnboundedSender<(Vec<Data<VerifiedBlock>>, DataSource)>,
     bls_service: Option<BlsServiceHandle>,
     sailfish_service: Option<SailfishServiceHandle>,
+    starfish_rbc_service: Option<RbcServiceHandle>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H, C> {
@@ -732,6 +743,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         let own_id = inner.dag_state.get_own_authority_index();
+        let starfish_rbc_service = inner.starfish_rbc_service.clone();
         let peer = format_authority_index(peer_id);
 
         let (standalone_shard_tx, standalone_shard_rx) = mpsc::unbounded_channel();
@@ -775,6 +787,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             header_tx,
             bls_service,
             sailfish_service,
+            starfish_rbc_service,
         }
     }
 
@@ -791,6 +804,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -903,6 +917,34 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .handle_round_gap_request(round, known_authorities)
                     .await;
             }
+            NetworkMessage::RbcInitial(proposal) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.direct_initial(self.peer_id, proposal) {
+                        tracing::warn!("Failed to forward Starfish-RBC INIT: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcPhase(message) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.phase(self.peer_id, message) {
+                        tracing::warn!("Failed to forward Starfish-RBC phase: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcHeaderRequest(block_ref) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.header_request(self.peer_id, block_ref) {
+                        tracing::warn!("Failed to forward Starfish-RBC header request: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcHeaderResponse(header) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.header_response(self.peer_id, header) {
+                        tracing::warn!("Failed to forward Starfish-RBC header response: {error}");
+                    }
+                }
+            }
         }
         true
     }
@@ -1014,6 +1056,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed => {
@@ -1038,6 +1081,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -1271,6 +1315,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         ) {
             self.metrics
                 .block_sync_requests_received
@@ -1343,6 +1388,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -1399,6 +1445,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .collect();
         let missing = prepare_forwarded_blocks_for_peer(
             self.inner.dag_state.block_authentication_scheme,
+            self.consensus_protocol,
             self.peer_id,
             missing,
         );
@@ -1439,6 +1486,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .collect();
         let missing = prepare_forwarded_blocks_for_peer(
             self.inner.dag_state.block_authentication_scheme,
+            self.consensus_protocol,
             self.peer_id,
             missing,
         );
@@ -1476,6 +1524,8 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     bls_event_task: Option<JoinHandle<()>>,
     bls_broadcast_task: Option<JoinHandle<()>>,
     sf_event_task: Option<JoinHandle<()>>,
+    rbc_event_task: Option<JoinHandle<()>>,
+    rbc_service_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -1501,11 +1551,19 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub cordial_knowledge: CordialKnowledgeHandle,
     /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
+    /// Nonblocking ingress to per-connection RBC outbound workers. Keeping
+    /// these queues separate prevents one backpressured peer from delaying
+    /// another peer or the actor's local HeaderStaged/Delivered effects.
+    rbc_peer_senders:
+        parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::UnboundedSender<NetworkMessage>>>,
     pub leader_timeout: Duration,
     pub soft_block_timeout: Duration,
     /// Sailfish++ service handle for sending control messages
     /// (timeout/no-vote). None for non-SailfishPlusPlus protocols.
     pub sailfish_handle: Option<SailfishServiceHandle>,
+    /// Central Starfish-RBC service. Connection workers only forward their
+    /// trusted peer identity and wire payload into this single owner.
+    pub(crate) starfish_rbc_service: Option<RbcServiceHandle>,
     /// Wall-clock at NetworkSyncer start; consumed by time-dependent
     /// Byzantine strategies (e.g. RampUpWithholding) to ramp behavior
     /// over a fixed schedule.
@@ -1513,7 +1571,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
-    pub fn start(
+    pub async fn start(
         network: Network,
         mut core: Core<H>,
         mut commit_observer: C,
@@ -1560,7 +1618,42 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let sf_handle_for_inner = sf_msg_tx
             .as_ref()
             .map(|tx| SailfishServiceHandle::new(tx.clone()));
-        let mut syncer = Syncer::new(
+        let (starfish_rbc_service, rbc_event_rx, rbc_service_task) =
+            if dag_state.consensus_protocol.is_starfish_rbc() {
+                let protocol_instance = node_parameters
+                .starfish_rbc_protocol_instance
+                .and_then(|bytes| RbcProtocolInstanceId::new(bytes).ok())
+                .expect(
+                    "validated Starfish-RBC configuration must contain a nonzero protocol instance",
+                );
+                let initial_authenticator = match dag_state.block_authentication_scheme {
+                    BlockAuthenticationScheme::Ed25519 => {
+                        RbcInitialAuthenticator::Ed25519(core.get_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa44 => {
+                        RbcInitialAuthenticator::MlDsa44(core.get_ml_dsa_44_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa65 => {
+                        RbcInitialAuthenticator::MlDsa65(core.get_ml_dsa_65_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
+                };
+                let (service, events, task) = start_starfish_rbc_service(
+                    committee.clone(),
+                    dag_state.get_own_authority_index(),
+                    protocol_instance,
+                    dag_state.block_authentication_scheme,
+                    mac_keys.clone(),
+                    initial_authenticator,
+                    dag_state.highest_round(),
+                    STARFISH_RBC_HEADER_RETRY_INTERVAL,
+                )
+                .expect("validated Starfish-RBC configuration must start its service");
+                (Some(service), Some(events), Some(task))
+            } else {
+                (None, None, None)
+            };
+        let syncer = Syncer::new(
             core,
             NetworkSyncSignals {
                 block_ready_notify: block_ready_notify.clone(),
@@ -1570,10 +1663,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics.clone(),
             bls_msg_tx.clone(),
             sf_msg_tx.clone(),
+            starfish_rbc_service.clone(),
         );
         let initial_round = syncer.core().next_block_round();
-        syncer.force_new_block(initial_round);
         let syncer = CoreThreadDispatcher::start(syncer);
+        // Await the initial command while the async RBC actor remains
+        // schedulable. The command itself runs on the dedicated core thread,
+        // where synchronous local-INIT selection is safe.
+        syncer.force_new_block(initial_round).await;
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         // Occupy the only available permit, so that all other
         // calls to send() will block.
@@ -1585,6 +1682,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
@@ -1630,10 +1728,83 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shard_tx: parking_lot::Mutex::new(shard_tx),
             cordial_knowledge: cordial_knowledge_handle,
             peer_senders: parking_lot::RwLock::new(AHashMap::new()),
+            rbc_peer_senders: parking_lot::RwLock::new(AHashMap::new()),
             leader_timeout: node_parameters.leader_timeout,
             soft_block_timeout: node_parameters.soft_block_timeout,
             sailfish_handle: sf_handle_for_inner,
+            starfish_rbc_service: starfish_rbc_service.clone(),
             start_time: std::time::Instant::now(),
+        });
+
+        // Bridge the single-owner RBC actor to direct network unicasts and to
+        // the core thread's dirty/clean DAG boundaries. Header staging never
+        // implies delivery; only a typed `Delivered` effect can mark a vertex
+        // clean.
+        let rbc_event_task = rbc_event_rx.map(|mut event_rx| {
+            let event_inner = inner.clone();
+            handle.spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        RbcServiceEvent::Network { recipient, message } => {
+                            let sender =
+                                event_inner.rbc_peer_senders.read().get(&recipient).cloned();
+                            if let Some(sender) = sender {
+                                if sender.send(message).is_err() {
+                                    tracing::debug!(
+                                        "Starfish-RBC outbound worker for authority {} stopped",
+                                        recipient
+                                    );
+                                }
+                            } else {
+                                // Local INITs and phase intents are retained by
+                                // the actor and replayed when this peer connects.
+                                tracing::debug!(
+                                    "Deferring Starfish-RBC message for disconnected authority {}",
+                                    recipient
+                                );
+                            }
+                        }
+                        RbcServiceEvent::HeaderStaged(header) => {
+                            let mut block = header.header().to_authentication_free_block();
+                            block.preserialize();
+                            let block_ref = *block.reference();
+                            event_inner
+                                .cordial_knowledge
+                                .send(CordialKnowledgeMessage::DagParts {
+                                    headers: vec![block_ref],
+                                    shards: Vec::new(),
+                                });
+                            let (missing_parents, _) = event_inner
+                                .syncer
+                                .add_headers(
+                                    vec![Data::new(block)],
+                                    DataSource::BlockBundleStreamingHeader,
+                                )
+                                .await;
+                            if !missing_parents.is_empty() {
+                                tracing::debug!(
+                                    "Starfish-RBC staged header {} waits for dependencies {:?}",
+                                    block_ref,
+                                    missing_parents
+                                );
+                            }
+                        }
+                        RbcServiceEvent::Delivered(header) => {
+                            event_inner
+                                .syncer
+                                .apply_starfish_rbc_deliveries(vec![header])
+                                .await;
+                        }
+                        RbcServiceEvent::Rejected { peer, error } => {
+                            tracing::warn!(
+                                "Rejected Starfish-RBC input from {:?}: {}",
+                                peer,
+                                error
+                            );
+                        }
+                    }
+                }
+            })
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
@@ -1919,6 +2090,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_event_task,
             bls_broadcast_task,
             sf_event_task,
+            rbc_event_task,
+            rbc_service_task,
             cordial_knowledge_task,
         }
     }
@@ -1956,6 +2129,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             sf_task.abort();
             sf_task.await.ok();
         }
+        // Stop RBC event ingress first, but keep the service actor alive while
+        // the core queue drains: an already queued core action may still
+        // synchronously select another local INIT.
+        if let Some(rbc_task) = self.rbc_event_task {
+            rbc_task.abort();
+            rbc_task.await.ok();
+        }
+        let rbc_service_task = self.rbc_service_task;
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
@@ -1981,7 +2162,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             }
         };
-        inner.syncer.stop()
+        // `inner` is now exclusive, so no auxiliary task can enqueue after
+        // this FIFO barrier. Awaiting it keeps the runtime available to the
+        // RBC actor while any earlier core action completes.
+        let _ = inner.syncer.missing_parent_references().await;
+        let syncer = inner.syncer.stop();
+        if let Some(rbc_service_task) = rbc_service_task {
+            rbc_service_task.abort();
+            rbc_service_task.await.ok();
+        }
+        syncer
     }
 
     async fn run(
@@ -2112,6 +2302,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .peer_senders
             .write()
             .insert(peer_id, connection.sender.clone());
+        let rbc_outbound_task = inner.starfish_rbc_service.as_ref().map(|_| {
+            let (rbc_sender, mut rbc_receiver) = mpsc::unbounded_channel();
+            inner.rbc_peer_senders.write().insert(peer_id, rbc_sender);
+            let network_sender = connection.sender.clone();
+            Handle::current().spawn(async move {
+                while let Some(message) = rbc_receiver.recv().await {
+                    send_network_message_reliably(&network_sender, message).await;
+                }
+            })
+        });
+        if let Some(ref rbc) = inner.starfish_rbc_service {
+            if let Err(error) = rbc.peer_connected(peer_id) {
+                tracing::warn!(
+                    "Failed to notify Starfish-RBC service that authority {} connected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
 
         if inner.dag_state.consensus_protocol.uses_bls() {
             for (round, signature) in inner.dag_state.precomputed_round_sigs() {
@@ -2150,7 +2359,21 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
 
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
+        if let Some(ref rbc) = inner.starfish_rbc_service {
+            if let Err(error) = rbc.peer_disconnected(peer_id) {
+                tracing::warn!(
+                    "Failed to notify Starfish-RBC service that authority {} disconnected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
         inner.peer_senders.write().remove(&peer_id);
+        inner.rbc_peer_senders.write().remove(&peer_id);
+        if let Some(rbc_outbound_task) = rbc_outbound_task {
+            rbc_outbound_task.abort();
+            rbc_outbound_task.await.ok();
+        }
         inner.syncer.authority_connection(peer_id, false).await;
         handler.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
@@ -2660,6 +2883,7 @@ mod tests {
 
         let round_gap_blocks = prepare_forwarded_blocks_for_peer(
             BlockAuthenticationScheme::MacVector,
+            ConsensusProtocol::Bluestreak,
             0,
             vec![Data::new(full)],
         );

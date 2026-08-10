@@ -24,6 +24,7 @@ use crate::{
     network::Network,
     prometheus,
     runtime::{JoinError, JoinHandle},
+    starfish_rbc::RbcProtocolInstanceId,
     transactions_generator::TransactionGenerator,
     types::{AuthorityIndex, BlockAuthenticationScheme, PartialSig},
 };
@@ -50,6 +51,24 @@ impl Validator {
             public_config.parameters.block_authentication.as_deref(),
         )
         .map_err(|error| eyre!(error))?;
+        let is_starfish_rbc = protocol_config.consensus_protocol.is_starfish_rbc();
+        if is_starfish_rbc {
+            let protocol_instance = public_config
+                .parameters
+                .starfish_rbc_protocol_instance
+                .ok_or_else(|| eyre!("Starfish-RBC protocol instance is missing"))?;
+            RbcProtocolInstanceId::new(protocol_instance).map_err(|error| eyre!(error))?;
+        }
+        if (is_starfish_rbc
+            || protocol_config.block_authentication_scheme == BlockAuthenticationScheme::MacVector)
+            && private_config.mac_keys.len() != committee.len()
+        {
+            return Err(eyre!(
+                "MAC keyring length {} does not match committee size {}",
+                private_config.mac_keys.len(),
+                committee.len(),
+            ));
+        }
         match protocol_config.block_authentication_scheme {
             BlockAuthenticationScheme::Ed25519 => {
                 if committee.get_public_key(authority) != Some(&private_config.keypair.public_key())
@@ -59,15 +78,7 @@ impl Validator {
                     ));
                 }
             }
-            BlockAuthenticationScheme::MacVector => {
-                if private_config.mac_keys.len() != committee.len() {
-                    return Err(eyre!(
-                        "MAC keyring length {} does not match committee size {}",
-                        private_config.mac_keys.len(),
-                        committee.len(),
-                    ));
-                }
-            }
+            BlockAuthenticationScheme::MacVector => {}
             BlockAuthenticationScheme::MlDsa44 => {
                 if committee.get_ml_dsa_44_public_key(authority)
                     != Some(&private_config.ml_dsa_44_keypair.public_key())
@@ -218,7 +229,8 @@ impl Validator {
             partial_sig_rx,
             bls_cert_aggregator,
             bls_signer_for_service,
-        );
+        )
+        .await;
 
         tracing::info!("Validator {authority} listening on {network_address}");
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
@@ -313,6 +325,11 @@ mod smoke_tests {
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
+        if consensus == "starfish-rbc" {
+            public_config
+                .parameters
+                .refresh_starfish_rbc_protocol_instance();
+        }
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -341,7 +358,11 @@ mod smoke_tests {
             .all_metric_addresses()
             .map(|a| a.to_owned())
             .collect();
-        let timeout = config::param_defaults::default_leader_timeout() * 5;
+        // Four RBC authentication variants run in parallel in the full test
+        // suite and include expensive ML-DSA signing. Give that composed flow
+        // enough scheduling headroom without relaxing existing protocols.
+        let timeout_multiplier = if consensus == "starfish-rbc" { 20 } else { 5 };
+        let timeout = config::param_defaults::default_leader_timeout() * timeout_multiplier;
 
         tokio::select! {
             _ = await_for_commits(addresses) => (),
@@ -382,6 +403,10 @@ mod smoke_tests {
     #[test_case("bluestreak-mac", None, 920)]
     #[test_case("bluestreak", Some("ml-dsa-44"), 940)]
     #[test_case("bluestreak", Some("ml-dsa-65"), 1120)]
+    #[test_case("starfish-rbc", None, 1400)]
+    #[test_case("starfish-rbc", Some("mac"), 1440)]
+    #[test_case("starfish-rbc", Some("ml-dsa-44"), 1480)]
+    #[test_case("starfish-rbc", Some("ml-dsa-65"), 1520)]
     #[tokio::test]
     async fn validator_commit(
         consensus: &str,
@@ -396,12 +421,53 @@ mod smoke_tests {
         run_commit_test("bluestreak", None, 150).await;
     }
 
+    #[tokio::test]
+    async fn starfish_rbc_single_validator_starts_on_current_thread_runtime() {
+        let committee_size = 4;
+        // Give the sole running validator quorum stake so startup immediately
+        // exercises local RBC proposal construction before any peer connects.
+        let committee = Committee::new_test(vec![100, 1, 1, 1]);
+        let mut public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(1600);
+        public_config.parameters.block_authentication = Some("mac".to_string());
+        public_config
+            .parameters
+            .refresh_starfish_rbc_protocol_instance();
+
+        let dir = TempDir::new().unwrap();
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(0);
+        fs::create_dir_all(&private_config.storage_path).unwrap();
+
+        let validator = time::timeout(
+            Duration::from_secs(5),
+            Validator::start(
+                0,
+                committee,
+                public_config,
+                private_config,
+                Parameters::default(),
+                "honest".to_string(),
+                "starfish-rbc".to_string(),
+            ),
+        )
+        .await
+        .expect("Starfish-RBC startup must not block its async runtime")
+        .unwrap();
+        validator.stop().await;
+    }
+
     async fn run_sync_test(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
+        if consensus == "starfish-rbc" {
+            public_config
+                .parameters
+                .refresh_starfish_rbc_protocol_instance();
+        }
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -499,6 +565,7 @@ mod smoke_tests {
     #[test_case("bluestreak-mac", None, 960)]
     #[test_case("bluestreak", Some("ml-dsa-44"), 980)]
     #[test_case("bluestreak", Some("ml-dsa-65"), 1260)]
+    #[test_case("starfish-rbc", Some("mac"), 1560)]
     #[tokio::test]
     async fn validator_sync(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         run_sync_test(consensus, block_authentication, port_offset).await;

@@ -116,7 +116,10 @@ impl ProtocolCommands for StarfishProtocol {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let node_parameters = parameters.node_parameters.clone();
+        let node_parameters = Self::node_parameters_for_genesis(
+            &parameters.consensus_protocol,
+            parameters.node_parameters.clone(),
+        );
         let node_parameters_string = serde_yaml::to_string(&node_parameters).unwrap();
         let node_parameters_path = self.working_dir.join("node-parameters.yaml");
         let upload_node_parameters =
@@ -256,6 +259,16 @@ impl StarfishProtocol {
             .join(format!("parameters-{authority}.yaml"))
     }
 
+    fn node_parameters_for_genesis(
+        consensus_protocol: &str,
+        mut node_parameters: StarfishNodeParameters,
+    ) -> StarfishNodeParameters {
+        if consensus_protocol == "starfish-rbc" {
+            node_parameters.refresh_starfish_rbc_protocol_instance();
+        }
+        node_parameters
+    }
+
     fn write_remote_file_command(path: &Path, contents: &str) -> String {
         let mut delimiter = "STARFISH_REMOTE_FILE_EOF".to_string();
         while contents.contains(&delimiter) {
@@ -286,7 +299,29 @@ impl StarfishProtocol {
 
 #[cfg(test)]
 mod tests {
-    use super::StarfishProtocol;
+    use super::{StarfishNodeParameters, StarfishProtocol};
+
+    #[test]
+    fn starfish_rbc_genesis_gets_one_nonzero_protocol_instance() {
+        let parameters = StarfishProtocol::node_parameters_for_genesis(
+            "starfish-rbc",
+            StarfishNodeParameters::default(),
+        );
+        assert!(
+            parameters
+                .starfish_rbc_protocol_instance
+                .is_some_and(|instance| instance != [0; 32])
+        );
+    }
+
+    #[test]
+    fn non_rbc_genesis_does_not_need_a_protocol_instance() {
+        let parameters = StarfishProtocol::node_parameters_for_genesis(
+            "starfish",
+            StarfishNodeParameters::default(),
+        );
+        assert_eq!(parameters.starfish_rbc_protocol_instance, None);
+    }
 
     #[test]
     fn split_authority_load_preserves_total_load() {

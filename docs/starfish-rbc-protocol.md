@@ -1,7 +1,7 @@
 # Starfish-RBC protocol specification
 
-Status: protocol specification with isolated RBC kernel and canonical header staging; network and
-DAG integration pending
+Status: integrated benchmark prototype; extended adversarial validation and performance comparison
+pending
 
 This document specifies the first correctness-oriented prototype of Starfish with reliable header
 certification and a signature-free MAC configuration. The provisional CLI name is `starfish-rbc`.
@@ -468,9 +468,11 @@ Every honest ECHO and READY sender is a header holder. Retrieval therefore proce
 
 `NeedHeader` is a recovery wake-up, not a one-shot delivery assumption. The kernel re-emits it when
 the authenticated holder set grows and exposes the current effect to a durable retry timer. The
-integration layer must keep that timer active, retry or fan out after loss or an unresponsive
-holder, and cancel it only after a matching content-validated header is pinned or the instance is
-safely retired.
+central integration actor keeps that timer active, initially fans out to two connected holders,
+cycles through further holders every 250 ms after loss or an unresponsive response, and cancels the
+request only after a matching content-validated header is pinned. The actor and its fetch state
+outlive individual connection workers. Reconnection replays recipient-specific local INITs and
+rematerializes locally authorized phase messages under the new connection.
 
 At least one honest holder exists in every `V`-stake READY set. At least `f + 1` honest holders exist
 in an equal-stake `2f + 1` ECHO quorum. Byzantine responses can delay retrieval but cannot change
@@ -713,6 +715,13 @@ overhead number: saved INIT bytes can hide part of the phase-message cost. The b
 INIT/header bytes and ECHO/READY bytes separately; a one-tag lower-bound projection may be added but
 must be labeled as such.
 
+The first integrated prototype also sends the canonical header once in RBC INIT and again inside
+Starfish's existing full payload carrier. This deliberately preserves the transaction layer while
+the certification boundary is validated, but it is avoidable duplicate traffic. Initial benchmark
+results therefore measure the current whole-system prototype, not the minimum possible RBC header
+overhead. The per-message framed-byte counters make this duplication and the ECHO/READY cost
+visible separately.
+
 Metrics should separate:
 
 - initial header-authentication bytes and CPU;
@@ -763,26 +772,35 @@ Each milestone is committed separately.
    committee-bound pinned headers, context-bound ECHO capabilities, atomic poisoned-proof staging,
    bounded phase equivocation, round admission seams, pending triggers, and holder-backed
    multi-kernel recovery tests. The durable network fetch owner is part of milestone four.
-4. **Certified Starfish integration:** add `starfish-rbc`, selectable initial authentication, the
+4. **Certified Starfish integration (complete):** add `starfish-rbc`, selectable initial
+   authentication, the
    network RBC service and durable multi-holder fetch retry, dirty/clean lifecycle, clean-only
-   acknowledgments, and clean-only consensus/linearization.
-5. **End-to-end validation:** poisoned-tag, equivocation, dangling-parent, and all-authentication
-   commit tests.
+   acknowledgments, clean-only consensus/linearization, per-peer ordered outbound isolation, and
+   fresh per-run protocol-instance distribution.
+5. **End-to-end validation (in progress):** all four initial-authentication modes commit in a
+   four-validator network test, and a late-joining MAC validator catches up. Kernel-level
+   poisoned-tag and equivocation tests are complete; composed dangling-parent and Byzantine
+   network tests remain.
 6. **Tree dissemination:** subtree tag bundles, redundant routing/fallback, and matching signature
    baselines.
 7. **Recovery:** durable phase locks and delivered state, evidence replay, late-node synchronization,
    and restart tests.
 8. **Benchmarks:** direct and tree comparisons with results reported outside this specification.
 
-## 15. Remaining integration decisions
+## 15. Remaining integration and research decisions
 
 The kernel behavior, content digest, authenticated encoding, size limits, and admission semantics
-above are fixed. Integration must still choose:
+above are fixed. The orchestrator generates one fresh nonzero protocol instance before serializing
+the shared node configuration; version one uses two-holder recovery fanout with a 250 ms retry; and
+the legacy unsafe aliases remain explicitly labeled lower bounds. Remaining work must choose:
 
-- how benchmark genesis generates and distributes the fresh 32-byte `protocol_instance`;
 - a safe post-v1 state-retirement and garbage-collection rule;
-- header-holder request fanout and retry timing;
-- whether legacy unsafe `*-mac` aliases are renamed or retained as lower-bound benchmarks.
+- a catch-up mechanism for an honest validator delayed by more than the current 100-round admission
+  window without reopening unbounded Byzantine slot allocation;
+- a bounded per-peer RBC outbound queue policy that preserves honest-peer isolation under a stalled
+  receiver;
+- removal of the duplicate header in the transaction payload carrier; and
+- production-authenticated connection identity and durable phase/delivery recovery.
 
 The authentication selector remains `--block-authentication`; Starfish-RBC integration adds `mac`
 to the existing Ed25519, ML-DSA-44, and ML-DSA-65 values while retaining Ed25519 as the default.

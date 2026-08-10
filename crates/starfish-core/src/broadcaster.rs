@@ -87,6 +87,7 @@ impl BroadcasterParameters {
                 causal_push_shard_round_lag,
             },
             ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishRbc
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::CordialMiners
@@ -379,6 +380,7 @@ where
 
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishRbc
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::SparseStarfishSpeed => {
@@ -432,6 +434,7 @@ where
                     .get_transmission_parts(&refs_to_send, &refs_to_send);
                 let headers = prepare_forwarded_blocks_for_peer(
                     self.inner.dag_state.block_authentication_scheme,
+                    self.inner.dag_state.consensus_protocol,
                     peer_id,
                     headers,
                 );
@@ -473,6 +476,7 @@ where
                     .collect();
                 let all_blocks = prepare_forwarded_blocks_for_peer(
                     self.inner.dag_state.block_authentication_scheme,
+                    self.inner.dag_state.consensus_protocol,
                     peer_id,
                     all_blocks,
                 );
@@ -929,6 +933,7 @@ struct PushBatchParts {
 fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBlocksFormat {
     match consensus_protocol {
         ConsensusProtocol::Starfish
+        | ConsensusProtocol::StarfishRbc
         | ConsensusProtocol::StarfishSpeed
         | ConsensusProtocol::StarfishBls
         | ConsensusProtocol::SparseStarfishSpeed => PushOtherBlocksFormat::HeadersAndShards,
@@ -1336,6 +1341,7 @@ where
                 .collect();
             let other_blocks = prepare_forwarded_blocks_for_peer(
                 inner.dag_state.block_authentication_scheme,
+                inner.dag_state.consensus_protocol,
                 to_whom_authority_index,
                 other_blocks,
             );
@@ -1355,6 +1361,7 @@ where
                 .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
             let headers = prepare_forwarded_blocks_for_peer(
                 inner.dag_state.block_authentication_scheme,
+                inner.dag_state.consensus_protocol,
                 to_whom_authority_index,
                 headers,
             );
@@ -1626,9 +1633,12 @@ mod tests {
             .collect();
         let expected = tags[2];
         block.header.authentication = BlockAuthentication::MacVector(tags);
+        let mut rbc_carrier = block.clone();
+        rbc_carrier.header.authentication = BlockAuthentication::None;
 
         let relayed = prepare_forwarded_blocks_for_peer(
             BlockAuthenticationScheme::MacVector,
+            ConsensusProtocol::Starfish,
             2,
             vec![Data::new(block)],
         );
@@ -1638,8 +1648,24 @@ mod tests {
             BlockAuthentication::MacTag(tag) if *tag == expected
         ));
 
-        let second_hop =
-            prepare_forwarded_blocks_for_peer(BlockAuthenticationScheme::MacVector, 3, relayed);
+        let second_hop = prepare_forwarded_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            ConsensusProtocol::Starfish,
+            3,
+            relayed,
+        );
         assert!(second_hop.is_empty());
+
+        let forwarded_rbc_carrier = prepare_forwarded_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            ConsensusProtocol::StarfishRbc,
+            3,
+            vec![Data::new(rbc_carrier)],
+        );
+        assert_eq!(forwarded_rbc_carrier.len(), 1);
+        assert!(matches!(
+            forwarded_rbc_carrier[0].authentication(),
+            BlockAuthentication::None
+        ));
     }
 }

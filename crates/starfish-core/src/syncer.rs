@@ -19,6 +19,8 @@ use crate::{
     metrics::Metrics,
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
+    starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader},
+    starfish_rbc_service::{RbcLocalHeader, RbcServiceHandle},
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
         ReconstructedTransactionData, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
@@ -64,6 +66,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     pub(crate) metrics: Arc<Metrics>,
     bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
     sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
+    starfish_rbc_service: Option<RbcServiceHandle>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -95,6 +98,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         metrics: Arc<Metrics>,
         bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
         sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
+        starfish_rbc_service: Option<RbcServiceHandle>,
     ) -> Self {
         let committee_size = core.committee().len();
         let own_stake = core
@@ -114,6 +118,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             metrics,
             bls_tx,
             sailfish_tx,
+            starfish_rbc_service,
         }
     }
 
@@ -147,6 +152,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block(BlockCreationReason::NewBlocks);
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                // A previously delivered header may have become dirty-DAG
+                // connected and clean during insertion.
+                self.try_new_commit();
+            }
         }
         (
             pending_blocks_with_transactions,
@@ -175,6 +185,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block(BlockCreationReason::NewHeaders);
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                self.try_new_commit();
+            }
         }
         (missing_parents, processed_refs)
     }
@@ -197,6 +210,24 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn apply_sailfish_certificates(&mut self, certified_refs: Vec<BlockReference>) {
         let previous_rounds = self.capture_rounds();
         if self.core.dag_state().mark_vertices_clean(&certified_refs) {
+            self.maybe_update_proposal_wait();
+            self.maybe_signal_proposal_round_advance(previous_rounds);
+            self.try_new_block(BlockCreationReason::CertificateEvent);
+            self.try_new_commit();
+        }
+    }
+
+    /// Called after the local Starfish-RBC service delivers exact header
+    /// references. Delivery is separate from dirty insertion and transaction
+    /// availability; any newly dependency-closed vertices can immediately
+    /// unblock both proposal and commit paths.
+    pub fn apply_starfish_rbc_deliveries(&mut self, delivered_headers: Vec<PinnedRbcHeader>) {
+        let previous_rounds = self.capture_rounds();
+        if self
+            .core
+            .dag_state()
+            .apply_starfish_rbc_deliveries(&delivered_headers)
+        {
             self.maybe_update_proposal_wait();
             self.maybe_signal_proposal_round_advance(previous_rounds);
             self.try_new_block(BlockCreationReason::CertificateEvent);
@@ -306,6 +337,21 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
         let previous_rounds = self.capture_rounds();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                let canonical = RbcCanonicalHeader::from_block_header(block.header())
+                    .expect("locally built Starfish-RBC block must have canonical header content");
+                let selected = self
+                    .starfish_rbc_service
+                    .as_ref()
+                    .expect("Starfish-RBC protocol must start its RBC service")
+                    .start_local_header_blocking(RbcLocalHeader::from_canonical(&canonical))
+                    .expect("local Starfish-RBC header must be accepted before dissemination");
+                assert_eq!(
+                    selected.reference(),
+                    *block.reference(),
+                    "RBC service selected a different local header reference"
+                );
+            }
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
                     .proposal_wait_time_total_us
@@ -584,7 +630,7 @@ mod tests {
         assert_eq!(core.dag_state().proposal_round(), 3);
         assert_eq!(core.last_proposed(), 0);
 
-        let mut syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None);
+        let mut syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None, None);
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);
         syncer.recompute_subscriber_stake();
@@ -679,6 +725,7 @@ mod tests {
             TestSignals::default(),
             NoopCommitObserver,
             metrics,
+            None,
             None,
             None,
         );

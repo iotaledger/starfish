@@ -215,6 +215,14 @@ impl<H: BlockHandler> Core<H> {
         &self.signer
     }
 
+    pub(crate) fn get_ml_dsa_44_signer(&self) -> &crate::crypto::MlDsa44Signer {
+        &self.ml_dsa_44_signer
+    }
+
+    pub(crate) fn get_ml_dsa_65_signer(&self) -> &crate::crypto::MlDsa65Signer {
+        &self.ml_dsa_65_signer
+    }
+
     pub fn mac_keys(&self) -> Arc<Vec<MacKey>> {
         self.mac_keys.clone()
     }
@@ -511,6 +519,24 @@ impl<H: BlockHandler> Core<H> {
             return None;
         }
 
+        // `build_block` always prepends the creator's previous block. For
+        // Starfish-RBC that local header is dirty until the local RBC instance
+        // delivers it; another clean quorum must not let us smuggle this dirty
+        // mandatory parent into a proposal.
+        if protocol.is_starfish_rbc()
+            && clock_round > 1
+            && self
+                .last_own_block
+                .iter()
+                .any(|own| !self.dag_state.has_clean_vertex(own.block.reference()))
+        {
+            tracing::debug!(
+                "Cannot construct Starfish-RBC block in round {}: own previous header is not clean",
+                clock_round
+            );
+            return None;
+        }
+
         let voted_leader_ref = if protocol.uses_bls() {
             self.select_starfish_bls_voted_leader(clock_round)
         } else {
@@ -531,8 +557,17 @@ impl<H: BlockHandler> Core<H> {
         };
 
         let pending_transactions = self.get_pending_transactions(clock_round);
-        let (mut transactions, block_references, raw_refs) =
+        let (mut transactions, block_references, raw_refs, deferred_dirty_refs) =
             self.collect_transactions_and_references(pending_transactions, clock_round);
+        // A header can reach the dirty DAG before the local RBC instance
+        // delivers it. Keep its include notification pending so a proposal
+        // created from some other clean quorum does not permanently consume
+        // the only chance to reference it once delivery completes.
+        self.pending.extend(
+            deferred_dirty_refs
+                .into_iter()
+                .map(MetaTransaction::Include),
+        );
 
         // Dual-DAG protocols: if the clean-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
@@ -713,6 +748,7 @@ impl<H: BlockHandler> Core<H> {
         Vec<BaseTransaction>,
         Vec<BlockReference>,
         Vec<BlockReference>,
+        Vec<BlockReference>,
     ) {
         let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
@@ -724,9 +760,23 @@ impl<H: BlockHandler> Core<H> {
                 MetaTransaction::Include(include) => pending_refs.push(include),
             }
         }
-        let raw_refs = pending_refs.clone();
+        // Dirty vertices must not even participate in transitive reduction:
+        // otherwise a dirty child can suppress one of its clean parents and
+        // then be filtered itself, shrinking the usable clean frontier.
+        let (compression_candidates, deferred_dirty_refs): (Vec<_>, Vec<_>) =
+            if self.dag_state.consensus_protocol.is_starfish_rbc() {
+                pending_refs.into_iter().partition(|reference| {
+                    reference.round == 0 || self.dag_state.has_clean_vertex(reference)
+                })
+            } else {
+                (pending_refs, Vec::new())
+            };
+        // These are the usable inputs that callers must retry when a later
+        // proposal gate fails. Dirty RBC refs are retried independently above
+        // so the two retry paths cannot duplicate them.
+        let raw_refs = compression_candidates.clone();
         let mut block_references =
-            self.compress_pending_block_references(&pending_refs, block_round);
+            self.compress_pending_block_references(&compression_candidates, block_round);
 
         // Dual-DAG protocols: filter parents to only include clean blocks.
         if self.dag_state.consensus_protocol.uses_dual_dag() {
@@ -790,11 +840,16 @@ impl<H: BlockHandler> Core<H> {
                     seen.contains(self.authority),
                     is_compressed_non_leader
                 );
-                return (transactions, vec![], raw_refs);
+                return (transactions, vec![], raw_refs, deferred_dirty_refs);
             }
         }
 
-        (transactions, block_references, raw_refs)
+        (
+            transactions,
+            block_references,
+            raw_refs,
+            deferred_dirty_refs,
+        )
     }
 
     fn prepare_encoded_transactions(
@@ -1004,34 +1059,50 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        let authorizer = match self.dag_state.block_authentication_scheme {
-            BlockAuthenticationScheme::Ed25519 => BlockAuthorizer::Ed25519(&self.signer),
-            BlockAuthenticationScheme::MacVector => BlockAuthorizer::MacVector(&self.mac_keys),
-            BlockAuthenticationScheme::MlDsa44 => BlockAuthorizer::MlDsa44(&self.ml_dsa_44_signer),
-            BlockAuthenticationScheme::MlDsa65 => BlockAuthorizer::MlDsa65(&self.ml_dsa_65_signer),
+        let mut block = if protocol == ConsensusProtocol::StarfishRbc {
+            VerifiedBlock::new_starfish_rbc(
+                self.authority,
+                clock_round,
+                block_references,
+                acknowledgment_references.to_vec(),
+                time_ns,
+                transactions.to_vec(),
+                encoded_transactions.clone(),
+            )
+        } else {
+            let authorizer = match self.dag_state.block_authentication_scheme {
+                BlockAuthenticationScheme::Ed25519 => BlockAuthorizer::Ed25519(&self.signer),
+                BlockAuthenticationScheme::MacVector => BlockAuthorizer::MacVector(&self.mac_keys),
+                BlockAuthenticationScheme::MlDsa44 => {
+                    BlockAuthorizer::MlDsa44(&self.ml_dsa_44_signer)
+                }
+                BlockAuthenticationScheme::MlDsa65 => {
+                    BlockAuthorizer::MlDsa65(&self.ml_dsa_65_signer)
+                }
+            };
+            VerifiedBlock::new_with_authorizer_and_unprovable(
+                self.authority,
+                clock_round,
+                block_references,
+                voted_leader_ref,
+                acknowledgment_references.to_vec(),
+                time_ns,
+                &authorizer,
+                bls_signer_opt,
+                committee_opt,
+                aggregate_dac_sigs,
+                transactions.to_vec(),
+                encoded_transactions.clone(),
+                self.dag_state.consensus_protocol,
+                strong_vote,
+                aggregate_round_sig,
+                certified_leader,
+                precomputed_round_sig,
+                precomputed_leader_sig,
+                sailfish_fields,
+                unprovable_certificate,
+            )
         };
-        let mut block = VerifiedBlock::new_with_authorizer_and_unprovable(
-            self.authority,
-            clock_round,
-            block_references,
-            voted_leader_ref,
-            acknowledgment_references.to_vec(),
-            time_ns,
-            &authorizer,
-            bls_signer_opt,
-            committee_opt,
-            aggregate_dac_sigs,
-            transactions.to_vec(),
-            encoded_transactions.clone(),
-            self.dag_state.consensus_protocol,
-            strong_vote,
-            aggregate_round_sig,
-            certified_leader,
-            precomputed_round_sig,
-            precomputed_leader_sig,
-            sailfish_fields,
-            unprovable_certificate,
-        );
 
         let role = if is_round_leader {
             "leader"
@@ -1627,6 +1698,26 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_starfish_rbc_round_1_block(
+        committee: &Committee,
+        authority: AuthorityIndex,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_starfish_rbc(
+            authority,
+            1,
+            committee
+                .authorities()
+                .map(|auth| BlockReference::new_test(auth, 0))
+                .collect(),
+            Vec::new(),
+            authority as u64,
+            Vec::new(),
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     fn make_test_round_certificate(
         bls_signers: &[BlsSigner],
         round: RoundNumber,
@@ -1705,6 +1796,69 @@ mod tests {
         let refs = round_2.block_references();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], *round_1.reference());
+    }
+
+    #[test]
+    fn starfish_rbc_proposal_defers_dirty_include_until_delivery() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        let own_round_one = core
+            .try_new_block("new_blocks")
+            .expect("round-one block should be creatable");
+        let peer_one = make_starfish_rbc_round_1_block(&committee, 1);
+        let peer_two = make_starfish_rbc_round_1_block(&committee, 2);
+        let dirty_peer = make_starfish_rbc_round_1_block(&committee, 3);
+        let dirty_ref = *dirty_peer.reference();
+        core.add_headers(
+            vec![peer_one.clone(), peer_two.clone(), dirty_peer],
+            DataSource::BlockBundleStreamingHeader,
+        );
+
+        assert!(
+            core.dag_state()
+                .apply_starfish_rbc_delivery_refs_for_test(&[
+                    *own_round_one.reference(),
+                    *peer_one.reference(),
+                    *peer_two.reference(),
+                ])
+        );
+        let round_two = core
+            .try_new_block("new_blocks")
+            .expect("a clean quorum should permit the round-two proposal");
+        assert!(!round_two.block_references().contains(&dirty_ref));
+        assert!(core.pending.iter().any(|pending| {
+            matches!(pending, MetaTransaction::Include(reference) if *reference == dirty_ref)
+        }));
     }
 
     #[test]

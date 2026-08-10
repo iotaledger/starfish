@@ -28,6 +28,7 @@ use crate::{
     metrics::{Metrics, print_network_address_table},
     runtime,
     runtime::JoinHandle,
+    starfish_rbc::{RbcCanonicalHeader, RbcHeaderProposal, RbcPhase, RbcPhaseMessage},
     stat::HistogramSender,
     types::{
         AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, PartialSig,
@@ -178,6 +179,17 @@ pub enum NetworkMessage {
         round: RoundNumber,
         known_authorities: AuthoritySet,
     },
+    /// Starfish-RBC: direct-author canonical header and receiver-specific
+    /// initial proof.
+    RbcInitial(RbcHeaderProposal),
+    /// Starfish-RBC: direct, recipient-specific ECHO or READY testimony.
+    RbcPhase(RbcPhaseMessage),
+    /// Starfish-RBC: request canonical header content for a phase-evidenced
+    /// block reference.
+    RbcHeaderRequest(BlockReference),
+    /// Starfish-RBC: return canonical header content. The receiver recomputes
+    /// and checks its content-addressed reference before accepting it.
+    RbcHeaderResponse(RbcCanonicalHeader),
 }
 
 impl NetworkMessage {
@@ -198,6 +210,13 @@ impl NetworkMessage {
             Self::SailfishNoVote(_) => "sailfish_no_vote",
             Self::UnprovableCertificateRequest { .. } => "unprovable_cert_request",
             Self::RoundGapRequest { .. } => "round_gap_request",
+            Self::RbcInitial(_) => "rbc_initial",
+            Self::RbcPhase(message) => match message.phase() {
+                RbcPhase::Echo => "rbc_echo",
+                RbcPhase::Ready => "rbc_ready",
+            },
+            Self::RbcHeaderRequest(_) => "rbc_header_request",
+            Self::RbcHeaderResponse(_) => "rbc_header_response",
         }
     }
 }
@@ -520,6 +539,7 @@ impl Worker {
         let start = Instant::now();
         let bytes_sent_total = metrics.bytes_sent_total.clone();
         let network_requests_sent_total = metrics.network_requests_sent_total.clone();
+        let network_message_bytes_sent_total = metrics.network_message_bytes_sent_total.clone();
 
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
@@ -617,12 +637,13 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    let framed_len = wire_bytes.len() as u64 + 4;
 
                     match async {
                         let mut writer_guard = writer.lock().await;
                         writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
+                        bytes_sent_total.inc_by(framed_len);
                         writer_guard.write_all(&wire_bytes).await
                     }
                     .await
@@ -631,6 +652,9 @@ impl Worker {
                             network_requests_sent_total
                                 .with_label_values(&[request_type])
                                 .inc();
+                            network_message_bytes_sent_total
+                                .with_label_values(&[request_type])
+                                .inc_by(framed_len);
                         }
                         Err(e) => {
                             tracing::error!("Failed to write message: {e}");
@@ -661,6 +685,7 @@ impl Worker {
                 let writer = writer.clone();
                 let bytes_sent_total = bytes_sent_total.clone();
                 let network_requests_sent_total = network_requests_sent_total.clone();
+                let network_message_bytes_sent_total = network_message_bytes_sent_total.clone();
                 let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
                 let latency =
                     generate_latency(effective_latency(connection_latency, connection_scaled));
@@ -674,13 +699,14 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    let framed_len = wire_bytes.len() as u64 + 4;
                     tokio::time::sleep(latency).await;
 
                     match async {
                         let mut writer_guard = writer.lock().await;
                         writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
+                        bytes_sent_total.inc_by(framed_len);
                         writer_guard.write_all(&wire_bytes).await
                     }
                     .await
@@ -689,6 +715,9 @@ impl Worker {
                             network_requests_sent_total
                                 .with_label_values(&[request_type])
                                 .inc();
+                            network_message_bytes_sent_total
+                                .with_label_values(&[request_type])
+                                .inc_by(framed_len);
                         }
                         Err(e) => {
                             tracing::error!("Failed to write message: {e}");
@@ -766,6 +795,10 @@ impl Worker {
             match deserialize_result {
                 Some(message) => {
                     let request_type = message.request_type();
+                    metrics
+                        .network_message_bytes_received_total
+                        .with_label_values(&[request_type])
+                        .inc_by(read as u64 + 4);
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
                         return Ok(());
@@ -925,4 +958,67 @@ fn decode_ping(message: &[u8]) -> i64 {
     let mut m = [0u8; 8];
     m.copy_from_slice(message); // asserts message.len() == 8
     i64::from_le_bytes(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::{MacTag, TransactionsCommitment, dummy_signer},
+        starfish_rbc::{RbcInitialProof, RbcPhaseMessage},
+    };
+
+    fn variant_index(message: &NetworkMessage) -> u32 {
+        let bytes = bincode::serialize(message).unwrap();
+        u32::from_le_bytes(bytes[..4].try_into().unwrap())
+    }
+
+    #[test]
+    fn rbc_wire_variants_are_append_only_and_roundtrip() {
+        // This pre-existing last variant is frozen at index 10. Adding RBC
+        // messages must not renumber any legacy bincode discriminant.
+        let legacy = NetworkMessage::RoundGapRequest {
+            round: 7,
+            known_authorities: AuthoritySet::default(),
+        };
+        assert_eq!(variant_index(&legacy), 10);
+
+        let header = RbcCanonicalHeader::try_new(
+            0,
+            1,
+            Vec::new(),
+            Vec::new(),
+            11,
+            TransactionsCommitment::default(),
+        )
+        .unwrap();
+        let block_ref = header.reference();
+        let initial = NetworkMessage::RbcInitial(RbcHeaderProposal::new(
+            header.clone(),
+            RbcInitialProof::Ed25519(dummy_signer().sign_digest(&[0xA1; 32])),
+        ));
+        let phase = NetworkMessage::RbcPhase(RbcPhaseMessage::new_for_test(
+            block_ref,
+            1,
+            2,
+            RbcPhase::Ready,
+            MacTag::from_bytes([0xA2; 32]),
+        ));
+        let request = NetworkMessage::RbcHeaderRequest(block_ref);
+        let response = NetworkMessage::RbcHeaderResponse(header);
+
+        for (message, expected_index, expected_kind) in [
+            (initial, 11, "rbc_initial"),
+            (phase, 12, "rbc_ready"),
+            (request, 13, "rbc_header_request"),
+            (response, 14, "rbc_header_response"),
+        ] {
+            assert_eq!(variant_index(&message), expected_index);
+            assert_eq!(message.request_type(), expected_kind);
+            let encoded = bincode::serialize(&message).unwrap();
+            let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(decoded.request_type(), expected_kind);
+            assert_eq!(variant_index(&decoded), expected_index);
+        }
+    }
 }

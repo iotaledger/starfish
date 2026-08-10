@@ -13,6 +13,7 @@ use crate::{
     dag_state::DataSource,
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
+    starfish_rbc::PinnedRbcHeader,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockReference, ProvableShard, ReconstructedTransactionData, RoundNumber,
@@ -68,6 +69,8 @@ enum CoreThreadCommand {
     ApplyCertificateEvents(Vec<CertificateEvent>, oneshot::Sender<()>),
     /// Apply Sailfish RBC-certified vertices on the core thread.
     ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
+    /// Apply locally delivered Starfish-RBC headers on the core thread.
+    ApplyStarfishRbcDeliveries(Vec<PinnedRbcHeader>, oneshot::Sender<()>),
     /// Store a Sailfish++ timeout certificate in DagState.
     ApplyTimeoutCert(SailfishTimeoutCert, oneshot::Sender<()>),
     /// Store a Sailfish++ no-vote certificate in DagState.
@@ -186,6 +189,22 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::ApplySailfishCertificates(
             certified_refs,
+            sender,
+        ))
+        .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    /// Apply exact references emitted by the local Starfish-RBC service's
+    /// delivery effects. Delivery is latched even if dirty-DAG insertion is
+    /// still waiting for a missing parent.
+    pub(crate) async fn apply_starfish_rbc_deliveries(
+        &self,
+        delivered_headers: Vec<PinnedRbcHeader>,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplyStarfishRbcDeliveries(
+            delivered_headers,
             sender,
         ))
         .await;
@@ -375,6 +394,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     self.syncer.apply_sailfish_certificates(certified_refs);
                     sender.send(()).ok();
                 }
+                CoreThreadCommand::ApplyStarfishRbcDeliveries(delivered_headers, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_starfish_rbc_deliveries"])
+                        .inc();
+                    self.syncer.apply_starfish_rbc_deliveries(delivered_headers);
+                    sender.send(()).ok();
+                }
                 CoreThreadCommand::ApplyTimeoutCert(cert, sender) => {
                     metrics
                         .core_thread_tasks_total
@@ -477,7 +504,7 @@ mod tests {
             recovered,
             None,
         );
-        let syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None);
+        let syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None, None);
         CoreThreadDispatcher::start(syncer)
     }
 

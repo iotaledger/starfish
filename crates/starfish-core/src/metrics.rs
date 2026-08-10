@@ -132,6 +132,8 @@ pub struct Metrics {
     // per-request-type network message counters
     pub network_requests_sent_total: IntCounterVec,
     pub network_requests_received_total: IntCounterVec,
+    pub network_message_bytes_sent_total: IntCounterVec,
+    pub network_message_bytes_received_total: IntCounterVec,
 
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
@@ -496,6 +498,20 @@ impl Metrics {
             network_requests_received_total: register_int_counter_vec_with_registry!(
                 "network_requests_received_total",
                 "Total network requests received, by type",
+                &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            network_message_bytes_sent_total: register_int_counter_vec_with_registry!(
+                "network_message_bytes_sent_total",
+                "Total framed network-message bytes sent, by type",
+                &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            network_message_bytes_received_total: register_int_counter_vec_with_registry!(
+                "network_message_bytes_received_total",
+                "Total framed network-message bytes received, by type",
                 &["request_type"],
                 registry,
             )

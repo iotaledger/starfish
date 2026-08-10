@@ -8,7 +8,7 @@
 This repository is a benchmarking framework for DAG-based BFT
 consensus protocols in the partially synchronous model, implemented
 in Rust.
-It includes 9 protocol implementations with configurable
+It includes 10 protocol implementations with configurable
 dissemination strategies, storage backends, and Byzantine fault
 injection.
 
@@ -22,6 +22,7 @@ injection.
 | Starfish-Speed | `starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | -- |
 | Sparse-Starfish-Speed | `sparse-starfish-speed` | 4.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | -- |
 | Starfish | `starfish` | 5.5δ | Uncertified | Encoded | Push | O(n⁴) | O(n⁴) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567) |
+| Starfish-RBC (prototype) | `starfish-rbc` | TBD | RBC-certified headers | Encoded | Push | TBD | TBD | [design](docs/starfish-rbc-protocol.md) |
 | Cordial Miners | `cordial-miners` | 6δ | Uncertified | Full | Push | O(n³) | O(n⁴) | [arxiv.org/pdf/2205.09174](https://arxiv.org/pdf/2205.09174) |
 | Sailfish++ | `sailfish-pp` | 6δ | Certified | Full | Pull | O(n³) | O(n⁴) | [arxiv.org/abs/2505.02761](https://arxiv.org/abs/2505.02761) |
 | Starfish-BLS | `starfish-bls` | 6.5δ | Uncertified | Encoded | Push | O(n²) | O(n³) | [eprint.iacr.org/2025/567](https://eprint.iacr.org/2025/567)* |
@@ -43,6 +44,10 @@ and compressed block references.
 certificate tracking, similar in architecture to Mysticeti-BLS, but with cheaper certification.
 **Starfish** uses push dissemination for headers and Reed-Solomon encoded shards with
 acknowledgment references between validators.
+**Starfish-RBC** composes plain Starfish with direct Bracha reliable broadcast of canonical
+headers. ECHO and READY are recipient-authenticated with pairwise MACs; the author's INIT can use
+Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctness-oriented research
+prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's
@@ -61,13 +66,15 @@ offloaded from the critical path.
 
 ### Block authentication
 
-Every consensus protocol can select its block signature independently:
+Every consensus protocol can select its public block-signature scheme independently.
+Starfish-RBC additionally supports a receiver-specific MAC for the author's initial header:
 
 | Scheme | CLI option |
 |---|---|
 | Ed25519 (default) | `--block-authentication ed25519` or omit the option |
 | ML-DSA-44 | `--block-authentication ml-dsa-44` |
 | ML-DSA-65 | `--block-authentication ml-dsa-65` |
+| Pairwise MAC (Starfish-RBC only) | `--block-authentication mac` |
 
 For example, `--consensus mysticeti --block-authentication ml-dsa-65` changes
 Mysticeti's block signature without creating another consensus protocol. This
@@ -93,6 +100,11 @@ treated as production-ready cryptography.
 
 #### Experimental MAC protocols
 
+`--consensus starfish-rbc --block-authentication mac` runs the reliable-header-broadcast
+prototype. It sends one author tag to each intended recipient, then runs the same pairwise-MAC
+ECHO/READY flow used by Starfish-RBC's signature-authenticated modes. Only locally delivered,
+dependency-closed headers enter the clean consensus DAG.
+
 `starfish-mac`, `starfish-speed-mac`, `sparse-starfish-speed-mac`, and
 `bluestreak-mac` remain separate work-in-progress benchmark protocols. They are
 not interchangeable signature selections and cannot be combined with
@@ -102,8 +114,8 @@ These variants measure a lower bound for pairwise-MAC authentication. Direct
 author streaming carries the full committee-sized MAC vector; relays and
 synchronization responses carry only the destination's tag. Pairwise MACs do
 not provide transferable authorship, and a Byzantine author can give different
-recipients valid and invalid tags for the same block reference. The current
-prototype does not add the quorum-authentication/RBC exchange needed to bind
+recipients valid and invalid tags for the same block reference. These lower-bound modes do not add
+the quorum-authentication/RBC exchange needed to bind
 the author to an available authenticator. It therefore makes no safety or
 liveness claim and must not be treated as a proven variant of the underlying
 protocol.

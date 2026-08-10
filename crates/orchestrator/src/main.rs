@@ -60,7 +60,7 @@ pub struct Opts {
 
     /// Block signature scheme used by every selected consensus protocol.
     /// Defaults to Ed25519. Not applicable to experimental `*-mac` protocols.
-    #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65", global = true)]
+    #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac", global = true)]
     block_authentication: Option<String>,
 
     /// The type of operation to run.
@@ -2321,6 +2321,25 @@ mod tests {
             }
             other => panic!("unexpected operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn benchmark_parses_starfish_rbc_mac_authentication() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark",
+            "--block-authentication",
+            "mac",
+            "--protocols",
+            "starfish-rbc",
+        ])
+        .unwrap();
+
+        assert_eq!(opts.block_authentication.as_deref(), Some("mac"));
+        let Operation::Benchmark { protocols, .. } = opts.operation else {
+            panic!("expected benchmark operation");
+        };
+        assert_eq!(protocols, vec!["starfish-rbc"]);
     }
 
     #[test]

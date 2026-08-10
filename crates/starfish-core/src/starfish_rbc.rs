@@ -3,11 +3,9 @@
 
 //! Synchronous reliable-broadcast kernel for Starfish-RBC.
 //!
-//! This module is deliberately not connected to networking or DAG admission
-//! yet. The next milestones will supply content-validated headers and expand
-//! multicast effects into recipient-specific network messages.
-
-#![allow(dead_code)]
+//! Networking and DAG admission remain outside the kernel: the service adapter
+//! supplies content-validated headers and expands typed multicast effects into
+//! recipient-specific messages.
 
 use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
@@ -23,7 +21,7 @@ use crate::{
     types::{
         AckFields, AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme,
         BlockDigest, BlockHeader, BlockReference, MAX_COMMITTEE_SIZE, RoundNumber, Stake,
-        TimestampNs, compress_acknowledgments, expand_acknowledgments,
+        TimestampNs, VerifiedBlock, compress_acknowledgments, expand_acknowledgments,
     },
 };
 
@@ -151,7 +149,7 @@ impl RbcAckFields {
 /// Acknowledgments stay canonically compressed on wire, but the digest hashes
 /// their expanded logical vector with an explicit boundary from parents.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct RbcCanonicalHeader {
+pub struct RbcCanonicalHeader {
     reference: BlockReference,
     #[serde(with = "bounded_references")]
     block_references: Vec<BlockReference>,
@@ -161,7 +159,7 @@ pub(crate) struct RbcCanonicalHeader {
 }
 
 impl RbcCanonicalHeader {
-    fn try_new(
+    pub(crate) fn try_new(
         authority: AuthorityIndex,
         round: RoundNumber,
         block_references: Vec<BlockReference>,
@@ -289,15 +287,15 @@ impl RbcCanonicalHeader {
         })
     }
 
-    pub(crate) fn reference(&self) -> BlockReference {
+    pub fn reference(&self) -> BlockReference {
         self.reference
     }
 
-    pub(crate) fn block_references(&self) -> &[BlockReference] {
+    pub fn block_references(&self) -> &[BlockReference] {
         &self.block_references
     }
 
-    pub(crate) fn acknowledgment_references(&self) -> Vec<BlockReference> {
+    pub fn acknowledgment_references(&self) -> Vec<BlockReference> {
         self.acknowledgments.logical(&self.block_references)
     }
 
@@ -308,58 +306,36 @@ impl RbcCanonicalHeader {
         }
     }
 
-    pub(crate) fn meta_creation_time_ns(&self) -> TimestampNs {
+    pub fn meta_creation_time_ns(&self) -> TimestampNs {
         self.meta_creation_time_ns
     }
 
-    pub(crate) fn transactions_commitment(&self) -> TransactionsCommitment {
+    pub fn transactions_commitment(&self) -> TransactionsCommitment {
         self.transactions_commitment
     }
 
-    fn encoded_content_size(&self, acknowledgment_count: usize) -> Result<usize, RbcError> {
-        let reference_count = self
-            .block_references
-            .len()
-            .checked_add(acknowledgment_count)
-            .ok_or(RbcError::HeaderContentTooLarge)?;
-        RBC_BLOCK_REFERENCE_SIZE
-            .checked_mul(reference_count)
-            .and_then(|size| size.checked_add(RBC_HEADER_FIXED_CONTENT_SIZE))
-            .ok_or(RbcError::HeaderContentTooLarge)
-    }
-}
-
-/// An intrinsically validated header retained by `Arc` for as long as the RBC
-/// state may advertise this validator as a holder.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PinnedRbcHeader {
-    header: Arc<RbcCanonicalHeader>,
-    committee_id: RbcCommitteeId,
-}
-
-impl PinnedRbcHeader {
-    fn validate_with_committee_id(
-        header: RbcCanonicalHeader,
-        committee: &Committee,
-        committee_id: RbcCommitteeId,
-    ) -> Result<Self, RbcError> {
-        let block_ref = header.reference;
+    /// Validate canonical header content against an already validated static
+    /// committee without deriving the committee identifier.
+    ///
+    /// This is the shared structural boundary for RBC INIT/recovery and for a
+    /// later normal block-batch payload carrier. Global committee invariants
+    /// are checked once when the RBC context is created; this per-header path
+    /// touches only authorities referenced by the header.
+    pub(crate) fn validate_for_committee(&self, committee: &Committee) -> Result<(), RbcError> {
+        let block_ref = self.reference;
         if block_ref.round == 0 {
             return Err(RbcError::GenesisSlot);
         }
         if !committee.known_authority(block_ref.authority) {
             return Err(RbcError::UnknownAuthority(block_ref.authority));
         }
-        if !header
-            .acknowledgments
-            .is_canonical(&header.block_references)
-        {
+        if !self.acknowledgments.is_canonical(&self.block_references) {
             return Err(RbcError::NonCanonicalAcknowledgments);
         }
 
-        let acknowledgments = header.acknowledgment_references();
+        let acknowledgments = self.acknowledgment_references();
         for (field, count) in [
-            ("parent", header.block_references.len()),
+            ("parent", self.block_references.len()),
             ("acknowledgment", acknowledgments.len()),
         ] {
             if count > MAX_RBC_REFERENCES_PER_FIELD {
@@ -370,13 +346,13 @@ impl PinnedRbcHeader {
                 });
             }
         }
-        if header.encoded_content_size(acknowledgments.len())? > MAX_RBC_HEADER_CONTENT_SIZE {
+        if self.encoded_content_size(acknowledgments.len())? > MAX_RBC_HEADER_CONTENT_SIZE {
             return Err(RbcError::HeaderContentTooLarge);
         }
 
         let mut parent_set = AHashSet::new();
         let mut previous_round_parents = StakeAggregator::<QuorumThreshold>::new();
-        for parent in &header.block_references {
+        for parent in &self.block_references {
             if !committee.known_authority(parent.authority) {
                 return Err(RbcError::UnknownAuthority(parent.authority));
             }
@@ -410,10 +386,10 @@ impl PinnedRbcHeader {
         let expected_digest = BlockDigest::new_starfish_rbc_header(
             block_ref.authority,
             block_ref.round,
-            &header.block_references,
+            &self.block_references,
             &acknowledgments,
-            header.meta_creation_time_ns,
-            header.transactions_commitment,
+            self.meta_creation_time_ns,
+            self.transactions_commitment,
         );
         if expected_digest != block_ref.digest {
             return Err(RbcError::HeaderDigestMismatch {
@@ -421,6 +397,59 @@ impl PinnedRbcHeader {
                 actual: block_ref.digest,
             });
         }
+        Ok(())
+    }
+
+    /// Convert canonical content into the existing header-only carrier. RBC
+    /// authorization remains external, so the compatibility header contains
+    /// no signature or MAC sidecar.
+    pub(crate) fn to_authentication_free_block(&self) -> VerifiedBlock {
+        VerifiedBlock::from_parts(
+            BlockHeader {
+                reference: self.reference,
+                block_references: self.block_references.clone(),
+                meta_creation_time_ns: self.meta_creation_time_ns,
+                authentication: BlockAuthentication::None,
+                transactions_commitment: Some(self.transactions_commitment),
+                ack: Some(self.acknowledgment_fields()),
+                strong_vote: None,
+                bls: None,
+                sailfish: None,
+                unprovable_certificate: None,
+                serialized: None,
+            },
+            None,
+        )
+    }
+
+    fn encoded_content_size(&self, acknowledgment_count: usize) -> Result<usize, RbcError> {
+        let reference_count = self
+            .block_references
+            .len()
+            .checked_add(acknowledgment_count)
+            .ok_or(RbcError::HeaderContentTooLarge)?;
+        RBC_BLOCK_REFERENCE_SIZE
+            .checked_mul(reference_count)
+            .and_then(|size| size.checked_add(RBC_HEADER_FIXED_CONTENT_SIZE))
+            .ok_or(RbcError::HeaderContentTooLarge)
+    }
+}
+
+/// An intrinsically validated header retained by `Arc` for as long as the RBC
+/// state may advertise this validator as a holder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PinnedRbcHeader {
+    header: Arc<RbcCanonicalHeader>,
+    committee_id: RbcCommitteeId,
+}
+
+impl PinnedRbcHeader {
+    fn validate_with_committee_id(
+        header: RbcCanonicalHeader,
+        committee: &Committee,
+        committee_id: RbcCommitteeId,
+    ) -> Result<Self, RbcError> {
+        header.validate_for_committee(committee)?;
         Ok(Self {
             header: Arc::new(header),
             committee_id,
@@ -451,14 +480,43 @@ impl PinnedRbcHeader {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) enum RbcInitialProof {
+pub enum RbcInitialProof {
     Ed25519(SignatureBytes),
     MlDsa44(MlDsa44SignatureBytes),
     MlDsa65(MlDsa65SignatureBytes),
     Mac(MacTag),
 }
 
+/// Direct-author Starfish-RBC header proposal carried on the wire.
+///
+/// The proof is a sidecar over the canonical header reference. It is not part
+/// of the content-addressed header identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcHeaderProposal {
+    header: RbcCanonicalHeader,
+    proof: RbcInitialProof,
+}
+
+impl RbcHeaderProposal {
+    pub(crate) fn new(header: RbcCanonicalHeader, proof: RbcInitialProof) -> Self {
+        Self { header, proof }
+    }
+
+    pub fn header(&self) -> &RbcCanonicalHeader {
+        &self.header
+    }
+
+    pub fn proof(&self) -> &RbcInitialProof {
+        &self.proof
+    }
+
+    pub(crate) fn into_parts(self) -> (RbcCanonicalHeader, RbcInitialProof) {
+        (self.header, self.proof)
+    }
+}
+
 impl RbcInitialProof {
+    #[allow(dead_code)]
     pub(crate) fn from_block_authentication(
         authentication: &BlockAuthentication,
     ) -> Result<Self, RbcError> {
@@ -621,8 +679,8 @@ impl RbcContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) enum RbcPhase {
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum RbcPhase {
     Echo,
     Ready,
 }
@@ -637,7 +695,7 @@ impl RbcPhase {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct RbcPhaseMessage {
+pub struct RbcPhaseMessage {
     block_ref: BlockReference,
     sender: AuthorityIndex,
     recipient: AuthorityIndex,
@@ -646,19 +704,36 @@ pub(crate) struct RbcPhaseMessage {
 }
 
 impl RbcPhaseMessage {
-    pub(crate) fn block_ref(&self) -> BlockReference {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        block_ref: BlockReference,
+        sender: AuthorityIndex,
+        recipient: AuthorityIndex,
+        phase: RbcPhase,
+        tag: MacTag,
+    ) -> Self {
+        Self {
+            block_ref,
+            sender,
+            recipient,
+            phase,
+            tag,
+        }
+    }
+
+    pub fn block_ref(&self) -> BlockReference {
         self.block_ref
     }
 
-    pub(crate) fn sender(&self) -> AuthorityIndex {
+    pub fn sender(&self) -> AuthorityIndex {
         self.sender
     }
 
-    pub(crate) fn recipient(&self) -> AuthorityIndex {
+    pub fn recipient(&self) -> AuthorityIndex {
         self.recipient
     }
 
-    pub(crate) fn phase(&self) -> RbcPhase {
+    pub fn phase(&self) -> RbcPhase {
         self.phase
     }
 }
@@ -716,10 +791,12 @@ pub(crate) enum RbcError {
         current: RoundNumber,
         proposed: RoundNumber,
     },
+    #[allow(dead_code)]
     RetainedRoundRegression {
         current: RoundNumber,
         proposed: RoundNumber,
     },
+    #[allow(dead_code)]
     RetainedRoundAheadOfLocal {
         local: RoundNumber,
         proposed: RoundNumber,
@@ -1077,6 +1154,7 @@ impl StarfishRbcKernel {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn context(&self) -> RbcContext {
         self.context
     }
@@ -1096,6 +1174,7 @@ impl StarfishRbcKernel {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn minimum_new_slot_round(&self) -> RoundNumber {
         self.minimum_new_slot_round
     }
@@ -1105,6 +1184,7 @@ impl StarfishRbcKernel {
     /// call: the integration layer may advance it only when its recovery model
     /// proves that no newly observed slot below `round` is still required.
     /// Existing slots remain active so late evidence can complete totality.
+    #[allow(dead_code)]
     pub(crate) fn close_new_slots_before(&mut self, round: RoundNumber) -> Result<(), RbcError> {
         if round < self.minimum_new_slot_round {
             return Err(RbcError::RetainedRoundRegression {
@@ -1555,10 +1635,26 @@ impl StarfishRbcKernel {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn header_holders(&self, block_ref: &BlockReference) -> AuthoritySet {
         self.candidate(block_ref)
             .map(CandidateState::holders)
             .unwrap_or_default()
+    }
+
+    /// Return the retained, content-validated header for a candidate.
+    ///
+    /// The service uses this accessor to answer recovery requests. Returning
+    /// the pin (rather than a detached header clone) preserves the invariant
+    /// that an honest ECHO/READY sender keeps the advertised content alive.
+    pub(crate) fn pinned_header(
+        &self,
+        block_ref: BlockReference,
+    ) -> Result<Option<PinnedRbcHeader>, RbcError> {
+        self.validate_block_ref(&block_ref)?;
+        Ok(self
+            .candidate(&block_ref)
+            .and_then(|candidate| candidate.header.clone()))
     }
 
     /// Recreate the current fetch effect for a durable retry timer. The first
@@ -2275,6 +2371,16 @@ mod tests {
         let extracted_with = RbcCanonicalHeader::from_block_header(&with_authentication).unwrap();
         assert_eq!(extracted_without, canonical);
         assert_eq!(extracted_with, canonical);
+        canonical.validate_for_committee(&committee).unwrap();
+
+        let carrier = canonical.to_authentication_free_block();
+        assert_eq!(carrier.reference(), &canonical.reference());
+        assert_eq!(carrier.authentication(), &BlockAuthentication::None);
+        assert!(!carrier.has_transaction_data());
+        assert_eq!(
+            RbcCanonicalHeader::from_block_header(carrier.header()).unwrap(),
+            canonical
+        );
 
         let pinned = PinnedRbcHeader::validate(canonical.clone(), &committee).unwrap();
         let retained = pinned.clone();

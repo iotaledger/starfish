@@ -65,6 +65,7 @@ impl BlockManager {
         // missing references that we don't currently have
         let mut missing_references = AHashSet::new();
         let mut block_exists_cache: AHashMap<BlockReference, bool> = AHashMap::new();
+        let include_ack_dependencies = self.dag_state.consensus_protocol.is_starfish_rbc();
         while let Some(block) = blocks.pop_front() {
             let block_reference = block.reference();
 
@@ -130,11 +131,11 @@ impl BlockManager {
             }
 
             let mut processed = true;
-            for included_reference in block.block_references() {
-                if self.blocks_pending.contains_key(included_reference) {
+            for included_reference in Self::dependencies(&block, include_ack_dependencies) {
+                if self.blocks_pending.contains_key(&included_reference) {
                     processed = false;
                     self.block_references_waiting
-                        .entry(*included_reference)
+                        .entry(included_reference)
                         .or_default()
                         .insert(*block_reference);
                     continue;
@@ -143,21 +144,21 @@ impl BlockManager {
                 // If we are missing a reference then we insert
                 // into pending and update the waiting index
                 if !*block_exists_cache
-                    .entry(*included_reference)
-                    .or_insert_with(|| self.dag_state.block_exists(*included_reference))
+                    .entry(included_reference)
+                    .or_insert_with(|| self.dag_state.block_exists(included_reference))
                 {
                     processed = false;
 
                     self.block_references_waiting
-                        .entry(*included_reference)
+                        .entry(included_reference)
                         .or_default()
                         .insert(*block_reference);
-                    if !self.blocks_pending.contains_key(included_reference) {
+                    if !self.blocks_pending.contains_key(&included_reference) {
                         // add missing references if it is not available
                         // in both pending set and storage
-                        missing_references.insert(*included_reference);
+                        missing_references.insert(included_reference);
                         self.missing[included_reference.authority as usize]
-                            .insert(*included_reference);
+                            .insert(included_reference);
                     }
                 }
             }
@@ -189,8 +190,7 @@ impl BlockManager {
                                 primary key.",
                             );
 
-                        if block_pointer
-                            .block_references()
+                        if Self::dependencies(block_pointer, include_ack_dependencies)
                             .iter()
                             .all(|item_ref| !self.block_references_waiting.contains_key(item_ref))
                         {
@@ -218,6 +218,28 @@ impl BlockManager {
             updated_existing_with_transactions,
             missing_references,
         )
+    }
+
+    /// Dirty-DAG connection normally follows causal parents. Starfish-RBC
+    /// also waits for logical acknowledgment targets because clean activation
+    /// treats them as sequencing dependencies and the normal missing-parent
+    /// request path is the contained way to fetch their headers.
+    fn dependencies(block: &VerifiedBlock, include_acknowledgments: bool) -> Vec<BlockReference> {
+        let mut seen = AHashSet::new();
+        let mut dependencies = Vec::new();
+        for reference in block.block_references() {
+            if seen.insert(*reference) {
+                dependencies.push(*reference);
+            }
+        }
+        if include_acknowledgments {
+            for reference in block.acknowledgments() {
+                if seen.insert(reference) {
+                    dependencies.push(reference);
+                }
+            }
+        }
+        dependencies
     }
 
     pub fn missing_blocks(&self) -> &[AHashSet<BlockReference>] {
@@ -274,6 +296,28 @@ mod tests {
             committee,
             "honest".to_string(),
             "starfish-mac".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        )
+        .dag_state
+    }
+
+    fn open_rbc_dag_state(committee: Arc<Committee>, path: &std::path::Path) -> DagState {
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        DagState::open(
+            0,
+            path,
+            metrics,
+            committee,
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
             &StorageBackend::Rocksdb,
             false,
             DisseminationMode::ProtocolDefault,
@@ -371,5 +415,87 @@ mod tests {
                 .unwrap()
                 .has_full_mac_vector()
         );
+    }
+
+    #[test]
+    fn starfish_rbc_requests_ack_only_dependencies_and_deduplicates_parent_overlap() {
+        let committee = Committee::new_for_benchmarks(4);
+        let temp_dir = TempDir::new().unwrap();
+        let dag_state = open_rbc_dag_state(committee.clone(), temp_dir.path());
+        let mut manager = BlockManager::new(dag_state, &committee);
+        let genesis: Vec<_> = committee
+            .authorities()
+            .map(|authority| BlockReference::new_test(authority, 0))
+            .collect();
+
+        let mut ack_target =
+            VerifiedBlock::new_starfish_rbc(1, 1, genesis.clone(), Vec::new(), 1, Vec::new(), None);
+        ack_target.preserialize();
+        let ack_target_ref = *ack_target.reference();
+
+        // The target is both a parent and an acknowledgment. It must create
+        // one waiting edge, while the ack-only target below proves that RBC
+        // expands the dependency set beyond causal parents.
+        let mut ack_only =
+            VerifiedBlock::new_starfish_rbc(2, 1, genesis, Vec::new(), 2, Vec::new(), None);
+        ack_only.preserialize();
+        let ack_only_ref = *ack_only.reference();
+        let mut parent_a = VerifiedBlock::new_starfish_rbc(
+            0,
+            1,
+            committee
+                .authorities()
+                .map(|authority| BlockReference::new_test(authority, 0))
+                .collect(),
+            Vec::new(),
+            3,
+            Vec::new(),
+            None,
+        );
+        parent_a.preserialize();
+        let mut parent_b = VerifiedBlock::new_starfish_rbc(
+            3,
+            1,
+            committee
+                .authorities()
+                .map(|authority| BlockReference::new_test(authority, 0))
+                .collect(),
+            Vec::new(),
+            4,
+            Vec::new(),
+            None,
+        );
+        parent_b.preserialize();
+        let parent_a_ref = *parent_a.reference();
+        let parent_b_ref = *parent_b.reference();
+        manager.add_blocks(
+            vec![Data::new(parent_a), Data::new(parent_b)],
+            DataSource::BlockHeaderRequest,
+        );
+        let mut child = VerifiedBlock::new_starfish_rbc(
+            0,
+            2,
+            vec![ack_target_ref, parent_a_ref, parent_b_ref],
+            vec![ack_target_ref, ack_only_ref],
+            2,
+            Vec::new(),
+            None,
+        );
+        child.preserialize();
+
+        let (_, _, missing) =
+            manager.add_blocks(vec![Data::new(child)], DataSource::BlockBundleStreaming);
+        assert!(missing.contains(&ack_target_ref));
+        assert!(missing.contains(&ack_only_ref));
+        assert_eq!(manager.pending_blocks_count(), 1);
+
+        manager.add_blocks(vec![Data::new(ack_target)], DataSource::BlockHeaderRequest);
+        assert_eq!(
+            manager.pending_blocks_count(),
+            1,
+            "the ack-only dependency must keep the child suspended"
+        );
+        manager.add_blocks(vec![Data::new(ack_only)], DataSource::BlockHeaderRequest);
+        assert_eq!(manager.pending_blocks_count(), 0);
     }
 }
