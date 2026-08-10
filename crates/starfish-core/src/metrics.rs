@@ -1090,6 +1090,72 @@ impl Metrics {
             b->"Average bandwidth in:",
             format!("{:.2} MB/s", bw_in)
         ]);
+        const NETWORK_MESSAGE_TYPES: &[&str] = &[
+            "subscribe_broadcast",
+            "batch",
+            "missing_parents",
+            "missing_tx_data",
+            "partial_sig",
+            "cert_echo",
+            "cert_vote",
+            "cert_ready",
+            "cert_batch",
+            "sailfish_timeout",
+            "sailfish_no_vote",
+            "unprovable_cert_request",
+            "round_gap_request",
+            "rbc_initial",
+            "rbc_echo",
+            "rbc_ready",
+            "rbc_header_request",
+            "rbc_header_response",
+        ];
+        let outbound_message_breakdown = NETWORK_MESSAGE_TYPES
+            .iter()
+            .filter_map(|request_type| {
+                let average_bytes = metrics
+                    .iter()
+                    .map(|metrics| {
+                        metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&[request_type])
+                            .get()
+                    })
+                    .sum::<u64>() as f64
+                    / num_validators as f64;
+                if average_bytes == 0.0 {
+                    return None;
+                }
+                let average_requests = metrics
+                    .iter()
+                    .map(|metrics| {
+                        metrics
+                            .network_requests_sent_total
+                            .with_label_values(&[request_type])
+                            .get()
+                    })
+                    .sum::<u64>() as f64
+                    / num_validators as f64;
+                Some((*request_type, average_bytes, average_requests))
+            })
+            .collect::<Vec<_>>();
+        if !outbound_message_breakdown.is_empty() {
+            table.add_row(row![bH2->""]);
+            table.add_row(row![bH2->"Average Outbound Message Breakdown"]);
+            for (request_type, average_bytes, average_requests) in outbound_message_breakdown {
+                let bandwidth = average_bytes / duration_secs as f64 / 1024.0 / 1024.0;
+                let share = if average_bytes_sent == 0 {
+                    0.0
+                } else {
+                    average_bytes / average_bytes_sent as f64 * 100.0
+                };
+                let requests_per_second = average_requests / duration_secs as f64;
+                table.add_row(row![
+                    b->format!("{request_type}:"),
+                    format!("{bandwidth:.3} MB/s ({share:.1}%, {requests_per_second:.1} msg/s)")
+                ]);
+            }
+        }
         let total_average_transactions = (average_tps * duration_secs as f64) as u64;
         let bandwidth_efficiency = if total_average_transactions > 0 {
             average_bytes_sent as f64 / total_average_transactions as f64 / 512.0
