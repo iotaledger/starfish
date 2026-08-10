@@ -82,7 +82,7 @@ pub enum DataSource {
     /// Response to RoundGapRequest (blocks the requester was missing at a
     /// round).
     RoundGapResponse,
-    /// Header-free transaction data carried by Starfish-RBC after INIT.
+    /// Transaction data co-carried by the direct Starfish-RBC INIT.
     StarfishRbcPayload,
 }
 

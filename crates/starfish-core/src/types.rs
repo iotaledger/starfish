@@ -700,6 +700,15 @@ pub struct TransactionData {
     pub(crate) serialized: Option<Bytes>,
 }
 
+impl fmt::Debug for TransactionData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransactionData")
+            .field("transaction_count", &self.transactions.len())
+            .finish()
+    }
+}
+
 impl TransactionData {
     pub fn new(transactions: Vec<BaseTransaction>) -> Self {
         Self {

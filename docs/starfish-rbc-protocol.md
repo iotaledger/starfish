@@ -259,6 +259,7 @@ HeaderProposal {
     slot,
     canonical_header,
     initial_authentication,
+    transaction_data?,
 }
 
 RbcPhaseMessage {
@@ -279,10 +280,6 @@ HeaderResponse {
     canonical_header,
 }
 
-TransactionPayload {
-    block_ref,
-    transaction_data,
-}
 ```
 
 The protocol instance, committee ID, and authentication mode are fixed service context and need not
@@ -303,13 +300,13 @@ content digest and validating the header's structure.
 needs nor confers a valid local initial proof. It supplies the content bytes needed for a transition
 that is authorized by the receiver's own directly authenticated RBC evidence.
 
-The RBC header-retrieval path never asserts transaction-payload availability. Direct transaction
-data uses a header-free payload keyed by the already authenticated `BlockReference`; the receiver
-checks it against the transaction commitment in the pinned header, derives its local shard, and
-attaches or buffers it through the existing Starfish transaction-data path. Shard relay and
-reconstruction remain unchanged. Explicit missing-parent synchronization may still return a
-header as a recovery fallback, but proactive full-block/header batches are disabled for
-Starfish-RBC.
+The RBC header-retrieval path never asserts transaction-payload availability. Direct INIT may
+co-carry transaction data in the same envelope as the one canonical header; the receiver checks it
+against the transaction commitment in the pinned header, derives its local shard, and attaches or
+buffers it through the existing Starfish transaction-data path. The payload is not part of the RBC
+authentication sidecar or header identity. Shard relay and reconstruction remain unchanged.
+Explicit missing-parent synchronization may still return a header as a recovery fallback, but
+proactive full-block/header batches are disabled for Starfish-RBC.
 
 ## 5. Local state
 
@@ -725,11 +722,11 @@ overhead number: saved INIT bytes can hide part of the phase-message cost. The b
 INIT/header bytes and ECHO/READY bytes separately; a one-tag lower-bound projection may be added but
 must be labeled as such.
 
-Starfish-RBC sends the canonical header through INIT (or explicit header recovery) and transports
-direct transaction data separately as `RbcTransactionPayload { block_ref, transaction_data }`.
-This removes the steady-state duplicate header that the first integrated prototype carried inside
-an ordinary full-block batch. The per-message framed-byte counters report the payload and
-ECHO/READY costs separately.
+Starfish-RBC sends the canonical header once through INIT (or explicit header recovery), with
+optional direct transaction data in the same INIT envelope. This removes the steady-state duplicate
+header that the first integrated prototype carried inside an ordinary full-block batch without
+opening a second scheduling gap before the payload. The per-message framed-byte counters report
+the combined INIT bytes and ECHO/READY costs separately.
 
 Metrics should separate:
 
@@ -785,7 +782,7 @@ Each milestone is committed separately.
    authentication, the
    network RBC service and durable multi-holder fetch retry, dirty/clean lifecycle, clean-only
    acknowledgments, clean-only consensus/linearization, per-peer ordered outbound isolation,
-   header-free transaction payloads, and fresh per-run protocol-instance distribution.
+   single-header INIT transaction transport, and fresh per-run protocol-instance distribution.
 5. **End-to-end validation (in progress):** all four initial-authentication modes commit in a
    four-validator network test, and a late-joining MAC validator catches up. Kernel-level
    poisoned-tag and equivocation tests are complete; composed dangling-parent and Byzantine

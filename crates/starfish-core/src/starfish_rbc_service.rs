@@ -26,7 +26,7 @@ use tokio::{
 use crate::{
     committee::Committee,
     crypto::{MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
-    network::{NetworkMessage, RbcTransactionPayload},
+    network::NetworkMessage,
     starfish_rbc::{
         PinnedRbcHeader, RbcCanonicalHeader, RbcEffect, RbcError, RbcHeaderProposal,
         RbcInitialHeaderOutcome, RbcInitialProof, RbcLocalInitial, RbcPhase, RbcPhaseMessage,
@@ -97,11 +97,6 @@ pub(crate) enum RbcServiceError {
         block_ref: BlockReference,
         peer: AuthorityIndex,
     },
-    UnexpectedTransactionPayload(BlockReference),
-    TransactionPayloadNotFromAuthor {
-        block_ref: BlockReference,
-        peer: AuthorityIndex,
-    },
     ServiceStopped,
 }
 
@@ -138,14 +133,6 @@ impl fmt::Display for RbcServiceError {
                 formatter,
                 "Starfish-RBC header response for {block_ref} came from non-holder {peer}"
             ),
-            Self::UnexpectedTransactionPayload(block_ref) => write!(
-                formatter,
-                "Starfish-RBC transaction payload arrived before its header for {block_ref}"
-            ),
-            Self::TransactionPayloadNotFromAuthor { block_ref, peer } => write!(
-                formatter,
-                "Starfish-RBC transaction payload for {block_ref} came from non-author {peer}"
-            ),
             Self::ServiceStopped => formatter.write_str("Starfish-RBC service stopped"),
         }
     }
@@ -164,7 +151,7 @@ pub(crate) enum RbcServiceEvent {
     TransactionPayloadStaged {
         peer: AuthorityIndex,
         header: PinnedRbcHeader,
-        payload: RbcTransactionPayload,
+        transaction_data: Arc<TransactionData>,
     },
     Delivered(PinnedRbcHeader),
     Rejected {
@@ -194,10 +181,6 @@ enum RbcServiceMessage {
     HeaderResponse {
         peer: AuthorityIndex,
         header: RbcCanonicalHeader,
-    },
-    TransactionPayload {
-        peer: AuthorityIndex,
-        payload: RbcTransactionPayload,
     },
     PeerConnected(AuthorityIndex),
     PeerDisconnected(AuthorityIndex),
@@ -293,14 +276,6 @@ impl RbcServiceHandle {
         self.send(RbcServiceMessage::HeaderResponse { peer, header })
     }
 
-    pub(crate) fn transaction_payload(
-        &self,
-        peer: AuthorityIndex,
-        payload: RbcTransactionPayload,
-    ) -> Result<(), RbcServiceError> {
-        self.send(RbcServiceMessage::TransactionPayload { peer, payload })
-    }
-
     pub(crate) fn peer_connected(&self, peer: AuthorityIndex) -> Result<(), RbcServiceError> {
         self.send(RbcServiceMessage::PeerConnected(peer))
     }
@@ -388,7 +363,6 @@ pub(crate) fn start_starfish_rbc_service(
         pending_fetches: AHashMap::new(),
         staged_notifications: AHashSet::new(),
         retained_initials: BTreeMap::new(),
-        retained_transaction_payloads: BTreeMap::new(),
         retained_phases: BTreeSet::new(),
     };
     let task = tokio::spawn(run_service(state, message_rx, header_retry_interval));
@@ -460,10 +434,6 @@ struct RbcServiceState {
     /// Recipient-specialized local proposals retained for replay after a
     /// connection is replaced. Version one keeps these for the run.
     retained_initials: BTreeMap<(BlockReference, AuthorityIndex), RbcHeaderProposal>,
-    /// Header-free transaction payloads retained for replay after INIT. The
-    /// same content-addressed payload is specialized only by its recipient
-    /// routing, not by its bytes.
-    retained_transaction_payloads: BTreeMap<BlockReference, RbcTransactionPayload>,
     /// Authorized local phase intents. Tags are rematerialized for the peer
     /// on replay rather than retaining or cloning a tagged wire message.
     retained_phases: BTreeSet<(BlockReference, RbcPhase)>,
@@ -495,9 +465,6 @@ impl RbcServiceState {
             RbcServiceMessage::HeaderResponse { peer, header } => {
                 self.accept_header_response(peer, header);
             }
-            RbcServiceMessage::TransactionPayload { peer, payload } => {
-                self.accept_transaction_payload(peer, payload);
-            }
             RbcServiceMessage::PeerConnected(peer) => self.peer_connected(peer),
             RbcServiceMessage::PeerDisconnected(peer) => self.peer_disconnected(peer),
             RbcServiceMessage::AdvanceLocalRound { round, reply } => {
@@ -528,26 +495,15 @@ impl RbcServiceState {
             header.transactions_commitment,
         )?;
         let canonical = local.header().clone();
-        let proposals = self.make_initial_proposals(&local);
+        let transaction_data = transaction_data.map(Arc::new);
+        let proposals = self.make_initial_proposals(&local, transaction_data);
         let (pinned, effects) = local.into_parts();
-        let transaction_payload =
-            transaction_data.map(|data| RbcTransactionPayload::new(canonical.reference(), data));
-        if let Some(payload) = transaction_payload.as_ref() {
-            self.retained_transaction_payloads
-                .insert(canonical.reference(), payload.clone());
-        }
 
         self.notify_header_staged(pinned);
         for (recipient, proposal) in proposals {
             self.retained_initials
                 .insert((canonical.reference(), recipient), proposal.clone());
             self.send_network(recipient, NetworkMessage::RbcInitial(proposal));
-            if let Some(payload) = transaction_payload.as_ref() {
-                self.send_network(
-                    recipient,
-                    NetworkMessage::RbcTransactionPayload(payload.clone()),
-                );
-            }
         }
         self.process_effects(effects);
         Ok(canonical)
@@ -556,6 +512,7 @@ impl RbcServiceState {
     fn make_initial_proposals(
         &self,
         local: &RbcLocalInitial,
+        transaction_data: Option<Arc<TransactionData>>,
     ) -> Vec<(AuthorityIndex, RbcHeaderProposal)> {
         let header = local.header().clone();
         match &self.initial_authenticator {
@@ -565,7 +522,7 @@ impl RbcServiceState {
                     .make_local_initial_signature_digest(local)
                     .expect("local RBC handle must remain selected");
                 let proof = RbcInitialProof::Ed25519(signer.sign_digest(&digest));
-                self.public_initial_proposals(header, proof)
+                self.public_initial_proposals(header, proof, transaction_data)
             }
             RbcInitialAuthenticator::MlDsa44(signer) => {
                 let digest = self
@@ -574,7 +531,7 @@ impl RbcServiceState {
                     .expect("local RBC handle must remain selected");
                 let proof =
                     RbcInitialProof::MlDsa44(signer.sign_digest(&BlockDigest::from(digest)));
-                self.public_initial_proposals(header, proof)
+                self.public_initial_proposals(header, proof, transaction_data)
             }
             RbcInitialAuthenticator::MlDsa65(signer) => {
                 let digest = self
@@ -583,7 +540,7 @@ impl RbcServiceState {
                     .expect("local RBC handle must remain selected");
                 let proof =
                     RbcInitialProof::MlDsa65(signer.sign_digest(&BlockDigest::from(digest)));
-                self.public_initial_proposals(header, proof)
+                self.public_initial_proposals(header, proof, transaction_data)
             }
             RbcInitialAuthenticator::Mac => self
                 .committee
@@ -596,7 +553,11 @@ impl RbcServiceState {
                         .expect("local RBC handle must remain selected");
                     (
                         recipient,
-                        RbcHeaderProposal::new(header.clone(), RbcInitialProof::Mac(tag)),
+                        RbcHeaderProposal::with_transaction_data(
+                            header.clone(),
+                            RbcInitialProof::Mac(tag),
+                            transaction_data.clone(),
+                        ),
                     )
                 })
                 .collect(),
@@ -607,6 +568,7 @@ impl RbcServiceState {
         &self,
         header: RbcCanonicalHeader,
         proof: RbcInitialProof,
+        transaction_data: Option<Arc<TransactionData>>,
     ) -> Vec<(AuthorityIndex, RbcHeaderProposal)> {
         self.committee
             .authorities()
@@ -614,25 +576,31 @@ impl RbcServiceState {
             .map(|recipient| {
                 (
                     recipient,
-                    RbcHeaderProposal::new(header.clone(), proof.clone()),
+                    RbcHeaderProposal::with_transaction_data(
+                        header.clone(),
+                        proof.clone(),
+                        transaction_data.clone(),
+                    ),
                 )
             })
             .collect()
     }
 
     fn accept_direct_initial(&mut self, peer: AuthorityIndex, proposal: RbcHeaderProposal) {
-        let (header, proof) = proposal.into_parts();
+        let (header, proof, transaction_data) = proposal.into_parts();
         let block_ref = header.reference();
         match self
             .kernel
             .accept_direct_initial_header(peer, header, &proof)
         {
             Ok(RbcInitialHeaderOutcome::Authenticated { effects }) => {
-                self.finish_header_staging(block_ref, Some(peer));
+                let pinned = self.finish_header_staging(block_ref, Some(peer));
+                self.notify_transaction_payload(peer, pinned, transaction_data);
                 self.process_effects(effects);
             }
             Ok(RbcInitialHeaderOutcome::StagedUnauthenticated { effects, error }) => {
-                self.finish_header_staging(block_ref, Some(peer));
+                let pinned = self.finish_header_staging(block_ref, Some(peer));
+                self.notify_transaction_payload(peer, pinned, transaction_data);
                 self.process_effects(effects);
                 self.reject(Some(peer), error.into());
             }
@@ -693,43 +661,40 @@ impl RbcServiceState {
         }
     }
 
-    fn accept_transaction_payload(&mut self, peer: AuthorityIndex, payload: RbcTransactionPayload) {
-        let block_ref = payload.block_reference();
-        if !self.committee.known_authority(peer) {
-            self.reject(Some(peer), RbcError::UnknownAuthority(peer).into());
-            return;
-        }
-        if peer != block_ref.authority {
-            self.reject(
-                Some(peer),
-                RbcServiceError::TransactionPayloadNotFromAuthor { block_ref, peer },
-            );
-            return;
-        }
-        match self.kernel.pinned_header(block_ref) {
-            Ok(Some(header)) => {
-                let _ = self.events.send(RbcServiceEvent::TransactionPayloadStaged {
-                    peer,
-                    header,
-                    payload,
-                });
-            }
-            Ok(None) => self.reject(
-                Some(peer),
-                RbcServiceError::UnexpectedTransactionPayload(block_ref),
-            ),
-            Err(error) => self.reject(Some(peer), error.into()),
-        }
-    }
-
-    fn finish_header_staging(&mut self, block_ref: BlockReference, peer: Option<AuthorityIndex>) {
+    fn finish_header_staging(
+        &mut self,
+        block_ref: BlockReference,
+        peer: Option<AuthorityIndex>,
+    ) -> Option<PinnedRbcHeader> {
         match self.kernel.pinned_header(block_ref) {
             Ok(Some(header)) => {
                 self.pending_fetches.remove(&block_ref);
-                self.notify_header_staged(header);
+                self.notify_header_staged(header.clone());
+                Some(header)
             }
-            Ok(None) => self.reject(peer, RbcError::HeaderUnavailable(block_ref).into()),
-            Err(error) => self.reject(peer, error.into()),
+            Ok(None) => {
+                self.reject(peer, RbcError::HeaderUnavailable(block_ref).into());
+                None
+            }
+            Err(error) => {
+                self.reject(peer, error.into());
+                None
+            }
+        }
+    }
+
+    fn notify_transaction_payload(
+        &self,
+        peer: AuthorityIndex,
+        header: Option<PinnedRbcHeader>,
+        transaction_data: Option<Arc<TransactionData>>,
+    ) {
+        if let (Some(header), Some(transaction_data)) = (header, transaction_data) {
+            let _ = self.events.send(RbcServiceEvent::TransactionPayloadStaged {
+                peer,
+                header,
+                transaction_data,
+            });
         }
     }
 
@@ -849,15 +814,6 @@ impl RbcServiceState {
             .collect();
         for proposal in initials {
             self.send_network(peer, NetworkMessage::RbcInitial(proposal));
-        }
-
-        let payloads: Vec<_> = self
-            .retained_transaction_payloads
-            .values()
-            .cloned()
-            .collect();
-        for payload in payloads {
-            self.send_network(peer, NetworkMessage::RbcTransactionPayload(payload));
         }
 
         let phases: Vec<_> = self.retained_phases.iter().copied().collect();
@@ -1061,7 +1017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_payload_is_header_free_and_replayed_after_initial() {
+    async fn local_payload_is_embedded_in_initial_and_replayed_before_phase() {
         let (handle, mut events, task) = start_service(0, BlockAuthenticationScheme::MacVector);
         let transaction_data = TransactionData::new(Vec::new());
         let canonical = handle
@@ -1079,20 +1035,15 @@ mod tests {
                 RbcServiceEvent::Network {
                     recipient,
                     message: NetworkMessage::RbcInitial(ref proposal),
-                } if recipient == expected_recipient && proposal.header() == &canonical
-            ));
-            assert!(matches!(
-                next_event(&mut events).await,
-                RbcServiceEvent::Network {
-                    recipient,
-                    message: NetworkMessage::RbcTransactionPayload(ref payload),
                 } if recipient == expected_recipient
-                    && payload.block_reference() == canonical.reference()
+                    && proposal.header() == &canonical
+                    && proposal.transaction_data().is_some()
             ));
         }
 
         // Drain the three initial ECHO messages, then reconnect one peer. The
-        // replay FIFO must put INIT and payload before the rematerialized ECHO.
+        // replay FIFO must put payload-bearing INIT before the rematerialized
+        // ECHO.
         for _ in 0..3 {
             assert!(matches!(
                 next_event(&mut events).await,
@@ -1107,15 +1058,8 @@ mod tests {
             next_event(&mut events).await,
             RbcServiceEvent::Network {
                 recipient: 2,
-                message: NetworkMessage::RbcInitial(_),
-            }
-        ));
-        assert!(matches!(
-            next_event(&mut events).await,
-            RbcServiceEvent::Network {
-                recipient: 2,
-                message: NetworkMessage::RbcTransactionPayload(ref payload),
-            } if payload.block_reference() == canonical.reference()
+                message: NetworkMessage::RbcInitial(ref proposal),
+            } if proposal.transaction_data().is_some()
         ));
         assert!(matches!(
             next_event(&mut events).await,
@@ -1130,34 +1074,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transaction_payload_requires_its_pinned_header_and_direct_author() {
-        let (handle, mut events, task) = start_service(1, BlockAuthenticationScheme::MacVector);
-        let block_ref = BlockReference::new_test(0, 1);
-        let payload = RbcTransactionPayload::new(block_ref, TransactionData::new(Vec::new()));
-
-        handle.transaction_payload(0, payload.clone()).unwrap();
+    async fn direct_initial_stages_header_and_payload_before_echo() {
+        let (author, mut author_events, author_task) =
+            start_service(0, BlockAuthenticationScheme::MacVector);
+        author
+            .start_local_header_with_payload(
+                local_header(1, 4),
+                Some(TransactionData::new(Vec::new())),
+            )
+            .await
+            .unwrap();
         assert!(matches!(
-            next_event(&mut events).await,
-            RbcServiceEvent::Rejected {
-                peer: Some(0),
-                error: RbcServiceError::UnexpectedTransactionPayload(reference),
-            } if reference == block_ref
+            next_event(&mut author_events).await,
+            RbcServiceEvent::HeaderStaged(_)
+        ));
+        let proposal = loop {
+            if let RbcServiceEvent::Network {
+                recipient: 1,
+                message: NetworkMessage::RbcInitial(proposal),
+            } = next_event(&mut author_events).await
+            {
+                break proposal;
+            }
+        };
+
+        let (receiver, mut receiver_events, receiver_task) =
+            start_service(1, BlockAuthenticationScheme::MacVector);
+        receiver.direct_initial(0, proposal).unwrap();
+        let staged = match next_event(&mut receiver_events).await {
+            RbcServiceEvent::HeaderStaged(header) => header,
+            other => panic!("expected staged header, got {other:?}"),
+        };
+        assert!(matches!(
+            next_event(&mut receiver_events).await,
+            RbcServiceEvent::TransactionPayloadStaged {
+                peer: 0,
+                ref header,
+                ref transaction_data,
+            } if header.reference() == staged.reference()
+                && transaction_data.number_transactions() == 0
+        ));
+        assert!(matches!(
+            next_event(&mut receiver_events).await,
+            RbcServiceEvent::Network {
+                message: NetworkMessage::RbcPhase(ref message),
+                ..
+            } if message.phase() == RbcPhase::Echo
         ));
 
-        handle.transaction_payload(2, payload).unwrap();
-        assert!(matches!(
-            next_event(&mut events).await,
-            RbcServiceEvent::Rejected {
-                peer: Some(2),
-                error: RbcServiceError::TransactionPayloadNotFromAuthor {
-                    block_ref: reference,
-                    peer: 2,
-                },
-            } if reference == block_ref
-        ));
-
-        drop(handle);
-        task.await.unwrap();
+        drop(author);
+        drop(receiver);
+        author_task.await.unwrap();
+        receiver_task.await.unwrap();
     }
 
     #[tokio::test]

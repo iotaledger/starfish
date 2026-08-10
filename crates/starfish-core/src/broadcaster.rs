@@ -884,8 +884,8 @@ where
         }
     }
     if inner.dag_state.consensus_protocol.is_starfish_rbc() {
-        // INIT is the sole proactive header carrier and the RBC service sends
-        // transaction data as a separate reference-keyed payload.
+        // INIT is the sole proactive header carrier and co-carries direct
+        // transaction data without repeating the header.
         return Some(());
     }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");

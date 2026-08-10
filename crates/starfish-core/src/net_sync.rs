@@ -38,9 +38,7 @@ use crate::{
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
-    network::{
-        BlockBatch, Connection, Network, NetworkMessage, RbcTransactionPayload, ShardPayload,
-    },
+    network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
     sailfish_service::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
@@ -54,7 +52,7 @@ use crate::{
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
         BlockReference, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
-        RoundNumber, VerifiedBlock, format_authority_index,
+        RoundNumber, TransactionData, VerifiedBlock, format_authority_index,
     },
 };
 
@@ -107,7 +105,7 @@ fn verify_mac_transport(
 
 fn verify_starfish_rbc_transaction_payload(
     canonical_header: &RbcCanonicalHeader,
-    payload: RbcTransactionPayload,
+    transaction_data: Arc<TransactionData>,
     committee: &Committee,
     own_id: AuthorityIndex,
     peer_id: AuthorityIndex,
@@ -115,14 +113,8 @@ fn verify_starfish_rbc_transaction_payload(
     authentication_scheme: BlockAuthenticationScheme,
     mac_keys: &[MacKey],
 ) -> eyre::Result<ReconstructedTransactionData> {
-    let (block_reference, transaction_data) = payload.into_parts();
-    if block_reference != canonical_header.reference() {
-        eyre::bail!(
-            "Starfish-RBC transaction payload reference {} does not match header {}",
-            block_reference,
-            canonical_header.reference()
-        );
-    }
+    let block_reference = canonical_header.reference();
+    let transaction_data = Arc::try_unwrap(transaction_data).unwrap_or_else(|data| (*data).clone());
     let (block_header, _) = canonical_header.to_authentication_free_block().into_parts();
     let mut block = VerifiedBlock::from_parts(block_header, Some(transaction_data));
     let Some(mut shard_data) = block.verify_with_authentication(
@@ -992,15 +984,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
             }
-            NetworkMessage::RbcTransactionPayload(payload) => {
-                if let Some(ref rbc) = self.starfish_rbc_service {
-                    if let Err(error) = rbc.transaction_payload(self.peer_id, payload) {
-                        tracing::warn!(
-                            "Failed to forward Starfish-RBC transaction payload: {error}"
-                        );
-                    }
-                }
-            }
         }
         true
     }
@@ -1850,12 +1833,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         RbcServiceEvent::TransactionPayloadStaged {
                             peer,
                             header,
-                            payload,
+                            transaction_data,
                         } => {
-                            let block_ref = payload.block_reference();
+                            let block_ref = header.reference();
                             let item = match verify_starfish_rbc_transaction_payload(
                                 header.header(),
-                                payload,
+                                transaction_data,
                                 &event_inner.committee,
                                 event_inner.dag_state.get_own_authority_index(),
                                 peer,
@@ -2869,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn starfish_rbc_payload_is_header_free_and_commitment_checked() {
+    fn starfish_rbc_initial_payload_is_commitment_checked() {
         let committee = Committee::new_test(vec![1; 4]);
         let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 64]))];
         let mut commitment_encoder =
@@ -2893,10 +2876,7 @@ mod tests {
             commitment,
         )
         .unwrap();
-        let payload = RbcTransactionPayload::new(
-            canonical.reference(),
-            TransactionData::new(transactions.clone()),
-        );
+        let payload = Arc::new(TransactionData::new(transactions.clone()));
         let mut verifier = ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
         let verified = verify_starfish_rbc_transaction_payload(
             &canonical,
@@ -2913,32 +2893,13 @@ mod tests {
         assert_eq!(verified.transaction_data.transactions(), &transactions);
         assert_eq!(verified.shard_data.shard_index(), 1);
 
-        let tampered = RbcTransactionPayload::new(
-            canonical.reference(),
-            TransactionData::new(vec![BaseTransaction::Share(Transaction::new(vec![8; 64]))]),
-        );
+        let tampered = Arc::new(TransactionData::new(vec![BaseTransaction::Share(
+            Transaction::new(vec![8; 64]),
+        )]));
         assert!(
             verify_starfish_rbc_transaction_payload(
                 &canonical,
                 tampered,
-                &committee,
-                1,
-                0,
-                &mut verifier,
-                BlockAuthenticationScheme::MacVector,
-                &[],
-            )
-            .is_err()
-        );
-
-        let wrong_reference = RbcTransactionPayload::new(
-            BlockReference::new_test(0, 2),
-            TransactionData::new(transactions),
-        );
-        assert!(
-            verify_starfish_rbc_transaction_payload(
-                &canonical,
-                wrong_reference,
                 &committee,
                 1,
                 0,

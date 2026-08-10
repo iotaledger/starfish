@@ -21,7 +21,8 @@ use crate::{
     types::{
         AckFields, AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme,
         BlockDigest, BlockHeader, BlockReference, MAX_COMMITTEE_SIZE, RoundNumber, Stake,
-        TimestampNs, VerifiedBlock, compress_acknowledgments, expand_acknowledgments,
+        TimestampNs, TransactionData, VerifiedBlock, compress_acknowledgments,
+        expand_acknowledgments,
     },
 };
 
@@ -491,15 +492,33 @@ pub enum RbcInitialProof {
 ///
 /// The proof is a sidecar over the canonical header reference. It is not part
 /// of the content-addressed header identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RbcHeaderProposal {
     header: RbcCanonicalHeader,
     proof: RbcInitialProof,
+    transaction_data: Option<Arc<TransactionData>>,
 }
 
 impl RbcHeaderProposal {
+    #[cfg(test)]
     pub(crate) fn new(header: RbcCanonicalHeader, proof: RbcInitialProof) -> Self {
-        Self { header, proof }
+        Self {
+            header,
+            proof,
+            transaction_data: None,
+        }
+    }
+
+    pub(crate) fn with_transaction_data(
+        header: RbcCanonicalHeader,
+        proof: RbcInitialProof,
+        transaction_data: Option<Arc<TransactionData>>,
+    ) -> Self {
+        Self {
+            header,
+            proof,
+            transaction_data,
+        }
     }
 
     pub fn header(&self) -> &RbcCanonicalHeader {
@@ -510,8 +529,36 @@ impl RbcHeaderProposal {
         &self.proof
     }
 
-    pub(crate) fn into_parts(self) -> (RbcCanonicalHeader, RbcInitialProof) {
-        (self.header, self.proof)
+    #[cfg(test)]
+    pub(crate) fn transaction_data(&self) -> Option<&TransactionData> {
+        self.transaction_data.as_deref()
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        RbcCanonicalHeader,
+        RbcInitialProof,
+        Option<Arc<TransactionData>>,
+    ) {
+        (self.header, self.proof, self.transaction_data)
+    }
+}
+
+impl fmt::Debug for RbcHeaderProposal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RbcHeaderProposal")
+            .field("header", &self.header)
+            .field("proof", &self.proof)
+            .field(
+                "transaction_count",
+                &self
+                    .transaction_data
+                    .as_ref()
+                    .map(|data| data.number_transactions()),
+            )
+            .finish()
     }
 }
 
