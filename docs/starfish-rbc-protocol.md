@@ -1,6 +1,6 @@
 # Starfish-RBC protocol specification
 
-Status: design milestone, not implemented
+Status: protocol specification with isolated RBC kernel; network and DAG integration pending
 
 This document specifies the first correctness-oriented prototype of Starfish with reliable header
 certification and a signature-free MAC configuration. The provisional CLI name is `starfish-rbc`.
@@ -10,10 +10,10 @@ availability, DAG ordering, and commitment, while adding a Bracha reliable-broad
 block headers. It uses the same validator, committee, networking, storage, orchestrator, and
 benchmark setup as the other protocols in this repository.
 
-This document is not a claim that the protocol is already proved or implemented. The motivating
-work-in-progress note gives reliable-delivery and MAC-vector ingredients, but does not prove their
-composition with Starfish. The proof obligations below must be discharged before making a safety
-or liveness claim.
+This document is not a claim that the composed protocol is already proved or fully implemented. The
+motivating work-in-progress note gives reliable-delivery and MAC-vector ingredients, but does not
+prove their composition with Starfish. The proof obligations below must be discharged before making
+a safety or liveness claim.
 
 ## 1. Goals
 
@@ -96,19 +96,39 @@ One reliable-broadcast instance exists for each slot:
 Slot = (protocol_instance, committee_id, author, round)
 ```
 
-The value proposed in a slot is a canonical Starfish header. Its identifier is the existing:
+The value proposed in a slot is a canonical Starfish header. Its identifier remains:
 
 ```text
 BlockReference = (author, round, content_digest)
 ```
 
-`content_digest` commits to the existing canonical header content, including the transaction
-commitment, parent references, acknowledgments, and other consensus-relevant fields. It does not
-commit to the initial authentication sidecar or to reliable-broadcast messages.
+`content_digest` must commit unambiguously to the canonical header content, including the
+transaction commitment, parent references, acknowledgments, and other consensus-relevant fields.
+It does not commit to the initial authentication sidecar or to reliable-broadcast messages.
 
-`protocol_instance` and `committee_id` are domain-separation inputs. They are not added to
-`BlockReference`. Their exact derivation must be fixed before implementation; a committee/genesis
-identifier is preferable to a human-readable CLI string.
+The current shared `BlockDigest` implementation hashes the parent-reference vector immediately
+followed by the acknowledgment vector without encoding their lengths. Moving a reference across
+that boundary can therefore preserve the digest without finding a BLAKE3 collision. Before
+Starfish-RBC accepts headers, milestone three must add a Starfish-RBC canonical content encoding
+with explicit field markers and collection lengths. This is a blocking proof obligation, not an
+optional optimization.
+
+`protocol_instance` and `committee_id` are authenticated domain-separation inputs but are not added
+to `BlockReference`:
+
+- `protocol_instance` is a nonzero 32-byte execution/session identifier shared through genesis
+  configuration. A fixed version string is not sufficient because benchmark keys are deterministic
+  and reused across independent runs.
+- `committee_id` is a 32-byte BLAKE3 derive-key hash under context
+  `STARFISH_RBC_V1_COMMITTEE_ID`. Its canonical input contains the committee length, effective
+  validity and quorum thresholds, Reed-Solomon information length, the three stored optimistic
+  thresholds, and each authority in index order with its index, stake, and Ed25519, BLS,
+  ML-DSA-44, and ML-DSA-65 public keys. It excludes addresses, timeouts, private keys, and pairwise
+  MAC keys.
+
+The kernel rejects an all-zero protocol instance both at construction and deserialization, a
+keyring-length mismatch, committees above `MAX_COMMITTEE_SIZE`, and deserialized committees whose
+effective validity/quorum thresholds or information length disagree with the canonical formulas.
 
 Header processing has three distinct gates:
 
@@ -125,14 +145,25 @@ The implementation must not keep these gates bundled in the current all-or-nothi
 
 ### 3.2 Initial header authentication
 
-The configured block-authentication method applies only to the author's initial header proof:
+The configured block-authentication method applies only to the author's initial header proof. Its
+stable authentication code is Ed25519 `0x00`, ML-DSA-44 `0x01`, ML-DSA-65 `0x02`, or MAC `0x03`.
 
-- Ed25519 and ML-DSA sign a domain-separated statement containing the slot and content digest.
-- In MAC mode, author `A` creates one receiver-specific tag for each validator `Q`:
+Ed25519 and ML-DSA sign the BLAKE3 digest of the 119-byte base statement below. In MAC mode, author
+`A` creates one receiver-specific tag for each validator `Q` over the 123-byte MAC statement:
 
 ```text
-InitialTag(A, Q, block_ref) =
-    MAC[k(A,Q)](INITIAL || Slot || block_ref || A || Q)
+base_statement =
+    "STARFISH_RBC_V1"         // 15 bytes
+ || kind                       // INITIAL = 0x00
+ || initial_authentication     // 1 byte
+ || protocol_instance          // 32 bytes
+ || committee_id               // 32 bytes
+ || author                     // u16, big-endian
+ || round                      // u32, big-endian
+ || content_digest             // 32 bytes
+
+InitialSignatureDigest = BLAKE3(base_statement)
+InitialTag(A, Q) = MAC[k(A,Q)](base_statement || A:u16_be || Q:u16_be)
 ```
 
 The ordered collection of these tags is the conceptual MAC vector. With direct dissemination,
@@ -148,15 +179,21 @@ the header clean, globally available, or safe to commit.
 ### 3.3 Phase-message authentication
 
 ECHO and READY use pairwise MAC authentication for every initial header-authentication variant.
-For phase sender `S` and recipient `Q`:
+Their kind codes are ECHO `0x01` and READY `0x02`. For phase sender `S` and recipient `Q`:
 
 ```text
 PhaseTag(S, Q, phase, block_ref) =
-    MAC[k(S,Q)](RBC_PHASE || Slot || phase || block_ref || S || Q)
+    MAC[k(S,Q)](
+        base_statement(phase, block_ref)
+     || S:u16_be
+     || Q:u16_be
+    )
 ```
 
-The concrete encoding must use fixed-width, canonical fields and distinct domain values for
-INITIAL, ECHO, and READY. The protocol must not rely on ambiguous string concatenation.
+The resulting phase statement is exactly 123 bytes. The selected initial-authentication mode is
+bound even though every mode uses phase MACs; nodes with inconsistent modes cannot combine
+transcripts. Enum discriminants, bincode, YAML, and ambiguous string concatenation are never used
+as authenticated bytes.
 
 An inbound phase message counts only if all of the following hold:
 
@@ -171,6 +208,11 @@ A forwarded or replayed phase message received from another peer never counts, e
 contain a valid tag addressed to the receiver. Local ECHO/READY actions are counted locally and do
 not require a loopback network message.
 
+The isolated kernel enforces committee membership and rejects genesis slots. The active/retained
+round-window check requires the service's current round and is therefore an explicit ingress
+adapter responsibility in milestone three; it must run before calling the kernel or allocating a
+candidate.
+
 ## 4. Messages
 
 Version one uses the following logical messages:
@@ -182,19 +224,11 @@ HeaderProposal {
     initial_authentication,
 }
 
-Echo {
-    slot,
+RbcPhaseMessage {
     block_ref,
     sender,
     recipient,
-    phase_tag,
-}
-
-Ready {
-    slot,
-    block_ref,
-    sender,
-    recipient,
+    phase,
     phase_tag,
 }
 
@@ -209,9 +243,14 @@ HeaderResponse {
 }
 ```
 
-ECHO and READY contain a block reference, not the header. This avoids rebroadcasting each header
-quadratically. Header request/response traffic transports data only and is never counted as quorum
-testimony.
+The protocol instance, committee ID, and authentication mode are fixed service context and need not
+be repeated on the wire, but every tag authenticates them. ECHO and READY contain a block reference,
+not the header. This avoids rebroadcasting each header quadratically. Header request/response
+traffic transports data only and is never counted as quorum testimony.
+
+The milestone-two phase message has a golden bincode regression vector. The eventual
+`NetworkMessage` integration must append a new variant or use a versioned envelope; it must not
+silently change existing variant discriminants.
 
 An honest ECHO or READY sender must possess the matching content-validated header. Consequently,
 when a threshold is observed before the local header arrives, the receiver can request the header
@@ -251,6 +290,13 @@ CandidateState {
 }
 ```
 
+The isolated milestone-two kernel temporarily represents header presence with an internal boolean
+to test transitions. Its header-available and initial-proof authorization hooks are module-private,
+so another crate module cannot assert these facts by call ordering. Milestone three must replace the
+boolean with a typed handle that owns or pins the canonical content-validated header, and expose
+only combined typed ingress paths. Cache eviction must not leave the kernel advertising a header it
+no longer retains.
+
 The `echoed`, `readied`, and `delivered` guards are slot-global, not per digest. Evidence is kept per
 digest so that Byzantine equivocation can be observed without locking the receiver to the first
 value it sees.
@@ -271,7 +317,10 @@ bounds are deferred with crash/restart support; arbitrary cache eviction is not 
 
 Sending a local phase is one atomic state transition: set the slot-global guard, insert the local
 authority into that candidate's phase-sender set, and enqueue separately authenticated messages for
-all other validators. Threshold checks include this local evidence.
+all other validators. Threshold checks include this local evidence. Message materialization checks
+the recorded slot-global guard and the kernel's header-present predicate again; it cannot
+authenticate a phase for an unauthorized or conflicting value. Milestone three makes that predicate
+a pinned-header handle. The same authorized phase may be materialized again for retransmission.
 
 ## 6. State machine
 
@@ -344,6 +393,12 @@ Every honest ECHO and READY sender is a header holder. Retrieval therefore proce
 3. Accept the first response whose recomputed digest and structural validation match.
 4. Re-evaluate all latched ECHO/READY triggers immediately after storing the header.
 5. Continue requesting while threshold progress is blocked and untried holders remain.
+
+`NeedHeader` is a recovery wake-up, not a one-shot delivery assumption. The kernel re-emits it when
+the authenticated holder set grows and exposes the current effect to a durable retry timer. The
+integration layer must keep that timer active, retry or fan out after loss or an unresponsive
+holder, and cancel it only after a matching content-validated header is pinned or the instance is
+safely retired.
 
 At least one honest holder exists in every `V`-stake READY set. At least `f + 1` honest holders exist
 in an equal-stake `2f + 1` ECHO quorum. Byzantine responses can delay retrieval but cannot change
@@ -517,6 +572,9 @@ tests.
 
 ### 11.1 RBC unit tests
 
+The milestone-two suite includes deterministic four-kernel message-pump traces for split initial
+values and poisoned-recipient MAC recovery, in addition to the local transition tests below.
+
 - `n = 4, f = 1`: a Byzantine author gives candidate X to one honest validator and candidate Y to
   two others. A validator that first saw X must still process quorum traffic for Y.
 - A Byzantine author provides valid initial tags to enough validators to form an ECHO quorum but
@@ -616,12 +674,14 @@ RBC copy of every protocol.
 
 Each milestone is committed separately.
 
-1. **Specification:** this document, with no protocol code changes.
-2. **RBC kernel:** domain-separated phase MACs, slot-global ECHO/READY state, per-value evidence,
-   header-holder tracking, and adversarial unit tests.
+1. **Specification (complete):** this document, initially with no protocol code changes.
+2. **RBC kernel (complete):** domain-separated initial/phase statements, explicit session and
+   committee identity, slot-global ECHO/READY state, guarded recipient-specific message
+   materialization, retryable header-holder tracking, and local plus four-kernel adversarial tests.
+   The synchronous kernel is intentionally not network- or DAG-wired yet.
 3. **Header staging and retrieval:** split content validation from initial authentication, add
-   fixed-size-checked candidate staging with pending triggers, and fetch headers from direct phase
-   senders.
+   a length-delimited Starfish-RBC content digest, typed/pinned fixed-size-checked candidate staging,
+   retained-window filtering, pending triggers, and durable fetching from direct phase senders.
 4. **Certified Starfish integration:** add `starfish-rbc`, selectable initial authentication,
    dirty/clean lifecycle, clean-only acknowledgments, and clean-only consensus/linearization.
 5. **End-to-end validation:** poisoned-tag, equivocation, dangling-parent, and all-authentication
@@ -632,16 +692,18 @@ Each milestone is committed separately.
    and restart tests.
 8. **Benchmarks:** direct and tree comparisons with results reported outside this specification.
 
-## 15. Decisions still required before implementation
+## 15. Remaining integration decisions
 
-The protocol behavior above is fixed, but implementation must still choose:
+The kernel behavior and authenticated encoding above are fixed. Integration must still choose:
 
-- the exact `protocol_instance` and `committee_id` derivation;
-- the canonical byte encoding for phase-MAC statements;
+- how benchmark genesis generates and distributes the fresh 32-byte `protocol_instance`;
+- the exact field markers and collection-length widths for the Starfish-RBC content digest;
 - a safe post-v1 state-retirement and garbage-collection rule;
 - header-holder request fanout and retry timing;
-- the final CLI spelling for MAC authentication; and
 - whether legacy unsafe `*-mac` aliases are renamed or retained as lower-bound benchmarks.
+
+The authentication selector remains `--block-authentication`; Starfish-RBC integration adds `mac`
+to the existing Ed25519, ML-DSA-44, and ML-DSA-65 values while retaining Ed25519 as the default.
 
 None of these choices may weaken the slot-global phase guards, direct-message checks, header
 availability requirement, or clean-only Starfish boundary.

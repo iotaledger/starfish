@@ -502,6 +502,16 @@ impl MacKey {
         hasher.update(content_digest.as_ref());
         MacTag(hasher.finalize().into())
     }
+
+    /// Authenticate an already-canonical Starfish-RBC statement.
+    ///
+    /// Statement construction and domain separation live in the RBC module;
+    /// keeping keyed-hasher access here avoids exposing the secret key bytes.
+    pub(crate) fn compute_rbc_tag(&self, statement: &[u8]) -> MacTag {
+        let mut hasher = Blake3Hasher::new_keyed(&self.0);
+        hasher.update(statement);
+        MacTag(hasher.finalize().into())
+    }
 }
 
 /// Generate deterministic, symmetric pairwise keyrings for local benchmarks

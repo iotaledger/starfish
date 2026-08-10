@@ -29,6 +29,7 @@ pub mod prometheus;
 mod rocks_store;
 mod runtime;
 pub mod shard_reconstructor;
+mod starfish_rbc;
 mod stat;
 mod state;
 pub(crate) mod store;
