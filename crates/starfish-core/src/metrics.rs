@@ -1109,6 +1109,7 @@ impl Metrics {
             "rbc_ready",
             "rbc_header_request",
             "rbc_header_response",
+            "rbc_payload",
         ];
         let outbound_message_breakdown = NETWORK_MESSAGE_TYPES
             .iter()

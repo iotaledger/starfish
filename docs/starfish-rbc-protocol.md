@@ -278,6 +278,11 @@ HeaderResponse {
     slot,
     canonical_header,
 }
+
+TransactionPayload {
+    block_ref,
+    transaction_data,
+}
 ```
 
 The protocol instance, committee ID, and authentication mode are fixed service context and need not
@@ -285,9 +290,9 @@ be repeated on the wire, but every tag authenticates them. ECHO and READY contai
 not the header. This avoids rebroadcasting each header quadratically. Header request/response
 traffic transports data only and is never counted as quorum testimony.
 
-The milestone-two phase message has a golden bincode regression vector. The eventual
-`NetworkMessage` integration must append a new variant or use a versioned envelope; it must not
-silently change existing variant discriminants.
+The milestone-two phase message has a golden bincode regression vector. Integrated
+`NetworkMessage` variants are append-only so they do not silently change existing bincode
+discriminants.
 
 An honest ECHO or READY sender must possess the matching content-validated header. Consequently,
 when a threshold is observed before the local header arrives, the receiver can request the header
@@ -298,8 +303,13 @@ content digest and validating the header's structure.
 needs nor confers a valid local initial proof. It supplies the content bytes needed for a transition
 that is authorized by the receiver's own directly authenticated RBC evidence.
 
-The RBC header-retrieval path never asserts transaction-payload availability. Shards and full
-transaction data continue to use the existing Starfish paths.
+The RBC header-retrieval path never asserts transaction-payload availability. Direct transaction
+data uses a header-free payload keyed by the already authenticated `BlockReference`; the receiver
+checks it against the transaction commitment in the pinned header, derives its local shard, and
+attaches or buffers it through the existing Starfish transaction-data path. Shard relay and
+reconstruction remain unchanged. Explicit missing-parent synchronization may still return a
+header as a recovery fallback, but proactive full-block/header batches are disabled for
+Starfish-RBC.
 
 ## 5. Local state
 
@@ -715,12 +725,11 @@ overhead number: saved INIT bytes can hide part of the phase-message cost. The b
 INIT/header bytes and ECHO/READY bytes separately; a one-tag lower-bound projection may be added but
 must be labeled as such.
 
-The first integrated prototype also sends the canonical header once in RBC INIT and again inside
-Starfish's existing full payload carrier. This deliberately preserves the transaction layer while
-the certification boundary is validated, but it is avoidable duplicate traffic. Initial benchmark
-results therefore measure the current whole-system prototype, not the minimum possible RBC header
-overhead. The per-message framed-byte counters make this duplication and the ECHO/READY cost
-visible separately.
+Starfish-RBC sends the canonical header through INIT (or explicit header recovery) and transports
+direct transaction data separately as `RbcTransactionPayload { block_ref, transaction_data }`.
+This removes the steady-state duplicate header that the first integrated prototype carried inside
+an ordinary full-block batch. The per-message framed-byte counters report the payload and
+ECHO/READY costs separately.
 
 Metrics should separate:
 
@@ -775,8 +784,8 @@ Each milestone is committed separately.
 4. **Certified Starfish integration (complete):** add `starfish-rbc`, selectable initial
    authentication, the
    network RBC service and durable multi-holder fetch retry, dirty/clean lifecycle, clean-only
-   acknowledgments, clean-only consensus/linearization, per-peer ordered outbound isolation, and
-   fresh per-run protocol-instance distribution.
+   acknowledgments, clean-only consensus/linearization, per-peer ordered outbound isolation,
+   header-free transaction payloads, and fresh per-run protocol-instance distribution.
 5. **End-to-end validation (in progress):** all four initial-authentication modes commit in a
    four-validator network test, and a late-joining MAC validator catches up. Kernel-level
    poisoned-tag and equivocation tests are complete; composed dangling-parent and Byzantine
@@ -799,7 +808,6 @@ the legacy unsafe aliases remain explicitly labeled lower bounds. Remaining work
   window without reopening unbounded Byzantine slot allocation;
 - a bounded per-peer RBC outbound queue policy that preserves honest-peer isolation under a stalled
   receiver;
-- removal of the duplicate header in the transaction payload carrier; and
 - production-authenticated connection identity and durable phase/delivery recovery.
 
 The authentication selector remains `--block-authentication`; Starfish-RBC integration adds `mac`

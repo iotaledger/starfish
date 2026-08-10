@@ -883,6 +883,11 @@ where
             *round = max(*round, block.round());
         }
     }
+    if inner.dag_state.consensus_protocol.is_starfish_rbc() {
+        // INIT is the sole proactive header carrier and the RBC service sends
+        // transaction data as a separate reference-keyed payload.
+        return Some(());
+    }
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch::full_only(DataSource::BlockBundleStreaming, blocks);
     if let Ok(size) = bincode::serialized_size(&batch) {
@@ -1087,6 +1092,12 @@ where
     let useful_headers = AuthoritySet::default();
     let useful_shards = AuthoritySet::default();
     report_useful_authorities(metrics, peer.as_str(), useful_headers, useful_shards);
+
+    if inner.dag_state.consensus_protocol.is_starfish_rbc() {
+        let mut sent = sent_to_peer.write();
+        sent.extend(blocks.iter().map(|block| *block.reference()));
+        return Some(());
+    }
 
     tracing::debug!("Blocks to be sent to {peer} are {blocks:?}");
     let batch = BlockBatch {
@@ -1356,9 +1367,15 @@ where
             }
         }
         PushOtherBlocksFormat::HeadersAndShards => {
+            let rbc_payload_sidecar = inner.dag_state.consensus_protocol.is_starfish_rbc();
+            let header_refs = if rbc_payload_sidecar {
+                &[]
+            } else {
+                plan.other_refs.as_slice()
+            };
             let (headers, shards) = inner
                 .dag_state
-                .get_transmission_parts(&plan.other_refs, &plan.shard_refs);
+                .get_transmission_parts(header_refs, &plan.shard_refs);
             let headers = prepare_forwarded_blocks_for_peer(
                 inner.dag_state.block_authentication_scheme,
                 inner.dag_state.consensus_protocol,
@@ -1367,7 +1384,11 @@ where
             );
             BlockBatch {
                 source: DataSource::BlockBundleStreaming,
-                full_blocks: plan.own_blocks,
+                full_blocks: if rbc_payload_sidecar {
+                    Vec::new()
+                } else {
+                    plan.own_blocks
+                },
                 headers,
                 shards,
                 useful_headers_authors: plan.useful_headers,
@@ -1407,7 +1428,7 @@ where
     if let Some(max_round) = own_blocks.iter().map(|b| b.round()).max() {
         *round = max_round;
     }
-    if !own_blocks.is_empty() {
+    if !own_blocks.is_empty() && !inner.dag_state.consensus_protocol.is_starfish_rbc() {
         let fast_batch =
             BlockBatch::full_only(DataSource::BlockBundleStreaming, own_blocks.clone());
         if let Ok(size) = bincode::serialized_size(&fast_batch) {
@@ -1444,6 +1465,12 @@ where
 
     // Drop own blocks from the plan — already shipped in the fast batch.
     plan.own_blocks = Vec::new();
+    if inner.dag_state.consensus_protocol.is_starfish_rbc() {
+        // RBC INIT/recovery owns header dissemination. The ordinary Starfish
+        // broadcaster remains responsible only for shard sidecars.
+        plan.other_refs.clear();
+        plan.useful_headers = AuthoritySet::default();
+    }
 
     let slow_batch = materialize_push_batch(&inner, to_whom_authority_index, plan);
     if slow_batch.is_empty() {

@@ -32,7 +32,8 @@ use crate::{
     stat::HistogramSender,
     types::{
         AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, PartialSig,
-        ProvableShard, RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, VerifiedBlock,
+        ProvableShard, RoundNumber, SailfishNoVoteMsg, SailfishTimeoutMsg, TransactionData,
+        VerifiedBlock,
     },
 };
 
@@ -81,6 +82,44 @@ const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
 pub struct ShardPayload {
     pub block_reference: BlockReference,
     pub shard: ProvableShard,
+}
+
+/// Starfish-RBC transaction data transported separately from the canonical
+/// header already carried by INIT or header recovery.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RbcTransactionPayload {
+    block_reference: BlockReference,
+    transaction_data: TransactionData,
+}
+
+impl RbcTransactionPayload {
+    pub(crate) fn new(block_reference: BlockReference, transaction_data: TransactionData) -> Self {
+        Self {
+            block_reference,
+            transaction_data,
+        }
+    }
+
+    pub(crate) fn block_reference(&self) -> BlockReference {
+        self.block_reference
+    }
+
+    pub(crate) fn into_parts(self) -> (BlockReference, TransactionData) {
+        (self.block_reference, self.transaction_data)
+    }
+}
+
+impl std::fmt::Debug for RbcTransactionPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RbcTransactionPayload")
+            .field("block_reference", &self.block_reference)
+            .field(
+                "transaction_count",
+                &self.transaction_data.number_transactions(),
+            )
+            .finish()
+    }
 }
 
 /// A structured batch of block data, ordered by decreasing information density:
@@ -190,6 +229,9 @@ pub enum NetworkMessage {
     /// Starfish-RBC: return canonical header content. The receiver recomputes
     /// and checks its content-addressed reference before accepting it.
     RbcHeaderResponse(RbcCanonicalHeader),
+    /// Starfish-RBC: transaction data keyed by the canonical reference already
+    /// disseminated through INIT. This deliberately carries no block header.
+    RbcTransactionPayload(RbcTransactionPayload),
 }
 
 impl NetworkMessage {
@@ -217,6 +259,7 @@ impl NetworkMessage {
             },
             Self::RbcHeaderRequest(_) => "rbc_header_request",
             Self::RbcHeaderResponse(_) => "rbc_header_response",
+            Self::RbcTransactionPayload(_) => "rbc_payload",
         }
     }
 }
@@ -966,6 +1009,7 @@ mod tests {
     use crate::{
         crypto::{MacTag, TransactionsCommitment, dummy_signer},
         starfish_rbc::{RbcInitialProof, RbcPhaseMessage},
+        types::TransactionData,
     };
 
     fn variant_index(message: &NetworkMessage) -> u32 {
@@ -1006,12 +1050,17 @@ mod tests {
         ));
         let request = NetworkMessage::RbcHeaderRequest(block_ref);
         let response = NetworkMessage::RbcHeaderResponse(header);
+        let payload = NetworkMessage::RbcTransactionPayload(RbcTransactionPayload::new(
+            block_ref,
+            TransactionData::new(Vec::new()),
+        ));
 
         for (message, expected_index, expected_kind) in [
             (initial, 11, "rbc_initial"),
             (phase, 12, "rbc_ready"),
             (request, 13, "rbc_header_request"),
             (response, 14, "rbc_header_response"),
+            (payload, 15, "rbc_payload"),
         ] {
             assert_eq!(variant_index(&message), expected_index);
             assert_eq!(message.request_type(), expected_kind);

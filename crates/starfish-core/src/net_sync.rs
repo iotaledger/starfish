@@ -38,21 +38,23 @@ use crate::{
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
-    network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
+    network::{
+        BlockBatch, Connection, Network, NetworkMessage, RbcTransactionPayload, ShardPayload,
+    },
     runtime::{Handle, JoinError, JoinHandle, sleep},
     sailfish_service::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
-    starfish_rbc::RbcProtocolInstanceId,
+    starfish_rbc::{RbcCanonicalHeader, RbcProtocolInstanceId},
     starfish_rbc_service::{
         RbcInitialAuthenticator, RbcServiceEvent, RbcServiceHandle, start_starfish_rbc_service,
     },
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
-        BlockReference, PartialSig, PartialSigKind, ProvableShard, RoundNumber, VerifiedBlock,
-        format_authority_index,
+        BlockReference, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
+        RoundNumber, VerifiedBlock, format_authority_index,
     },
 };
 
@@ -101,6 +103,51 @@ fn verify_mac_transport(
         ),
         _ => Ok(()),
     }
+}
+
+fn verify_starfish_rbc_transaction_payload(
+    canonical_header: &RbcCanonicalHeader,
+    payload: RbcTransactionPayload,
+    committee: &Committee,
+    own_id: AuthorityIndex,
+    peer_id: AuthorityIndex,
+    encoder: &mut ReedSolomonEncoder,
+    authentication_scheme: BlockAuthenticationScheme,
+    mac_keys: &[MacKey],
+) -> eyre::Result<ReconstructedTransactionData> {
+    let (block_reference, transaction_data) = payload.into_parts();
+    if block_reference != canonical_header.reference() {
+        eyre::bail!(
+            "Starfish-RBC transaction payload reference {} does not match header {}",
+            block_reference,
+            canonical_header.reference()
+        );
+    }
+    let (block_header, _) = canonical_header.to_authentication_free_block().into_parts();
+    let mut block = VerifiedBlock::from_parts(block_header, Some(transaction_data));
+    let Some(mut shard_data) = block.verify_with_authentication(
+        committee,
+        own_id as usize,
+        peer_id as usize,
+        encoder,
+        ConsensusProtocol::StarfishRbc,
+        authentication_scheme,
+        mac_keys,
+    )?
+    else {
+        eyre::bail!("Starfish-RBC transaction payload for {block_reference} is empty");
+    };
+    block.preserialize();
+    shard_data.preserialize();
+    let transaction_data = block
+        .transaction_data()
+        .expect("verified RBC payload must contain transaction data")
+        .clone();
+    Ok(ReconstructedTransactionData {
+        block_reference,
+        transaction_data,
+        shard_data,
+    })
 }
 
 /// Prepare blocks forwarded through relay or synchronization paths for a
@@ -945,6 +992,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     }
                 }
             }
+            NetworkMessage::RbcTransactionPayload(payload) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.transaction_payload(self.peer_id, payload) {
+                        tracing::warn!(
+                            "Failed to forward Starfish-RBC transaction payload: {error}"
+                        );
+                    }
+                }
+            }
         }
         true
     }
@@ -1743,6 +1799,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let rbc_event_task = rbc_event_rx.map(|mut event_rx| {
             let event_inner = inner.clone();
             handle.spawn(async move {
+                let mut payload_encoder = ReedSolomonEncoder::new(2, 4, 2)
+                    .expect("Starfish-RBC payload encoder should be created");
                 while let Some(event) = event_rx.recv().await {
                     match event {
                         RbcServiceEvent::Network { recipient, message } => {
@@ -1788,6 +1846,47 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     missing_parents
                                 );
                             }
+                        }
+                        RbcServiceEvent::TransactionPayloadStaged {
+                            peer,
+                            header,
+                            payload,
+                        } => {
+                            let block_ref = payload.block_reference();
+                            let item = match verify_starfish_rbc_transaction_payload(
+                                header.header(),
+                                payload,
+                                &event_inner.committee,
+                                event_inner.dag_state.get_own_authority_index(),
+                                peer,
+                                &mut payload_encoder,
+                                event_inner.dag_state.block_authentication_scheme,
+                                &event_inner.mac_keys,
+                            ) {
+                                Ok(item) => item,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        ?block_ref,
+                                        peer,
+                                        ?error,
+                                        "Rejected Starfish-RBC transaction payload"
+                                    );
+                                    continue;
+                                }
+                            };
+                            event_inner
+                                .cordial_knowledge
+                                .send(CordialKnowledgeMessage::DagParts {
+                                    headers: Vec::new(),
+                                    shards: vec![block_ref],
+                                });
+                            if let Some(shard_tx) = event_inner.shard_tx.lock().as_ref() {
+                                let _ = shard_tx.send(vec![ShardMessage::FullBlock(block_ref)]);
+                            }
+                            event_inner
+                                .syncer
+                                .add_transaction_data(vec![item], DataSource::StarfishRbcPayload)
+                                .await;
                         }
                         RbcServiceEvent::Delivered(header) => {
                             event_inner
@@ -2750,8 +2849,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::{self, SignatureBytes},
-        types::{BaseTransaction, BlockReference},
+        crypto::{self, SignatureBytes, TransactionsCommitment},
+        encoder::ShardEncoder,
+        types::{BaseTransaction, BlockReference, Transaction, TransactionData},
     };
 
     #[tokio::test]
@@ -2766,6 +2866,88 @@ mod tests {
         let wait = proposal_round_notify.notified();
         signals.proposal_round_advanced(5);
         wait.await;
+    }
+
+    #[test]
+    fn starfish_rbc_payload_is_header_free_and_commitment_checked() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 64]))];
+        let mut commitment_encoder =
+            ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
+        let encoded = commitment_encoder.encode_transactions(
+            &transactions,
+            committee.info_length(),
+            committee.len() - committee.info_length(),
+        );
+        let (commitment, _) = TransactionsCommitment::new_from_encoded_transactions(&encoded, 1);
+        let canonical = RbcCanonicalHeader::try_new(
+            0,
+            1,
+            vec![
+                BlockReference::new_test(0, 0),
+                BlockReference::new_test(1, 0),
+                BlockReference::new_test(2, 0),
+            ],
+            Vec::new(),
+            11,
+            commitment,
+        )
+        .unwrap();
+        let payload = RbcTransactionPayload::new(
+            canonical.reference(),
+            TransactionData::new(transactions.clone()),
+        );
+        let mut verifier = ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
+        let verified = verify_starfish_rbc_transaction_payload(
+            &canonical,
+            payload,
+            &committee,
+            1,
+            0,
+            &mut verifier,
+            BlockAuthenticationScheme::MacVector,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(verified.block_reference, canonical.reference());
+        assert_eq!(verified.transaction_data.transactions(), &transactions);
+        assert_eq!(verified.shard_data.shard_index(), 1);
+
+        let tampered = RbcTransactionPayload::new(
+            canonical.reference(),
+            TransactionData::new(vec![BaseTransaction::Share(Transaction::new(vec![8; 64]))]),
+        );
+        assert!(
+            verify_starfish_rbc_transaction_payload(
+                &canonical,
+                tampered,
+                &committee,
+                1,
+                0,
+                &mut verifier,
+                BlockAuthenticationScheme::MacVector,
+                &[],
+            )
+            .is_err()
+        );
+
+        let wrong_reference = RbcTransactionPayload::new(
+            BlockReference::new_test(0, 2),
+            TransactionData::new(transactions),
+        );
+        assert!(
+            verify_starfish_rbc_transaction_payload(
+                &canonical,
+                wrong_reference,
+                &committee,
+                1,
+                0,
+                &mut verifier,
+                BlockAuthenticationScheme::MacVector,
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]

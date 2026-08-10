@@ -344,7 +344,10 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     .starfish_rbc_service
                     .as_ref()
                     .expect("Starfish-RBC protocol must start its RBC service")
-                    .start_local_header_blocking(RbcLocalHeader::from_canonical(&canonical))
+                    .start_local_header_with_payload_blocking(
+                        RbcLocalHeader::from_canonical(&canonical),
+                        block.transaction_data().cloned(),
+                    )
                     .expect("local Starfish-RBC header must be accepted before dissemination");
                 assert_eq!(
                     selected.reference(),

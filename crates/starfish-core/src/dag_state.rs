@@ -82,6 +82,8 @@ pub enum DataSource {
     /// Response to RoundGapRequest (blocks the requester was missing at a
     /// round).
     RoundGapResponse,
+    /// Header-free transaction data carried by Starfish-RBC after INIT.
+    StarfishRbcPayload,
 }
 
 impl DataSource {
@@ -96,6 +98,7 @@ impl DataSource {
             Self::Recover => "recover",
             Self::UnprovableCertificateResponse => "unprovable_certificate_response",
             Self::RoundGapResponse => "round_gap_response",
+            Self::StarfishRbcPayload => "starfish_rbc_payload",
         }
     }
 }
