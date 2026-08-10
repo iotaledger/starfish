@@ -580,7 +580,7 @@ impl AsRef<[u8]> for MacTag {
 
 impl fmt::Debug for MacTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Mac({})", &hex::encode(&self.0[..4]))
+        write!(f, "Mac({})", hex::encode(&self.0[..4]))
     }
 }
 
