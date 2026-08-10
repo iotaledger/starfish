@@ -597,7 +597,7 @@ impl BlockHeader {
     }
 }
 
-fn expand_acknowledgments(
+pub(crate) fn expand_acknowledgments(
     block_references: &[BlockReference],
     acknowledgment_intersection: Option<u8>,
     acknowledgment_references: &[BlockReference],
@@ -625,7 +625,7 @@ fn count_acknowledgments(
     (block_references.len() - start) + acknowledgment_references.len()
 }
 
-fn compress_acknowledgments(
+pub(crate) fn compress_acknowledgments(
     block_references: &[BlockReference],
     acknowledgment_references: &[BlockReference],
 ) -> (Option<u8>, Vec<BlockReference>) {

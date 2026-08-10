@@ -11,15 +11,19 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
-use ahash::AHashMap;
-use serde::{Deserialize, Deserializer, Serialize, de};
+use ahash::{AHashMap, AHashSet};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
     committee::{Committee, QuorumThreshold, StakeAggregator, ValidityThreshold},
-    crypto::{Blake3Hasher, MacKey, MacTag},
+    crypto::{
+        Blake3Hasher, MacKey, MacTag, MlDsa44SignatureBytes, MlDsa65SignatureBytes, SignatureBytes,
+        TransactionsCommitment,
+    },
     types::{
-        AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockReference,
-        MAX_COMMITTEE_SIZE, RoundNumber, Stake,
+        AckFields, AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme,
+        BlockDigest, BlockHeader, BlockReference, MAX_COMMITTEE_SIZE, RoundNumber, Stake,
+        TimestampNs, compress_acknowledgments, expand_acknowledgments,
     },
 };
 
@@ -39,6 +43,476 @@ const BASE_STATEMENT_SIZE: usize = PROTOCOL_DOMAIN.len()
     + COMMITTEE_ID_SIZE
     + BLOCK_REFERENCE_SIZE;
 const MAC_STATEMENT_SIZE: usize = BASE_STATEMENT_SIZE + 2 + 2;
+const RBC_BLOCK_REFERENCE_SIZE: usize = 2 + 4 + 32;
+const RBC_HEADER_FIXED_CONTENT_SIZE: usize = 1 + 2 + 1 + 4 + 1 + 4 + 1 + 4 + 1 + 8 + 1 + 32;
+const MAX_RBC_HEADER_CONTENT_SIZE: usize = 4 * 1024 * 1024;
+const MAX_RBC_REFERENCES_PER_FIELD: usize = u16::MAX as usize;
+const MAX_RBC_FUTURE_ROUNDS: RoundNumber = 100;
+
+mod bounded_references {
+    use std::{fmt, marker::PhantomData};
+
+    use serde::de::{Error as _, SeqAccess, Visitor};
+
+    use super::*;
+
+    pub(super) fn serialize<S>(
+        references: &[BlockReference],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        references.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<BlockReference>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ReferencesVisitor(PhantomData<BlockReference>);
+
+        impl<'de> Visitor<'de> for ReferencesVisitor {
+            type Value = Vec<BlockReference>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    formatter,
+                    "at most {MAX_RBC_REFERENCES_PER_FIELD} Starfish-RBC references"
+                )
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let size_hint = sequence.size_hint().unwrap_or(0);
+                if size_hint > MAX_RBC_REFERENCES_PER_FIELD {
+                    return Err(A::Error::custom(format!(
+                        "RBC reference count {size_hint} exceeds {MAX_RBC_REFERENCES_PER_FIELD}"
+                    )));
+                }
+                let mut references = Vec::with_capacity(size_hint);
+                while let Some(reference) = sequence.next_element()? {
+                    if references.len() == MAX_RBC_REFERENCES_PER_FIELD {
+                        return Err(A::Error::custom(format!(
+                            "RBC reference count exceeds {MAX_RBC_REFERENCES_PER_FIELD}"
+                        )));
+                    }
+                    references.push(reference);
+                }
+                Ok(references)
+            }
+        }
+
+        deserializer.deserialize_seq(ReferencesVisitor(PhantomData))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RbcAckFields {
+    intersection: Option<u8>,
+    #[serde(with = "bounded_references")]
+    extra_references: Vec<BlockReference>,
+}
+
+impl RbcAckFields {
+    fn from_logical(
+        block_references: &[BlockReference],
+        acknowledgment_references: &[BlockReference],
+    ) -> Self {
+        let (intersection, extra_references) =
+            compress_acknowledgments(block_references, acknowledgment_references);
+        Self {
+            intersection,
+            extra_references,
+        }
+    }
+
+    fn logical(&self, block_references: &[BlockReference]) -> Vec<BlockReference> {
+        expand_acknowledgments(block_references, self.intersection, &self.extra_references)
+    }
+
+    fn is_canonical(&self, block_references: &[BlockReference]) -> bool {
+        if self
+            .intersection
+            .is_some_and(|start| start as usize > block_references.len())
+        {
+            return false;
+        }
+        let logical = self.logical(block_references);
+        let (intersection, extra_references) = compress_acknowledgments(block_references, &logical);
+        self.intersection == intersection && self.extra_references == extra_references
+    }
+}
+
+/// Authentication-free, canonical Starfish-RBC header content.
+///
+/// Acknowledgments stay canonically compressed on wire, but the digest hashes
+/// their expanded logical vector with an explicit boundary from parents.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RbcCanonicalHeader {
+    reference: BlockReference,
+    #[serde(with = "bounded_references")]
+    block_references: Vec<BlockReference>,
+    acknowledgments: RbcAckFields,
+    meta_creation_time_ns: TimestampNs,
+    transactions_commitment: TransactionsCommitment,
+}
+
+impl RbcCanonicalHeader {
+    fn try_new(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+    ) -> Result<Self, RbcError> {
+        for (field, count) in [
+            ("parent", block_references.len()),
+            ("acknowledgment", acknowledgment_references.len()),
+        ] {
+            if count > MAX_RBC_REFERENCES_PER_FIELD {
+                return Err(RbcError::TooManyHeaderReferences {
+                    field,
+                    count,
+                    maximum: MAX_RBC_REFERENCES_PER_FIELD,
+                });
+            }
+        }
+        let mut parent_set = AHashSet::new();
+        for parent in &block_references {
+            if !parent_set.insert(*parent) {
+                return Err(RbcError::DuplicateParent(*parent));
+            }
+        }
+        let mut acknowledgment_set = AHashSet::new();
+        for acknowledgment in &acknowledgment_references {
+            if !acknowledgment_set.insert(*acknowledgment) {
+                return Err(RbcError::DuplicateAcknowledgment(*acknowledgment));
+            }
+        }
+
+        let acknowledgments =
+            RbcAckFields::from_logical(&block_references, &acknowledgment_references);
+        let logical_acknowledgments = acknowledgments.logical(&block_references);
+        let reference = BlockReference {
+            authority,
+            round,
+            digest: BlockDigest::new_starfish_rbc_header(
+                authority,
+                round,
+                &block_references,
+                &logical_acknowledgments,
+                meta_creation_time_ns,
+                transactions_commitment,
+            ),
+        };
+        let header = Self {
+            reference,
+            block_references,
+            acknowledgments,
+            meta_creation_time_ns,
+            transactions_commitment,
+        };
+        if header.encoded_content_size(logical_acknowledgments.len())? > MAX_RBC_HEADER_CONTENT_SIZE
+        {
+            return Err(RbcError::HeaderContentTooLarge);
+        }
+        Ok(header)
+    }
+
+    pub(crate) fn from_block_header(header: &BlockHeader) -> Result<Self, RbcError> {
+        if header.strong_vote.is_some()
+            || header.bls.is_some()
+            || header.sailfish.is_some()
+            || header.unprovable_certificate.is_some()
+        {
+            return Err(RbcError::ForbiddenHeaderExtensions);
+        }
+        let Some(acknowledgments) = header.ack.as_ref() else {
+            return Err(RbcError::MissingAcknowledgments);
+        };
+        let Some(transactions_commitment) = header.transactions_commitment else {
+            return Err(RbcError::MissingTransactionsCommitment);
+        };
+        let parent_count = header.block_references.len();
+        let extra_acknowledgment_count = acknowledgments.extra_references.len();
+        for (field, count) in [
+            ("parent", parent_count),
+            ("acknowledgment", extra_acknowledgment_count),
+        ] {
+            if count > MAX_RBC_REFERENCES_PER_FIELD {
+                return Err(RbcError::TooManyHeaderReferences {
+                    field,
+                    count,
+                    maximum: MAX_RBC_REFERENCES_PER_FIELD,
+                });
+            }
+        }
+        let intersection_start = match acknowledgments.intersection {
+            Some(start) if start as usize <= parent_count => start as usize,
+            Some(_) => return Err(RbcError::NonCanonicalAcknowledgments),
+            None => parent_count,
+        };
+        let logical_acknowledgment_count = parent_count
+            .checked_sub(intersection_start)
+            .and_then(|count| count.checked_add(extra_acknowledgment_count))
+            .ok_or(RbcError::HeaderContentTooLarge)?;
+        if logical_acknowledgment_count > MAX_RBC_REFERENCES_PER_FIELD {
+            return Err(RbcError::TooManyHeaderReferences {
+                field: "acknowledgment",
+                count: logical_acknowledgment_count,
+                maximum: MAX_RBC_REFERENCES_PER_FIELD,
+            });
+        }
+        let reference_count = parent_count
+            .checked_add(logical_acknowledgment_count)
+            .ok_or(RbcError::HeaderContentTooLarge)?;
+        let encoded_size = RBC_BLOCK_REFERENCE_SIZE
+            .checked_mul(reference_count)
+            .and_then(|size| size.checked_add(RBC_HEADER_FIXED_CONTENT_SIZE))
+            .ok_or(RbcError::HeaderContentTooLarge)?;
+        if encoded_size > MAX_RBC_HEADER_CONTENT_SIZE {
+            return Err(RbcError::HeaderContentTooLarge);
+        }
+        Ok(Self {
+            reference: header.reference,
+            block_references: header.block_references.clone(),
+            acknowledgments: RbcAckFields {
+                intersection: acknowledgments.intersection,
+                extra_references: acknowledgments.extra_references.clone(),
+            },
+            meta_creation_time_ns: header.meta_creation_time_ns,
+            transactions_commitment,
+        })
+    }
+
+    pub(crate) fn reference(&self) -> BlockReference {
+        self.reference
+    }
+
+    pub(crate) fn block_references(&self) -> &[BlockReference] {
+        &self.block_references
+    }
+
+    pub(crate) fn acknowledgment_references(&self) -> Vec<BlockReference> {
+        self.acknowledgments.logical(&self.block_references)
+    }
+
+    pub(crate) fn acknowledgment_fields(&self) -> AckFields {
+        AckFields {
+            intersection: self.acknowledgments.intersection,
+            extra_references: self.acknowledgments.extra_references.clone(),
+        }
+    }
+
+    pub(crate) fn meta_creation_time_ns(&self) -> TimestampNs {
+        self.meta_creation_time_ns
+    }
+
+    pub(crate) fn transactions_commitment(&self) -> TransactionsCommitment {
+        self.transactions_commitment
+    }
+
+    fn encoded_content_size(&self, acknowledgment_count: usize) -> Result<usize, RbcError> {
+        let reference_count = self
+            .block_references
+            .len()
+            .checked_add(acknowledgment_count)
+            .ok_or(RbcError::HeaderContentTooLarge)?;
+        RBC_BLOCK_REFERENCE_SIZE
+            .checked_mul(reference_count)
+            .and_then(|size| size.checked_add(RBC_HEADER_FIXED_CONTENT_SIZE))
+            .ok_or(RbcError::HeaderContentTooLarge)
+    }
+}
+
+/// An intrinsically validated header retained by `Arc` for as long as the RBC
+/// state may advertise this validator as a holder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PinnedRbcHeader {
+    header: Arc<RbcCanonicalHeader>,
+    committee_id: RbcCommitteeId,
+}
+
+impl PinnedRbcHeader {
+    fn validate_with_committee_id(
+        header: RbcCanonicalHeader,
+        committee: &Committee,
+        committee_id: RbcCommitteeId,
+    ) -> Result<Self, RbcError> {
+        let block_ref = header.reference;
+        if block_ref.round == 0 {
+            return Err(RbcError::GenesisSlot);
+        }
+        if !committee.known_authority(block_ref.authority) {
+            return Err(RbcError::UnknownAuthority(block_ref.authority));
+        }
+        if !header
+            .acknowledgments
+            .is_canonical(&header.block_references)
+        {
+            return Err(RbcError::NonCanonicalAcknowledgments);
+        }
+
+        let acknowledgments = header.acknowledgment_references();
+        for (field, count) in [
+            ("parent", header.block_references.len()),
+            ("acknowledgment", acknowledgments.len()),
+        ] {
+            if count > MAX_RBC_REFERENCES_PER_FIELD {
+                return Err(RbcError::TooManyHeaderReferences {
+                    field,
+                    count,
+                    maximum: MAX_RBC_REFERENCES_PER_FIELD,
+                });
+            }
+        }
+        if header.encoded_content_size(acknowledgments.len())? > MAX_RBC_HEADER_CONTENT_SIZE {
+            return Err(RbcError::HeaderContentTooLarge);
+        }
+
+        let mut parent_set = AHashSet::new();
+        let mut previous_round_parents = StakeAggregator::<QuorumThreshold>::new();
+        for parent in &header.block_references {
+            if !committee.known_authority(parent.authority) {
+                return Err(RbcError::UnknownAuthority(parent.authority));
+            }
+            if parent.round >= block_ref.round {
+                return Err(RbcError::ParentNotPast(*parent));
+            }
+            if !parent_set.insert(*parent) {
+                return Err(RbcError::DuplicateParent(*parent));
+            }
+            if parent.round + 1 == block_ref.round {
+                previous_round_parents.add(parent.authority, committee);
+            }
+        }
+        if !previous_round_parents.is_quorum(committee) {
+            return Err(RbcError::InvalidThresholdClock);
+        }
+
+        let mut acknowledgment_set = AHashSet::new();
+        for acknowledgment in &acknowledgments {
+            if !committee.known_authority(acknowledgment.authority) {
+                return Err(RbcError::UnknownAuthority(acknowledgment.authority));
+            }
+            if acknowledgment.round > block_ref.round {
+                return Err(RbcError::AcknowledgmentFromFuture(*acknowledgment));
+            }
+            if !acknowledgment_set.insert(*acknowledgment) {
+                return Err(RbcError::DuplicateAcknowledgment(*acknowledgment));
+            }
+        }
+
+        let expected_digest = BlockDigest::new_starfish_rbc_header(
+            block_ref.authority,
+            block_ref.round,
+            &header.block_references,
+            &acknowledgments,
+            header.meta_creation_time_ns,
+            header.transactions_commitment,
+        );
+        if expected_digest != block_ref.digest {
+            return Err(RbcError::HeaderDigestMismatch {
+                expected: expected_digest,
+                actual: block_ref.digest,
+            });
+        }
+        Ok(Self {
+            header: Arc::new(header),
+            committee_id,
+        })
+    }
+
+    #[cfg(test)]
+    fn validate(header: RbcCanonicalHeader, committee: &Committee) -> Result<Self, RbcError> {
+        validate_committee(committee)?;
+        let committee_id = RbcCommitteeId::derive(committee)?;
+        Self::validate_with_committee_id(header, committee, committee_id)
+    }
+
+    pub(crate) fn reference(&self) -> BlockReference {
+        self.header.reference
+    }
+
+    pub(crate) fn header(&self) -> &RbcCanonicalHeader {
+        &self.header
+    }
+
+    fn ensure_committee(&self, expected: RbcCommitteeId) -> Result<(), RbcError> {
+        if self.committee_id != expected {
+            return Err(RbcError::PinnedHeaderCommitteeMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum RbcInitialProof {
+    Ed25519(SignatureBytes),
+    MlDsa44(MlDsa44SignatureBytes),
+    MlDsa65(MlDsa65SignatureBytes),
+    Mac(MacTag),
+}
+
+impl RbcInitialProof {
+    pub(crate) fn from_block_authentication(
+        authentication: &BlockAuthentication,
+    ) -> Result<Self, RbcError> {
+        match authentication {
+            BlockAuthentication::Ed25519(signature) => Ok(Self::Ed25519(*signature)),
+            BlockAuthentication::MlDsa44(signature) => Ok(Self::MlDsa44(signature.clone())),
+            BlockAuthentication::MlDsa65(signature) => Ok(Self::MlDsa65(signature.clone())),
+            BlockAuthentication::MacTag(tag) => Ok(Self::Mac(*tag)),
+            BlockAuthentication::None | BlockAuthentication::MacVector(_) => {
+                Err(RbcError::InvalidInitialProof)
+            }
+        }
+    }
+}
+
+/// Capability proving that the pinned header had a valid local-construction
+/// path or a direct-author initial proof. Only this type can authorize ECHO.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct EchoEligibleHeader {
+    header: PinnedRbcHeader,
+    context: RbcContext,
+    recipient: AuthorityIndex,
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct RbcLocalInitial {
+    header: PinnedRbcHeader,
+    effects: Vec<RbcEffect>,
+    context: RbcContext,
+    author: AuthorityIndex,
+}
+
+impl RbcLocalInitial {
+    pub(crate) fn header(&self) -> &RbcCanonicalHeader {
+        self.header.header()
+    }
+
+    pub(crate) fn into_parts(self) -> (PinnedRbcHeader, Vec<RbcEffect>) {
+        (self.header, self.effects)
+    }
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum RbcInitialHeaderOutcome {
+    Authenticated {
+        effects: Vec<RbcEffect>,
+    },
+    StagedUnauthenticated {
+        effects: Vec<RbcEffect>,
+        error: RbcError,
+    },
+}
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct RbcProtocolInstanceId([u8; PROTOCOL_INSTANCE_SIZE]);
@@ -201,7 +675,7 @@ pub(crate) enum RbcEffect {
         block_ref: BlockReference,
         holders: AuthoritySet,
     },
-    Deliver(BlockReference),
+    Deliver(PinnedRbcHeader),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,6 +704,55 @@ pub(crate) enum RbcError {
     },
     UnknownAuthority(AuthorityIndex),
     GenesisSlot,
+    FutureRound {
+        round: RoundNumber,
+        maximum: RoundNumber,
+    },
+    StaleRound {
+        round: RoundNumber,
+        minimum: RoundNumber,
+    },
+    RoundRegression {
+        current: RoundNumber,
+        proposed: RoundNumber,
+    },
+    RetainedRoundRegression {
+        current: RoundNumber,
+        proposed: RoundNumber,
+    },
+    RetainedRoundAheadOfLocal {
+        local: RoundNumber,
+        proposed: RoundNumber,
+    },
+    MissingAcknowledgments,
+    NonCanonicalAcknowledgments,
+    MissingTransactionsCommitment,
+    ForbiddenHeaderExtensions,
+    TooManyHeaderReferences {
+        field: &'static str,
+        count: usize,
+        maximum: usize,
+    },
+    HeaderContentTooLarge,
+    ParentNotPast(BlockReference),
+    DuplicateParent(BlockReference),
+    AcknowledgmentFromFuture(BlockReference),
+    DuplicateAcknowledgment(BlockReference),
+    InvalidThresholdClock,
+    HeaderDigestMismatch {
+        expected: BlockDigest,
+        actual: BlockDigest,
+    },
+    PinnedHeaderCommitteeMismatch,
+    EchoCapabilityContextMismatch,
+    LocalInitialContextMismatch,
+    LocalInitialNotSelected(BlockReference),
+    ConflictingHeaderContent(BlockReference),
+    ConflictingInitialHeader {
+        existing: BlockReference,
+        received: BlockReference,
+    },
+    UnexpectedRecoveredHeader(BlockReference),
     HeaderUnavailable(BlockReference),
     WrongRecipient {
         expected: AuthorityIndex,
@@ -246,6 +769,8 @@ pub(crate) enum RbcError {
     LoopbackPhase,
     InvalidPhaseTag,
     InvalidInitialTag,
+    InvalidInitialProof,
+    InitialProofSchemeMismatch,
     InitialSignatureRequiresSignatureAuthentication,
     InitialMacRequiresMacAuthentication,
     InitialAuthorMismatch {
@@ -294,6 +819,93 @@ impl fmt::Display for RbcError {
                 write!(f, "unknown Starfish-RBC authority {authority}")
             }
             Self::GenesisSlot => f.write_str("Starfish-RBC does not certify genesis slots"),
+            Self::FutureRound { round, maximum } => write!(
+                f,
+                "Starfish-RBC round {round} exceeds admission maximum {maximum}"
+            ),
+            Self::StaleRound { round, minimum } => write!(
+                f,
+                "Starfish-RBC round {round} is below admission minimum {minimum}"
+            ),
+            Self::RoundRegression { current, proposed } => write!(
+                f,
+                "Starfish-RBC local round cannot regress from {current} to {proposed}"
+            ),
+            Self::RetainedRoundRegression { current, proposed } => write!(
+                f,
+                "Starfish-RBC retained-round floor cannot regress from {current} to {proposed}"
+            ),
+            Self::RetainedRoundAheadOfLocal { local, proposed } => write!(
+                f,
+                "Starfish-RBC retained-round floor {proposed} exceeds local round {local}"
+            ),
+            Self::MissingAcknowledgments => {
+                f.write_str("Starfish-RBC header is missing acknowledgment fields")
+            }
+            Self::NonCanonicalAcknowledgments => {
+                f.write_str("Starfish-RBC acknowledgment encoding is not canonical")
+            }
+            Self::MissingTransactionsCommitment => {
+                f.write_str("Starfish-RBC header is missing its transaction commitment")
+            }
+            Self::ForbiddenHeaderExtensions => {
+                f.write_str("Starfish-RBC header carries a forbidden protocol extension")
+            }
+            Self::TooManyHeaderReferences {
+                field,
+                count,
+                maximum,
+            } => write!(
+                f,
+                "Starfish-RBC {field} reference count {count} exceeds limit {maximum}"
+            ),
+            Self::HeaderContentTooLarge => f.write_str("Starfish-RBC header content is too large"),
+            Self::ParentNotPast(parent) => {
+                write!(f, "Starfish-RBC parent {parent} is not from a past round")
+            }
+            Self::DuplicateParent(parent) => {
+                write!(f, "Starfish-RBC parent {parent} is duplicated")
+            }
+            Self::AcknowledgmentFromFuture(acknowledgment) => write!(
+                f,
+                "Starfish-RBC acknowledgment {acknowledgment} is from a future round"
+            ),
+            Self::DuplicateAcknowledgment(acknowledgment) => write!(
+                f,
+                "Starfish-RBC acknowledgment {acknowledgment} is duplicated"
+            ),
+            Self::InvalidThresholdClock => {
+                f.write_str("Starfish-RBC header does not reference previous-round quorum stake")
+            }
+            Self::HeaderDigestMismatch { expected, actual } => write!(
+                f,
+                "Starfish-RBC header digest mismatch: expected {expected}, got {actual}"
+            ),
+            Self::PinnedHeaderCommitteeMismatch => {
+                f.write_str("Starfish-RBC pinned header belongs to a different committee")
+            }
+            Self::EchoCapabilityContextMismatch => f.write_str(
+                "Starfish-RBC ECHO capability belongs to a different context or recipient",
+            ),
+            Self::LocalInitialContextMismatch => {
+                f.write_str("Starfish-RBC local initial handle belongs to a different kernel")
+            }
+            Self::LocalInitialNotSelected(block_ref) => write!(
+                f,
+                "Starfish-RBC local initial header {block_ref} is not the selected pinned proposal"
+            ),
+            Self::ConflictingHeaderContent(block_ref) => write!(
+                f,
+                "Starfish-RBC received conflicting pinned content for {block_ref}"
+            ),
+            Self::ConflictingInitialHeader { existing, received } => write!(
+                f,
+                "Starfish-RBC slot already staged initial header {existing}, not {received}"
+            ),
+            Self::UnexpectedRecoveredHeader(block_ref) => write!(
+                f,
+                "Starfish-RBC recovered header {block_ref} has no retained candidate"
+            ),
             Self::HeaderUnavailable(block_ref) => {
                 write!(
                     f,
@@ -317,6 +929,12 @@ impl fmt::Display for RbcError {
             }
             Self::InvalidPhaseTag => f.write_str("Starfish-RBC phase MAC verification failed"),
             Self::InvalidInitialTag => f.write_str("Starfish-RBC initial MAC verification failed"),
+            Self::InvalidInitialProof => {
+                f.write_str("Starfish-RBC initial proof verification failed")
+            }
+            Self::InitialProofSchemeMismatch => {
+                f.write_str("Starfish-RBC initial proof has the wrong authentication scheme")
+            }
             Self::InitialSignatureRequiresSignatureAuthentication => f.write_str(
                 "Starfish-RBC initial signature digest requires a signature authentication mode",
             ),
@@ -334,7 +952,7 @@ impl fmt::Display for RbcError {
 impl Error for RbcError {}
 
 struct CandidateState {
-    header_available: bool,
+    header: Option<PinnedRbcHeader>,
     echoes: StakeAggregator<QuorumThreshold>,
     readies: StakeAggregator<ValidityThreshold>,
     echo_quorum_observed: bool,
@@ -346,7 +964,7 @@ struct CandidateState {
 impl CandidateState {
     fn new() -> Self {
         Self {
-            header_available: false,
+            header: None,
             echoes: StakeAggregator::new(),
             readies: StakeAggregator::new(),
             echo_quorum_observed: false,
@@ -367,12 +985,49 @@ impl CandidateState {
     }
 }
 
-#[derive(Default)]
 struct SlotState {
     echoed: Option<BlockReference>,
     readied: Option<BlockReference>,
     delivered: Option<BlockReference>,
+    initial_candidate: Option<BlockReference>,
+    echo_by_sender: AHashMap<AuthorityIndex, BlockReference>,
+    ready_by_sender: AHashMap<AuthorityIndex, BlockReference>,
     candidates: AHashMap<BlockReference, CandidateState>,
+}
+
+impl Default for SlotState {
+    fn default() -> Self {
+        Self {
+            echoed: None,
+            readied: None,
+            delivered: None,
+            initial_candidate: None,
+            echo_by_sender: AHashMap::new(),
+            ready_by_sender: AHashMap::new(),
+            candidates: AHashMap::new(),
+        }
+    }
+}
+
+impl SlotState {
+    fn record_phase_sender(
+        &mut self,
+        phase: RbcPhase,
+        sender: AuthorityIndex,
+        block_ref: BlockReference,
+    ) -> bool {
+        let seen = match phase {
+            RbcPhase::Echo => &mut self.echo_by_sender,
+            RbcPhase::Ready => &mut self.ready_by_sender,
+        };
+        match seen.get(&sender) {
+            Some(existing) => *existing == block_ref,
+            None => {
+                seen.insert(sender, block_ref);
+                true
+            }
+        }
+    }
 }
 
 enum ProgressAction {
@@ -387,6 +1042,8 @@ pub(crate) struct StarfishRbcKernel {
     own_authority: AuthorityIndex,
     context: RbcContext,
     mac_keys: Arc<Vec<MacKey>>,
+    local_round: RoundNumber,
+    minimum_new_slot_round: RoundNumber,
     slots: BTreeMap<RoundNumber, AHashMap<AuthorityIndex, SlotState>>,
 }
 
@@ -397,6 +1054,7 @@ impl StarfishRbcKernel {
         protocol_instance: RbcProtocolInstanceId,
         initial_authentication: BlockAuthenticationScheme,
         mac_keys: Arc<Vec<MacKey>>,
+        local_round: RoundNumber,
     ) -> Result<Self, RbcError> {
         let context = RbcContext::new(protocol_instance, &committee, initial_authentication)?;
         if !committee.known_authority(own_authority) {
@@ -413,6 +1071,8 @@ impl StarfishRbcKernel {
             own_authority,
             context,
             mac_keys,
+            local_round,
+            minimum_new_slot_round: 1,
             slots: BTreeMap::new(),
         })
     }
@@ -421,27 +1081,265 @@ impl StarfishRbcKernel {
         self.context
     }
 
-    /// Record deterministic content validation and local header availability.
-    /// This does not authorize ECHO and does not imply initial authentication.
-    /// It remains module-private until header staging can supply a typed,
-    /// pinned content-validation result.
+    pub(crate) fn maximum_admissible_round(&self) -> RoundNumber {
+        self.local_round.saturating_add(MAX_RBC_FUTURE_ROUNDS)
+    }
+
+    pub(crate) fn advance_local_round(&mut self, round: RoundNumber) -> Result<(), RbcError> {
+        if round < self.local_round {
+            return Err(RbcError::RoundRegression {
+                current: self.local_round,
+                proposed: round,
+            });
+        }
+        self.local_round = round;
+        Ok(())
+    }
+
+    pub(crate) fn minimum_new_slot_round(&self) -> RoundNumber {
+        self.minimum_new_slot_round
+    }
+
+    /// Reject allocation of previously unseen slots below a monotonic safe
+    /// watermark. Advancing the DAG round is not sufficient evidence for this
+    /// call: the integration layer may advance it only when its recovery model
+    /// proves that no newly observed slot below `round` is still required.
+    /// Existing slots remain active so late evidence can complete totality.
+    pub(crate) fn close_new_slots_before(&mut self, round: RoundNumber) -> Result<(), RbcError> {
+        if round < self.minimum_new_slot_round {
+            return Err(RbcError::RetainedRoundRegression {
+                current: self.minimum_new_slot_round,
+                proposed: round,
+            });
+        }
+        let local_boundary = RoundNumber::max(self.local_round, 1);
+        if round > local_boundary {
+            return Err(RbcError::RetainedRoundAheadOfLocal {
+                local: self.local_round,
+                proposed: round,
+            });
+        }
+        self.minimum_new_slot_round = round;
+        Ok(())
+    }
+
+    pub(crate) fn validate_header_content(
+        &self,
+        header: RbcCanonicalHeader,
+    ) -> Result<PinnedRbcHeader, RbcError> {
+        self.validate_block_ref(&header.reference())?;
+        PinnedRbcHeader::validate_with_committee_id(
+            header,
+            &self.committee,
+            self.context.committee_id,
+        )
+    }
+
+    fn direct_initial_header(
+        &self,
+        direct_peer: AuthorityIndex,
+        header: PinnedRbcHeader,
+        proof: &RbcInitialProof,
+    ) -> Result<EchoEligibleHeader, RbcError> {
+        header.ensure_committee(self.context.committee_id)?;
+        let block_ref = header.reference();
+        self.validate_block_ref(&block_ref)?;
+        if direct_peer != block_ref.authority {
+            return Err(RbcError::InitialAuthorMismatch {
+                expected: block_ref.authority,
+                actual: direct_peer,
+            });
+        }
+        if direct_peer == self.own_authority {
+            return Err(RbcError::LoopbackPhase);
+        }
+
+        match (self.context.initial_authentication, proof) {
+            (BlockAuthenticationScheme::Ed25519, RbcInitialProof::Ed25519(signature)) => {
+                let digest = self.initial_signature_digest(block_ref)?;
+                let public_key = self
+                    .committee
+                    .get_public_key(block_ref.authority)
+                    .ok_or(RbcError::UnknownAuthority(block_ref.authority))?;
+                public_key
+                    .verify_digest_signature(&digest, signature)
+                    .map_err(|_| RbcError::InvalidInitialProof)?;
+            }
+            (BlockAuthenticationScheme::MlDsa44, RbcInitialProof::MlDsa44(signature)) => {
+                let digest = BlockDigest::from(self.initial_signature_digest(block_ref)?);
+                let public_key = self
+                    .committee
+                    .get_ml_dsa_44_public_key(block_ref.authority)
+                    .ok_or(RbcError::UnknownAuthority(block_ref.authority))?;
+                public_key
+                    .verify_digest_signature(&digest, signature)
+                    .map_err(|_| RbcError::InvalidInitialProof)?;
+            }
+            (BlockAuthenticationScheme::MlDsa65, RbcInitialProof::MlDsa65(signature)) => {
+                let digest = BlockDigest::from(self.initial_signature_digest(block_ref)?);
+                let public_key = self
+                    .committee
+                    .get_ml_dsa_65_public_key(block_ref.authority)
+                    .ok_or(RbcError::UnknownAuthority(block_ref.authority))?;
+                public_key
+                    .verify_digest_signature(&digest, signature)
+                    .map_err(|_| RbcError::InvalidInitialProof)?;
+            }
+            (BlockAuthenticationScheme::MacVector, RbcInitialProof::Mac(tag)) => {
+                self.verify_initial_mac_tag(direct_peer, block_ref, tag)?;
+            }
+            _ => return Err(RbcError::InitialProofSchemeMismatch),
+        }
+        Ok(EchoEligibleHeader {
+            header,
+            context: self.context,
+            recipient: self.own_authority,
+        })
+    }
+
+    fn local_initial_header(
+        &self,
+        header: PinnedRbcHeader,
+    ) -> Result<EchoEligibleHeader, RbcError> {
+        header.ensure_committee(self.context.committee_id)?;
+        let block_ref = header.reference();
+        self.validate_block_ref(&block_ref)?;
+        if block_ref.authority != self.own_authority {
+            return Err(RbcError::InitialAuthorMismatch {
+                expected: self.own_authority,
+                actual: block_ref.authority,
+            });
+        }
+        Ok(EchoEligibleHeader {
+            header,
+            context: self.context,
+            recipient: self.own_authority,
+        })
+    }
+
+    /// Atomically construct, validate, select, pin, and ECHO a local-author
+    /// proposal before exposing it for authentication or dissemination. The
+    /// caller supplies no author or digest and cannot obtain two conflicting
+    /// local handles for one slot.
+    pub(crate) fn start_local_initial_header(
+        &mut self,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+    ) -> Result<RbcLocalInitial, RbcError> {
+        let canonical = RbcCanonicalHeader::try_new(
+            self.own_authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            transactions_commitment,
+        )?;
+        let pinned = self.validate_header_content(canonical)?;
+        let eligible = self.local_initial_header(pinned.clone())?;
+        let effects = self.accept_initial_header(eligible)?;
+        Ok(RbcLocalInitial {
+            header: pinned,
+            effects,
+            context: self.context,
+            author: self.own_authority,
+        })
+    }
+
+    fn accept_initial_header(
+        &mut self,
+        eligible: EchoEligibleHeader,
+    ) -> Result<Vec<RbcEffect>, RbcError> {
+        if eligible.context != self.context || eligible.recipient != self.own_authority {
+            return Err(RbcError::EchoCapabilityContextMismatch);
+        }
+        eligible
+            .header
+            .ensure_committee(self.context.committee_id)?;
+        let block_ref = eligible.header.reference();
+        self.record_initial_candidate(block_ref)?;
+        let mut effects = self.note_header_available(eligible.header)?;
+        effects.extend(self.authorize_echo(block_ref)?);
+        Ok(effects)
+    }
+
+    /// Validate and stage a directly received proposal before checking its
+    /// receiver-specific proof. Invalid authentication therefore cannot make
+    /// the adapter accidentally discard content needed by later READY
+    /// recovery. The outcome preserves any effects unblocked by staging.
+    pub(crate) fn accept_direct_initial_header(
+        &mut self,
+        direct_peer: AuthorityIndex,
+        header: RbcCanonicalHeader,
+        proof: &RbcInitialProof,
+    ) -> Result<RbcInitialHeaderOutcome, RbcError> {
+        let pinned = self.validate_header_content(header)?;
+        let block_ref = pinned.reference();
+        if direct_peer != block_ref.authority {
+            return Err(RbcError::InitialAuthorMismatch {
+                expected: block_ref.authority,
+                actual: direct_peer,
+            });
+        }
+        if direct_peer == self.own_authority {
+            return Err(RbcError::LoopbackPhase);
+        }
+        self.record_initial_candidate(block_ref)?;
+        let mut effects = self.note_header_available(pinned.clone())?;
+        match self.direct_initial_header(direct_peer, pinned, proof) {
+            Ok(eligible) => {
+                effects.extend(self.accept_initial_header(eligible)?);
+                Ok(RbcInitialHeaderOutcome::Authenticated { effects })
+            }
+            Err(error) => Ok(RbcInitialHeaderOutcome::StagedUnauthenticated { effects, error }),
+        }
+    }
+
+    pub(crate) fn accept_recovered_header(
+        &mut self,
+        header: RbcCanonicalHeader,
+    ) -> Result<Vec<RbcEffect>, RbcError> {
+        let pinned = self.validate_header_content(header)?;
+        let block_ref = pinned.reference();
+        self.validate_block_ref(&block_ref)?;
+        if self.candidate(&block_ref).is_none() {
+            return Err(RbcError::UnexpectedRecoveredHeader(block_ref));
+        }
+        self.note_header_available(pinned)
+    }
+
+    /// Record a pinned, deterministically content-validated header. This does
+    /// not authorize ECHO and does not imply initial authentication. External
+    /// ingress uses `accept_recovered_header` or an echo-eligible capability.
     fn note_header_available(
         &mut self,
-        block_ref: BlockReference,
+        header: PinnedRbcHeader,
     ) -> Result<Vec<RbcEffect>, RbcError> {
+        header.ensure_committee(self.context.committee_id)?;
+        let block_ref = header.reference();
         self.validate_block_ref(&block_ref)?;
-        self.candidate_mut(block_ref).header_available = true;
+        let candidate = self.candidate_mut(block_ref);
+        if candidate
+            .header
+            .as_ref()
+            .is_some_and(|existing| existing != &header)
+        {
+            return Err(RbcError::ConflictingHeaderContent(block_ref));
+        }
+        candidate.header = Some(header);
         Ok(self.drive(block_ref))
     }
 
-    /// Authorize the one local ECHO for this slot. It remains module-private
-    /// until the integration layer can pass a typed direct-author proof (or a
-    /// local-creation capability) instead of relying on call ordering.
+    /// Complete the one local ECHO transition after the typed capability gate.
+    /// This lower-level method remains module-private so call ordering cannot
+    /// substitute for a direct-author proof or local-creation capability.
     fn authorize_echo(&mut self, block_ref: BlockReference) -> Result<Vec<RbcEffect>, RbcError> {
         self.validate_block_ref(&block_ref)?;
         let header_available = self
             .candidate(&block_ref)
-            .is_some_and(|candidate| candidate.header_available);
+            .is_some_and(|candidate| candidate.header.is_some());
         if !header_available {
             return Err(RbcError::HeaderUnavailable(block_ref));
         }
@@ -453,6 +1351,8 @@ impl StarfishRbcKernel {
             return Ok(Vec::new());
         }
         slot.echoed = Some(block_ref);
+        let recorded = slot.record_phase_sender(RbcPhase::Echo, own_authority, block_ref);
+        debug_assert!(recorded, "local ECHO guard and sender record diverged");
         slot.candidates
             .entry(block_ref)
             .or_insert_with(CandidateState::new)
@@ -474,7 +1374,14 @@ impl StarfishRbcKernel {
     ) -> Result<Vec<RbcEffect>, RbcError> {
         self.verify_phase_message(direct_peer, &message)?;
         let committee = Arc::clone(&self.committee);
-        let candidate = self.candidate_mut(message.block_ref);
+        let slot = self.slot_mut(message.block_ref);
+        if !slot.record_phase_sender(message.phase, message.sender, message.block_ref) {
+            return Ok(Vec::new());
+        }
+        let candidate = slot
+            .candidates
+            .entry(message.block_ref)
+            .or_insert_with(CandidateState::new);
         match message.phase {
             RbcPhase::Echo => {
                 candidate.echoes.add(message.sender, &committee);
@@ -504,7 +1411,7 @@ impl StarfishRbcKernel {
                 && slot
                     .candidates
                     .get(&block_ref)
-                    .is_some_and(|candidate| candidate.header_available)
+                    .is_some_and(|candidate| candidate.header.is_some())
         });
         if !authorized {
             return Err(RbcError::PhaseNotAuthorized { phase, block_ref });
@@ -532,12 +1439,38 @@ impl StarfishRbcKernel {
         })
     }
 
+    fn ensure_local_initial(&self, local: &RbcLocalInitial) -> Result<BlockReference, RbcError> {
+        if local.context != self.context || local.author != self.own_authority {
+            return Err(RbcError::LocalInitialContextMismatch);
+        }
+        local.header.ensure_committee(self.context.committee_id)?;
+        let block_ref = local.header.reference();
+        let selected = self.slot(&block_ref).is_some_and(|slot| {
+            slot.initial_candidate == Some(block_ref)
+                && slot.echoed == Some(block_ref)
+                && slot
+                    .candidates
+                    .get(&block_ref)
+                    .and_then(|candidate| candidate.header.as_ref())
+                    == Some(&local.header)
+        });
+        if !selected {
+            return Err(RbcError::LocalInitialNotSelected(block_ref));
+        }
+        Ok(block_ref)
+    }
+
+    pub(crate) fn make_local_initial_signature_digest(
+        &self,
+        local: &RbcLocalInitial,
+    ) -> Result<[u8; 32], RbcError> {
+        let block_ref = self.ensure_local_initial(local)?;
+        self.initial_signature_digest(block_ref)
+    }
+
     /// Produce the common 32-byte digest signed by Ed25519 or ML-DSA for an
     /// initial Starfish-RBC header proposal.
-    pub(crate) fn initial_signature_digest(
-        &self,
-        block_ref: BlockReference,
-    ) -> Result<[u8; 32], RbcError> {
+    fn initial_signature_digest(&self, block_ref: BlockReference) -> Result<[u8; 32], RbcError> {
         if self.context.initial_authentication == BlockAuthenticationScheme::MacVector {
             return Err(RbcError::InitialSignatureRequiresSignatureAuthentication);
         }
@@ -548,7 +1481,16 @@ impl StarfishRbcKernel {
 
     /// Produce one receiver-specific initial MAC. The local author calls this
     /// separately for every non-local recipient.
-    pub(crate) fn make_initial_mac_tag(
+    pub(crate) fn make_local_initial_mac_tag(
+        &self,
+        local: &RbcLocalInitial,
+        recipient: AuthorityIndex,
+    ) -> Result<MacTag, RbcError> {
+        let block_ref = self.ensure_local_initial(local)?;
+        self.make_initial_mac_tag_for_reference(block_ref, recipient)
+    }
+
+    fn make_initial_mac_tag_for_reference(
         &self,
         block_ref: BlockReference,
         recipient: AuthorityIndex,
@@ -634,7 +1576,7 @@ impl StarfishRbcKernel {
             return Ok(None);
         };
         let ready_trigger = candidate.echo_quorum_observed || candidate.ready_validity_observed;
-        let blocked_on_header = !candidate.header_available
+        let blocked_on_header = candidate.header.is_none()
             && ((slot.readied.is_none() && ready_trigger)
                 || (slot.delivered.is_none() && candidate.ready_quorum_observed));
         Ok(blocked_on_header.then(|| RbcEffect::NeedHeader {
@@ -694,7 +1636,36 @@ impl StarfishRbcKernel {
         if !self.committee.known_authority(block_ref.authority) {
             return Err(RbcError::UnknownAuthority(block_ref.authority));
         }
+        let maximum_round = self.maximum_admissible_round();
+        if block_ref.round > maximum_round {
+            return Err(RbcError::FutureRound {
+                round: block_ref.round,
+                maximum: maximum_round,
+            });
+        }
+        if block_ref.round < self.minimum_new_slot_round && self.slot(block_ref).is_none() {
+            return Err(RbcError::StaleRound {
+                round: block_ref.round,
+                minimum: self.minimum_new_slot_round,
+            });
+        }
         Ok(())
+    }
+
+    fn record_initial_candidate(&mut self, block_ref: BlockReference) -> Result<(), RbcError> {
+        self.validate_block_ref(&block_ref)?;
+        let slot = self.slot_mut(block_ref);
+        match slot.initial_candidate {
+            Some(existing) if existing != block_ref => Err(RbcError::ConflictingInitialHeader {
+                existing,
+                received: block_ref,
+            }),
+            Some(_) => Ok(()),
+            None => {
+                slot.initial_candidate = Some(block_ref);
+                Ok(())
+            }
+        }
     }
 
     fn slot_mut(&mut self, block_ref: BlockReference) -> &mut SlotState {
@@ -741,16 +1712,16 @@ impl StarfishRbcKernel {
 
                 let ready_trigger =
                     candidate.echo_quorum_observed || candidate.ready_validity_observed;
-                let blocked_on_header = !candidate.header_available
+                let blocked_on_header = candidate.header.is_none()
                     && ((can_send_ready && ready_trigger)
                         || (can_deliver && candidate.ready_quorum_observed));
                 let holders = candidate.holders();
                 if blocked_on_header && holders != candidate.header_request_holders {
                     candidate.header_request_holders = holders;
                     ProgressAction::NeedHeader(holders)
-                } else if candidate.header_available && can_send_ready && ready_trigger {
+                } else if candidate.header.is_some() && can_send_ready && ready_trigger {
                     ProgressAction::SendReady
-                } else if candidate.header_available
+                } else if candidate.header.is_some()
                     && can_deliver
                     && candidate.ready_quorum_observed
                 {
@@ -771,6 +1742,9 @@ impl StarfishRbcKernel {
                     let slot = self.slot_mut(block_ref);
                     if slot.readied.is_none() {
                         slot.readied = Some(block_ref);
+                        let recorded =
+                            slot.record_phase_sender(RbcPhase::Ready, own_authority, block_ref);
+                        debug_assert!(recorded, "local READY guard and sender record diverged");
                         slot.candidates
                             .entry(block_ref)
                             .or_insert_with(CandidateState::new)
@@ -786,7 +1760,12 @@ impl StarfishRbcKernel {
                     let slot = self.slot_mut(block_ref);
                     if slot.delivered.is_none() {
                         slot.delivered = Some(block_ref);
-                        effects.push(RbcEffect::Deliver(block_ref));
+                        let header = slot
+                            .candidates
+                            .get(&block_ref)
+                            .and_then(|candidate| candidate.header.clone())
+                            .expect("delivery requires a pinned Starfish-RBC header");
+                        effects.push(RbcEffect::Deliver(header));
                     }
                 }
                 ProgressAction::None => break,
@@ -897,17 +1876,96 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::mac_keyrings_for_test,
+        crypto::{
+            dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
+        },
         types::{BlockDigest, BlockReference},
     };
 
     const TEST_INSTANCE_BYTE: u8 = 0xA5;
+    type DeliveryTrace = Vec<Vec<BlockReference>>;
+    type RecoveryTrace = Vec<(AuthorityIndex, AuthorityIndex, BlockReference)>;
 
     fn block(authority: AuthorityIndex, round: RoundNumber, marker: u8) -> BlockReference {
         BlockReference {
             authority,
             round,
             digest: BlockDigest::from([marker; 32]),
+        }
+    }
+
+    fn pinned_header_for_context(
+        context: RbcContext,
+        block_ref: BlockReference,
+    ) -> PinnedRbcHeader {
+        PinnedRbcHeader {
+            header: Arc::new(RbcCanonicalHeader {
+                reference: block_ref,
+                block_references: Vec::new(),
+                acknowledgments: RbcAckFields {
+                    intersection: Some(0),
+                    extra_references: Vec::new(),
+                },
+                meta_creation_time_ns: 0,
+                transactions_commitment: TransactionsCommitment::default(),
+            }),
+            committee_id: context.committee_id,
+        }
+    }
+
+    fn pinned_header(committee: &Committee, block_ref: BlockReference) -> PinnedRbcHeader {
+        pinned_header_for_context(
+            RbcContext::new(
+                instance(TEST_INSTANCE_BYTE),
+                committee,
+                BlockAuthenticationScheme::Ed25519,
+            )
+            .unwrap(),
+            block_ref,
+        )
+    }
+
+    fn valid_canonical_header(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        marker: u8,
+    ) -> RbcCanonicalHeader {
+        let parents = (0..3)
+            .map(|parent_authority| {
+                block(
+                    parent_authority,
+                    round - 1,
+                    marker.wrapping_add(parent_authority as u8),
+                )
+            })
+            .collect();
+        RbcCanonicalHeader::try_new(
+            authority,
+            round,
+            parents,
+            Vec::new(),
+            0x0102_0304_0506_0708,
+            TransactionsCommitment::default(),
+        )
+        .unwrap()
+    }
+
+    fn block_header_from_canonical(
+        header: &RbcCanonicalHeader,
+        authentication: BlockAuthentication,
+    ) -> BlockHeader {
+        BlockHeader {
+            reference: header.reference,
+            block_references: header.block_references.clone(),
+            meta_creation_time_ns: header.meta_creation_time_ns,
+            authentication,
+            transactions_commitment: Some(header.transactions_commitment),
+            ack: Some(header.acknowledgment_fields()),
+            strong_vote: None,
+            bls: None,
+            sailfish: None,
+            unprovable_certificate: None,
+            serialized: None,
         }
     }
 
@@ -943,6 +2001,7 @@ mod tests {
             instance(instance_byte),
             authentication,
             Arc::new(keyrings[own_authority as usize].clone()),
+            0,
         )
         .unwrap()
     }
@@ -978,7 +2037,8 @@ mod tests {
     }
 
     fn authorize_echo(kernel: &mut StarfishRbcKernel, block_ref: BlockReference) {
-        kernel.note_header_available(block_ref).unwrap();
+        let header = pinned_header_for_context(kernel.context(), block_ref);
+        kernel.note_header_available(header).unwrap();
         assert!(matches!(
             kernel.authorize_echo(block_ref).unwrap().as_slice(),
             [RbcEffect::MulticastPhase {
@@ -995,8 +2055,8 @@ mod tests {
     fn pump_phase_effects(
         kernels: &mut [StarfishRbcKernel],
         initial_effects: Vec<(AuthorityIndex, Vec<RbcEffect>)>,
-        fetch_missing_headers: bool,
-    ) -> Vec<Vec<BlockReference>> {
+        header_stores: &mut [AHashMap<BlockReference, RbcCanonicalHeader>],
+    ) -> (DeliveryTrace, RecoveryTrace) {
         let mut queue: VecDeque<_> = initial_effects
             .into_iter()
             .flat_map(|(authority, effects)| {
@@ -1004,6 +2064,7 @@ mod tests {
             })
             .collect();
         let mut deliveries = vec![Vec::new(); kernels.len()];
+        let mut recoveries = Vec::new();
 
         while let Some((owner, effect)) = queue.pop_front() {
             match effect {
@@ -1027,19 +2088,33 @@ mod tests {
                         queue.extend(effects.into_iter().map(|effect| (recipient, effect)));
                     }
                 }
-                RbcEffect::NeedHeader { block_ref, .. } if fetch_missing_headers => {
+                RbcEffect::NeedHeader { block_ref, holders } => {
+                    let (source, header) = holders
+                        .present()
+                        .find_map(|source| {
+                            header_stores[source as usize]
+                                .get(&block_ref)
+                                .cloned()
+                                .map(|header| (source, header))
+                        })
+                        .expect("a test RBC holder must retain the canonical header");
                     let effects = kernels[owner as usize]
-                        .note_header_available(block_ref)
+                        .accept_recovered_header(header.clone())
                         .unwrap();
+                    header_stores[owner as usize].insert(block_ref, header);
+                    recoveries.push((owner, source, block_ref));
                     queue.extend(effects.into_iter().map(|effect| (owner, effect)));
                 }
-                RbcEffect::NeedHeader { .. } => {}
-                RbcEffect::Deliver(block_ref) => {
-                    deliveries[owner as usize].push(block_ref);
+                RbcEffect::Deliver(header) => {
+                    assert_eq!(
+                        header_stores[owner as usize].get(&header.reference()),
+                        Some(header.header())
+                    );
+                    deliveries[owner as usize].push(header.reference());
                 }
             }
         }
-        deliveries
+        (deliveries, recoveries)
     }
 
     #[test]
@@ -1067,6 +2142,832 @@ mod tests {
         assert_eq!(&statement[87..119], &[0x33; 32]);
         assert_eq!(&statement[119..121], &[0x07, 0x08]);
         assert_eq!(&statement[121..123], &[0x09, 0x0A]);
+    }
+
+    #[test]
+    fn canonical_header_digest_has_a_frozen_tagged_encoding() {
+        let parent = block(0x0708, 0x090A_0B0C, 0x11);
+        let acknowledgment = block(0x0D0E, 0x0F10_1112, 0x22);
+        let timestamp: TimestampNs = 0x1314_1516_1718_191A;
+        let commitment = TransactionsCommitment::default();
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&[0x01]);
+        encoded.extend_from_slice(&0x0102u16.to_be_bytes());
+        encoded.extend_from_slice(&[0x02]);
+        encoded.extend_from_slice(&0x0304_0506u32.to_be_bytes());
+        encoded.extend_from_slice(&[0x03]);
+        encoded.extend_from_slice(&1u32.to_be_bytes());
+        encoded.extend_from_slice(&parent.authority.to_be_bytes());
+        encoded.extend_from_slice(&parent.round.to_be_bytes());
+        encoded.extend_from_slice(parent.digest.as_ref());
+        encoded.extend_from_slice(&[0x04]);
+        encoded.extend_from_slice(&1u32.to_be_bytes());
+        encoded.extend_from_slice(&acknowledgment.authority.to_be_bytes());
+        encoded.extend_from_slice(&acknowledgment.round.to_be_bytes());
+        encoded.extend_from_slice(acknowledgment.digest.as_ref());
+        encoded.extend_from_slice(&[0x05]);
+        encoded.extend_from_slice(&timestamp.to_be_bytes());
+        encoded.extend_from_slice(&[0x06]);
+        encoded.extend_from_slice(commitment.as_ref());
+
+        assert_eq!(
+            hex::encode(&encoded),
+            concat!(
+                "010102020304050603000000010708090a0b0c",
+                "11111111111111111111111111111111",
+                "11111111111111111111111111111111",
+                "04000000010d0e0f101112",
+                "22222222222222222222222222222222",
+                "22222222222222222222222222222222",
+                "051314",
+                "15161718191a060000000000000000000000000000000000000000000000000000",
+                "000000000000"
+            )
+        );
+        let digest = BlockDigest::new_starfish_rbc_header(
+            0x0102,
+            0x0304_0506,
+            &[parent],
+            &[acknowledgment],
+            timestamp,
+            commitment,
+        );
+        assert_eq!(digest.as_ref(), blake3::hash(&encoded).as_bytes());
+        assert_eq!(
+            hex::encode(digest.as_ref()),
+            "3a0ef697511a95ddf97c73e72aad2cb2313839063f7249fe0f967f2d8ff3ad22"
+        );
+    }
+
+    #[test]
+    fn canonical_digest_separates_the_legacy_parent_ack_boundary() {
+        let references: Vec<_> = (0..4)
+            .map(|authority| block(authority, 7, 0x30 + authority as u8))
+            .collect();
+        let commitment = TransactionsCommitment::default();
+        let legacy_first = BlockDigest::new(
+            0,
+            8,
+            &references[..3],
+            &references[3..],
+            42,
+            Some(commitment),
+            None,
+        );
+        let legacy_second = BlockDigest::new(0, 8, &references, &[], 42, Some(commitment), None);
+        assert_eq!(legacy_first, legacy_second);
+
+        let canonical_first = BlockDigest::new_starfish_rbc_header(
+            0,
+            8,
+            &references[..3],
+            &references[3..],
+            42,
+            commitment,
+        );
+        let canonical_second =
+            BlockDigest::new_starfish_rbc_header(0, 8, &references, &[], 42, commitment);
+        assert_ne!(canonical_first, canonical_second);
+    }
+
+    #[test]
+    fn canonical_digest_binds_every_content_field_and_order() {
+        let first = block(0, 4, 0x41);
+        let second = block(1, 4, 0x42);
+        let commitment = TransactionsCommitment::default();
+        let other_commitment = TransactionsCommitment::new_from_transactions(&Vec::new());
+        let digest =
+            BlockDigest::new_starfish_rbc_header(2, 5, &[first, second], &[first], 7, commitment);
+
+        for changed in [
+            BlockDigest::new_starfish_rbc_header(3, 5, &[first, second], &[first], 7, commitment),
+            BlockDigest::new_starfish_rbc_header(2, 6, &[first, second], &[first], 7, commitment),
+            BlockDigest::new_starfish_rbc_header(2, 5, &[second, first], &[first], 7, commitment),
+            BlockDigest::new_starfish_rbc_header(2, 5, &[first, second], &[second], 7, commitment),
+            BlockDigest::new_starfish_rbc_header(2, 5, &[first, second], &[first], 8, commitment),
+            BlockDigest::new_starfish_rbc_header(
+                2,
+                5,
+                &[first, second],
+                &[first],
+                7,
+                other_commitment,
+            ),
+        ] {
+            assert_ne!(digest, changed);
+        }
+    }
+
+    #[test]
+    fn canonical_header_validation_is_authentication_independent_and_pins_content() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let canonical = valid_canonical_header(3, 5, 0x51);
+        let without_authentication =
+            block_header_from_canonical(&canonical, BlockAuthentication::None);
+        let with_authentication = block_header_from_canonical(
+            &canonical,
+            BlockAuthentication::Ed25519(SignatureBytes::default()),
+        );
+
+        let extracted_without =
+            RbcCanonicalHeader::from_block_header(&without_authentication).unwrap();
+        let extracted_with = RbcCanonicalHeader::from_block_header(&with_authentication).unwrap();
+        assert_eq!(extracted_without, canonical);
+        assert_eq!(extracted_with, canonical);
+
+        let pinned = PinnedRbcHeader::validate(canonical.clone(), &committee).unwrap();
+        let retained = pinned.clone();
+        assert_eq!(pinned.reference(), canonical.reference());
+        assert!(Arc::ptr_eq(&pinned.header, &retained.header));
+        assert_eq!(pinned.header(), &canonical);
+    }
+
+    #[test]
+    fn block_header_conversion_rejects_missing_fields_and_extensions() {
+        let canonical = valid_canonical_header(3, 5, 0x52);
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.ack = None;
+        assert_eq!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::MissingAcknowledgments)
+        );
+
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.transactions_commitment = None;
+        assert_eq!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::MissingTransactionsCommitment)
+        );
+
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.strong_vote = Some(AuthoritySet::default());
+        assert_eq!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::ForbiddenHeaderExtensions)
+        );
+
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.block_references = vec![block(0, 4, 0x51); MAX_RBC_REFERENCES_PER_FIELD + 1];
+        assert!(matches!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::TooManyHeaderReferences {
+                field: "parent",
+                ..
+            })
+        ));
+
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.ack = Some(AckFields {
+            intersection: None,
+            extra_references: vec![block(0, 4, 0x51); MAX_RBC_REFERENCES_PER_FIELD + 1],
+        });
+        assert!(matches!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::TooManyHeaderReferences {
+                field: "acknowledgment",
+                ..
+            })
+        ));
+
+        let mut header = block_header_from_canonical(&canonical, BlockAuthentication::None);
+        header.block_references = vec![block(0, 4, 0x51); MAX_RBC_REFERENCES_PER_FIELD];
+        header.ack = Some(AckFields {
+            intersection: Some(0),
+            extra_references: vec![block(1, 4, 0x52)],
+        });
+        assert!(matches!(
+            RbcCanonicalHeader::from_block_header(&header),
+            Err(RbcError::TooManyHeaderReferences {
+                field: "acknowledgment",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn acknowledgment_compression_is_canonical_and_preserves_u8_boundary() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let canonical = valid_canonical_header(3, 5, 0x53);
+        assert!(PinnedRbcHeader::validate(canonical.clone(), &committee).is_ok());
+
+        let mut legacy_alias = canonical.clone();
+        legacy_alias.acknowledgments.intersection = None;
+        legacy_alias.acknowledgments.extra_references.clear();
+        assert_eq!(
+            PinnedRbcHeader::validate(legacy_alias, &committee),
+            Err(RbcError::NonCanonicalAcknowledgments)
+        );
+
+        let mut out_of_range = canonical;
+        out_of_range.acknowledgments.intersection = Some(4);
+        assert_eq!(
+            PinnedRbcHeader::validate(out_of_range, &committee),
+            Err(RbcError::NonCanonicalAcknowledgments)
+        );
+
+        let references = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    let mut digest = [0; 32];
+                    digest[..4].copy_from_slice(&(index as u32).to_be_bytes());
+                    BlockReference {
+                        authority: index as AuthorityIndex % 4,
+                        round: 4,
+                        digest: BlockDigest::from(digest),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let parents_255 = references(255);
+        let parents_256 = references(256);
+        assert_eq!(
+            RbcAckFields::from_logical(&parents_255, &[]).intersection,
+            Some(255)
+        );
+        assert_eq!(
+            RbcAckFields::from_logical(&parents_256, &[]),
+            RbcAckFields {
+                intersection: None,
+                extra_references: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_header_wire_keeps_starfish_acknowledgment_compression() {
+        #[derive(Serialize)]
+        struct ExpandedHeader<'a> {
+            reference: BlockReference,
+            block_references: &'a [BlockReference],
+            acknowledgments: &'a [BlockReference],
+            meta_creation_time_ns: TimestampNs,
+            transactions_commitment: TransactionsCommitment,
+        }
+
+        let parents: Vec<_> = (0..100)
+            .map(|index| {
+                let mut digest = [0; 32];
+                digest[..4].copy_from_slice(&(index as u32).to_be_bytes());
+                BlockReference {
+                    authority: index % 4,
+                    round: 4,
+                    digest: BlockDigest::from(digest),
+                }
+            })
+            .collect();
+        let logical_acknowledgments = parents[50..].to_vec();
+        let header = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            parents,
+            logical_acknowledgments.clone(),
+            7,
+            TransactionsCommitment::default(),
+        )
+        .unwrap();
+        assert_eq!(header.acknowledgments.intersection, Some(50));
+        assert!(header.acknowledgments.extra_references.is_empty());
+
+        let compressed_size = bincode::serialize(&header).unwrap().len();
+        let expanded_size = bincode::serialize(&ExpandedHeader {
+            reference: header.reference,
+            block_references: &header.block_references,
+            acknowledgments: &logical_acknowledgments,
+            meta_creation_time_ns: header.meta_creation_time_ns,
+            transactions_commitment: header.transactions_commitment,
+        })
+        .unwrap()
+        .len();
+        assert!(compressed_size < expanded_size);
+    }
+
+    #[test]
+    fn canonical_header_validation_rejects_duplicate_and_invalid_references() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let valid = valid_canonical_header(3, 5, 0x54);
+
+        let same_round_ack = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            valid.block_references.clone(),
+            vec![block(2, 5, 0x59)],
+            valid.meta_creation_time_ns,
+            valid.transactions_commitment,
+        )
+        .unwrap();
+        assert!(PinnedRbcHeader::validate(same_round_ack, &committee).is_ok());
+
+        let mut duplicate_parent = valid.clone();
+        duplicate_parent
+            .block_references
+            .push(duplicate_parent.block_references[0]);
+        duplicate_parent.reference.digest = BlockDigest::new_starfish_rbc_header(
+            duplicate_parent.reference.authority,
+            duplicate_parent.reference.round,
+            &duplicate_parent.block_references,
+            &duplicate_parent.acknowledgment_references(),
+            duplicate_parent.meta_creation_time_ns,
+            duplicate_parent.transactions_commitment,
+        );
+        assert!(matches!(
+            PinnedRbcHeader::validate(duplicate_parent, &committee),
+            Err(RbcError::DuplicateParent(_))
+        ));
+
+        let duplicate_ack = block(3, 5, 0x55);
+        assert!(matches!(
+            RbcCanonicalHeader::try_new(
+                3,
+                5,
+                valid.block_references.clone(),
+                vec![duplicate_ack, duplicate_ack],
+                valid.meta_creation_time_ns,
+                valid.transactions_commitment,
+            ),
+            Err(RbcError::DuplicateAcknowledgment(_))
+        ));
+
+        let shared_parent = valid.block_references[2];
+        let extra = block(3, 5, 0x5A);
+        let normalized = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            valid.block_references.clone(),
+            vec![extra, shared_parent],
+            valid.meta_creation_time_ns,
+            valid.transactions_commitment,
+        );
+        assert_eq!(
+            normalized.unwrap().acknowledgment_references(),
+            vec![shared_parent, extra]
+        );
+
+        let future_ack = block(3, 6, 0x56);
+        let future_ack_header = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            valid.block_references.clone(),
+            vec![future_ack],
+            valid.meta_creation_time_ns,
+            valid.transactions_commitment,
+        )
+        .unwrap();
+        assert!(matches!(
+            PinnedRbcHeader::validate(future_ack_header, &committee),
+            Err(RbcError::AcknowledgmentFromFuture(_))
+        ));
+
+        let unknown_ack_header = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            valid.block_references.clone(),
+            vec![block(4, 5, 0x5B)],
+            valid.meta_creation_time_ns,
+            valid.transactions_commitment,
+        )
+        .unwrap();
+        assert_eq!(
+            PinnedRbcHeader::validate(unknown_ack_header, &committee),
+            Err(RbcError::UnknownAuthority(4))
+        );
+
+        let mut unknown_parent = valid.clone();
+        unknown_parent.block_references[0].authority = 4;
+        unknown_parent.reference.digest = BlockDigest::new_starfish_rbc_header(
+            unknown_parent.reference.authority,
+            unknown_parent.reference.round,
+            &unknown_parent.block_references,
+            &unknown_parent.acknowledgment_references(),
+            unknown_parent.meta_creation_time_ns,
+            unknown_parent.transactions_commitment,
+        );
+        assert_eq!(
+            PinnedRbcHeader::validate(unknown_parent, &committee),
+            Err(RbcError::UnknownAuthority(4))
+        );
+
+        let mut same_round_parent = valid.clone();
+        same_round_parent.block_references[0].round = same_round_parent.reference.round;
+        same_round_parent.reference.digest = BlockDigest::new_starfish_rbc_header(
+            same_round_parent.reference.authority,
+            same_round_parent.reference.round,
+            &same_round_parent.block_references,
+            &same_round_parent.acknowledgment_references(),
+            same_round_parent.meta_creation_time_ns,
+            same_round_parent.transactions_commitment,
+        );
+        assert!(matches!(
+            PinnedRbcHeader::validate(same_round_parent, &committee),
+            Err(RbcError::ParentNotPast(_))
+        ));
+
+        let insufficient_parents = RbcCanonicalHeader::try_new(
+            3,
+            5,
+            valid.block_references[..2].to_vec(),
+            Vec::new(),
+            valid.meta_creation_time_ns,
+            valid.transactions_commitment,
+        )
+        .unwrap();
+        assert_eq!(
+            PinnedRbcHeader::validate(insufficient_parents, &committee),
+            Err(RbcError::InvalidThresholdClock)
+        );
+
+        let mut wrong_digest = valid;
+        wrong_digest.reference.digest = BlockDigest::from([0xFF; 32]);
+        assert!(matches!(
+            PinnedRbcHeader::validate(wrong_digest, &committee),
+            Err(RbcError::HeaderDigestMismatch { .. })
+        ));
+
+        let keyrings = mac_keyrings_for_test(4);
+        let kernel = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        let mut genesis = valid_canonical_header(0, 5, 0x5C);
+        genesis.reference.round = 0;
+        assert_eq!(
+            kernel.validate_header_content(genesis),
+            Err(RbcError::GenesisSlot)
+        );
+    }
+
+    #[test]
+    fn future_round_admission_advances_monotonically() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let mut kernel = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        let too_far = block(0, MAX_RBC_FUTURE_ROUNDS + 1, 0x57);
+        assert!(matches!(
+            kernel.handle_phase(
+                1,
+                phase_message(
+                    Arc::clone(&kernel.committee),
+                    &keyrings,
+                    1,
+                    0,
+                    RbcPhase::Echo,
+                    too_far,
+                ),
+            ),
+            Err(RbcError::FutureRound { .. })
+        ));
+        assert!(kernel.slots.is_empty());
+
+        kernel.advance_local_round(1).unwrap();
+        assert_eq!(kernel.maximum_admissible_round(), MAX_RBC_FUTURE_ROUNDS + 1);
+        assert_eq!(
+            kernel.advance_local_round(0),
+            Err(RbcError::RoundRegression {
+                current: 1,
+                proposed: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn retained_round_floor_rejects_only_unseen_slots() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let mut receiver = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            3,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        let first = valid_canonical_header(0, 5, 0xD0).reference();
+        receiver
+            .handle_phase(
+                0,
+                phase_message(
+                    Arc::clone(&committee),
+                    &keyrings,
+                    0,
+                    3,
+                    RbcPhase::Echo,
+                    first,
+                ),
+            )
+            .unwrap();
+
+        receiver.advance_local_round(10).unwrap();
+        assert_eq!(
+            receiver.close_new_slots_before(11),
+            Err(RbcError::RetainedRoundAheadOfLocal {
+                local: 10,
+                proposed: 11,
+            })
+        );
+        receiver.close_new_slots_before(10).unwrap();
+        assert_eq!(receiver.minimum_new_slot_round(), 10);
+        assert_eq!(
+            receiver.close_new_slots_before(9),
+            Err(RbcError::RetainedRoundRegression {
+                current: 10,
+                proposed: 9,
+            })
+        );
+
+        let retained_candidate = valid_canonical_header(0, 5, 0xD1);
+        let retained_ref = retained_candidate.reference();
+        receiver
+            .handle_phase(
+                1,
+                phase_message(
+                    Arc::clone(&committee),
+                    &keyrings,
+                    1,
+                    3,
+                    RbcPhase::Ready,
+                    retained_ref,
+                ),
+            )
+            .unwrap();
+        assert!(
+            receiver
+                .accept_recovered_header(retained_candidate)
+                .unwrap()
+                .is_empty()
+        );
+
+        let unseen = block(1, 5, 0xD2);
+        assert_eq!(
+            receiver.handle_phase(
+                0,
+                phase_message(
+                    Arc::clone(&committee),
+                    &keyrings,
+                    0,
+                    3,
+                    RbcPhase::Echo,
+                    unseen,
+                ),
+            ),
+            Err(RbcError::StaleRound {
+                round: 5,
+                minimum: 10,
+            })
+        );
+        assert!(receiver.slots[&5].get(&1).is_none());
+        assert!(receiver.candidate(&retained_ref).unwrap().header.is_some());
+    }
+
+    #[test]
+    fn phase_sender_admission_bounds_equivocation_without_burning_invalid_messages() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 6, 0xD3);
+        let mut receiver = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            3,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        let outcome = receiver
+            .accept_direct_initial_header(
+                0,
+                canonical,
+                &RbcInitialProof::Ed25519(SignatureBytes::default()),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RbcInitialHeaderOutcome::StagedUnauthenticated { .. }
+        ));
+        let conflicting_initial = valid_canonical_header(0, 6, 0xD5);
+        let conflicting_ref = conflicting_initial.reference();
+        assert!(matches!(
+            receiver.accept_direct_initial_header(
+                0,
+                conflicting_initial,
+                &RbcInitialProof::Ed25519(SignatureBytes::default()),
+            ),
+            Err(RbcError::ConflictingInitialHeader { received, .. }) if received == conflicting_ref
+        ));
+
+        let mut invalid = phase_message(
+            Arc::clone(&committee),
+            &keyrings,
+            0,
+            3,
+            RbcPhase::Echo,
+            block(0, 6, 0xD4),
+        );
+        invalid.tag = MacTag::from_bytes([0; 32]);
+        assert_eq!(
+            receiver.handle_phase(0, invalid),
+            Err(RbcError::InvalidPhaseTag)
+        );
+
+        let mut first_echo = None;
+        let mut first_ready = None;
+        for sender in 0..3 {
+            let echo = block(0, 6, 0xE0 + sender as u8);
+            let ready = block(0, 6, 0xF0 + sender as u8);
+            first_echo.get_or_insert(echo);
+            first_ready.get_or_insert(ready);
+            receiver
+                .handle_phase(
+                    sender,
+                    phase_message(
+                        Arc::clone(&committee),
+                        &keyrings,
+                        sender,
+                        3,
+                        RbcPhase::Echo,
+                        echo,
+                    ),
+                )
+                .unwrap();
+            receiver
+                .handle_phase(
+                    sender,
+                    phase_message(
+                        Arc::clone(&committee),
+                        &keyrings,
+                        sender,
+                        3,
+                        RbcPhase::Ready,
+                        ready,
+                    ),
+                )
+                .unwrap();
+        }
+
+        for marker in 0..32 {
+            for phase in [RbcPhase::Echo, RbcPhase::Ready] {
+                let message = phase_message(
+                    Arc::clone(&committee),
+                    &keyrings,
+                    0,
+                    3,
+                    phase,
+                    block(0, 6, marker),
+                );
+                assert!(receiver.handle_phase(0, message).unwrap().is_empty());
+            }
+        }
+        let slot = receiver.slot(&block(0, 6, 0)).unwrap();
+        assert_eq!(slot.candidates.len(), 1 + 2 * (committee.len() - 1));
+        assert!(slot.candidates.contains_key(&first_echo.unwrap()));
+        assert!(slot.candidates.contains_key(&first_ready.unwrap()));
+    }
+
+    #[test]
+    fn recovered_headers_require_prior_authenticated_phase_evidence() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 8, 0xD6);
+        let block_ref = canonical.reference();
+        let mut receiver = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            3,
+            BlockAuthenticationScheme::Ed25519,
+        );
+
+        assert_eq!(
+            receiver.accept_recovered_header(canonical.clone()),
+            Err(RbcError::UnexpectedRecoveredHeader(block_ref))
+        );
+        assert!(receiver.slots.is_empty());
+
+        receiver
+            .handle_phase(
+                0,
+                phase_message(committee, &keyrings, 0, 3, RbcPhase::Ready, block_ref),
+            )
+            .unwrap();
+        assert!(
+            receiver
+                .accept_recovered_header(canonical)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(receiver.candidate(&block_ref).unwrap().header.is_some());
+    }
+
+    #[test]
+    fn bounded_header_decoder_rejects_oversized_reference_vector() {
+        #[derive(Serialize)]
+        struct UnboundedReferences {
+            references: Vec<BlockReference>,
+        }
+        #[derive(Deserialize)]
+        struct BoundedReferences {
+            #[serde(with = "super::bounded_references")]
+            _references: Vec<BlockReference>,
+        }
+
+        let oversized = UnboundedReferences {
+            references: vec![block(0, 1, 0x58); MAX_RBC_REFERENCES_PER_FIELD + 1],
+        };
+        let bytes = bincode::serialize(&oversized).unwrap();
+        assert!(bincode::deserialize::<BoundedReferences>(&bytes).is_err());
+
+        #[derive(Serialize)]
+        struct UnboundedAckFields {
+            intersection: Option<u8>,
+            extra_references: Vec<BlockReference>,
+        }
+        #[derive(Serialize)]
+        struct UnboundedHeader {
+            reference: BlockReference,
+            block_references: Vec<BlockReference>,
+            acknowledgments: UnboundedAckFields,
+            meta_creation_time_ns: TimestampNs,
+            transactions_commitment: TransactionsCommitment,
+        }
+
+        let base = valid_canonical_header(0, 5, 0x59);
+        let oversized_parent_header = UnboundedHeader {
+            reference: base.reference,
+            block_references: vec![block(0, 4, 0x58); MAX_RBC_REFERENCES_PER_FIELD + 1],
+            acknowledgments: UnboundedAckFields {
+                intersection: Some(0),
+                extra_references: Vec::new(),
+            },
+            meta_creation_time_ns: base.meta_creation_time_ns,
+            transactions_commitment: base.transactions_commitment,
+        };
+        let bytes = bincode::serialize(&oversized_parent_header).unwrap();
+        assert!(bincode::deserialize::<RbcCanonicalHeader>(&bytes).is_err());
+
+        let oversized_extra_header = UnboundedHeader {
+            reference: base.reference,
+            block_references: base.block_references,
+            acknowledgments: UnboundedAckFields {
+                intersection: Some(0),
+                extra_references: vec![block(0, 4, 0x58); MAX_RBC_REFERENCES_PER_FIELD + 1],
+            },
+            meta_creation_time_ns: base.meta_creation_time_ns,
+            transactions_commitment: base.transactions_commitment,
+        };
+        let bytes = bincode::serialize(&oversized_extra_header).unwrap();
+        assert!(bincode::deserialize::<RbcCanonicalHeader>(&bytes).is_err());
+    }
+
+    #[test]
+    fn canonical_header_content_size_enforces_the_four_mib_boundary() {
+        let references = |count: usize, round: RoundNumber, domain: u8| {
+            (0..count)
+                .map(|index| {
+                    let mut digest = [0; 32];
+                    digest[0] = domain;
+                    digest[1..9].copy_from_slice(&(index as u64).to_be_bytes());
+                    BlockReference {
+                        authority: index as AuthorityIndex % 4,
+                        round,
+                        digest: BlockDigest::from(digest),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let maximum_total_references = (MAX_RBC_HEADER_CONTENT_SIZE
+            - RBC_HEADER_FIXED_CONTENT_SIZE)
+            / RBC_BLOCK_REFERENCE_SIZE;
+        let parent_count = maximum_total_references / 2;
+        let acknowledgment_count = maximum_total_references - parent_count;
+        let accepted = RbcCanonicalHeader::try_new(
+            0,
+            5,
+            references(parent_count, 4, 0x01),
+            references(acknowledgment_count, 3, 0x02),
+            0,
+            TransactionsCommitment::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted
+                .encoded_content_size(accepted.acknowledgment_references().len())
+                .unwrap(),
+            MAX_RBC_HEADER_CONTENT_SIZE - 32
+        );
+
+        let mut too_large_acknowledgments = accepted.acknowledgment_references();
+        too_large_acknowledgments.push(block(0, 3, 0x03));
+        assert_eq!(
+            RbcCanonicalHeader::try_new(
+                accepted.reference.authority,
+                accepted.reference.round,
+                accepted.block_references.clone(),
+                too_large_acknowledgments,
+                accepted.meta_creation_time_ns,
+                accepted.transactions_commitment,
+            ),
+            Err(RbcError::HeaderContentTooLarge)
+        );
     }
 
     #[test]
@@ -1120,6 +3021,7 @@ mod tests {
             instance(TEST_INSTANCE_BYTE),
             BlockAuthenticationScheme::Ed25519,
             Arc::new(Vec::new()),
+            0,
         )
         .err()
         .unwrap();
@@ -1147,6 +3049,7 @@ mod tests {
             instance(TEST_INSTANCE_BYTE),
             BlockAuthenticationScheme::Ed25519,
             Arc::new(mac_keyrings_for_test(4)[0].clone()),
+            0,
         )
         .err()
         .unwrap();
@@ -1174,6 +3077,7 @@ mod tests {
             instance(TEST_INSTANCE_BYTE),
             BlockAuthenticationScheme::Ed25519,
             Arc::new(Vec::new()),
+            0,
         )
         .err()
         .unwrap();
@@ -1209,7 +3113,9 @@ mod tests {
             BlockAuthenticationScheme::MacVector,
         );
         let block_ref = block(0, 7, 0x44);
-        let tag = author.make_initial_mac_tag(block_ref, 1).unwrap();
+        let tag = author
+            .make_initial_mac_tag_for_reference(block_ref, 1)
+            .unwrap();
 
         recipient
             .verify_initial_mac_tag(0, block_ref, &tag)
@@ -1277,6 +3183,296 @@ mod tests {
     }
 
     #[test]
+    fn typed_initial_proofs_gate_echo_for_every_authentication_scheme() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 5, 0x20);
+        let block_ref = canonical.reference();
+
+        for authentication in [
+            BlockAuthenticationScheme::Ed25519,
+            BlockAuthenticationScheme::MlDsa44,
+            BlockAuthenticationScheme::MlDsa65,
+            BlockAuthenticationScheme::MacVector,
+        ] {
+            let mut receiver = kernel(Arc::clone(&committee), &keyrings, 1, authentication);
+            let proof = match authentication {
+                BlockAuthenticationScheme::Ed25519 => {
+                    let digest = receiver.initial_signature_digest(block_ref).unwrap();
+                    RbcInitialProof::Ed25519(dummy_signer().sign_digest(&digest))
+                }
+                BlockAuthenticationScheme::MlDsa44 => {
+                    let digest =
+                        BlockDigest::from(receiver.initial_signature_digest(block_ref).unwrap());
+                    RbcInitialProof::MlDsa44(dummy_ml_dsa_44_signer().sign_digest(&digest))
+                }
+                BlockAuthenticationScheme::MlDsa65 => {
+                    let digest =
+                        BlockDigest::from(receiver.initial_signature_digest(block_ref).unwrap());
+                    RbcInitialProof::MlDsa65(dummy_ml_dsa_65_signer().sign_digest(&digest))
+                }
+                BlockAuthenticationScheme::MacVector => {
+                    let author = kernel(
+                        Arc::clone(&committee),
+                        &keyrings,
+                        0,
+                        BlockAuthenticationScheme::MacVector,
+                    );
+                    RbcInitialProof::Mac(
+                        author
+                            .make_initial_mac_tag_for_reference(block_ref, 1)
+                            .unwrap(),
+                    )
+                }
+            };
+            let outcome = receiver
+                .accept_direct_initial_header(0, canonical.clone(), &proof)
+                .unwrap();
+            assert!(matches!(outcome,
+                RbcInitialHeaderOutcome::Authenticated { effects }
+                    if matches!(effects.as_slice(), [RbcEffect::MulticastPhase {
+                    phase: RbcPhase::Echo,
+                    ..
+                }])
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_initial_proof_still_allows_content_recovery_without_echo() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 5, 0x25);
+        let block_ref = canonical.reference();
+        let mut receiver = kernel(committee, &keyrings, 1, BlockAuthenticationScheme::Ed25519);
+        let invalid = RbcInitialProof::Ed25519(SignatureBytes::default());
+
+        let outcome = receiver
+            .accept_direct_initial_header(0, canonical, &invalid)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RbcInitialHeaderOutcome::StagedUnauthenticated {
+                effects,
+                error: RbcError::InvalidInitialProof,
+            } if effects.is_empty()
+        ));
+        let slot = receiver.slot(&block_ref).unwrap();
+        assert_eq!(slot.echoed, None);
+        assert_eq!(
+            slot.candidates
+                .get(&block_ref)
+                .and_then(|candidate| candidate.header.as_ref())
+                .map(PinnedRbcHeader::reference),
+            Some(block_ref)
+        );
+
+        assert!(
+            receiver
+                .accept_recovered_header(valid_canonical_header(0, 5, 0x25))
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            RbcInitialProof::from_block_authentication(&BlockAuthentication::MacVector(vec![])),
+            Err(RbcError::InvalidInitialProof)
+        );
+    }
+
+    #[test]
+    fn pinned_headers_and_echo_capabilities_are_kernel_bound() {
+        let committee_a = Committee::new_test(vec![1; 4]);
+        let committee_b = Committee::new_test(vec![1, 1, 1, 10]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 5, 0xA8);
+        let block_ref = canonical.reference();
+        let pin_a = PinnedRbcHeader::validate(canonical.clone(), &committee_a).unwrap();
+        assert_eq!(
+            PinnedRbcHeader::validate(canonical.clone(), &committee_b),
+            Err(RbcError::InvalidThresholdClock)
+        );
+
+        let mut committee_b_kernel = kernel(
+            committee_b,
+            &keyrings,
+            1,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        assert_eq!(
+            committee_b_kernel.note_header_available(pin_a.clone()),
+            Err(RbcError::PinnedHeaderCommitteeMismatch)
+        );
+        assert!(committee_b_kernel.slots.is_empty());
+
+        let author = kernel(
+            Arc::clone(&committee_a),
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::MacVector,
+        );
+        let receiver_one = kernel(
+            Arc::clone(&committee_a),
+            &keyrings,
+            1,
+            BlockAuthenticationScheme::MacVector,
+        );
+        let proof = RbcInitialProof::Mac(
+            author
+                .make_initial_mac_tag_for_reference(block_ref, 1)
+                .unwrap(),
+        );
+        let eligible_for_one = receiver_one
+            .direct_initial_header(0, pin_a.clone(), &proof)
+            .unwrap();
+        let mut receiver_two = kernel(
+            Arc::clone(&committee_a),
+            &keyrings,
+            2,
+            BlockAuthenticationScheme::MacVector,
+        );
+        assert!(matches!(
+            receiver_two.accept_direct_initial_header(1, canonical, &proof),
+            Err(RbcError::InitialAuthorMismatch { .. })
+        ));
+        assert!(receiver_two.slots.is_empty());
+        assert_eq!(
+            receiver_two.accept_initial_header(eligible_for_one),
+            Err(RbcError::EchoCapabilityContextMismatch)
+        );
+        assert!(receiver_two.slots.is_empty());
+
+        let eligible_for_instance = receiver_one
+            .direct_initial_header(0, pin_a, &proof)
+            .unwrap();
+        let mut other_instance = kernel_with_instance(
+            committee_a,
+            &keyrings,
+            1,
+            BlockAuthenticationScheme::MacVector,
+            0xB6,
+        );
+        assert_eq!(
+            other_instance.accept_initial_header(eligible_for_instance),
+            Err(RbcError::EchoCapabilityContextMismatch)
+        );
+        assert!(other_instance.slots.is_empty());
+    }
+
+    #[test]
+    fn invalid_initial_proof_preserves_ready_effect_unblocked_by_staging() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let canonical = valid_canonical_header(0, 7, 0xB7);
+        let block_ref = canonical.reference();
+        let mut receiver = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            3,
+            BlockAuthenticationScheme::Ed25519,
+        );
+
+        for sender in 0..3 {
+            let message = phase_message(
+                Arc::clone(&committee),
+                &keyrings,
+                sender,
+                3,
+                RbcPhase::Echo,
+                block_ref,
+            );
+            receiver.handle_phase(sender, message).unwrap();
+        }
+        let outcome = receiver
+            .accept_direct_initial_header(
+                0,
+                canonical,
+                &RbcInitialProof::Ed25519(SignatureBytes::default()),
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RbcInitialHeaderOutcome::StagedUnauthenticated {
+                effects,
+                error: RbcError::InvalidInitialProof,
+            } if effects == vec![RbcEffect::MulticastPhase {
+                phase: RbcPhase::Ready,
+                block_ref,
+            }]
+        ));
+        let slot = receiver.slot(&block_ref).unwrap();
+        assert_eq!(slot.echoed, None);
+        assert_eq!(slot.readied, Some(block_ref));
+        assert!(slot.candidates[&block_ref].header.is_some());
+    }
+
+    #[test]
+    fn local_initial_constructor_binds_the_local_author_and_content() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        let mut kernel = kernel(
+            Arc::clone(&committee),
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::Ed25519,
+        );
+        let template = valid_canonical_header(1, 5, 0x27);
+
+        let local = kernel
+            .start_local_initial_header(
+                template.reference.round,
+                template.block_references.clone(),
+                template.acknowledgment_references(),
+                template.meta_creation_time_ns,
+                template.transactions_commitment,
+            )
+            .unwrap();
+        assert!(kernel.make_local_initial_signature_digest(&local).is_ok());
+        let other_instance = kernel_with_instance(
+            committee,
+            &keyrings,
+            0,
+            BlockAuthenticationScheme::Ed25519,
+            0xB8,
+        );
+        assert_eq!(
+            other_instance.make_local_initial_signature_digest(&local),
+            Err(RbcError::LocalInitialContextMismatch)
+        );
+        assert!(matches!(
+            kernel.start_local_initial_header(
+                template.reference.round,
+                template.block_references.clone(),
+                template.acknowledgment_references(),
+                template.meta_creation_time_ns + 1,
+                template.transactions_commitment,
+            ),
+            Err(RbcError::ConflictingInitialHeader { .. })
+        ));
+        let (pinned, effects) = local.into_parts();
+        assert_eq!(pinned.reference().authority, 0);
+        assert_ne!(pinned.reference(), template.reference());
+        assert!(matches!(
+            effects.as_slice(),
+            [RbcEffect::MulticastPhase {
+                phase: RbcPhase::Echo,
+                ..
+            }]
+        ));
+
+        assert!(matches!(
+            kernel.start_local_initial_header(
+                6,
+                template.block_references[..2].to_vec(),
+                Vec::new(),
+                template.meta_creation_time_ns,
+                template.transactions_commitment,
+            ),
+            Err(RbcError::InvalidThresholdClock)
+        ));
+    }
+
+    #[test]
     fn phase_messages_are_specialized_for_each_recipient() {
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(4);
@@ -1339,7 +3535,9 @@ mod tests {
             sender.make_phase_message(RbcPhase::Echo, first, 1),
             Err(RbcError::PhaseNotAuthorized { .. })
         ));
-        sender.note_header_available(first).unwrap();
+        sender
+            .note_header_available(pinned_header(&committee, first))
+            .unwrap();
         assert!(matches!(
             sender.make_phase_message(RbcPhase::Echo, first, 1),
             Err(RbcError::PhaseNotAuthorized { .. })
@@ -1358,7 +3556,9 @@ mod tests {
             sender.make_phase_message(RbcPhase::Echo, first, 1).unwrap()
         );
 
-        sender.note_header_available(conflicting).unwrap();
+        sender
+            .note_header_available(pinned_header(&committee, conflicting))
+            .unwrap();
         assert!(sender.authorize_echo(conflicting).unwrap().is_empty());
         assert!(matches!(
             sender.make_phase_message(RbcPhase::Echo, conflicting, 1),
@@ -1542,7 +3742,9 @@ mod tests {
         let mut message = sender
             .make_phase_message(RbcPhase::Echo, block_ref, 1)
             .unwrap();
-        message.tag = sender.make_initial_mac_tag(block_ref, 1).unwrap();
+        message.tag = sender
+            .make_initial_mac_tag_for_reference(block_ref, 1)
+            .unwrap();
 
         assert_eq!(
             receiver.handle_phase(0, message),
@@ -1642,7 +3844,9 @@ mod tests {
         );
 
         assert_eq!(
-            receiver.note_header_available(block_ref).unwrap(),
+            receiver
+                .note_header_available(pinned_header(&committee, block_ref))
+                .unwrap(),
             vec![RbcEffect::MulticastPhase {
                 phase: RbcPhase::Ready,
                 block_ref,
@@ -1685,13 +3889,15 @@ mod tests {
         ));
 
         assert_eq!(
-            receiver.note_header_available(block_ref).unwrap(),
+            receiver
+                .note_header_available(pinned_header(&committee, block_ref))
+                .unwrap(),
             vec![
                 RbcEffect::MulticastPhase {
                     phase: RbcPhase::Ready,
                     block_ref,
                 },
-                RbcEffect::Deliver(block_ref),
+                RbcEffect::Deliver(pinned_header(&committee, block_ref)),
             ]
         );
     }
@@ -1731,7 +3937,14 @@ mod tests {
             initial_request.first().cloned()
         );
 
-        let third = phase_message(committee, &keyrings, 2, 3, RbcPhase::Ready, block_ref);
+        let third = phase_message(
+            Arc::clone(&committee),
+            &keyrings,
+            2,
+            3,
+            RbcPhase::Ready,
+            block_ref,
+        );
         let expanded_request = receiver.handle_phase(2, third).unwrap();
         assert!(matches!(
             expanded_request.as_slice(),
@@ -1742,7 +3955,9 @@ mod tests {
             expanded_request.first().cloned()
         );
 
-        receiver.note_header_available(block_ref).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, block_ref))
+            .unwrap();
         assert_eq!(receiver.retry_header_request(block_ref).unwrap(), None);
     }
 
@@ -1772,13 +3987,15 @@ mod tests {
         assert_eq!(receiver.slot(&block_ref).unwrap().delivered, None);
 
         assert_eq!(
-            receiver.note_header_available(block_ref).unwrap(),
+            receiver
+                .note_header_available(pinned_header(&committee, block_ref))
+                .unwrap(),
             vec![
                 RbcEffect::MulticastPhase {
                     phase: RbcPhase::Ready,
                     block_ref,
                 },
-                RbcEffect::Deliver(block_ref),
+                RbcEffect::Deliver(pinned_header(&committee, block_ref)),
             ]
         );
     }
@@ -1794,7 +4011,9 @@ mod tests {
             3,
             BlockAuthenticationScheme::Ed25519,
         );
-        receiver.note_header_available(block_ref).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, block_ref))
+            .unwrap();
 
         for sender in [0, 0, 1] {
             let message = phase_message(
@@ -1836,7 +4055,9 @@ mod tests {
             0,
             BlockAuthenticationScheme::Ed25519,
         );
-        receiver.note_header_available(first).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, first))
+            .unwrap();
         assert!(matches!(
             receiver.authorize_echo(first).unwrap().as_slice(),
             [RbcEffect::MulticastPhase {
@@ -1844,7 +4065,9 @@ mod tests {
                 ..
             }]
         ));
-        receiver.note_header_available(quorum_candidate).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, quorum_candidate))
+            .unwrap();
         assert!(
             receiver
                 .authorize_echo(quorum_candidate)
@@ -1877,7 +4100,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_is_per_candidate_but_delivery_is_slot_global() {
+    fn phase_equivocation_is_ignored_and_delivery_is_slot_global() {
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(4);
         let first = block(0, 10, 0x81);
@@ -1888,8 +4111,12 @@ mod tests {
             3,
             BlockAuthenticationScheme::Ed25519,
         );
-        receiver.note_header_available(first).unwrap();
-        receiver.note_header_available(second).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, first))
+            .unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, second))
+            .unwrap();
 
         for candidate in [first, second] {
             let message = phase_message(
@@ -1904,7 +4131,7 @@ mod tests {
         }
         assert!(receiver.candidate(&first).unwrap().echoes.votes.contains(0));
         assert!(
-            receiver
+            !receiver
                 .candidate(&second)
                 .unwrap()
                 .echoes
@@ -1943,8 +4170,10 @@ mod tests {
     fn four_kernel_split_initial_values_converge_on_at_most_one_delivery() {
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(4);
-        let first = block(0, 12, 0xA1);
-        let conflicting = block(0, 12, 0xA2);
+        let first_header = valid_canonical_header(0, 12, 0xA1);
+        let conflicting_header = valid_canonical_header(0, 12, 0xA2);
+        let first = first_header.reference();
+        let conflicting = conflicting_header.reference();
         let mut kernels: Vec<_> = (0..4)
             .map(|authority| {
                 kernel(
@@ -1955,25 +4184,64 @@ mod tests {
                 )
             })
             .collect();
+        let mut header_stores = vec![AHashMap::new(); 4];
 
         let mut initial_effects = Vec::new();
-        for (authority, block_ref) in [(0, first), (1, first), (2, first), (3, conflicting)] {
-            kernels[authority as usize]
-                .note_header_available(block_ref)
+        let local = kernels[0]
+            .start_local_initial_header(
+                first_header.reference.round,
+                first_header.block_references.clone(),
+                first_header.acknowledgment_references(),
+                first_header.meta_creation_time_ns,
+                first_header.transactions_commitment,
+            )
+            .unwrap();
+        assert_eq!(local.header(), &first_header);
+        let first_signature_digest = kernels[0]
+            .make_local_initial_signature_digest(&local)
+            .unwrap();
+        let first_proof =
+            RbcInitialProof::Ed25519(dummy_signer().sign_digest(&first_signature_digest));
+        let (local_header, local_effects) = local.into_parts();
+        header_stores[0].insert(first, local_header.header().clone());
+        initial_effects.push((0, local_effects));
+
+        for authority in 1..3 {
+            let outcome = kernels[authority as usize]
+                .accept_direct_initial_header(0, first_header.clone(), &first_proof)
                 .unwrap();
-            let effects = kernels[authority as usize]
-                .authorize_echo(block_ref)
-                .unwrap();
+            let RbcInitialHeaderOutcome::Authenticated { effects } = outcome else {
+                panic!("valid direct initial header must authenticate")
+            };
+            header_stores[authority as usize].insert(first, first_header.clone());
             initial_effects.push((authority, effects));
         }
 
-        let deliveries = pump_phase_effects(&mut kernels, initial_effects, true);
+        let conflicting_digest = kernels[3].initial_signature_digest(conflicting).unwrap();
+        let conflicting_proof =
+            RbcInitialProof::Ed25519(dummy_signer().sign_digest(&conflicting_digest));
+        let outcome = kernels[3]
+            .accept_direct_initial_header(0, conflicting_header.clone(), &conflicting_proof)
+            .unwrap();
+        let RbcInitialHeaderOutcome::Authenticated { effects } = outcome else {
+            panic!("valid conflicting author proof must authenticate at its recipient")
+        };
+        header_stores[3].insert(conflicting, conflicting_header);
+        initial_effects.push((3, effects));
+
+        let (deliveries, recoveries) =
+            pump_phase_effects(&mut kernels, initial_effects, &mut header_stores);
         assert!(deliveries.iter().all(|delivered| delivered == &[first]));
         assert!(
             deliveries
                 .iter()
                 .flatten()
                 .all(|delivered| *delivered != conflicting)
+        );
+        assert!(
+            recoveries
+                .iter()
+                .any(|(requester, _, block_ref)| *requester == 3 && *block_ref == first)
         );
         assert_eq!(kernels[3].slot(&first).unwrap().echoed, Some(conflicting));
         assert_eq!(kernels[3].slot(&first).unwrap().readied, Some(first));
@@ -1983,7 +4251,8 @@ mod tests {
     fn poisoned_initial_mac_does_not_block_rbc_totality() {
         let committee = Committee::new_test(vec![1; 4]);
         let keyrings = mac_keyrings_for_test(4);
-        let block_ref = block(0, 13, 0xA3);
+        let canonical = valid_canonical_header(0, 13, 0xA3);
+        let block_ref = canonical.reference();
         let mut kernels: Vec<_> = (0..4)
             .map(|authority| {
                 kernel(
@@ -1994,33 +4263,53 @@ mod tests {
                 )
             })
             .collect();
+        let mut header_stores = vec![AHashMap::new(); 4];
 
-        let valid_for_one = kernels[0].make_initial_mac_tag(block_ref, 1).unwrap();
-        let valid_for_two = kernels[0].make_initial_mac_tag(block_ref, 2).unwrap();
-        kernels[1]
-            .verify_initial_mac_tag(0, block_ref, &valid_for_one)
+        let local = kernels[0]
+            .start_local_initial_header(
+                canonical.reference.round,
+                canonical.block_references.clone(),
+                canonical.acknowledgment_references(),
+                canonical.meta_creation_time_ns,
+                canonical.transactions_commitment,
+            )
             .unwrap();
-        kernels[2]
-            .verify_initial_mac_tag(0, block_ref, &valid_for_two)
-            .unwrap();
-        assert_eq!(
-            kernels[3].verify_initial_mac_tag(0, block_ref, &valid_for_two),
-            Err(RbcError::InvalidInitialTag)
-        );
-
-        let mut initial_effects = Vec::new();
-        for authority in 0..3 {
-            kernels[authority as usize]
-                .note_header_available(block_ref)
+        let valid_for_one = kernels[0].make_local_initial_mac_tag(&local, 1).unwrap();
+        let valid_for_two = kernels[0].make_local_initial_mac_tag(&local, 2).unwrap();
+        let (local_header, local_effects) = local.into_parts();
+        header_stores[0].insert(block_ref, local_header.header().clone());
+        let mut initial_effects = vec![(0, local_effects)];
+        for (authority, tag) in [(1, valid_for_one), (2, valid_for_two)] {
+            let outcome = kernels[authority as usize]
+                .accept_direct_initial_header(0, canonical.clone(), &RbcInitialProof::Mac(tag))
                 .unwrap();
-            let effects = kernels[authority as usize]
-                .authorize_echo(block_ref)
-                .unwrap();
+            let RbcInitialHeaderOutcome::Authenticated { effects } = outcome else {
+                panic!("recipient-specific author MAC must authenticate")
+            };
+            header_stores[authority as usize].insert(block_ref, canonical.clone());
             initial_effects.push((authority, effects));
         }
 
-        let deliveries = pump_phase_effects(&mut kernels, initial_effects, true);
+        let poisoned = kernels[3]
+            .accept_direct_initial_header(
+                0,
+                canonical.clone(),
+                &RbcInitialProof::Mac(valid_for_two),
+            )
+            .unwrap();
+        assert!(matches!(
+            poisoned,
+            RbcInitialHeaderOutcome::StagedUnauthenticated {
+                effects,
+                error: RbcError::InvalidInitialTag,
+            } if effects.is_empty()
+        ));
+        header_stores[3].insert(block_ref, canonical);
+
+        let (deliveries, recoveries) =
+            pump_phase_effects(&mut kernels, initial_effects, &mut header_stores);
         assert!(deliveries.iter().all(|delivered| delivered == &[block_ref]));
+        assert!(recoveries.is_empty());
         let recovered_slot = kernels[3].slot(&block_ref).unwrap();
         assert_eq!(recovered_slot.echoed, None);
         assert_eq!(recovered_slot.readied, Some(block_ref));
@@ -2040,7 +4329,9 @@ mod tests {
             3,
             BlockAuthenticationScheme::Ed25519,
         );
-        receiver.note_header_available(block_ref).unwrap();
+        receiver
+            .note_header_available(pinned_header(&committee, block_ref))
+            .unwrap();
         assert_eq!(
             receiver.authorize_echo(block_ref).unwrap(),
             vec![RbcEffect::MulticastPhase {

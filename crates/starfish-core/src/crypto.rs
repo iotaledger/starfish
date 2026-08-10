@@ -220,6 +220,58 @@ impl BlockDigest {
         )
     }
 
+    /// Canonical Starfish-RBC header-content digest.
+    ///
+    /// This encoding is intentionally separate from the legacy block digest:
+    /// every field is tagged, collection lengths are explicit, integers are
+    /// big-endian, and the transaction commitment is mandatory. Authentication
+    /// and protocol sidecars are not part of the content identity.
+    pub(crate) fn new_starfish_rbc_header(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: &[BlockReference],
+        acknowledgment_references: &[BlockReference],
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+    ) -> Self {
+        const AUTHORITY_FIELD: u8 = 0x01;
+        const ROUND_FIELD: u8 = 0x02;
+        const PARENTS_FIELD: u8 = 0x03;
+        const ACKNOWLEDGMENTS_FIELD: u8 = 0x04;
+        const CREATION_TIME_FIELD: u8 = 0x05;
+        const TRANSACTIONS_COMMITMENT_FIELD: u8 = 0x06;
+
+        fn hash_reference(hasher: &mut Blake3Hasher, block_ref: &BlockReference) {
+            hasher.update(&block_ref.authority.to_be_bytes());
+            hasher.update(&block_ref.round.to_be_bytes());
+            hasher.update(block_ref.digest.as_ref());
+        }
+
+        fn hash_references(hasher: &mut Blake3Hasher, references: &[BlockReference]) {
+            let length =
+                u32::try_from(references.len()).expect("Starfish-RBC reference count exceeds u32");
+            hasher.update(&length.to_be_bytes());
+            for block_ref in references {
+                hash_reference(hasher, block_ref);
+            }
+        }
+
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(&[AUTHORITY_FIELD]);
+        hasher.update(&authority.to_be_bytes());
+        hasher.update(&[ROUND_FIELD]);
+        hasher.update(&round.to_be_bytes());
+        hasher.update(&[PARENTS_FIELD]);
+        hash_references(&mut hasher, block_references);
+        hasher.update(&[ACKNOWLEDGMENTS_FIELD]);
+        hash_references(&mut hasher, acknowledgment_references);
+        hasher.update(&[CREATION_TIME_FIELD]);
+        hasher.update(&meta_creation_time_ns.to_be_bytes());
+        hasher.update(&[TRANSACTIONS_COMMITMENT_FIELD]);
+        hasher.update(transactions_commitment.as_ref());
+        Self(hasher.finalize().into())
+    }
+
     pub fn new_without_transactions_with_unprovable(
         authority: AuthorityIndex,
         round: RoundNumber,

@@ -1,6 +1,7 @@
 # Starfish-RBC protocol specification
 
-Status: protocol specification with isolated RBC kernel; network and DAG integration pending
+Status: protocol specification with isolated RBC kernel and canonical header staging; network and
+DAG integration pending
 
 This document specifies the first correctness-oriented prototype of Starfish with reliable header
 certification and a signature-free MAC configuration. The provisional CLI name is `starfish-rbc`.
@@ -102,16 +103,40 @@ The value proposed in a slot is a canonical Starfish header. Its identifier rema
 BlockReference = (author, round, content_digest)
 ```
 
-`content_digest` must commit unambiguously to the canonical header content, including the
-transaction commitment, parent references, acknowledgments, and other consensus-relevant fields.
-It does not commit to the initial authentication sidecar or to reliable-broadcast messages.
+`content_digest` commits unambiguously to the canonical header content, including the transaction
+commitment, parent references, and logical acknowledgments. It does not commit to the initial
+authentication sidecar, protocol instance, committee ID, reliable-broadcast messages, transaction
+payload, or the transport representation of compressed acknowledgments.
 
-The current shared `BlockDigest` implementation hashes the parent-reference vector immediately
+The legacy shared `BlockDigest` implementation hashes the parent-reference vector immediately
 followed by the acknowledgment vector without encoding their lengths. Moving a reference across
-that boundary can therefore preserve the digest without finding a BLAKE3 collision. Before
-Starfish-RBC accepts headers, milestone three must add a Starfish-RBC canonical content encoding
-with explicit field markers and collection lengths. This is a blocking proof obligation, not an
-optional optimization.
+that boundary can therefore preserve the digest without finding a BLAKE3 collision. Starfish-RBC
+does not change that legacy encoding. It uses plain BLAKE3 over this canonical tagged byte stream:
+
+```text
+0x01 || author:u16_be
+0x02 || round:u32_be
+0x03 || parent_count:u32_be || parent[0] || ... || parent[n-1]
+0x04 || logical_ack_count:u32_be || ack[0] || ... || ack[m-1]
+0x05 || creation_time_ns:u64_be
+0x06 || transactions_commitment:[u8;32]
+
+reference = authority:u16_be || round:u32_be || digest:[u8;32]
+```
+
+There is deliberately no `starfish:block-ref:v2` string, protocol name, session identifier, or
+authentication mode in this input: a block reference remains exactly `H(content)`. The field tags
+and fixed-width counts make the content grammar unambiguous. Any future content field requires a
+new canonical encoding rather than silently extending this one.
+
+Acknowledgments remain compressed on the wire so that RBC does not inflate the Starfish bandwidth
+baseline. Before hashing, they are expanded into their logical ordered vector. The stored
+compression must be canonical: the intersection is in range, denotes the maximal shared parent
+suffix, and recompressing the logical vector must reproduce the stored fields byte-for-byte. An
+intersection up to 255 uses the compact form; a larger index uses the legacy full-vector fallback.
+Local construction follows existing Starfish semantics: a shared parent suffix is normalized to
+the front of the logical vector and non-shared acknowledgments retain their relative order. Exact
+duplicate parents and acknowledgments are rejected before this normalization.
 
 `protocol_instance` and `committee_id` are authenticated domain-separation inputs but are not added
 to `BlockReference`:
@@ -132,13 +157,16 @@ effective validity/quorum thresholds or information length disagree with the can
 
 Header processing has three distinct gates:
 
-1. **Content validation** is deterministic and view-independent. It checks the canonical digest,
-   intrinsic field relationships, committee/round bounds, the committed transaction root, and
-   protocol syntax without requiring the local initial proof, transaction data, a shard, or locally
-   available dependencies.
-2. **Initial authentication** determines only whether this validator may send ECHO for the
+1. **Structural content validation** is deterministic and view-independent. It checks the canonical
+   digest, intrinsic field relationships, committee membership, the previous-round quorum clock,
+   the committed transaction root, and protocol syntax without requiring the local initial proof,
+   transaction data, a shard, or locally available dependencies. The resulting pin caches the
+   already-validated committee ID; it does not rehash the committee for every header.
+2. **Ingress admission** applies the local future-round ceiling and the monotonic new-slot floor
+   before candidate allocation. These local resource checks are not part of content identity.
+3. **Initial authentication** determines only whether this validator may send ECHO for the
    candidate.
-3. **DAG admission and clean activation** resolve dependencies and determine whether the delivered
+4. **DAG admission and clean activation** resolve dependencies and determine whether the delivered
    header can influence Starfish.
 
 The implementation must not keep these gates bundled in the current all-or-nothing block verifier.
@@ -172,6 +200,12 @@ each recipient receives only its own entry. The full vector is not transmitted t
 The local author does not need to authenticate its header to itself. Local construction is the
 author's ECHO eligibility evidence; only messages sent to other validators need receiver-specific
 initial tags.
+
+The atomic local-start operation returns an unforgeable handle only after the selected header is
+pinned and local ECHO is recorded. Author-side signature-digest and MAC-tag generation require a
+borrow of that handle and recheck the selected stored reference. The service generates all INIT
+proofs while borrowing the handle, then consumes it to obtain the pinned header and queued phase
+effects; arbitrary caller-supplied references cannot reach the author-side proof API.
 
 A valid initial proof permits an honest recipient to ECHO the header. It does not by itself make
 the header clean, globally available, or safe to commit.
@@ -208,10 +242,13 @@ A forwarded or replayed phase message received from another peer never counts, e
 contain a valid tag addressed to the receiver. Local ECHO/READY actions are counted locally and do
 not require a loopback network message.
 
-The isolated kernel enforces committee membership and rejects genesis slots. The active/retained
-round-window check requires the service's current round and is therefore an explicit ingress
-adapter responsibility in milestone three; it must run before calling the kernel or allocating a
-candidate.
+The kernel enforces committee membership, rejects genesis slots, and rejects a header or phase
+reference more than 100 rounds ahead of its monotonic local round before allocating candidate
+state. It also exposes a separate monotonic floor for allocating previously unseen slots. That
+floor defaults to round one and must not be derived automatically from DAG progress: the
+integration layer may advance it only from a proved safe recovery/retirement watermark. Existing
+slots remain active below the floor so late evidence for a newly observed candidate can still
+complete reliable-delivery totality. The kernel rejects a floor above its current local round.
 
 ## 4. Messages
 
@@ -277,8 +314,7 @@ SlotState {
 }
 
 CandidateState {
-    header: Option<CanonicalHeader>,
-    initial_authentication_valid: bool,
+    header: Option<PinnedRbcHeader>,
     echo_senders: AuthoritySet,
     ready_senders: AuthoritySet,
     echo_quorum_observed: bool,
@@ -290,12 +326,21 @@ CandidateState {
 }
 ```
 
-The isolated milestone-two kernel temporarily represents header presence with an internal boolean
-to test transitions. Its header-available and initial-proof authorization hooks are module-private,
-so another crate module cannot assert these facts by call ordering. Milestone three must replace the
-boolean with a typed handle that owns or pins the canonical content-validated header, and expose
-only combined typed ingress paths. Cache eviction must not leave the kernel advertising a header it
-no longer retains.
+The kernel stores an `Arc`-backed `PinnedRbcHeader`, not a presence boolean. Its constructor checks
+the canonical digest, acknowledgment representation, intrinsic rounds, committee membership,
+previous-round quorum clock, required transaction commitment, forbidden protocol extensions, and
+resource bounds. Every pin records the committee ID under which those checks ran; another committee
+cannot consume it. The pin is held for as long as this validator may advertise itself as a header
+holder, so cache eviction cannot silently invalidate the RBC availability invariant.
+
+A distinct `EchoEligibleHeader` capability is bound to the full RBC context and local recipient. It
+is created only by valid direct-author initial authentication or the local-author construction path.
+Recovered content can be pinned and can unblock READY/delivery, but it cannot be converted into
+ECHO eligibility. Direct INIT ingress stages content even when the receiver-specific proof is
+invalid and returns all effects unblocked by staging; this makes poisoned-tag handling atomic rather
+than an adapter convention. A proposal received from a peer other than its claimed author is
+rejected by this direct-INIT path. RBC delivery carries the pinned header rather than only its
+reference.
 
 The `echoed`, `readied`, and `delivered` guards are slot-global, not per digest. Evidence is kept per
 digest so that Byzantine equivocation can be observed without locking the receiver to the first
@@ -312,15 +357,29 @@ In particular:
 For correctness in version one, slot-global locks, phase evidence, threshold latches, and headers
 advertised by an honest local phase action are retained for the whole benchmark run. Unsupported
 candidate bodies may be evicted because they can be fetched again by digest, but eviction must not
-discard evidence or a pending transition. A proved retirement boundary and adversarial storage
-bounds are deferred with crash/restart support; arbitrary cache eviction is not a protocol action.
+discard evidence or a pending transition. The kernel's new-slot floor is not advanced in the first
+benchmark prototype. A proved nontrivial retirement boundary is deferred with crash/restart
+support; arbitrary cache eviction is not a protocol action.
+
+Each direct sender may sponsor only its first ECHO value and first READY value in a slot. Exact
+retransmissions are idempotent; later phase equivocations from that sender are verified but ignored
+before candidate allocation. ECHO and READY use separate ledgers because an honest validator may
+ECHO one value and later READY another. Together with one content-only direct-author candidate,
+this bounds retained candidates per slot to at most `2 * committee_size - 1`: one initial candidate
+plus two first-phase values from each of the other validators. A recovered header can attach only to
+an already retained candidate and cannot allocate one by itself.
+
+Version one accepts at most 65,535 parents or logical acknowledgments per field and at most 4 MiB
+of canonical header content. Bounded vector deserialization enforces the serialized parent and
+extra-acknowledgment limits incrementally, before an attacker can force an unbounded vector
+allocation.
 
 Sending a local phase is one atomic state transition: set the slot-global guard, insert the local
 authority into that candidate's phase-sender set, and enqueue separately authenticated messages for
 all other validators. Threshold checks include this local evidence. Message materialization checks
 the recorded slot-global guard and the kernel's header-present predicate again; it cannot
-authenticate a phase for an unauthorized or conflicting value. Milestone three makes that predicate
-a pinned-header handle. The same authorized phase may be materialized again for retransmission.
+authenticate a phase for an unauthorized or conflicting value. That predicate is a pinned-header
+handle. The same authorized phase may be materialized again for retransmission.
 
 ## 6. State machine
 
@@ -330,13 +389,17 @@ On `HeaderProposal` for candidate `R`:
 
 1. Validate committee membership, slot consistency, header syntax, canonical content digest,
    protocol-specific fields, and resource bounds.
-2. Store the fixed-size-checked, content-valid header as a candidate even if its local initial
-   authenticator is missing or invalid. This permits later RBC delivery to repair a poisoned
-   recipient tag.
-3. Verify that version one's proposal was received directly from the claimed author, then verify the
-   selected initial authentication method for the local recipient. For the local author's own
-   header, successful local construction supplies this evidence without a loopback signature or
-   MAC.
+2. Verify that version one's direct-INIT peer is the claimed author. A header from another peer does
+   not enter the content-only INIT allowance; it may be accepted later only as recovery for an
+   already phase-evidenced candidate.
+3. Store the fixed-size-checked, content-valid direct-author header as a candidate even if its local
+   initial authenticator is missing or invalid. Return any READY/delivery effects unblocked by that
+   staging together with the authentication failure. This permits later RBC delivery to repair a
+   poisoned recipient tag without relying on adapter call ordering. For the local author's own
+   header, one mutable kernel operation fixes the author and digest, selects and pins the candidate,
+   records local ECHO, and only then exposes a context-bound handle for proof generation and
+   dissemination. This prevents two conflicting local proposals from escaping before the slot lock
+   is installed.
 4. If the direct-author check and proof are valid and the slot-global ECHO guard is empty, record the
    local ECHO immediately and send a recipient-specific ECHO for `R` to every other validator.
    Header RBC does not wait for parents, acknowledgments, transaction data, or a shard to arrive.
@@ -344,16 +407,24 @@ On `HeaderProposal` for candidate `R`:
    its dirty dependencies are present. This follows Sailfish's dirty/clean setup and does not make
    the candidate consensus-visible.
 
-A relayed header may be retained as a content-valid candidate, but it does not trigger ECHO in
-version one. Tree dissemination later changes this eligibility rule to accept a relayed
-receiver-specific author proof and must extend the integrity argument accordingly.
+A relayed header may be retained through the recovery path for an already phase-evidenced
+candidate, but it does not trigger ECHO in version one. Tree dissemination later changes this
+eligibility rule to accept a relayed receiver-specific author proof and must extend the integrity
+argument accordingly.
+
+The first content-valid INIT received directly from the claimed author occupies the one
+content-only INIT allowance even if its proof is invalid. A later proof for the same reference may
+still authenticate and ECHO it; a conflicting author proposal cannot consume more memory or replace
+it. This is deliberate: a Byzantine author is not promised validity for its slot, while a different
+value can still complete through first-phase evidence and header recovery.
 
 ### 6.2 Receiving ECHO
 
 On a valid direct `Echo(R, S)`:
 
-1. Record `S` once in `R.echo_senders`. A Byzantine sender may appear in the evidence sets of
-   multiple conflicting candidates, but its stake counts only once per candidate.
+1. If this is `S`'s first ECHO value in the slot, record `S` once in `R.echo_senders`. An exact
+   retransmission is idempotent. A later conflicting ECHO from `S` is ignored before allocating or
+   changing candidate evidence.
 2. When ECHO stake for `R` reaches `Q`, latch `echo_quorum_observed` and:
    - if the header is absent, request it from multiple recorded ECHO senders;
    - validate and store the returned header; and
@@ -371,7 +442,8 @@ honest-author progress by withholding theirs.
 
 On a valid direct `Ready(R, S)`:
 
-1. Record `S` once in `R.ready_senders`.
+1. If this is `S`'s first READY value in the slot, record `S` once in `R.ready_senders`. Treat an
+   exact retransmission as idempotent and ignore a later conflicting READY before allocation.
 2. When READY stake for `R` reaches `V`, latch `ready_validity_observed` and:
    - if the header is absent, request it from multiple recorded READY senders;
    - validate and store the returned header; and
@@ -634,6 +706,13 @@ Native Starfish with Ed25519 and ML-DSA should also be measured separately. That
 the total cost of reliable delivery, but it must not be presented as an isolated authentication
 comparison because the message flows differ.
 
+The existing unsafe `starfish-mac` lower bound sends the full committee-sized MAC vector with each
+direct-author streamed header, while Starfish-RBC/MAC sends only the recipient's tag and adds
+ECHO/READY traffic. Their measured delta is therefore the net whole-protocol cost, not a pure RBC
+overhead number: saved INIT bytes can hide part of the phase-message cost. The benchmark must report
+INIT/header bytes and ECHO/READY bytes separately; a one-tag lower-bound projection may be added but
+must be labeled as such.
+
 Metrics should separate:
 
 - initial header-authentication bytes and CPU;
@@ -679,11 +758,14 @@ Each milestone is committed separately.
    committee identity, slot-global ECHO/READY state, guarded recipient-specific message
    materialization, retryable header-holder tracking, and local plus four-kernel adversarial tests.
    The synchronous kernel is intentionally not network- or DAG-wired yet.
-3. **Header staging and retrieval:** split content validation from initial authentication, add
-   a length-delimited Starfish-RBC content digest, typed/pinned fixed-size-checked candidate staging,
-   retained-window filtering, pending triggers, and durable fetching from direct phase senders.
-4. **Certified Starfish integration:** add `starfish-rbc`, selectable initial authentication,
-   dirty/clean lifecycle, clean-only acknowledgments, and clean-only consensus/linearization.
+3. **Canonical header boundary (complete):** split content validation from initial authentication,
+   add the tagged length-delimited content digest, canonical compressed acknowledgments,
+   committee-bound pinned headers, context-bound ECHO capabilities, atomic poisoned-proof staging,
+   bounded phase equivocation, round admission seams, pending triggers, and holder-backed
+   multi-kernel recovery tests. The durable network fetch owner is part of milestone four.
+4. **Certified Starfish integration:** add `starfish-rbc`, selectable initial authentication, the
+   network RBC service and durable multi-holder fetch retry, dirty/clean lifecycle, clean-only
+   acknowledgments, and clean-only consensus/linearization.
 5. **End-to-end validation:** poisoned-tag, equivocation, dangling-parent, and all-authentication
    commit tests.
 6. **Tree dissemination:** subtree tag bundles, redundant routing/fallback, and matching signature
@@ -694,10 +776,10 @@ Each milestone is committed separately.
 
 ## 15. Remaining integration decisions
 
-The kernel behavior and authenticated encoding above are fixed. Integration must still choose:
+The kernel behavior, content digest, authenticated encoding, size limits, and admission semantics
+above are fixed. Integration must still choose:
 
 - how benchmark genesis generates and distributes the fresh 32-byte `protocol_instance`;
-- the exact field markers and collection-length widths for the Starfish-RBC content digest;
 - a safe post-v1 state-retirement and garbage-collection rule;
 - header-holder request fanout and retry timing;
 - whether legacy unsafe `*-mac` aliases are renamed or retained as lower-bound benchmarks.
