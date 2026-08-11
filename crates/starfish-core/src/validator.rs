@@ -18,14 +18,15 @@ use crate::{
     committee::Committee,
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
-    dag_state::{ConsensusProtocol, DagState},
+    dag_state::{DagState, ProtocolConfig},
     metrics::{MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
     runtime::{JoinError, JoinHandle},
+    starfish_rbc::RbcProtocolInstanceId,
     transactions_generator::TransactionGenerator,
-    types::{AuthorityIndex, PartialSig},
+    types::{AuthorityIndex, BlockAuthenticationScheme, PartialSig},
 };
 
 pub struct Validator {
@@ -45,6 +46,94 @@ impl Validator {
         byzantine_strategy: String,
         consensus: String,
     ) -> Result<Self> {
+        let protocol_config = ProtocolConfig::from_selection(
+            &consensus,
+            public_config.parameters.block_authentication.as_deref(),
+        )
+        .map_err(|error| eyre!(error))?;
+        let is_starfish_rbc = protocol_config.consensus_protocol.is_starfish_rbc();
+        if public_config.parameters.starfish_rbc_dag_autonomous_clock
+            && !public_config.parameters.starfish_rbc_dag_shadow
+        {
+            return Err(eyre!(
+                "Starfish-RBC-DAG autonomous clock requires the RBC-DAG shadow"
+            ));
+        }
+        if public_config
+            .parameters
+            .starfish_rbc_dag_embedded_rbc_authority
+            && (!public_config.parameters.starfish_rbc_dag_shadow
+                || !public_config.parameters.starfish_rbc_dag_autonomous_clock)
+        {
+            return Err(eyre!(
+                "Starfish-RBC-DAG embedded RBC authority requires the autonomous RBC-DAG shadow"
+            ));
+        }
+        if public_config.parameters.starfish_rbc_dag_autonomous_clock && !is_starfish_rbc {
+            return Err(eyre!(
+                "Starfish-RBC-DAG autonomous clock requires consensus 'starfish-rbc'"
+            ));
+        }
+        if public_config.parameters.starfish_rbc_dag_shadow && !is_starfish_rbc {
+            return Err(eyre!(
+                "Starfish-RBC-DAG shadow mode requires consensus 'starfish-rbc'"
+            ));
+        }
+        if public_config
+            .parameters
+            .starfish_rbc_dag_shadow_buffered_wal
+            && !public_config.parameters.starfish_rbc_dag_shadow
+        {
+            return Err(eyre!(
+                "Starfish-RBC-DAG buffered benchmark WAL requires the RBC-DAG shadow"
+            ));
+        }
+        if is_starfish_rbc {
+            let protocol_instance = public_config
+                .parameters
+                .starfish_rbc_protocol_instance
+                .ok_or_else(|| eyre!("Starfish-RBC protocol instance is missing"))?;
+            RbcProtocolInstanceId::new(protocol_instance).map_err(|error| eyre!(error))?;
+        }
+        if (is_starfish_rbc
+            || protocol_config.block_authentication_scheme == BlockAuthenticationScheme::MacVector)
+            && private_config.mac_keys.len() != committee.len()
+        {
+            return Err(eyre!(
+                "MAC keyring length {} does not match committee size {}",
+                private_config.mac_keys.len(),
+                committee.len(),
+            ));
+        }
+        match protocol_config.block_authentication_scheme {
+            BlockAuthenticationScheme::Ed25519 => {
+                if committee.get_public_key(authority) != Some(&private_config.keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "Ed25519 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MacVector => {}
+            BlockAuthenticationScheme::MlDsa44 => {
+                if committee.get_ml_dsa_44_public_key(authority)
+                    != Some(&private_config.ml_dsa_44_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-44 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+            BlockAuthenticationScheme::MlDsa65 => {
+                if committee.get_ml_dsa_65_public_key(authority)
+                    != Some(&private_config.ml_dsa_65_keypair.public_key())
+                {
+                    return Err(eyre!(
+                        "ML-DSA-65 private key does not match committee authority {authority}"
+                    ));
+                }
+            }
+        }
         // Network and metrics setup remains the same
         let network_address = public_config
             .network_address(authority)
@@ -76,7 +165,7 @@ impl Validator {
                 .register(Box::new(pc))
                 .wrap_err("Failed to register ProcessCollector")?;
         }
-        let protocol = ConsensusProtocol::from_str(&consensus);
+        let protocol = protocol_config.consensus_protocol;
         let resolved_dissemination =
             protocol.resolve_dissemination_mode(public_config.parameters.dissemination_mode);
         let dissemination_str = resolved_dissemination.to_string();
@@ -101,13 +190,13 @@ impl Validator {
 
         // Open the DAG state.
         let rocks_path = private_config.rocksdb();
-        let recovered = DagState::open(
+        let recovered = DagState::open_with_protocol_config(
             authority,
             rocks_path,
             metrics.clone(),
             committee.clone(),
             byzantine_strategy,
-            consensus,
+            protocol_config,
             &parameters.storage_backend,
             public_config
                 .parameters
@@ -142,6 +231,22 @@ impl Validator {
         } else {
             None
         };
+        let starfish_rbc_dag_shadow_wal = if public_config
+            .parameters
+            .starfish_rbc_dag_shadow_buffered_wal
+            && public_config.parameters.starfish_rbc_dag_autonomous_clock
+        {
+            private_config.starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal()
+        } else if public_config
+            .parameters
+            .starfish_rbc_dag_shadow_buffered_wal
+        {
+            private_config.starfish_rbc_dag_shadow_buffered_benchmark_wal()
+        } else if public_config.parameters.starfish_rbc_dag_autonomous_clock {
+            private_config.starfish_rbc_dag_autonomous_clock_wal()
+        } else {
+            private_config.starfish_rbc_dag_shadow_wal()
+        };
 
         let (core, bls_cert_aggregator) = Core::open(
             block_handler,
@@ -173,10 +278,12 @@ impl Validator {
             commit_handler,
             metrics.clone(),
             public_config.parameters.clone(),
+            starfish_rbc_dag_shadow_wal,
             partial_sig_rx,
             bls_cert_aggregator,
             bls_signer_for_service,
-        );
+        )
+        .await;
 
         tracing::info!("Validator {authority} listening on {network_address}");
         tracing::info!("Validator {authority} exposing metrics on {metrics_address}");
@@ -234,6 +341,10 @@ mod smoke_tests {
     use crate::{
         committee::Committee,
         config::{self, NodePrivateConfig, NodePublicConfig, Parameters},
+        metrics::{
+            STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR,
+            STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG,
+        },
         prometheus,
         types::AuthorityIndex,
     };
@@ -244,7 +355,14 @@ mod smoke_tests {
         let route = prometheus::METRICS_ROUTE;
         let res = reqwest::get(format! {"http://{address}{route}"}).await?;
         let string = res.text().await?;
-        let commit = string.contains("committed_leaders_total");
+        let commit = string.lines().any(|line| {
+            line.starts_with("commit_index")
+                && line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .is_some_and(|value| value > 0.0)
+        });
         Ok(commit)
     }
 
@@ -261,12 +379,178 @@ mod smoke_tests {
         }
     }
 
-    async fn run_commit_test(consensus: &str, port_offset: u16) {
+    #[tokio::test]
+    async fn starfish_rbc_dag_shadow_rejects_non_rbc_protocol() {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config.parameters.starfish_rbc_dag_shadow = true;
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("shadow mode requires consensus 'starfish-rbc'")
+        }));
+    }
+
+    #[tokio::test]
+    async fn autonomous_clock_requires_shadow_mode() {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config.parameters.starfish_rbc_dag_autonomous_clock = true;
+        public_config
+            .parameters
+            .refresh_starfish_rbc_protocol_instance();
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("autonomous clock requires the RBC-DAG shadow")
+        }));
+    }
+
+    #[tokio::test]
+    async fn buffered_shadow_wal_requires_shadow_mode() {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config
+            .parameters
+            .starfish_rbc_dag_shadow_buffered_wal = true;
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("buffered benchmark WAL requires the RBC-DAG shadow")
+        }));
+    }
+
+    #[tokio::test]
+    async fn autonomous_clock_rejects_non_rbc_protocol() {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config.parameters.starfish_rbc_dag_shadow = true;
+        public_config.parameters.starfish_rbc_dag_autonomous_clock = true;
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("autonomous clock requires consensus 'starfish-rbc'")
+        }));
+    }
+
+    async fn run_commit_test(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
+        run_commit_test_with_shadow(consensus, block_authentication, port_offset, false).await;
+    }
+
+    async fn run_commit_test_with_shadow(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+        starfish_rbc_dag_shadow: bool,
+    ) {
+        run_commit_test_with_shadow_mode(
+            consensus,
+            block_authentication,
+            port_offset,
+            starfish_rbc_dag_shadow,
+            false,
+            false,
+        )
+        .await;
+    }
+
+    async fn run_commit_test_with_shadow_mode(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+        starfish_rbc_dag_shadow: bool,
+        autonomous_clock: bool,
+        embedded_rbc_authority: bool,
+    ) {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
-        let parameters = Parameters::default();
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
+        public_config.parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
+        public_config.parameters.starfish_rbc_dag_autonomous_clock = autonomous_clock;
+        public_config
+            .parameters
+            .starfish_rbc_dag_embedded_rbc_authority = embedded_rbc_authority;
+        if consensus == "starfish-rbc" {
+            public_config
+                .parameters
+                .refresh_starfish_rbc_protocol_instance();
+        }
+        let mut parameters = Parameters::default();
+        if autonomous_clock {
+            // Exercise the shared Starfish/carrier pacemaker contract without
+            // making the integration test wait for production timeouts.
+            parameters.leader_timeout = Some(Duration::from_millis(50));
+        }
 
         let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -294,14 +578,254 @@ mod smoke_tests {
             .all_metric_addresses()
             .map(|a| a.to_owned())
             .collect();
-        let timeout = config::param_defaults::default_leader_timeout() * 5;
+        // Four RBC authentication variants run in parallel in the full test
+        // suite and include expensive ML-DSA signing. Give that composed flow
+        // enough scheduling headroom without relaxing existing protocols.
+        let timeout_multiplier = if consensus == "starfish-rbc" { 20 } else { 5 };
+        let timeout = config::param_defaults::default_leader_timeout() * timeout_multiplier;
 
-        tokio::select! {
-            _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!(
-                "[{consensus}] Failed to gather commits \
-                within a few timeouts"
-            ),
+        if tokio::time::timeout(timeout, await_for_commits(addresses))
+            .await
+            .is_err()
+        {
+            let state = validators
+                .iter()
+                .map(|validator| {
+                    let metrics = validator.metrics();
+                    (
+                        metrics.commit_index.get(),
+                        metrics.starfish_rbc_dag_shadow_carrier_round.get(),
+                        metrics.starfish_rbc_dag_projected_vertices_total.get(),
+                        metrics
+                            .starfish_rbc_dag_projection_decisions_total
+                            .with_label_values(&["direct_commit"])
+                            .get(),
+                        metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "committed"])
+                            .get(),
+                        metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "application"])
+                            .get(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "[{consensus}] Failed to gather commits within a few timeouts; \
+                 per-node (commit index, carrier round, projected, direct commits, frontiers, \
+                 frontier applications)={state:?}"
+            );
+        }
+
+        if autonomous_clock {
+            let autonomous_progress = tokio::time::timeout(timeout, async {
+                loop {
+                    if validators.iter().all(|validator| {
+                        let metrics = validator.metrics();
+                        metrics.starfish_rbc_dag_shadow_clock_valid.get() == 1
+                            && metrics.starfish_rbc_dag_shadow_carrier_round.get() > 3
+                            && metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["heartbeat", "accepted"])
+                                .get()
+                                > 0
+                            && metrics
+                                .starfish_rbc_dag_shadow_wal_durable_records_total
+                                .get()
+                                > 0
+                            && metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "shadow"])
+                                .get()
+                                > 0
+                            && metrics.starfish_rbc_dag_projected_vertices_total.get() > 0
+                            && metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&["direct_commit"])
+                                .get()
+                                > 0
+                            && (!embedded_rbc_authority
+                                || metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["delivery", "embedded_application"])
+                                    .get()
+                                    > 0
+                                    && metrics
+                                        .starfish_rbc_dag_shadow_inputs_total
+                                        .with_label_values(&["frontier", "committed"])
+                                        .get()
+                                        > 0
+                                    && metrics
+                                        .starfish_rbc_dag_shadow_inputs_total
+                                        .with_label_values(&["frontier", "application"])
+                                        .get()
+                                        > 0)
+                            && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
+                    }) {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+            if autonomous_progress.is_err() {
+                let state = validators
+                    .iter()
+                    .map(|validator| {
+                        let metrics = validator.metrics();
+                        (
+                            metrics.starfish_rbc_dag_shadow_clock_valid.get(),
+                            metrics.starfish_rbc_dag_shadow_carrier_round.get(),
+                            metrics.starfish_rbc_dag_projected_vertices_total.get(),
+                            metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&["direct_commit"])
+                                .get(),
+                            metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "shadow"])
+                                .get(),
+                            metrics.starfish_rbc_dag_shadow_pending_recovery.get(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "autonomous carrier projection did not advance while direct RBC committed; \
+                     per-node (valid, round, projected, commits, deliveries, recovery)={state:?}"
+                );
+            }
+
+            for validator in &validators {
+                let metrics = validator.metrics();
+                assert_eq!(metrics.starfish_rbc_dag_shadow_clock_valid.get(), 1);
+                assert!(metrics.starfish_rbc_dag_shadow_carrier_round.get() > 3);
+                assert!(metrics.starfish_rbc_dag_projected_vertices_total.get() > 0);
+                assert!(
+                    metrics
+                        .starfish_rbc_dag_projection_decisions_total
+                        .with_label_values(&["direct_commit"])
+                        .get()
+                        > 0
+                );
+                assert_eq!(
+                    metrics.starfish_rbc_dag_shadow_comparison_valid.get(),
+                    0,
+                    "autonomous mode must not claim direct-round comparison"
+                );
+                if embedded_rbc_authority {
+                    assert!(
+                        metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&["rbc_initial"])
+                            .get()
+                            > 0,
+                        "direct INIT remains the application/payload transport"
+                    );
+                    assert_eq!(
+                        metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&["rbc_echo"])
+                            .get(),
+                        0,
+                        "direct RBC ECHO must be disabled under embedded authority"
+                    );
+                    assert_eq!(
+                        metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&["rbc_ready"])
+                            .get(),
+                        0,
+                        "direct RBC READY must be disabled under embedded authority"
+                    );
+                }
+            }
+        } else if starfish_rbc_dag_shadow {
+            let maximum_unpaired = STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR
+                * i64::try_from(committee_size).unwrap();
+            tokio::time::timeout(timeout, async {
+                loop {
+                    let complete = validators.iter().all(|validator| {
+                        let metrics = validator.metrics();
+                        let direct_deliveries = metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["delivery", "direct"])
+                            .get();
+                        let shadow_deliveries = metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["delivery", "shadow"])
+                            .get();
+                        let matches = metrics
+                            .starfish_rbc_dag_shadow_delivery_comparisons_total
+                            .with_label_values(&["match"])
+                            .get();
+                        metrics.starfish_rbc_dag_shadow_comparison_valid.get() == 1
+                            && metrics
+                                .starfish_rbc_dag_shadow_wal_durable_records_total
+                                .get()
+                                > 0
+                            && direct_deliveries > 0
+                            && shadow_deliveries > 0
+                            && matches > 0
+                            && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
+                            && metrics.starfish_rbc_dag_shadow_unpaired_direct.get()
+                                <= maximum_unpaired
+                            && metrics.starfish_rbc_dag_shadow_unpaired_shadow.get()
+                                <= maximum_unpaired
+                            && metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                                <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+                    });
+                    if complete {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("shadow did not durably deliver and match direct RBC before timeout");
+
+            for validator in &validators {
+                let metrics = validator.metrics();
+                assert_eq!(
+                    metrics.starfish_rbc_dag_shadow_comparison_valid.get(),
+                    1,
+                    "shadow observation stream shed work while direct RBC committed"
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["mismatch"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["direct_only"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["shadow_only"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["ambiguous"])
+                        .get(),
+                    0
+                );
+                assert!(metrics.starfish_rbc_dag_shadow_unpaired_direct.get() <= maximum_unpaired);
+                assert!(metrics.starfish_rbc_dag_shadow_unpaired_shadow.get() <= maximum_unpaired);
+                assert!(
+                    metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                        <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+                );
+            }
         }
 
         for v in validators {
@@ -309,30 +833,113 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 0)]
-    #[test_case("cordial-miners", 40)]
-    #[test_case("starfish", 60)]
-    #[test_case("starfish-speed", 80)]
-    #[test_case("starfish-bls", 100)]
-    #[test_case("sailfish++", 120)]
-    #[test_case("bluestreak", 140)]
-    #[test_case("mysticeti-bls", 160)]
-    #[test_case("sparse-starfish-speed", 180)]
+    #[test_case("mysticeti", None, 0)]
+    #[test_case("mysticeti", Some("ml-dsa-65"), 1280)]
+    #[test_case("cordial-miners", None, 40)]
+    #[test_case("cordial-miners", Some("ml-dsa-65"), 1300)]
+    #[test_case("starfish", None, 60)]
+    #[test_case("starfish-mac", None, 700)]
+    #[test_case("starfish", Some("ml-dsa-44"), 720)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1000)]
+    #[test_case("starfish-speed", None, 80)]
+    #[test_case("starfish-speed-mac", None, 760)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 780)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1040)]
+    #[test_case("starfish-bls", None, 100)]
+    #[test_case("starfish-bls", Some("ml-dsa-65"), 1320)]
+    #[test_case("sailfish++", None, 120)]
+    #[test_case("sailfish++", Some("ml-dsa-65"), 1340)]
+    #[test_case("bluestreak", None, 140)]
+    #[test_case("mysticeti-bls", None, 160)]
+    #[test_case("mysticeti-bls", Some("ml-dsa-65"), 1360)]
+    #[test_case("sparse-starfish-speed", None, 180)]
+    #[test_case("sparse-starfish-speed-mac", None, 840)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 860)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1080)]
+    #[test_case("bluestreak-mac", None, 920)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 940)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1120)]
+    #[test_case("starfish-rbc", None, 1400)]
+    #[test_case("starfish-rbc", Some("mac"), 1440)]
+    #[test_case("starfish-rbc", Some("ml-dsa-44"), 1480)]
+    #[test_case("starfish-rbc", Some("ml-dsa-65"), 1520)]
     #[tokio::test]
-    async fn validator_commit(consensus: &str, port_offset: u16) {
-        run_commit_test(consensus, port_offset).await;
+    async fn validator_commit(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+    ) {
+        run_commit_test(consensus, block_authentication, port_offset).await;
     }
 
     #[tokio::test]
     async fn validator_commit_bluestreak_basic() {
-        run_commit_test("bluestreak", 150).await;
+        run_commit_test("bluestreak", None, 150).await;
     }
 
-    async fn run_sync_test(consensus: &str, port_offset: u16) {
+    #[tokio::test]
+    async fn starfish_rbc_dag_shadow_mac_keeps_direct_commits_live() {
+        run_commit_test_with_shadow("starfish-rbc", Some("mac"), 1640, true).await;
+    }
+
+    #[tokio::test]
+    async fn starfish_rbc_dag_autonomous_clock_advances_without_owning_consensus() {
+        run_commit_test_with_shadow_mode("starfish-rbc", Some("mac"), 1700, true, true, false)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn starfish_rbc_dag_embedded_rbc_is_the_only_phase_authority() {
+        run_commit_test_with_shadow_mode("starfish-rbc", Some("mac"), 1740, true, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn starfish_rbc_single_validator_starts_on_current_thread_runtime() {
+        let committee_size = 4;
+        // Give the sole running validator quorum stake so startup immediately
+        // exercises local RBC proposal construction before any peer connects.
+        let committee = Committee::new_test(vec![100, 1, 1, 1]);
+        let mut public_config =
+            NodePublicConfig::new_for_tests(committee_size).with_port_offset(1600);
+        public_config.parameters.block_authentication = Some("mac".to_string());
+        public_config
+            .parameters
+            .refresh_starfish_rbc_protocol_instance();
+
+        let dir = TempDir::new().unwrap();
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size).remove(0);
+        fs::create_dir_all(&private_config.storage_path).unwrap();
+
+        let validator = time::timeout(
+            Duration::from_secs(5),
+            Validator::start(
+                0,
+                committee,
+                public_config,
+                private_config,
+                Parameters::default(),
+                "honest".to_string(),
+                "starfish-rbc".to_string(),
+            ),
+        )
+        .await
+        .expect("Starfish-RBC startup must not block its async runtime")
+        .unwrap();
+        validator.stop().await;
+    }
+
+    async fn run_sync_test(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
-        let public_config =
+        let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
+        public_config.parameters.block_authentication = block_authentication.map(str::to_string);
+        if consensus == "starfish-rbc" {
+            public_config
+                .parameters
+                .refresh_starfish_rbc_protocol_instance();
+        }
         let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
@@ -409,18 +1016,31 @@ mod smoke_tests {
         }
     }
 
-    #[test_case("mysticeti", 100)]
-    #[test_case("cordial-miners", 140)]
-    #[test_case("starfish", 160)]
-    #[test_case("starfish-speed", 180)]
-    #[test_case("starfish-bls", 200)]
-    #[test_case("sailfish++", 220)]
-    #[test_case("bluestreak", 260)]
-    #[test_case("mysticeti-bls", 280)]
-    #[test_case("sparse-starfish-speed", 320)]
+    #[test_case("mysticeti", None, 100)]
+    #[test_case("cordial-miners", None, 140)]
+    #[test_case("starfish", None, 160)]
+    #[test_case("starfish-mac", None, 740)]
+    #[test_case("starfish", Some("ml-dsa-44"), 1020)]
+    #[test_case("starfish", Some("ml-dsa-65"), 1200)]
+    #[test_case("starfish-speed", None, 180)]
+    #[test_case("starfish-speed-mac", None, 800)]
+    #[test_case("starfish-speed", Some("ml-dsa-44"), 820)]
+    #[test_case("starfish-speed", Some("ml-dsa-65"), 1220)]
+    #[test_case("starfish-bls", None, 200)]
+    #[test_case("sailfish++", None, 220)]
+    #[test_case("bluestreak", None, 260)]
+    #[test_case("mysticeti-bls", None, 280)]
+    #[test_case("sparse-starfish-speed", None, 320)]
+    #[test_case("sparse-starfish-speed-mac", None, 880)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-44"), 900)]
+    #[test_case("sparse-starfish-speed", Some("ml-dsa-65"), 1240)]
+    #[test_case("bluestreak-mac", None, 960)]
+    #[test_case("bluestreak", Some("ml-dsa-44"), 980)]
+    #[test_case("bluestreak", Some("ml-dsa-65"), 1260)]
+    #[test_case("starfish-rbc", Some("mac"), 1560)]
     #[tokio::test]
-    async fn validator_sync(consensus: &str, port_offset: u16) {
-        run_sync_test(consensus, port_offset).await;
+    async fn validator_sync(consensus: &str, block_authentication: Option<&str>, port_offset: u16) {
+        run_sync_test(consensus, block_authentication, port_offset).await;
     }
 
     async fn run_crash_faults_test(consensus: &str, port_offset: u16) {

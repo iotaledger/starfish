@@ -28,6 +28,7 @@ use crate::{
     metrics::{Metrics, print_network_address_table},
     runtime,
     runtime::JoinHandle,
+    starfish_rbc::{RbcCanonicalHeader, RbcHeaderProposal, RbcPhase, RbcPhaseMessage},
     stat::HistogramSender,
     types::{
         AuthorityIndex, AuthoritySet, BlockReference, CertMessage, CertMessageKind, PartialSig,
@@ -80,6 +81,44 @@ const RTT_LATENCY_TABLE: [[u32; 10]; 10] = [
 pub struct ShardPayload {
     pub block_reference: BlockReference,
     pub shard: ProvableShard,
+}
+
+/// Non-authoritative Starfish-RBC-DAG carrier used by the persisted shadow
+/// runtime. Both byte strings use the versioned canonical codecs from
+/// `starfish_rbc_dag`; the network envelope deliberately adds no second
+/// identity or authentication scheme.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcDagShadowCarrier {
+    pub canonical_carrier: Vec<u8>,
+    pub authentication_sidecar: Vec<u8>,
+}
+
+/// Content-only response for a phase-evidenced shadow carrier. Recovery can
+/// satisfy READY/delivery, but it cannot grant optimistic admission or ECHO.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcDagShadowCarrierResponse {
+    pub reference: BlockReference,
+    pub canonical_carrier: Vec<u8>,
+}
+
+/// Request one exact carrier-clock slot from a peer. Keeping synchronization
+/// slot-addressed prevents an untrusted peer from choosing an unbounded range
+/// of history to return.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcDagShadowCarrierSyncRequest {
+    pub author: AuthorityIndex,
+    pub round: RoundNumber,
+}
+
+/// Full response for one exact carrier-clock slot. The receiver validates that
+/// the canonical carrier has the requested author and round, and authenticates
+/// the sidecar before admitting it.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcDagShadowCarrierSyncResponse {
+    pub author: AuthorityIndex,
+    pub round: RoundNumber,
+    pub canonical_carrier: Vec<u8>,
+    pub authentication_sidecar: Vec<u8>,
 }
 
 /// A structured batch of block data, ordered by decreasing information density:
@@ -178,6 +217,31 @@ pub enum NetworkMessage {
         round: RoundNumber,
         known_authorities: AuthoritySet,
     },
+    /// Starfish-RBC: direct-author canonical header and receiver-specific
+    /// initial proof.
+    RbcInitial(RbcHeaderProposal),
+    /// Starfish-RBC: direct, recipient-specific ECHO or READY testimony.
+    RbcPhase(RbcPhaseMessage),
+    /// Starfish-RBC: request canonical header content for a phase-evidenced
+    /// block reference.
+    RbcHeaderRequest(BlockReference),
+    /// Starfish-RBC: return canonical header content. The receiver recomputes
+    /// and checks its content-addressed reference before accepting it.
+    RbcHeaderResponse(RbcCanonicalHeader),
+    /// Starfish-RBC-DAG milestone-three shadow carrier. This path is
+    /// observational and never feeds the authoritative DAG or consensus.
+    RbcDagShadowCarrier(RbcDagShadowCarrier),
+    /// Request canonical content after embedded phase evidence arrives before
+    /// the corresponding shadow carrier.
+    RbcDagShadowCarrierRequest(BlockReference),
+    /// Return content only; the receiver recomputes and checks the reference.
+    RbcDagShadowCarrierResponse(RbcDagShadowCarrierResponse),
+    /// Starfish-RBC-DAG milestone-four synchronization for one exact
+    /// `(author, round)` carrier-clock slot.
+    RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest),
+    /// Full canonical carrier and authentication sidecar for an exact
+    /// carrier-clock slot. Receivers validate the duplicated slot identity.
+    RbcDagShadowCarrierSyncResponse(RbcDagShadowCarrierSyncResponse),
 }
 
 impl NetworkMessage {
@@ -198,6 +262,18 @@ impl NetworkMessage {
             Self::SailfishNoVote(_) => "sailfish_no_vote",
             Self::UnprovableCertificateRequest { .. } => "unprovable_cert_request",
             Self::RoundGapRequest { .. } => "round_gap_request",
+            Self::RbcInitial(_) => "rbc_initial",
+            Self::RbcPhase(message) => match message.phase() {
+                RbcPhase::Echo => "rbc_echo",
+                RbcPhase::Ready => "rbc_ready",
+            },
+            Self::RbcHeaderRequest(_) => "rbc_header_request",
+            Self::RbcHeaderResponse(_) => "rbc_header_response",
+            Self::RbcDagShadowCarrier(_) => "rbc_dag_shadow_carrier",
+            Self::RbcDagShadowCarrierRequest(_) => "rbc_dag_shadow_carrier_request",
+            Self::RbcDagShadowCarrierResponse(_) => "rbc_dag_shadow_carrier_response",
+            Self::RbcDagShadowCarrierSyncRequest(_) => "rbc_dag_shadow_carrier_sync_request",
+            Self::RbcDagShadowCarrierSyncResponse(_) => "rbc_dag_shadow_carrier_sync_response",
         }
     }
 }
@@ -520,11 +596,12 @@ impl Worker {
         let start = Instant::now();
         let bytes_sent_total = metrics.bytes_sent_total.clone();
         let network_requests_sent_total = metrics.network_requests_sent_total.clone();
+        let network_message_bytes_sent_total = metrics.network_message_bytes_sent_total.clone();
 
         // Spawn the first task for handling pings
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
-        let ping_task = tokio::spawn(async move {
+        let ping_task = async move {
             let mut ping_deadline = start + PING_INTERVAL;
             loop {
                 tokio::time::sleep_until(ping_deadline).await;
@@ -544,12 +621,12 @@ impl Worker {
                 }
                 bytes_sent_total_clone.inc_by(12); // ping is 12-byte sized
             }
-        });
+        };
 
         // Spawn the second task for handling pong responses
         let writer_clone = Arc::clone(&writer);
         let bytes_sent_total_clone = bytes_sent_total.clone();
-        let pong_task = tokio::spawn(async move {
+        let pong_task = async move {
             while let Some(ping) = pong_receiver.recv().await {
                 if ping == 0 {
                     tracing::warn!("Invalid ping: {ping}");
@@ -596,7 +673,7 @@ impl Worker {
                 // Yield to ensure responsiveness
                 tokio::task::yield_now().await;
             }
-        });
+        };
 
         // Spawn the third task(s) for handling message sending.
         //
@@ -605,7 +682,7 @@ impl Worker {
         // backpressure encoding and starve catch-up for late joiners under
         // latency simulation.
         if connection_latency == 0.0 {
-            let message_task = tokio::spawn(async move {
+            let message_task = async move {
                 while let Some(message) = receiver.recv().await {
                     let request_type = message.request_type();
                     let serialized = bincode::serialize(&message).expect("Serialization failed");
@@ -617,12 +694,13 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    let framed_len = wire_bytes.len() as u64 + 4;
 
                     match async {
                         let mut writer_guard = writer.lock().await;
                         writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
+                        bytes_sent_total.inc_by(framed_len);
                         writer_guard.write_all(&wire_bytes).await
                     }
                     .await
@@ -631,16 +709,19 @@ impl Worker {
                             network_requests_sent_total
                                 .with_label_values(&[request_type])
                                 .inc();
+                            network_message_bytes_sent_total
+                                .with_label_values(&[request_type])
+                                .inc_by(framed_len);
                         }
                         Err(e) => {
                             tracing::error!("Failed to write message: {e}");
                         }
                     }
                 }
-            });
+            };
 
             // Wait for all tasks to complete.
-            let _ = tokio::try_join!(ping_task, pong_task, message_task);
+            let _ = tokio::join!(ping_task, pong_task, message_task);
             return Ok(());
         }
 
@@ -648,7 +729,7 @@ impl Worker {
         // behavior by sleeping inside per-message tasks, but keep concurrency
         // bounded to avoid unbounded task buildup under heavy load.
         const MAX_IN_FLIGHT: usize = NETWORK_MESSAGE_CHANNEL_CAPACITY * 64;
-        let message_task = tokio::spawn(async move {
+        let message_task = async move {
             let mut join_set = tokio::task::JoinSet::new();
 
             while let Some(message) = receiver.recv().await {
@@ -661,6 +742,7 @@ impl Worker {
                 let writer = writer.clone();
                 let bytes_sent_total = bytes_sent_total.clone();
                 let network_requests_sent_total = network_requests_sent_total.clone();
+                let network_message_bytes_sent_total = network_message_bytes_sent_total.clone();
                 let bytes_uncompressed_sent_total = metrics.bytes_uncompressed_sent_total.clone();
                 let latency =
                     generate_latency(effective_latency(connection_latency, connection_scaled));
@@ -674,13 +756,14 @@ impl Worker {
                     } else {
                         serialized
                     };
+                    let framed_len = wire_bytes.len() as u64 + 4;
                     tokio::time::sleep(latency).await;
 
                     match async {
                         let mut writer_guard = writer.lock().await;
                         writer_guard.write_u32(wire_bytes.len() as u32).await?;
 
-                        bytes_sent_total.inc_by(wire_bytes.len() as u64 + 4);
+                        bytes_sent_total.inc_by(framed_len);
                         writer_guard.write_all(&wire_bytes).await
                     }
                     .await
@@ -689,6 +772,9 @@ impl Worker {
                             network_requests_sent_total
                                 .with_label_values(&[request_type])
                                 .inc();
+                            network_message_bytes_sent_total
+                                .with_label_values(&[request_type])
+                                .inc_by(framed_len);
                         }
                         Err(e) => {
                             tracing::error!("Failed to write message: {e}");
@@ -702,10 +788,10 @@ impl Worker {
                     tracing::error!("An inner task failed: {e:?}");
                 }
             }
-        });
+        };
 
         // Wait for all tasks to complete.
-        let _ = tokio::try_join!(ping_task, pong_task, message_task);
+        let _ = tokio::join!(ping_task, pong_task, message_task);
 
         Ok(())
     }
@@ -766,6 +852,10 @@ impl Worker {
             match deserialize_result {
                 Some(message) => {
                     let request_type = message.request_type();
+                    metrics
+                        .network_message_bytes_received_total
+                        .with_label_values(&[request_type])
+                        .inc_by(read as u64 + 4);
                     if sender.send(message).await.is_err() {
                         // todo - pass signal to break main loop
                         return Ok(());
@@ -925,4 +1015,257 @@ fn decode_ping(message: &[u8]) -> i64 {
     let mut m = [0u8; 8];
     m.copy_from_slice(message); // asserts message.len() == 8
     i64::from_le_bytes(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+    use crate::{
+        committee::Committee,
+        crypto::{MacTag, TransactionsCommitment, dummy_signer},
+        starfish_rbc::{RbcInitialProof, RbcPhaseMessage},
+    };
+
+    const NETWORK_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(6);
+
+    async fn connected_pair(
+        addresses: &[SocketAddr; 2],
+        parameters: &NodeParameters,
+    ) -> (Network, Network, Connection, Connection) {
+        let committee = Committee::new_for_benchmarks(2);
+        let metrics_0 = Metrics::new(&Registry::new(), Some(&committee), None, None).0;
+        let metrics_1 = Metrics::new(&Registry::new(), Some(&committee), None, None).0;
+        let mut network_0 =
+            Network::from_socket_addresses(addresses, 0, addresses[0], metrics_0, parameters).await;
+        let mut network_1 =
+            Network::from_socket_addresses(addresses, 1, addresses[1], metrics_1, parameters).await;
+
+        let (connection_0, connection_1) = tokio::time::timeout(NETWORK_LIFECYCLE_TIMEOUT, async {
+            tokio::join!(
+                network_0.connection_receiver().recv(),
+                network_1.connection_receiver().recv(),
+            )
+        })
+        .await
+        .expect("two-node network did not connect before the lifecycle timeout");
+        let connection_0 = connection_0.expect("authority 0 connection channel closed");
+        let connection_1 = connection_1.expect("authority 1 connection channel closed");
+        assert_eq!(connection_0.peer_id, 1);
+        assert_eq!(connection_1.peer_id, 0);
+        (network_0, network_1, connection_0, connection_1)
+    }
+
+    async fn assert_bidirectional_round_trip(
+        connection_0: &mut Connection,
+        connection_1: &mut Connection,
+        marker: RoundNumber,
+    ) {
+        connection_0
+            .sender
+            .send(NetworkMessage::SubscribeBroadcastRequest(marker))
+            .await
+            .unwrap();
+        connection_1
+            .sender
+            .send(NetworkMessage::SubscribeBroadcastRequest(marker + 1))
+            .await
+            .unwrap();
+
+        let (received_by_0, received_by_1) =
+            tokio::time::timeout(NETWORK_LIFECYCLE_TIMEOUT, async {
+                tokio::join!(connection_0.receiver.recv(), connection_1.receiver.recv())
+            })
+            .await
+            .expect("two-node network did not exchange messages before the lifecycle timeout");
+        assert!(matches!(
+            received_by_0,
+            Some(NetworkMessage::SubscribeBroadcastRequest(round)) if round == marker + 1
+        ));
+        assert!(matches!(
+            received_by_1,
+            Some(NetworkMessage::SubscribeBroadcastRequest(round)) if round == marker
+        ));
+    }
+
+    async fn abort_network_pair(network_0: Network, network_1: Network) {
+        // Match production shutdown: abort both listeners together. Awaiting
+        // the server tasks makes listener release deterministic for this test;
+        // dropping their worker senders must then cancel every scoped stream
+        // future and its OwnedWriteHalf.
+        network_0.abort_server();
+        network_1.abort_server();
+        let Network {
+            connection_receiver: connection_receiver_0,
+            server_task: server_task_0,
+        } = network_0;
+        let Network {
+            connection_receiver: connection_receiver_1,
+            server_task: server_task_1,
+        } = network_1;
+        drop(connection_receiver_0);
+        drop(connection_receiver_1);
+        let (result_0, result_1) = tokio::join!(server_task_0, server_task_1);
+        assert!(result_0.is_err_and(|error| error.is_cancelled()));
+        assert!(result_1.is_err_and(|error| error.is_cancelled()));
+    }
+
+    async fn same_port_rebind_case(addresses: [SocketAddr; 2], latency_ms: Option<f64>) {
+        let parameters = NodeParameters {
+            mimic_latency: false,
+            uniform_latency_ms: latency_ms,
+            ..NodeParameters::default()
+        };
+
+        for cycle in 0..2 {
+            let (network_0, network_1, mut connection_0, mut connection_1) =
+                connected_pair(&addresses, &parameters).await;
+            assert_bidirectional_round_trip(&mut connection_0, &mut connection_1, 10 + cycle).await;
+
+            // NetworkSyncer drops its connection tasks before aborting the
+            // listener. Reproduce that ordering, then immediately construct
+            // the next cycle on the identical listener and active-bind ports.
+            drop(connection_0);
+            drop(connection_1);
+            abort_network_pair(network_0, network_1).await;
+        }
+    }
+
+    fn variant_index(message: &NetworkMessage) -> u32 {
+        let bytes = bincode::serialize(message).unwrap();
+        u32::from_le_bytes(bytes[..4].try_into().unwrap())
+    }
+
+    #[test]
+    fn rbc_wire_variants_are_append_only_and_roundtrip() {
+        // This pre-existing last variant is frozen at index 10. Adding RBC
+        // messages must not renumber any legacy bincode discriminant.
+        let legacy = NetworkMessage::RoundGapRequest {
+            round: 7,
+            known_authorities: AuthoritySet::default(),
+        };
+        assert_eq!(variant_index(&legacy), 10);
+
+        let header = RbcCanonicalHeader::try_new(
+            0,
+            1,
+            Vec::new(),
+            Vec::new(),
+            11,
+            TransactionsCommitment::default(),
+        )
+        .unwrap();
+        let block_ref = header.reference();
+        let initial = NetworkMessage::RbcInitial(RbcHeaderProposal::new(
+            header.clone(),
+            RbcInitialProof::Ed25519(dummy_signer().sign_digest(&[0xA1; 32])),
+        ));
+        let phase = NetworkMessage::RbcPhase(RbcPhaseMessage::new_for_test(
+            block_ref,
+            1,
+            2,
+            RbcPhase::Ready,
+            MacTag::from_bytes([0xA2; 32]),
+        ));
+        let request = NetworkMessage::RbcHeaderRequest(block_ref);
+        let response = NetworkMessage::RbcHeaderResponse(header);
+        let shadow = NetworkMessage::RbcDagShadowCarrier(RbcDagShadowCarrier {
+            canonical_carrier: vec![0xA3, 0xA4],
+            authentication_sidecar: vec![0xA5],
+        });
+        let shadow_request = NetworkMessage::RbcDagShadowCarrierRequest(block_ref);
+        let shadow_response =
+            NetworkMessage::RbcDagShadowCarrierResponse(RbcDagShadowCarrierResponse {
+                reference: block_ref,
+                canonical_carrier: vec![0xA6, 0xA7],
+            });
+        let sync_request =
+            NetworkMessage::RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest {
+                author: 2,
+                round: 23,
+            });
+        let sync_response =
+            NetworkMessage::RbcDagShadowCarrierSyncResponse(RbcDagShadowCarrierSyncResponse {
+                author: 2,
+                round: 23,
+                canonical_carrier: vec![0xA8, 0xA9],
+                authentication_sidecar: vec![0xAA, 0xAB],
+            });
+
+        for (message, expected_index, expected_kind) in [
+            (initial, 11, "rbc_initial"),
+            (phase, 12, "rbc_ready"),
+            (request, 13, "rbc_header_request"),
+            (response, 14, "rbc_header_response"),
+            (shadow, 15, "rbc_dag_shadow_carrier"),
+            (shadow_request, 16, "rbc_dag_shadow_carrier_request"),
+            (shadow_response, 17, "rbc_dag_shadow_carrier_response"),
+            (sync_request, 18, "rbc_dag_shadow_carrier_sync_request"),
+            (sync_response, 19, "rbc_dag_shadow_carrier_sync_response"),
+        ] {
+            assert_eq!(variant_index(&message), expected_index);
+            assert_eq!(message.request_type(), expected_kind);
+            let encoded = bincode::serialize(&message).unwrap();
+            let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(decoded.request_type(), expected_kind);
+            assert_eq!(variant_index(&decoded), expected_index);
+        }
+    }
+
+    #[test]
+    fn rbc_dag_shadow_carrier_sync_payloads_roundtrip_exactly() {
+        let request = RbcDagShadowCarrierSyncRequest {
+            author: 3,
+            round: 41,
+        };
+        let encoded =
+            bincode::serialize(&NetworkMessage::RbcDagShadowCarrierSyncRequest(request)).unwrap();
+        let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            NetworkMessage::RbcDagShadowCarrierSyncRequest(decoded) if decoded == request
+        ));
+
+        let response = RbcDagShadowCarrierSyncResponse {
+            author: 3,
+            round: 41,
+            canonical_carrier: vec![0xC1, 0xC2, 0xC3],
+            authentication_sidecar: vec![0xD1, 0xD2],
+        };
+        let encoded = bincode::serialize(&NetworkMessage::RbcDagShadowCarrierSyncResponse(
+            response.clone(),
+        ))
+        .unwrap();
+        let decoded: NetworkMessage = bincode::deserialize(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            NetworkMessage::RbcDagShadowCarrierSyncResponse(decoded) if decoded == response
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_connection_tasks_allow_immediate_same_port_rebind() {
+        // Active sockets bind to listener_port * 10. Keep those derived ports
+        // below the usual Linux ephemeral range to avoid unrelated allocation
+        // races while staying above the repository's validator-test fixtures.
+        same_port_rebind_case(
+            [
+                SocketAddr::from(([127, 0, 0, 1], 3_200)),
+                SocketAddr::from(([127, 0, 0, 1], 3_201)),
+            ],
+            None,
+        )
+        .await;
+        // Any nonzero configured latency selects the JoinSet-backed writer
+        // branch, so this also covers cancellation of its in-flight tasks.
+        same_port_rebind_case(
+            [
+                SocketAddr::from(([127, 0, 0, 1], 3_220)),
+                SocketAddr::from(([127, 0, 0, 1], 3_221)),
+            ],
+            Some(5.0),
+        )
+        .await;
+    }
 }

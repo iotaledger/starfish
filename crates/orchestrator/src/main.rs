@@ -58,9 +58,42 @@ pub struct Opts {
     )]
     settings_path: String,
 
+    /// Block signature scheme used by every selected consensus protocol.
+    /// Defaults to Ed25519. Not applicable to experimental `*-mac` protocols.
+    #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac", global = true)]
+    block_authentication: Option<String>,
+
+    /// Enable the persisted Starfish-RBC-DAG research runtime. Without the
+    /// autonomous flag it remains comparison-only.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_shadow: bool,
+
+    /// Run the independent Starfish-RBC-DAG carrier clock and certified
+    /// projection. Requires `--starfish-rbc-dag-shadow`.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_autonomous_clock: bool,
+
+    /// Let embedded carrier ECHO/READY delivery certify Starfish-RBC
+    /// application headers. Requires autonomous RBC-DAG mode.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_embedded_rbc_authority: bool,
+
+    /// Benchmark-only: sync the framed shadow WAL only at clean shutdown.
+    /// This removes per-transition disk pressure and is not crash-safe.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_shadow_buffered_wal: bool,
+
     /// The type of operation to run.
     #[clap(subcommand)]
     operation: Operation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StarfishRbcDagOverrides {
+    shadow: bool,
+    autonomous_clock: bool,
+    embedded_rbc_authority: bool,
+    buffered_wal: bool,
 }
 
 /// The type of operation to run.
@@ -134,10 +167,9 @@ pub enum Operation {
         #[clap(long, action, default_value_t = false, global = true)]
         skip_testbed_configuration: bool,
 
-        /// Protocols to benchmark in order. Available options:
-        /// starfish | starfish-speed | sparse-starfish-speed |
-        /// starfish-bls | mysticeti | mysticeti-bls |
-        /// cordial-miners | bluestreak | sailfish-pp
+        /// Consensus protocols to benchmark in order. The `*-mac` names are
+        /// separate experimental protocols; signature schemes are selected
+        /// with `--block-authentication`.
         #[clap(
             long,
             value_name = "STRING",
@@ -847,6 +879,8 @@ fn load_benchmark_configs(
     dissemination_mode: &Option<String>,
     compress_network: Option<bool>,
     bls_workers: Option<usize>,
+    block_authentication: &Option<String>,
+    starfish_rbc_dag: StarfishRbcDagOverrides,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
@@ -854,6 +888,21 @@ fn load_benchmark_configs(
     };
     node_parameters.adversarial_latency = adversarial_latency;
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
+    if block_authentication.is_some() {
+        node_parameters.block_authentication = block_authentication.clone();
+    }
+    if starfish_rbc_dag.shadow {
+        node_parameters.starfish_rbc_dag_shadow = true;
+    }
+    if starfish_rbc_dag.autonomous_clock {
+        node_parameters.starfish_rbc_dag_autonomous_clock = true;
+    }
+    if starfish_rbc_dag.embedded_rbc_authority {
+        node_parameters.starfish_rbc_dag_embedded_rbc_authority = true;
+    }
+    if starfish_rbc_dag.buffered_wal {
+        node_parameters.starfish_rbc_dag_shadow_buffered_wal = true;
+    }
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -1033,6 +1082,13 @@ async fn run<C: ServerProviderClient>(
         .await
         .wrap_err("Failed to crate testbed")?;
 
+    let block_authentication = opts.block_authentication.clone();
+    let starfish_rbc_dag = StarfishRbcDagOverrides {
+        shadow: opts.starfish_rbc_dag_shadow,
+        autonomous_clock: opts.starfish_rbc_dag_autonomous_clock,
+        embedded_rbc_authority: opts.starfish_rbc_dag_embedded_rbc_authority,
+        buffered_wal: opts.starfish_rbc_dag_shadow_buffered_wal,
+    };
     match opts.operation {
         Operation::Testbed { action } => match action {
             // Display the current status of the testbed.
@@ -1229,6 +1285,8 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1395,6 +1453,8 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1601,6 +1661,8 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1766,6 +1828,8 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1971,6 +2035,8 @@ async fn run<C: ServerProviderClient>(
                 &dissemination_mode,
                 compress_network,
                 resolved_bls_workers.override_workers,
+                &block_authentication,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -2279,6 +2345,8 @@ mod tests {
         let opts = Opts::try_parse_from([
             "orchestrator",
             "benchmark",
+            "--block-authentication",
+            "ml-dsa-65",
             "--protocols",
             "starfish",
             "mysticeti",
@@ -2289,6 +2357,8 @@ mod tests {
             "2",
         ])
         .unwrap();
+
+        assert_eq!(opts.block_authentication.as_deref(), Some("ml-dsa-65"));
 
         match opts.operation {
             Operation::Benchmark {
@@ -2303,6 +2373,33 @@ mod tests {
             }
             other => panic!("unexpected operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn benchmark_parses_starfish_rbc_mac_authentication() {
+        let opts = Opts::try_parse_from([
+            "orchestrator",
+            "benchmark",
+            "--block-authentication",
+            "mac",
+            "--starfish-rbc-dag-shadow",
+            "--starfish-rbc-dag-autonomous-clock",
+            "--starfish-rbc-dag-embedded-rbc-authority",
+            "--starfish-rbc-dag-shadow-buffered-wal",
+            "--protocols",
+            "starfish-rbc",
+        ])
+        .unwrap();
+
+        assert_eq!(opts.block_authentication.as_deref(), Some("mac"));
+        assert!(opts.starfish_rbc_dag_shadow);
+        assert!(opts.starfish_rbc_dag_autonomous_clock);
+        assert!(opts.starfish_rbc_dag_embedded_rbc_authority);
+        assert!(opts.starfish_rbc_dag_shadow_buffered_wal);
+        let Operation::Benchmark { protocols, .. } = opts.operation else {
+            panic!("expected benchmark operation");
+        };
+        assert_eq!(protocols, vec!["starfish-rbc"]);
     }
 
     #[test]

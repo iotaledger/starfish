@@ -28,7 +28,7 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "CC0-1.0",
-  "GPL-2.0",
+  "GPL-2.0-or-later",
   "ISC",
   "LicenseRef-ring",
   "MIT",
@@ -63,6 +63,14 @@ name = "minibytes"
 expression = "MIT"
 license-files = [{ path = "LICENSE", hash = 0x6b2d3210 }]
 
+# bloom 0.3.2 uses the deprecated SPDX identifier `GPL-2.0`; its license
+# grants redistribution under GPL version 2 or any later version.
+[[licenses.clarify]]
+name = "bloom"
+version = "0.3.2"
+expression = "GPL-2.0-or-later"
+license-files = [{ path = "LICENSE", hash = 0xeaa66bfd }]
+
 [licenses.private]
 # If true, ignores workspace crates that aren't published, or are only
 # published to private registries.
@@ -90,6 +98,10 @@ skip = [
   # tidehunter uses prometheus 0.14 (protobuf 3.x), starfish-core uses 0.13 (protobuf 2.x)
   { name = "prometheus", version = "0.13" },
   { name = "protobuf", version = "2" },
+  # ml-dsa 0.1 uses RustCrypto digest 0.11 and crypto-common 0.2 while
+  # existing workspace dependencies still require their previous releases.
+  { name = "crypto-common", version = "0.2" },
+  { name = "digest", version = "0.11" },
 ]
 skip-tree = [
   # aws-smithy-http-client depends on both hyper 0.14 and 1.x,

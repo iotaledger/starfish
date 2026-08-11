@@ -36,6 +36,47 @@ pub const BENCHMARK_DURATION: &str = "benchmark_duration";
 pub const TRANSACTION_CERTIFIED_LATENCY: &str = "transaction_certified_latency";
 pub const TRANSACTION_CERTIFIED_LATENCY_SQUARED: &str = "latency_s";
 
+/// Benchmark-only live-tail guards for the observational RBC-DAG shadow.
+/// They are not asynchronous protocol or garbage-collection bounds.
+pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR: i64 = 4;
+pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG: i64 = 4;
+
+/// Local-benchmark guards for the autonomous RBC-DAG carrier clock. The
+/// round-skew limit matches the executable model's bounded future
+/// buffer. A healthy clock can transiently retain phase work, but its carrier
+/// capacity exceeds the two RBC statements generated per admitted value; a
+/// sixteen-committee backlog therefore leaves generous scheduling headroom
+/// while still detecting an actor that is no longer draining work.
+pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG: i64 = 4;
+pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR: i64 = 16;
+pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR: i64 = 2;
+
+const LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES: &[&str] = &[
+    "subscribe_broadcast",
+    "batch",
+    "missing_parents",
+    "missing_tx_data",
+    "partial_sig",
+    "cert_echo",
+    "cert_vote",
+    "cert_ready",
+    "cert_batch",
+    "sailfish_timeout",
+    "sailfish_no_vote",
+    "unprovable_cert_request",
+    "round_gap_request",
+    "rbc_initial",
+    "rbc_echo",
+    "rbc_ready",
+    "rbc_header_request",
+    "rbc_header_response",
+    "rbc_dag_shadow_carrier",
+    "rbc_dag_shadow_carrier_request",
+    "rbc_dag_shadow_carrier_response",
+    "rbc_dag_shadow_carrier_sync_request",
+    "rbc_dag_shadow_carrier_sync_response",
+];
+
 #[derive(Clone)]
 pub struct Metrics {
     pub benchmark_duration: IntCounter,
@@ -132,6 +173,33 @@ pub struct Metrics {
     // per-request-type network message counters
     pub network_requests_sent_total: IntCounterVec,
     pub network_requests_received_total: IntCounterVec,
+    pub network_message_bytes_sent_total: IntCounterVec,
+    pub network_message_bytes_received_total: IntCounterVec,
+
+    // Starfish-RBC-DAG shadow instrumentation. These metrics are strictly
+    // observational: the shadow path never feeds the authoritative DAG or
+    // consensus state.
+    pub starfish_rbc_dag_shadow_inputs_total: IntCounterVec,
+    pub starfish_rbc_dag_shadow_delivery_comparisons_total: IntCounterVec,
+    pub starfish_rbc_dag_shadow_wal_appended_batches_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_appended_records_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_durable_batches_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_durable_records_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_replayed_batches: IntGauge,
+    pub starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total: IntCounter,
+    pub starfish_rbc_dag_shadow_pending_recovery: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_direct: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_shadow: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_max_round_lag: IntGauge,
+    pub starfish_rbc_dag_shadow_comparison_valid: IntGauge,
+    pub starfish_rbc_dag_shadow_clock_valid: IntGauge,
+    pub starfish_rbc_dag_shadow_carrier_round: IntGauge,
+    pub starfish_rbc_dag_shadow_phase_backlog: IntGauge,
+    pub starfish_rbc_dag_shadow_admitted_authors: IntGauge,
+    pub starfish_rbc_dag_shadow_admitted_stake: IntGauge,
+    pub starfish_rbc_dag_shadow_buffered_authenticated: IntGauge,
+    pub starfish_rbc_dag_projected_vertices_total: IntCounter,
+    pub starfish_rbc_dag_projection_decisions_total: IntCounterVec,
 
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
@@ -195,6 +263,296 @@ pub struct MetricReporter {
     pub global_in_memory_blocks_bytes: IntGauge,
 }
 
+/// Per-validator counters captured after the autonomous shadow becomes ready
+/// and immediately before the measured local-benchmark interval begins.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AutonomousClockBenchmarkBaseline {
+    accepted_local_carriers: u64,
+    delivered_carriers: u64,
+    delivered_applications: u64,
+    committed_frontiers: u64,
+    frontier_applications: u64,
+    projected_vertices: u64,
+    projection_decisions: u64,
+    wal_batches: u64,
+    wal_records: u64,
+    carrier_round: i64,
+}
+
+/// Per-validator cumulative counters sampled at the exact start of a local
+/// benchmark's active transaction window. Rates subtract this snapshot so
+/// connection warmup and shadow-WAL replay are not charged to the protocol.
+#[derive(Clone, Debug, Default)]
+pub struct LocalBenchmarkCounterBaseline {
+    sequenced_transactions: u64,
+    dag_state_entries: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+    outbound_messages: Vec<(u64, u64)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AutonomousClockBenchmarkSummary {
+    valid_nodes: usize,
+    progress_nodes: usize,
+    bounded_nodes: usize,
+    accepted_heartbeats: u64,
+    delivered_carriers: u64,
+    delivered_applications: u64,
+    committed_frontiers: u64,
+    frontier_applications: u64,
+    projected_vertices: u64,
+    projection_decisions: u64,
+    wal_batches: u64,
+    wal_records: u64,
+    pending_recovery: i64,
+    minimum_round: i64,
+    maximum_round: i64,
+    maximum_phase_backlog: i64,
+    maximum_admitted_authors: i64,
+    maximum_admitted_stake: i64,
+    maximum_buffered_authenticated: i64,
+    maximum_phase_backlog_bound: i64,
+    maximum_buffered_authenticated_bound: i64,
+    verdict_valid: bool,
+}
+
+fn summarize_autonomous_clock_benchmark(
+    metrics: &[Arc<Metrics>],
+    committee_size: usize,
+    baselines: Option<&[AutonomousClockBenchmarkBaseline]>,
+    embedded_rbc_authority: bool,
+) -> AutonomousClockBenchmarkSummary {
+    let committee_size = i64::try_from(committee_size).unwrap_or(i64::MAX);
+    let maximum_phase_backlog_bound =
+        STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR.saturating_mul(committee_size);
+    let maximum_buffered_authenticated_bound =
+        STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR.saturating_mul(committee_size);
+
+    let valid_nodes = metrics
+        .iter()
+        .filter(|metrics| metrics.starfish_rbc_dag_shadow_clock_valid.get() == 1)
+        .count();
+    let progress_nodes = metrics
+        .iter()
+        .enumerate()
+        .filter(|(index, metrics)| {
+            let baseline = baselines
+                .and_then(|baselines| baselines.get(*index))
+                .copied()
+                .unwrap_or_default();
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .get()
+                .saturating_add(
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["application_carrier", "accepted"])
+                        .get(),
+                )
+                > baseline.accepted_local_carriers
+                && metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "shadow"])
+                    .get()
+                    > baseline.delivered_carriers
+                && (!embedded_rbc_authority
+                    || metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "embedded_application"])
+                        .get()
+                        > baseline.delivered_applications
+                        && metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "committed"])
+                            .get()
+                            > baseline.committed_frontiers
+                        && metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "application"])
+                            .get()
+                            > baseline.frontier_applications)
+                && metrics.starfish_rbc_dag_projected_vertices_total.get()
+                    > baseline.projected_vertices
+                && metrics
+                    .starfish_rbc_dag_projection_decisions_total
+                    .with_label_values(&["direct_commit"])
+                    .get()
+                    > baseline.projection_decisions
+                && metrics
+                    .starfish_rbc_dag_shadow_wal_appended_batches_total
+                    .get()
+                    > baseline.wal_batches
+                && metrics
+                    .starfish_rbc_dag_shadow_wal_appended_records_total
+                    .get()
+                    > baseline.wal_records
+                && metrics.starfish_rbc_dag_shadow_carrier_round.get() > baseline.carrier_round
+        })
+        .count();
+    let bounded_nodes = metrics
+        .iter()
+        .filter(|metrics| {
+            let phase_backlog = metrics.starfish_rbc_dag_shadow_phase_backlog.get();
+            let admitted_authors = metrics.starfish_rbc_dag_shadow_admitted_authors.get();
+            let admitted_stake = metrics.starfish_rbc_dag_shadow_admitted_stake.get();
+            let buffered = metrics.starfish_rbc_dag_shadow_buffered_authenticated.get();
+            phase_backlog >= 0
+                && phase_backlog <= maximum_phase_backlog_bound
+                && admitted_authors >= 0
+                && admitted_authors <= committee_size
+                && admitted_stake >= 0
+                && buffered >= 0
+                && buffered <= maximum_buffered_authenticated_bound
+                && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
+        })
+        .count();
+
+    let accepted_heartbeats = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .get()
+        })
+        .sum();
+    let delivered_carriers = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "shadow"])
+                .get()
+        })
+        .sum();
+    let delivered_applications = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "embedded_application"])
+                .get()
+        })
+        .sum();
+    let committed_frontiers = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "committed"])
+                .get()
+        })
+        .sum();
+    let frontier_applications = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "application"])
+                .get()
+        })
+        .sum();
+    let projected_vertices = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_projected_vertices_total.get())
+        .sum();
+    let projection_decisions = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
+                .get()
+        })
+        .sum();
+    let wal_batches = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                .get()
+        })
+        .sum();
+    let wal_records = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_records_total
+                .get()
+        })
+        .sum();
+    let pending_recovery = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_pending_recovery.get())
+        .sum();
+    let minimum_round = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_carrier_round.get())
+        .min()
+        .unwrap_or_default();
+    let maximum_round = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_carrier_round.get())
+        .max()
+        .unwrap_or_default();
+    let maximum_phase_backlog = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_phase_backlog.get())
+        .max()
+        .unwrap_or_default();
+    let maximum_admitted_authors = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_admitted_authors.get())
+        .max()
+        .unwrap_or_default();
+    let maximum_admitted_stake = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_admitted_stake.get())
+        .max()
+        .unwrap_or_default();
+    let maximum_buffered_authenticated = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_buffered_authenticated.get())
+        .max()
+        .unwrap_or_default();
+    let round_lag = maximum_round.saturating_sub(minimum_round);
+    let every_node_valid = valid_nodes == metrics.len();
+    let every_node_progressed = progress_nodes == metrics.len();
+    let every_node_bounded = bounded_nodes == metrics.len();
+    let verdict_valid = !metrics.is_empty()
+        && every_node_valid
+        && every_node_progressed
+        && every_node_bounded
+        && round_lag <= STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG;
+
+    AutonomousClockBenchmarkSummary {
+        valid_nodes,
+        progress_nodes,
+        bounded_nodes,
+        accepted_heartbeats,
+        delivered_carriers,
+        delivered_applications,
+        committed_frontiers,
+        frontier_applications,
+        projected_vertices,
+        projection_decisions,
+        wal_batches,
+        wal_records,
+        pending_recovery,
+        minimum_round,
+        maximum_round,
+        maximum_phase_backlog,
+        maximum_admitted_authors,
+        maximum_admitted_stake,
+        maximum_buffered_authenticated,
+        maximum_phase_backlog_bound,
+        maximum_buffered_authenticated_bound,
+        verdict_valid,
+    }
+}
+
 pub struct HistogramReporter<T> {
     pub histogram: PreciseHistogram<T>,
     gauge: IntGaugeVec,
@@ -206,6 +564,70 @@ pub struct VecHistogramReporter<T> {
 }
 
 impl Metrics {
+    pub fn autonomous_clock_benchmark_baseline(&self) -> AutonomousClockBenchmarkBaseline {
+        AutonomousClockBenchmarkBaseline {
+            accepted_local_carriers: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .get()
+                .saturating_add(
+                    self.starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["application_carrier", "accepted"])
+                        .get(),
+                ),
+            delivered_carriers: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "shadow"])
+                .get(),
+            delivered_applications: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "embedded_application"])
+                .get(),
+            committed_frontiers: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "committed"])
+                .get(),
+            frontier_applications: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "application"])
+                .get(),
+            projected_vertices: self.starfish_rbc_dag_projected_vertices_total.get(),
+            projection_decisions: self
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
+                .get(),
+            wal_batches: self
+                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                .get(),
+            wal_records: self
+                .starfish_rbc_dag_shadow_wal_appended_records_total
+                .get(),
+            carrier_round: self.starfish_rbc_dag_shadow_carrier_round.get(),
+        }
+    }
+
+    pub fn local_benchmark_counter_baseline(&self) -> LocalBenchmarkCounterBaseline {
+        LocalBenchmarkCounterBaseline {
+            sequenced_transactions: self.sequenced_transactions_total.get(),
+            dag_state_entries: self.dag_state_entries.get(),
+            bytes_sent: self.bytes_sent_total.get(),
+            bytes_received: self.bytes_received_total.get(),
+            outbound_messages: LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES
+                .iter()
+                .map(|request_type| {
+                    (
+                        self.network_message_bytes_sent_total
+                            .with_label_values(&[request_type])
+                            .get(),
+                        self.network_requests_sent_total
+                            .with_label_values(&[request_type])
+                            .get(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
     pub fn new(
         registry: &Registry,
         committee: Option<&Committee>,
@@ -500,6 +922,154 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            network_message_bytes_sent_total: register_int_counter_vec_with_registry!(
+                "network_message_bytes_sent_total",
+                "Total framed network-message bytes sent, by type",
+                &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            network_message_bytes_received_total: register_int_counter_vec_with_registry!(
+                "network_message_bytes_received_total",
+                "Total framed network-message bytes received, by type",
+                &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_inputs_total: register_int_counter_vec_with_registry!(
+                "starfish_rbc_dag_shadow_inputs_total",
+                "Starfish-RBC-DAG shadow inputs, by bounded input kind and processing outcome",
+                &["kind", "outcome"],
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_delivery_comparisons_total:
+                register_int_counter_vec_with_registry!(
+                    "starfish_rbc_dag_shadow_delivery_comparisons_total",
+                    "Non-authoritative current-process paired direct-vs-shadow delivery observations, by outcome; unmatched observations are not mismatches",
+                    &["outcome"],
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_wal_appended_batches_total:
+                register_int_counter_with_registry!(
+                    "starfish_rbc_dag_shadow_wal_appended_batches_total",
+                    "Starfish-RBC-DAG shadow WAL batches appended to the framed log",
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_wal_appended_records_total:
+                register_int_counter_with_registry!(
+                    "starfish_rbc_dag_shadow_wal_appended_records_total",
+                    "Starfish-RBC-DAG shadow WAL records appended to the framed log",
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_wal_durable_batches_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_shadow_wal_durable_batches_total",
+                "Starfish-RBC-DAG shadow WAL batches synchronized before event exposure",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_durable_records_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_shadow_wal_durable_records_total",
+                "Starfish-RBC-DAG shadow WAL records synchronized before event exposure",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_replayed_batches: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_wal_replayed_batches",
+                "Starfish-RBC-DAG shadow WAL batches replayed during this process startup",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total:
+                register_int_counter_with_registry!(
+                    "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total",
+                    "Physically incomplete final Starfish-RBC-DAG shadow WAL bytes discarded during recovery",
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_pending_recovery: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_pending_recovery",
+                "Current Starfish-RBC-DAG shadow carrier-content recoveries pending",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_direct: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_direct",
+                "Current direct-delivery slots without an observed shadow-delivery slot, including recovered shadow state",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_shadow: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_shadow",
+                "Current shadow-delivery slots first observed in this process without a direct-delivery slot observed in this process",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_max_round_lag: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_max_round_lag",
+                "Maximum round lag from a current unpaired direct or current-epoch shadow delivery slot to the newest current-process observation",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_comparison_valid: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_comparison_valid",
+                "State of the non-authoritative shadow observation stream (1 valid, 0 disabled/invalid, -1 starting)",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_clock_valid: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_clock_valid",
+                "State of the autonomous RBC-DAG carrier clock and projection runtime (1 valid, 0 disabled/invalid, -1 starting)",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_carrier_round: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_carrier_round",
+                "Currently open sequential Starfish-RBC-DAG shadow carrier round",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_phase_backlog: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_phase_backlog",
+                "Pending embedded ECHO/READY statements in the autonomous carrier actor",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_admitted_authors: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_admitted_authors",
+                "Distinct authors admitted in the currently open carrier round",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_admitted_stake: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_admitted_stake",
+                "Stake admitted in the currently open carrier round",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_buffered_authenticated: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_buffered_authenticated",
+                "Authenticated future carrier slots buffered outside the current admission window",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_projected_vertices_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_projected_vertices_total",
+                "RBC-delivered, data-available consensus vertices admitted to the certified carrier projection",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_projection_decisions_total:
+                register_int_counter_vec_with_registry!(
+                    "starfish_rbc_dag_projection_decisions_total",
+                    "Clean-only Starfish leader decisions produced by the certified carrier projection",
+                    &["outcome"],
+                    registry,
+                )
+                .unwrap(),
             subscribed_to_peers: register_int_gauge_with_registry!(
                 "subscribed_to_peers",
                 "Number of peers this validator is subscribed to",
@@ -956,32 +1526,74 @@ impl Metrics {
         metrics: Vec<Arc<Metrics>>,
         reporters: Vec<Arc<MetricReporter>>,
         duration_secs: u64,
+        committee_size: usize,
+        starfish_rbc_dag_shadow_expected: bool,
+        starfish_rbc_dag_autonomous_clock_expected: bool,
+        starfish_rbc_dag_embedded_rbc_authority_expected: bool,
+        autonomous_clock_baselines: Option<Vec<AutonomousClockBenchmarkBaseline>>,
+        counter_baselines: Option<Vec<LocalBenchmarkCounterBaseline>>,
     ) {
         let num_validators = metrics.len() as u64;
 
         // Calculate overall statistics
         let average_transactions: u64 = metrics
             .iter()
-            .map(|m| m.sequenced_transactions_total.get())
+            .enumerate()
+            .map(|(index, metrics)| {
+                metrics.sequenced_transactions_total.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.sequenced_transactions)
+                        .unwrap_or_default(),
+                )
+            })
             .sum::<u64>()
             / num_validators;
         let average_tps = average_transactions as f64 / duration_secs as f64;
 
         let average_blocks_submitted = metrics
             .iter()
-            .map(|m| m.dag_state_entries.get())
+            .enumerate()
+            .map(|(index, metrics)| {
+                metrics.dag_state_entries.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.dag_state_entries)
+                        .unwrap_or_default(),
+                )
+            })
             .sum::<u64>()
             / num_validators;
         let average_bps = average_blocks_submitted as f64 / duration_secs as f64;
 
         let average_bytes_sent: u64 = metrics
             .iter()
-            .map(|m| m.bytes_sent_total.get())
+            .enumerate()
+            .map(|(index, metrics)| {
+                metrics.bytes_sent_total.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.bytes_sent)
+                        .unwrap_or_default(),
+                )
+            })
             .sum::<u64>()
             / num_validators;
         let average_bytes_received: u64 = metrics
             .iter()
-            .map(|m| m.bytes_received_total.get())
+            .enumerate()
+            .map(|(index, metrics)| {
+                metrics.bytes_received_total.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.bytes_received)
+                        .unwrap_or_default(),
+                )
+            })
             .sum::<u64>()
             / num_validators;
         let average_reconstructed_sent_to_core: u64 = metrics
@@ -1024,6 +1636,21 @@ impl Metrics {
             .map(|m| m.shard_reconstruction_pending_decoded_blocks.get())
             .sum::<i64>()
             / num_validators as i64;
+
+        // The periodic reporter drains every ten seconds. Pull the final tail
+        // synchronously so a benchmark cutoff never drops its last samples.
+        for reporter in &reporters {
+            reporter
+                .block_committed_latency
+                .lock()
+                .histogram
+                .receive_all();
+            reporter
+                .transaction_committed_latency
+                .lock()
+                .histogram
+                .receive_all();
+        }
 
         let p50_block_committed_latency = reporters
             .iter()
@@ -1074,6 +1701,69 @@ impl Metrics {
             b->"Average bandwidth in:",
             format!("{:.2} MB/s", bw_in)
         ]);
+        let outbound_message_breakdown = LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES
+            .iter()
+            .enumerate()
+            .filter_map(|(message_index, request_type)| {
+                let average_bytes = metrics
+                    .iter()
+                    .enumerate()
+                    .map(|(validator_index, metrics)| {
+                        let current = metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&[request_type])
+                            .get();
+                        let baseline = counter_baselines
+                            .as_ref()
+                            .and_then(|baselines| baselines.get(validator_index))
+                            .and_then(|baseline| baseline.outbound_messages.get(message_index))
+                            .map(|(bytes, _)| *bytes)
+                            .unwrap_or_default();
+                        current.saturating_sub(baseline)
+                    })
+                    .sum::<u64>() as f64
+                    / num_validators as f64;
+                if average_bytes == 0.0 {
+                    return None;
+                }
+                let average_requests = metrics
+                    .iter()
+                    .enumerate()
+                    .map(|(validator_index, metrics)| {
+                        let current = metrics
+                            .network_requests_sent_total
+                            .with_label_values(&[request_type])
+                            .get();
+                        let baseline = counter_baselines
+                            .as_ref()
+                            .and_then(|baselines| baselines.get(validator_index))
+                            .and_then(|baseline| baseline.outbound_messages.get(message_index))
+                            .map(|(_, requests)| *requests)
+                            .unwrap_or_default();
+                        current.saturating_sub(baseline)
+                    })
+                    .sum::<u64>() as f64
+                    / num_validators as f64;
+                Some((*request_type, average_bytes, average_requests))
+            })
+            .collect::<Vec<_>>();
+        if !outbound_message_breakdown.is_empty() {
+            table.add_row(row![bH2->""]);
+            table.add_row(row![bH2->"Average Outbound Message Breakdown"]);
+            for (request_type, average_bytes, average_requests) in outbound_message_breakdown {
+                let bandwidth = average_bytes / duration_secs as f64 / 1024.0 / 1024.0;
+                let share = if average_bytes_sent == 0 {
+                    0.0
+                } else {
+                    average_bytes / average_bytes_sent as f64 * 100.0
+                };
+                let requests_per_second = average_requests / duration_secs as f64;
+                table.add_row(row![
+                    b->format!("{request_type}:"),
+                    format!("{bandwidth:.3} MB/s ({share:.1}%, {requests_per_second:.1} msg/s)")
+                ]);
+            }
+        }
         let total_average_transactions = (average_tps * duration_secs as f64) as u64;
         let bandwidth_efficiency = if total_average_transactions > 0 {
             average_bytes_sent as f64 / total_average_transactions as f64 / 512.0
@@ -1081,6 +1771,223 @@ impl Metrics {
             0.0
         };
         table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", bandwidth_efficiency)]);
+
+        if starfish_rbc_dag_autonomous_clock_expected {
+            let summary = summarize_autonomous_clock_benchmark(
+                &metrics,
+                committee_size,
+                autonomous_clock_baselines.as_deref(),
+                starfish_rbc_dag_embedded_rbc_authority_expected,
+            );
+            let round_lag = summary.maximum_round.saturating_sub(summary.minimum_round);
+
+            table.add_row(row![bH2->""]);
+            table.add_row(row![
+                bH2->if starfish_rbc_dag_embedded_rbc_authority_expected {
+                    "RBC-DAG Embedded RBC Authority Verification"
+                } else {
+                    "RBC-DAG Autonomous Clock Verification"
+                }
+            ]);
+            table.add_row(row![
+                b->"Clock verdict:",
+                if summary.verdict_valid {
+                    "VALID".to_owned()
+                } else {
+                    "INVALID — DISCARD THIS AUTONOMOUS-CLOCK RUN".to_owned()
+                }
+            ]);
+            table.add_row(row![
+                b->"Valid/progress/bounded validators:",
+                format!(
+                    "{}/{}, {}/{}, {}/{}",
+                    summary.valid_nodes,
+                    metrics.len(),
+                    summary.progress_nodes,
+                    metrics.len(),
+                    summary.bounded_nodes,
+                    metrics.len(),
+                )
+            ]);
+            table.add_row(row![
+                b->"Clock/WAL progress:",
+                format!(
+                    "heartbeats={}, carrier deliveries={}, application deliveries={}, committed frontiers={}, frontier applications={}, projected vertices={}, projected commits={}, WAL batches={}, records={}, open rounds={}..{}",
+                    summary.accepted_heartbeats,
+                    summary.delivered_carriers,
+                    summary.delivered_applications,
+                    summary.committed_frontiers,
+                    summary.frontier_applications,
+                    summary.projected_vertices,
+                    summary.projection_decisions,
+                    summary.wal_batches,
+                    summary.wal_records,
+                    summary.minimum_round,
+                    summary.maximum_round,
+                )
+            ]);
+            table.add_row(row![
+                b->"Bounded live state:",
+                format!(
+                    "round skew={round_lag}/{}, max phase backlog={}/{}, admitted authors={}/{}, stake={}, max buffered={}/{}, pending recovery={}",
+                    STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG,
+                    summary.maximum_phase_backlog,
+                    summary.maximum_phase_backlog_bound,
+                    summary.maximum_admitted_authors,
+                    committee_size,
+                    summary.maximum_admitted_stake,
+                    summary.maximum_buffered_authenticated,
+                    summary.maximum_buffered_authenticated_bound,
+                    summary.pending_recovery,
+                )
+            ]);
+        } else if starfish_rbc_dag_shadow_expected {
+            let valid_nodes = metrics
+                .iter()
+                .filter(|metrics| metrics.starfish_rbc_dag_shadow_comparison_valid.get() == 1)
+                .count();
+            let matches = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["match"])
+                        .get()
+                })
+                .sum::<u64>();
+            let mismatches = metrics
+                .iter()
+                .map(|metrics| {
+                    ["mismatch", "direct_only", "shadow_only"]
+                        .into_iter()
+                        .map(|outcome| {
+                            metrics
+                                .starfish_rbc_dag_shadow_delivery_comparisons_total
+                                .with_label_values(&[outcome])
+                                .get()
+                        })
+                        .sum::<u64>()
+                })
+                .sum::<u64>();
+            let ambiguous = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["ambiguous"])
+                        .get()
+                })
+                .sum::<u64>();
+            let shadow_deliveries = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "shadow"])
+                        .get()
+                })
+                .sum::<u64>();
+            let direct_deliveries = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "direct"])
+                        .get()
+                })
+                .sum::<u64>();
+            let wal_records = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_wal_durable_records_total
+                        .get()
+                })
+                .sum::<u64>();
+            let pending_recovery = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_pending_recovery.get())
+                .sum::<i64>();
+            let maximum_unpaired = STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR
+                .saturating_mul(i64::try_from(committee_size).unwrap_or(i64::MAX));
+            let every_node_has_exact_coverage = metrics.iter().all(|metrics| {
+                let direct = metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "direct"])
+                    .get();
+                let shadow = metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "shadow"])
+                    .get();
+                let matched = metrics
+                    .starfish_rbc_dag_shadow_delivery_comparisons_total
+                    .with_label_values(&["match"])
+                    .get();
+                direct > 0
+                    && shadow > 0
+                    && matched > 0
+                    && metrics
+                        .starfish_rbc_dag_shadow_wal_durable_records_total
+                        .get()
+                        > 0
+                    && metrics.starfish_rbc_dag_shadow_unpaired_direct.get() <= maximum_unpaired
+                    && metrics.starfish_rbc_dag_shadow_unpaired_shadow.get() <= maximum_unpaired
+                    && metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                        <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+            });
+            let comparison_valid = valid_nodes == metrics.len()
+                && every_node_has_exact_coverage
+                && mismatches == 0
+                && ambiguous == 0
+                && wal_records > 0
+                && pending_recovery == 0;
+
+            table.add_row(row![bH2->""]);
+            table.add_row(row![bH2->"RBC-DAG Shadow Verification"]);
+            table.add_row(row![
+                b->"Comparison verdict:",
+                if comparison_valid {
+                    "VALID".to_owned()
+                } else {
+                    "INVALID — DISCARD THIS SHADOW COMPARISON".to_owned()
+                }
+            ]);
+            table.add_row(row![
+                b->"Valid validators:",
+                format!("{valid_nodes}/{}", metrics.len())
+            ]);
+            table.add_row(row![
+                b->"Paired deliveries:",
+                format!(
+                    "direct={direct_deliveries}, shadow={shadow_deliveries}, matches={matches}, \
+                     mismatches={mismatches}, ambiguous={ambiguous}"
+                )
+            ]);
+            table.add_row(row![
+                b->"Durability/recovery:",
+                format!("WAL records={wal_records}, pending recovery={pending_recovery}")
+            ]);
+            let unpaired_direct = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_direct.get())
+                .sum::<i64>();
+            let unpaired_shadow = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_shadow.get())
+                .sum::<i64>();
+            let max_unpaired_lag = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get())
+                .max()
+                .unwrap_or_default();
+            table.add_row(row![
+                b->"Live comparison tail:",
+                format!(
+                    "unpaired direct/shadow={unpaired_direct}/{unpaired_shadow}, \
+                     max lag={max_unpaired_lag} rounds"
+                )
+            ]);
+        }
 
         // Shard reconstruction metrics
         table.add_row(row![bH2->""]);
@@ -1379,4 +2286,299 @@ impl Drop for OwnedUtilizationTimer {
 struct NetworkAddressTable {
     peer: String,
     address: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_starfish_rbc_dag_shadow_metrics() {
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(&registry, None, None, None);
+
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["authenticated_ingress", "accepted"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_delivery_comparisons_total
+            .with_label_values(&["match"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_records_total
+            .inc_by(3);
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_records_total
+            .inc_by(3);
+        metrics.starfish_rbc_dag_shadow_wal_replayed_batches.set(4);
+        metrics
+            .starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total
+            .inc_by(5);
+        metrics.starfish_rbc_dag_shadow_pending_recovery.set(2);
+        metrics.starfish_rbc_dag_shadow_unpaired_direct.set(6);
+        metrics.starfish_rbc_dag_shadow_unpaired_shadow.set(7);
+        metrics
+            .starfish_rbc_dag_shadow_unpaired_max_round_lag
+            .set(8);
+        metrics.starfish_rbc_dag_shadow_comparison_valid.set(1);
+        metrics.starfish_rbc_dag_shadow_clock_valid.set(1);
+        metrics.starfish_rbc_dag_shadow_carrier_round.set(9);
+        metrics.starfish_rbc_dag_shadow_phase_backlog.set(10);
+        metrics.starfish_rbc_dag_shadow_admitted_authors.set(3);
+        metrics.starfish_rbc_dag_shadow_admitted_stake.set(3);
+        metrics
+            .starfish_rbc_dag_shadow_buffered_authenticated
+            .set(2);
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
+
+        let gathered = registry.gather();
+        for name in [
+            "starfish_rbc_dag_shadow_inputs_total",
+            "starfish_rbc_dag_shadow_delivery_comparisons_total",
+            "starfish_rbc_dag_shadow_wal_appended_batches_total",
+            "starfish_rbc_dag_shadow_wal_appended_records_total",
+            "starfish_rbc_dag_shadow_wal_durable_batches_total",
+            "starfish_rbc_dag_shadow_wal_durable_records_total",
+            "starfish_rbc_dag_shadow_wal_replayed_batches",
+            "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total",
+            "starfish_rbc_dag_shadow_pending_recovery",
+            "starfish_rbc_dag_shadow_unpaired_direct",
+            "starfish_rbc_dag_shadow_unpaired_shadow",
+            "starfish_rbc_dag_shadow_unpaired_max_round_lag",
+            "starfish_rbc_dag_shadow_comparison_valid",
+            "starfish_rbc_dag_shadow_clock_valid",
+            "starfish_rbc_dag_shadow_carrier_round",
+            "starfish_rbc_dag_shadow_phase_backlog",
+            "starfish_rbc_dag_shadow_admitted_authors",
+            "starfish_rbc_dag_shadow_admitted_stake",
+            "starfish_rbc_dag_shadow_buffered_authenticated",
+            "starfish_rbc_dag_projected_vertices_total",
+            "starfish_rbc_dag_projection_decisions_total",
+        ] {
+            assert!(
+                gathered.iter().any(|family| family.get_name() == name),
+                "metric family {name} was not registered",
+            );
+        }
+    }
+
+    fn autonomous_clock_metrics(
+        round: i64,
+        phase_backlog: i64,
+        buffered_authenticated: i64,
+    ) -> Arc<Metrics> {
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(&registry, None, None, None);
+        metrics.starfish_rbc_dag_shadow_clock_valid.set(1);
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["heartbeat", "accepted"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["delivery", "shadow"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_records_total
+            .inc_by(2);
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_records_total
+            .inc_by(2);
+        metrics.starfish_rbc_dag_shadow_carrier_round.set(round);
+        metrics
+            .starfish_rbc_dag_shadow_phase_backlog
+            .set(phase_backlog);
+        metrics.starfish_rbc_dag_shadow_admitted_authors.set(2);
+        metrics.starfish_rbc_dag_shadow_admitted_stake.set(2);
+        metrics
+            .starfish_rbc_dag_shadow_buffered_authenticated
+            .set(buffered_authenticated);
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
+        metrics
+    }
+
+    #[test]
+    fn autonomous_clock_summary_requires_every_node_to_make_bounded_wal_progress() {
+        let metrics = vec![
+            autonomous_clock_metrics(8, 3, 1),
+            autonomous_clock_metrics(9, 4, 2),
+            autonomous_clock_metrics(10, 5, 0),
+            autonomous_clock_metrics(11, 6, 1),
+        ];
+
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
+
+        assert!(summary.verdict_valid);
+        assert_eq!(summary.valid_nodes, 4);
+        assert_eq!(summary.progress_nodes, 4);
+        assert_eq!(summary.bounded_nodes, 4);
+        assert_eq!(summary.accepted_heartbeats, 4);
+        assert_eq!(summary.delivered_carriers, 4);
+        assert_eq!(summary.wal_batches, 4);
+        assert_eq!(summary.wal_records, 8);
+        assert_eq!(summary.minimum_round, 8);
+        assert_eq!(summary.maximum_round, 11);
+    }
+
+    #[test]
+    fn autonomous_clock_summary_requires_progress_after_the_benchmark_baseline() {
+        let metrics = vec![
+            autonomous_clock_metrics(8, 0, 0),
+            autonomous_clock_metrics(8, 0, 0),
+        ];
+        let baselines = metrics
+            .iter()
+            .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
+                .verdict_valid
+        );
+
+        for metrics in &metrics {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .inc();
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "shadow"])
+                .inc();
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                .inc();
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_records_total
+                .inc();
+            metrics
+                .starfish_rbc_dag_shadow_wal_durable_batches_total
+                .inc();
+            metrics
+                .starfish_rbc_dag_shadow_wal_durable_records_total
+                .inc();
+            metrics.starfish_rbc_dag_shadow_carrier_round.inc();
+            metrics.starfish_rbc_dag_projected_vertices_total.inc();
+            metrics
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
+                .inc();
+        }
+
+        assert!(
+            summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
+                .verdict_valid
+        );
+    }
+
+    #[test]
+    fn embedded_authority_summary_requires_application_delivery_progress() {
+        let metrics = [autonomous_clock_metrics(8, 0, 0)];
+        let baselines = metrics
+            .iter()
+            .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
+            .collect::<Vec<_>>();
+        let metrics = &metrics[0];
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["application_carrier", "accepted"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["delivery", "shadow"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_records_total
+            .inc();
+        metrics.starfish_rbc_dag_shadow_carrier_round.inc();
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
+
+        assert!(
+            !summarize_autonomous_clock_benchmark(
+                &[Arc::clone(metrics)],
+                2,
+                Some(&baselines),
+                true,
+            )
+            .verdict_valid
+        );
+
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["delivery", "embedded_application"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["frontier", "committed"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["frontier", "application"])
+            .inc();
+        assert!(
+            summarize_autonomous_clock_benchmark(
+                &[Arc::clone(metrics)],
+                2,
+                Some(&baselines),
+                true,
+            )
+            .verdict_valid
+        );
+    }
+
+    #[test]
+    fn autonomous_clock_summary_rejects_invalid_progress_and_unbounded_state() {
+        let no_progress = autonomous_clock_metrics(1, 0, 0);
+        no_progress
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["heartbeat", "accepted"])
+            .reset();
+        let invalid_clock = autonomous_clock_metrics(12, 0, 0);
+        invalid_clock.starfish_rbc_dag_shadow_clock_valid.set(0);
+        let unbounded = autonomous_clock_metrics(
+            20,
+            STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR * 4 + 1,
+            STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR * 4 + 1,
+        );
+        let metrics = vec![no_progress, invalid_clock, unbounded];
+
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
+
+        assert!(!summary.verdict_valid);
+        assert_eq!(summary.valid_nodes, 2);
+        assert_eq!(summary.progress_nodes, 2);
+        assert_eq!(summary.bounded_nodes, 2);
+        assert!(
+            summary.maximum_round - summary.minimum_round
+                > STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG
+        );
+    }
 }

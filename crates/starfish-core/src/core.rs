@@ -20,7 +20,9 @@ use crate::{
         linearizer::CommittedSubDag,
         universal_committer::{UniversalCommitter, UniversalCommitterBuilder},
     },
-    crypto::{self, AsBytes, BlsSignatureBytes, BlsSigner, Signer},
+    crypto::{
+        self, AsBytes, BlsSignatureBytes, BlsSigner, MacKey, MlDsa44Signer, MlDsa65Signer, Signer,
+    },
     dag_state::{
         ByzantineStrategy, CACHED_ROUNDS, CommitData, ConsensusProtocol, DagState, DataSource,
         OwnBlockData,
@@ -32,9 +34,10 @@ use crate::{
     state::RecoveredState,
     store::Store,
     types::{
-        AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-        Encoder, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
-        RoundNumber, SailfishFields, Shard, VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
+        BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
+        ProvableShard, ReconstructedTransactionData, RoundNumber, SailfishFields, Shard,
+        VerifiedBlock,
     },
 };
 
@@ -60,12 +63,19 @@ pub struct Core<H: BlockHandler> {
     pub(crate) metrics: Arc<Metrics>,
     signer: Signer,
     bls_signer: BlsSigner,
+    ml_dsa_44_signer: MlDsa44Signer,
+    ml_dsa_65_signer: MlDsa65Signer,
+    mac_keys: Arc<Vec<MacKey>>,
     partial_sig_outbox: Option<mpsc::UnboundedSender<PartialSig>>,
     // todo - ugly, probably need to merge syncer and core
     recovered_committed_blocks: Option<AHashSet<BlockReference>>,
     recovered_committed_leaders_count: Option<usize>,
     committer: UniversalCommitter,
     pub(crate) encoder: Encoder,
+    /// M7 application-production mode: direct Starfish headers are payload
+    /// descriptors only. Their dirty/clean DAG is no longer a consensus or
+    /// output authority, so raw threshold-clock progress may produce them.
+    rbc_dag_application_production: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -185,11 +195,15 @@ impl<H: BlockHandler> Core<H> {
             metrics,
             signer: private_config.keypair,
             bls_signer: private_config.bls_keypair,
+            ml_dsa_44_signer: private_config.ml_dsa_44_keypair,
+            ml_dsa_65_signer: private_config.ml_dsa_65_keypair,
+            mac_keys: Arc::new(private_config.mac_keys),
             partial_sig_outbox,
             recovered_committed_blocks: Some(committed_blocks),
             recovered_committed_leaders_count: Some(committed_leaders_count),
             committer,
             encoder,
+            rbc_dag_application_production: false,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -204,6 +218,18 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn get_signer(&self) -> &Signer {
         &self.signer
+    }
+
+    pub(crate) fn get_ml_dsa_44_signer(&self) -> &crate::crypto::MlDsa44Signer {
+        &self.ml_dsa_44_signer
+    }
+
+    pub(crate) fn get_ml_dsa_65_signer(&self) -> &crate::crypto::MlDsa65Signer {
+        &self.ml_dsa_65_signer
+    }
+
+    pub fn mac_keys(&self) -> Arc<Vec<MacKey>> {
+        self.mac_keys.clone()
     }
 
     pub fn get_universal_committer(&self) -> UniversalCommitter {
@@ -468,7 +494,11 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer
             .utilization_timer("Core::try_new_block");
 
-        let proposal_round = self.dag_state.proposal_round();
+        let proposal_round = if self.rbc_dag_application_production {
+            self.dag_state.threshold_clock_round()
+        } else {
+            self.dag_state.proposal_round()
+        };
         tracing::debug!(
             "Attempt to construct block in round {} (proposal round {}). Current pending: {:?}",
             clock_round,
@@ -485,7 +515,8 @@ impl<H: BlockHandler> Core<H> {
         let protocol = self.dag_state.consensus_protocol;
 
         // Dual-DAG protocols: require clean parent quorum before creating a block.
-        if protocol.uses_dual_dag()
+        if !self.rbc_dag_application_production
+            && protocol.uses_dual_dag()
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
@@ -494,6 +525,25 @@ impl<H: BlockHandler> Core<H> {
                  missing for previous round {}",
                 clock_round,
                 clock_round - 1
+            );
+            return None;
+        }
+
+        // `build_block` always prepends the creator's previous block. For
+        // Starfish-RBC that local header is dirty until the local RBC instance
+        // delivers it; another clean quorum must not let us smuggle this dirty
+        // mandatory parent into a proposal.
+        if !self.rbc_dag_application_production
+            && protocol.is_starfish_rbc()
+            && clock_round > 1
+            && self
+                .last_own_block
+                .iter()
+                .any(|own| !self.dag_state.has_clean_vertex(own.block.reference()))
+        {
+            tracing::debug!(
+                "Cannot construct Starfish-RBC block in round {}: own previous header is not clean",
+                clock_round
             );
             return None;
         }
@@ -518,8 +568,17 @@ impl<H: BlockHandler> Core<H> {
         };
 
         let pending_transactions = self.get_pending_transactions(clock_round);
-        let (mut transactions, block_references, raw_refs) =
+        let (mut transactions, block_references, raw_refs, deferred_dirty_refs) =
             self.collect_transactions_and_references(pending_transactions, clock_round);
+        // A header can reach the dirty DAG before the local RBC instance
+        // delivers it. Keep its include notification pending so a proposal
+        // created from some other clean quorum does not permanently consume
+        // the only chance to reference it once delivery completes.
+        self.pending.extend(
+            deferred_dirty_refs
+                .into_iter()
+                .map(MetaTransaction::Include),
+        );
 
         // Dual-DAG protocols: if the clean-parent filter reduced the parent
         // set below threshold-clock quorum, we cannot build a valid block yet.
@@ -554,7 +613,8 @@ impl<H: BlockHandler> Core<H> {
                 clock_round
             );
         }
-        if protocol.uses_dual_dag()
+        if !self.rbc_dag_application_production
+            && protocol.uses_dual_dag()
             && clock_round > 1
             && block_references.is_empty()
             && !allows_minimal_refs
@@ -700,6 +760,7 @@ impl<H: BlockHandler> Core<H> {
         Vec<BaseTransaction>,
         Vec<BlockReference>,
         Vec<BlockReference>,
+        Vec<BlockReference>,
     ) {
         let mut transactions = Vec::new();
         let mut pending_refs = Vec::new();
@@ -711,12 +772,29 @@ impl<H: BlockHandler> Core<H> {
                 MetaTransaction::Include(include) => pending_refs.push(include),
             }
         }
-        let raw_refs = pending_refs.clone();
+        // Dirty vertices must not even participate in transitive reduction:
+        // otherwise a dirty child can suppress one of its clean parents and
+        // then be filtered itself, shrinking the usable clean frontier.
+        let (compression_candidates, deferred_dirty_refs): (Vec<_>, Vec<_>) =
+            if self.dag_state.consensus_protocol.is_starfish_rbc()
+                && !self.rbc_dag_application_production
+            {
+                pending_refs.into_iter().partition(|reference| {
+                    reference.round == 0 || self.dag_state.has_clean_vertex(reference)
+                })
+            } else {
+                (pending_refs, Vec::new())
+            };
+        // These are the usable inputs that callers must retry when a later
+        // proposal gate fails. Dirty RBC refs are retried independently above
+        // so the two retry paths cannot duplicate them.
+        let raw_refs = compression_candidates.clone();
         let mut block_references =
-            self.compress_pending_block_references(&pending_refs, block_round);
+            self.compress_pending_block_references(&compression_candidates, block_round);
 
         // Dual-DAG protocols: filter parents to only include clean blocks.
-        if self.dag_state.consensus_protocol.uses_dual_dag() {
+        if self.dag_state.consensus_protocol.uses_dual_dag() && !self.rbc_dag_application_production
+        {
             let before = block_references.clone();
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
             let filtered_out_refs: Vec<_> = before
@@ -740,6 +818,7 @@ impl<H: BlockHandler> Core<H> {
         let is_compressed_non_leader = self.dag_state.consensus_protocol.uses_compressed_refs()
             && self.committee.elect_leader(block_round) != self.authority;
         if self.dag_state.consensus_protocol.uses_dual_dag()
+            && !self.rbc_dag_application_production
             && block_round > 1
             && !is_compressed_non_leader
         {
@@ -777,11 +856,16 @@ impl<H: BlockHandler> Core<H> {
                     seen.contains(self.authority),
                     is_compressed_non_leader
                 );
-                return (transactions, vec![], raw_refs);
+                return (transactions, vec![], raw_refs, deferred_dirty_refs);
             }
         }
 
-        (transactions, block_references, raw_refs)
+        (
+            transactions,
+            block_references,
+            raw_refs,
+            deferred_dirty_refs,
+        )
     }
 
     fn prepare_encoded_transactions(
@@ -991,28 +1075,50 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        let mut block = VerifiedBlock::new_with_signer_and_unprovable(
-            self.authority,
-            clock_round,
-            block_references,
-            voted_leader_ref,
-            acknowledgment_references.to_vec(),
-            time_ns,
-            &self.signer,
-            bls_signer_opt,
-            committee_opt,
-            aggregate_dac_sigs,
-            transactions.to_vec(),
-            encoded_transactions.clone(),
-            self.dag_state.consensus_protocol,
-            strong_vote,
-            aggregate_round_sig,
-            certified_leader,
-            precomputed_round_sig,
-            precomputed_leader_sig,
-            sailfish_fields,
-            unprovable_certificate,
-        );
+        let mut block = if protocol == ConsensusProtocol::StarfishRbc {
+            VerifiedBlock::new_starfish_rbc(
+                self.authority,
+                clock_round,
+                block_references,
+                acknowledgment_references.to_vec(),
+                time_ns,
+                transactions.to_vec(),
+                encoded_transactions.clone(),
+            )
+        } else {
+            let authorizer = match self.dag_state.block_authentication_scheme {
+                BlockAuthenticationScheme::Ed25519 => BlockAuthorizer::Ed25519(&self.signer),
+                BlockAuthenticationScheme::MacVector => BlockAuthorizer::MacVector(&self.mac_keys),
+                BlockAuthenticationScheme::MlDsa44 => {
+                    BlockAuthorizer::MlDsa44(&self.ml_dsa_44_signer)
+                }
+                BlockAuthenticationScheme::MlDsa65 => {
+                    BlockAuthorizer::MlDsa65(&self.ml_dsa_65_signer)
+                }
+            };
+            VerifiedBlock::new_with_authorizer_and_unprovable(
+                self.authority,
+                clock_round,
+                block_references,
+                voted_leader_ref,
+                acknowledgment_references.to_vec(),
+                time_ns,
+                &authorizer,
+                bls_signer_opt,
+                committee_opt,
+                aggregate_dac_sigs,
+                transactions.to_vec(),
+                encoded_transactions.clone(),
+                self.dag_state.consensus_protocol,
+                strong_vote,
+                aggregate_round_sig,
+                certified_leader,
+                precomputed_round_sig,
+                precomputed_leader_sig,
+                sailfish_fields,
+                unprovable_certificate,
+            )
+        };
 
         let role = if is_round_leader {
             "leader"
@@ -1396,6 +1502,9 @@ impl<H: BlockHandler> Core<H> {
         connected_authorities: &AHashSet<AuthorityIndex>,
         relaxed: bool,
     ) -> bool {
+        if self.rbc_dag_application_production {
+            return quorum_round > 0 && self.dag_state.threshold_clock_round() >= quorum_round;
+        }
         if quorum_round == 0 || self.dag_state.proposal_round() < quorum_round {
             return false;
         }
@@ -1451,6 +1560,39 @@ impl<H: BlockHandler> Core<H> {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
         self.flush_pending_clean_refs();
+    }
+
+    /// Persist an M7 frontier delta without feeding the obsolete Starfish
+    /// clean-DAG commit/proposal watermarks back into block production.
+    pub fn handle_rbc_dag_committed_delta(&mut self, committed: Vec<CommittedSubDag>) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::handle_rbc_dag_committed_delta");
+        let mut commit_data = Vec::with_capacity(committed.len());
+        for commit in &committed {
+            self.dag_state.update_last_committed_rounds(commit);
+            commit_data.push(CommitData::new(
+                commit,
+                self.dag_state.last_committed_rounds(),
+            ));
+        }
+        let store_start = std::time::Instant::now();
+        self.store
+            .store_commits(commit_data)
+            .expect("Store RBC-DAG frontier commits should not fail");
+        self.metrics
+            .store_commits_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_commits_count.inc();
+    }
+
+    pub(crate) fn enable_rbc_dag_application_production(&mut self) {
+        assert!(
+            self.dag_state.consensus_protocol.is_starfish_rbc(),
+            "RBC-DAG application production requires Starfish-RBC payload headers"
+        );
+        self.rbc_dag_application_production = true;
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
@@ -1608,6 +1750,26 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_starfish_rbc_round_1_block(
+        committee: &Committee,
+        authority: AuthorityIndex,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_starfish_rbc(
+            authority,
+            1,
+            committee
+                .authorities()
+                .map(|auth| BlockReference::new_test(auth, 0))
+                .collect(),
+            Vec::new(),
+            authority as u64,
+            Vec::new(),
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     fn make_test_round_certificate(
         bls_signers: &[BlsSigner],
         round: RoundNumber,
@@ -1686,6 +1848,126 @@ mod tests {
         let refs = round_2.block_references();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], *round_1.reference());
+    }
+
+    #[test]
+    fn starfish_rbc_proposal_defers_dirty_include_until_delivery() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        let own_round_one = core
+            .try_new_block("new_blocks")
+            .expect("round-one block should be creatable");
+        let peer_one = make_starfish_rbc_round_1_block(&committee, 1);
+        let peer_two = make_starfish_rbc_round_1_block(&committee, 2);
+        let dirty_peer = make_starfish_rbc_round_1_block(&committee, 3);
+        let dirty_ref = *dirty_peer.reference();
+        core.add_headers(
+            vec![peer_one.clone(), peer_two.clone(), dirty_peer],
+            DataSource::BlockBundleStreamingHeader,
+        );
+
+        assert!(
+            core.dag_state()
+                .apply_starfish_rbc_delivery_refs_for_test(&[
+                    *own_round_one.reference(),
+                    *peer_one.reference(),
+                    *peer_two.reference(),
+                ])
+        );
+        let round_two = core
+            .try_new_block("new_blocks")
+            .expect("a clean quorum should permit the round-two proposal");
+        assert!(!round_two.block_references().contains(&dirty_ref));
+        assert!(core.pending.iter().any(|pending| {
+            matches!(pending, MetaTransaction::Include(reference) if *reference == dirty_ref)
+        }));
+    }
+
+    #[test]
+    fn rbc_dag_application_production_does_not_wait_for_legacy_clean_delivery() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+        core.enable_rbc_dag_application_production();
+
+        let own_round_one = core
+            .try_new_block("new_blocks")
+            .expect("round-one application header should be creatable");
+        let peers = [1, 2]
+            .into_iter()
+            .map(|peer| make_starfish_rbc_round_1_block(&committee, peer))
+            .collect::<Vec<_>>();
+        core.add_headers(peers, DataSource::BlockBundleStreamingHeader);
+
+        assert_eq!(core.dag_state().threshold_clock_round(), 2);
+        assert!(!core.dag_state().has_clean_vertex(own_round_one.reference()));
+        let round_two = core
+            .try_new_block("new_blocks")
+            .expect("RBC-DAG application production must follow the raw threshold clock");
+        assert_eq!(round_two.round(), 2);
+        assert!(
+            round_two
+                .block_references()
+                .contains(own_round_one.reference())
+        );
     }
 
     #[test]

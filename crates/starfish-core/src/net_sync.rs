@@ -4,6 +4,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -34,7 +35,7 @@ use crate::{
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::BlsSigner,
+    crypto::{Blake3Hasher, BlsSigner, MacKey},
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
     metrics::{Metrics, UtilizationTimerVecExt},
@@ -44,16 +45,258 @@ use crate::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
+    starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader, RbcCommitteeId, RbcProtocolInstanceId},
+    starfish_rbc_dag::{
+        RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
+        projection::ProjectionDecisionV1, storage::ShadowWalSyncPolicyV1,
+    },
+    starfish_rbc_dag_shadow::{
+        ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
+    },
+    starfish_rbc_dag_shadow_service::{
+        ShadowServiceErrorV1, ShadowServiceEventV1, StarfishRbcDagShadowServiceHandleV1,
+        start_starfish_rbc_dag_autonomous_clock_service_v1,
+        start_starfish_rbc_dag_shadow_service_v1,
+    },
+    starfish_rbc_service::{
+        RbcInitialAuthenticator, RbcPhaseAuthorityV1, RbcServiceEvent, RbcServiceHandle,
+        start_starfish_rbc_service_with_phase_authority,
+    },
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, PartialSig, PartialSigKind,
-        ProvableShard, RoundNumber, VerifiedBlock, format_authority_index,
+        AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
+        BlockReference, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
+        RoundNumber, TransactionData, VerifiedBlock, format_authority_index,
     },
 };
 
 const MAX_FILTER_SIZE: usize = 100_000;
 const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
+const STARFISH_RBC_HEADER_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const STARFISH_RBC_DAG_AUTONOMOUS_INSTANCE_CONTEXT: &str =
+    "STARFISH_RBC_DAG_AUTONOMOUS_CLOCK_V1_PROTOCOL_INSTANCE";
+
+/// Recover the exact locally selected Starfish-RBC chain so the persisted
+/// non-authoritative shadow can reconcile a WAL that ended before the direct
+/// DAG. The newest local block determines the branch when a Byzantine test
+/// produced more than one value in a round.
+fn recovered_local_rbc_headers<H: BlockHandler>(
+    core: &Core<H>,
+) -> Result<Vec<RbcCanonicalHeader>, String> {
+    if !core.dag_state().consensus_protocol.is_starfish_rbc() || core.last_proposed() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let own_authority = core.authority();
+    let store = core.store();
+    let mut current = core.last_own_block().clone();
+    let mut reversed = Vec::with_capacity(current.round() as usize);
+    loop {
+        if current.round() == 0 {
+            break;
+        }
+        if current.authority() != own_authority {
+            return Err(format!(
+                "recovered local chain contains authority {} at round {} (expected {})",
+                current.authority(),
+                current.round(),
+                own_authority
+            ));
+        }
+        reversed.push(
+            RbcCanonicalHeader::from_block_header(current.header()).map_err(|error| {
+                format!(
+                    "recovered local Starfish-RBC header {} is not canonical: {error}",
+                    current.reference()
+                )
+            })?,
+        );
+        if current.round() == 1 {
+            break;
+        }
+
+        let expected_round = current.round() - 1;
+        let predecessor = current
+            .block_references()
+            .iter()
+            .find(|reference| {
+                reference.authority == own_authority && reference.round == expected_round
+            })
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "recovered local Starfish-RBC block {} has no own predecessor at round {}",
+                    current.reference(),
+                    expected_round
+                )
+            })?;
+        current = core
+            .dag_state()
+            .get_blocks_at_authority_round(own_authority, expected_round)
+            .into_iter()
+            .find(|block| block.reference() == &predecessor)
+            .or_else(|| store.get_block(&predecessor).ok().flatten())
+            .ok_or_else(|| {
+                format!("recovered local Starfish-RBC predecessor {predecessor} is unavailable")
+            })?;
+    }
+    reversed.reverse();
+    Ok(reversed)
+}
+
+fn shadow_transport_error_invalidates_run(error: &ShadowServiceErrorV1) -> bool {
+    matches!(
+        error,
+        ShadowServiceErrorV1::Overloaded { .. } | ShadowServiceErrorV1::Stopped
+    )
+}
+
+fn invalidate_shadow_run(metrics: &Metrics) {
+    // Exactly one verdict is active for a configured shadow mode, but setting
+    // both to zero makes every transport/startup failure fail closed without
+    // duplicating mode knowledge throughout the network plumbing.
+    metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
+    metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+}
+
+fn rbc_dag_shadow_protocol_instance(
+    direct_instance: [u8; 32],
+    autonomous_clock: bool,
+) -> RbcDagProtocolInstanceId {
+    let bytes = if autonomous_clock {
+        // Autonomous heartbeat carriers intentionally do not authenticate in
+        // the same namespace as milestone-three's direct-header mirror. This
+        // makes a heterogeneous deployment fail closed at the shadow boundary
+        // instead of cross-admitting application and control carriers.
+        let mut hasher = Blake3Hasher::new_derive_key(STARFISH_RBC_DAG_AUTONOMOUS_INSTANCE_CONTEXT);
+        hasher.update(&direct_instance);
+        *hasher.finalize().as_bytes()
+    } else {
+        direct_instance
+    };
+    RbcDagProtocolInstanceId::new(bytes)
+        .expect("a configured direct RBC instance and its derived namespace are nonzero")
+}
+
+/// Enforce the MAC experiment's transport contract before cryptographic
+/// verification:
+///
+/// - a full vector is accepted only on proactive block streaming directly from
+///   the block's claimed author;
+/// - every relay and synchronization path must carry one recipient tag;
+/// - a direct author stream must carry the full vector, so recipients retain
+///   the material needed for one-hop relay.
+fn verify_mac_transport(
+    block: &VerifiedBlock,
+    authentication_scheme: BlockAuthenticationScheme,
+    peer_id: AuthorityIndex,
+    source: DataSource,
+) -> eyre::Result<()> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector {
+        return Ok(());
+    }
+
+    let direct_author_stream = peer_id == block.authority()
+        && matches!(
+            source,
+            DataSource::BlockBundleStreaming | DataSource::BlockBundleStreamingHeader
+        );
+
+    match block.authentication() {
+        BlockAuthentication::MacVector(_) if direct_author_stream => Ok(()),
+        BlockAuthentication::MacVector(_) => eyre::bail!(
+            "Full MAC vector for block {} must arrive via direct author block streaming; \
+             received from authority {} with source {}",
+            block.reference(),
+            peer_id,
+            source,
+        ),
+        BlockAuthentication::MacTag(_) if !direct_author_stream => Ok(()),
+        BlockAuthentication::MacTag(_) => eyre::bail!(
+            "Direct author block stream for block {} must carry the full MAC vector",
+            block.reference(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn verify_starfish_rbc_transaction_payload(
+    canonical_header: &RbcCanonicalHeader,
+    transaction_data: Arc<TransactionData>,
+    committee: &Committee,
+    own_id: AuthorityIndex,
+    peer_id: AuthorityIndex,
+    encoder: &mut ReedSolomonEncoder,
+    authentication_scheme: BlockAuthenticationScheme,
+    mac_keys: &[MacKey],
+) -> eyre::Result<ReconstructedTransactionData> {
+    let block_reference = canonical_header.reference();
+    let transaction_data = Arc::try_unwrap(transaction_data).unwrap_or_else(|data| (*data).clone());
+    let (block_header, _) = canonical_header.to_authentication_free_block().into_parts();
+    let mut block = VerifiedBlock::from_parts(block_header, Some(transaction_data));
+    let Some(mut shard_data) = block.verify_with_authentication(
+        committee,
+        own_id as usize,
+        peer_id as usize,
+        encoder,
+        ConsensusProtocol::StarfishRbc,
+        authentication_scheme,
+        mac_keys,
+    )?
+    else {
+        eyre::bail!("Starfish-RBC transaction payload for {block_reference} is empty");
+    };
+    block.preserialize();
+    shard_data.preserialize();
+    let transaction_data = block
+        .transaction_data()
+        .expect("verified RBC payload must contain transaction data")
+        .clone();
+    Ok(ReconstructedTransactionData {
+        block_reference,
+        transaction_data,
+        shard_data,
+    })
+}
+
+/// Prepare blocks forwarded through relay or synchronization paths for a
+/// specific peer. Legacy MAC-experiment blocks retain their complete vector
+/// only at direct recipients; forwarding selects the destination's tag. A
+/// tag-only copy cannot be forwarded again and is therefore omitted.
+/// Starfish-RBC carriers are authentication-free and remain forwardable: the
+/// separate RBC service, rather than the carrier, controls clean admission.
+pub(crate) fn prepare_forwarded_blocks_for_peer(
+    authentication_scheme: BlockAuthenticationScheme,
+    consensus_protocol: ConsensusProtocol,
+    recipient: AuthorityIndex,
+    blocks: Vec<Data<VerifiedBlock>>,
+) -> Vec<Data<VerifiedBlock>> {
+    if authentication_scheme != BlockAuthenticationScheme::MacVector
+        || consensus_protocol.is_starfish_rbc()
+    {
+        return blocks;
+    }
+
+    blocks
+        .into_iter()
+        .filter_map(|block| {
+            block
+                .with_recipient_mac(recipient)
+                .map(Data::new)
+                .or_else(|| {
+                    tracing::debug!(
+                        "Cannot forward MAC-authenticated block {} to authority {}: \
+                         complete MAC vector is unavailable",
+                        block.reference(),
+                        recipient,
+                    );
+                    None
+                })
+        })
+        .collect()
+}
 
 async fn send_network_message_reliably(
     sender: &mpsc::Sender<NetworkMessage>,
@@ -161,6 +404,7 @@ fn eligible_missing_parent_refs(
 
 struct FilterForBlocks {
     digests: parking_lot::RwLock<AHashSet<BlockDigest>>,
+    full_mac_vectors: parking_lot::RwLock<AHashSet<BlockDigest>>,
     queue: parking_lot::RwLock<VecDeque<BlockDigest>>,
 }
 
@@ -168,6 +412,7 @@ impl FilterForBlocks {
     fn new() -> Self {
         Self {
             digests: parking_lot::RwLock::new(AHashSet::new()),
+            full_mac_vectors: parking_lot::RwLock::new(AHashSet::new()),
             queue: parking_lot::RwLock::new(VecDeque::new()),
         }
     }
@@ -177,58 +422,84 @@ impl FilterForBlocks {
         digests.iter().map(|d| set.contains(d)).collect()
     }
 
-    fn insert_batch(&self, new_digests: &[BlockDigest]) {
+    fn contains_full_mac_batch(&self, digests: &[BlockDigest]) -> Vec<bool> {
+        let set = self.full_mac_vectors.read();
+        digests.iter().map(|d| set.contains(d)).collect()
+    }
+
+    fn insert_batch(&self, blocks: &[(BlockDigest, bool)]) {
         let mut digests = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        for digest in new_digests {
+        for (digest, has_full_mac_vector) in blocks {
             if digests.insert(*digest) {
                 queue.push_back(*digest);
+            }
+            if *has_full_mac_vector {
+                full_mac_vectors.insert(*digest);
             }
         }
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 digests.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
     }
 
-    /// Inserts all digests and returns `true` for each that was genuinely new
-    /// (not already in the filter and not duplicated earlier in the batch).
-    fn insert_and_report_new(&self, digests: &[BlockDigest]) -> Vec<bool> {
+    /// Inserts all verified copies and returns `true` for each copy that adds
+    /// either a new block reference or the first full MAC vector for a
+    /// previously recipient-tag-only reference.
+    fn insert_and_report_useful(&self, blocks: &[(BlockDigest, bool)]) -> Vec<bool> {
         let mut set = self.digests.write();
+        let mut full_mac_vectors = self.full_mac_vectors.write();
         let mut queue = self.queue.write();
 
-        let is_new: Vec<bool> = digests
+        let is_useful: Vec<bool> = blocks
             .iter()
-            .map(|d| {
-                if set.insert(*d) {
-                    queue.push_back(*d);
-                    true
-                } else {
-                    false
+            .map(|(digest, has_full_mac_vector)| {
+                let is_new = set.insert(*digest);
+                if is_new {
+                    queue.push_back(*digest);
                 }
+                let is_mac_upgrade = *has_full_mac_vector && full_mac_vectors.insert(*digest);
+                is_new || is_mac_upgrade
             })
             .collect();
 
         while queue.len() > MAX_FILTER_SIZE {
             if let Some(removed) = queue.pop_front() {
                 set.remove(&removed);
+                full_mac_vectors.remove(&removed);
             }
         }
-        is_new
+        is_useful
     }
 
-    /// For each header digest, returns `true` if the digest has not been seen
-    /// before (neither in the filter nor earlier in this batch).
-    fn needed_headers(&self, batch: &[BlockDigest]) -> Vec<bool> {
+    /// For each header, returns `true` if it is either unseen or upgrades a
+    /// previously seen recipient-only MAC to a full vector.
+    fn needed_headers(&self, batch: &[(BlockDigest, bool)]) -> Vec<bool> {
         let digests = self.digests.read();
-        let mut seen_in_batch = AHashSet::with_capacity(batch.len());
+        let full_mac_vectors = self.full_mac_vectors.read();
+        let mut seen_in_batch = AHashMap::with_capacity(batch.len());
 
         batch
             .iter()
-            .map(|digest| !digests.contains(digest) && seen_in_batch.insert(*digest))
+            .map(|(digest, has_full_mac_vector)| {
+                let was_seen = digests.contains(digest) || seen_in_batch.contains_key(digest);
+                let had_full_mac_vector = seen_in_batch
+                    .get(digest)
+                    .copied()
+                    .unwrap_or_else(|| full_mac_vectors.contains(digest));
+                let is_needed = !was_seen || (*has_full_mac_vector && !had_full_mac_vector);
+                seen_in_batch
+                    .entry(*digest)
+                    .and_modify(|full| *full |= *has_full_mac_vector)
+                    .or_insert(*has_full_mac_vector);
+                is_needed
+            })
             .collect()
     }
 }
@@ -424,8 +695,11 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
         let mut encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         while let Some((blocks, source)) = rx.recv().await {
             let connection_knowledge = inner.cordial_knowledge.connection_knowledge(peer_id);
-            let incoming_digests: Vec<_> = blocks.iter().map(|block| block.digest()).collect();
-            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_digests);
+            let incoming_headers: Vec<_> = blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let needed_before_verify = filter_for_blocks.needed_headers(&incoming_headers);
             let mut verified_blocks: Vec<VerifiedBlock> = Vec::new();
 
             for (data_block, is_needed) in blocks.into_iter().zip(needed_before_verify) {
@@ -435,12 +709,28 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 }
                 let mut block: VerifiedBlock = (*data_block).clone();
                 tracing::debug!("Received {} from {}", block, peer);
-                match block.verify(
+                if let Err(e) = verify_mac_transport(
+                    &block,
+                    inner.dag_state.block_authentication_scheme,
+                    peer_id,
+                    source,
+                ) {
+                    tracing::warn!(
+                        "Rejected incorrectly transported block {} from {}: {:?}",
+                        block.reference(),
+                        peer,
+                        e
+                    );
+                    break;
+                }
+                match block.verify_with_authentication(
                     &inner.committee,
                     own_id as usize,
                     peer_id as usize,
                     &mut encoder,
                     consensus_protocol,
+                    inner.dag_state.block_authentication_scheme,
+                    &inner.mac_keys,
                 ) {
                     Ok(shard) => {
                         debug_assert!(shard.is_none(), "shard must be None for header-only blocks")
@@ -464,11 +754,14 @@ fn spawn_header_worker<H: BlockHandler + 'static, C: CommitObserver + 'static>(
                 ck.mark_headers_useful_from_peer(&refs);
             }
 
-            let digests: Vec<_> = verified_blocks.iter().map(|b| b.digest()).collect();
-            let is_new = filter_for_blocks.insert_and_report_new(&digests);
+            let filter_entries: Vec<_> = verified_blocks
+                .iter()
+                .map(|block| (block.digest(), block.has_full_mac_vector()))
+                .collect();
+            let is_useful = filter_for_blocks.insert_and_report_useful(&filter_entries);
             let mut new_data_blocks = Vec::new();
-            for (storage_block, is_new) in verified_blocks.into_iter().zip(is_new) {
-                if is_new {
+            for (storage_block, is_useful) in verified_blocks.into_iter().zip(is_useful) {
+                if is_useful {
                     let mut storage_block = storage_block;
                     storage_block.preserialize();
                     debug_assert!(
@@ -566,6 +859,8 @@ struct ConnectionHandler<H: BlockHandler + 'static, C: CommitObserver + 'static>
     header_tx: mpsc::UnboundedSender<(Vec<Data<VerifiedBlock>>, DataSource)>,
     bls_service: Option<BlsServiceHandle>,
     sailfish_service: Option<SailfishServiceHandle>,
+    starfish_rbc_service: Option<RbcServiceHandle>,
+    starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H, C> {
@@ -607,6 +902,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         let encoder = ReedSolomonEncoder::new(2, 4, 2).expect("Encoder should be created");
         let own_id = inner.dag_state.get_own_authority_index();
+        let starfish_rbc_service = inner.starfish_rbc_service.clone();
+        let starfish_rbc_dag_shadow_service = inner.starfish_rbc_dag_shadow_service.clone();
         let peer = format_authority_index(peer_id);
 
         let (standalone_shard_tx, standalone_shard_rx) = mpsc::unbounded_channel();
@@ -650,6 +947,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             header_tx,
             bls_service,
             sailfish_service,
+            starfish_rbc_service,
+            starfish_rbc_dag_shadow_service,
         }
     }
 
@@ -666,6 +965,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -778,6 +1078,88 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     .handle_round_gap_request(round, known_authorities)
                     .await;
             }
+            NetworkMessage::RbcInitial(proposal) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.direct_initial(self.peer_id, proposal) {
+                        tracing::warn!("Failed to forward Starfish-RBC INIT: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcPhase(message) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.phase(self.peer_id, message) {
+                        tracing::warn!("Failed to forward Starfish-RBC phase: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcHeaderRequest(block_ref) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.header_request(self.peer_id, block_ref) {
+                        tracing::warn!("Failed to forward Starfish-RBC header request: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcHeaderResponse(header) => {
+                if let Some(ref rbc) = self.starfish_rbc_service {
+                    if let Err(error) = rbc.header_response(self.peer_id, header) {
+                        tracing::warn!("Failed to forward Starfish-RBC header response: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcDagShadowCarrier(envelope) => {
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.carrier(self.peer_id, envelope) {
+                        if shadow_transport_error_invalidates_run(&error) {
+                            invalidate_shadow_run(&self.metrics);
+                        }
+                        tracing::warn!("Failed to forward RBC-DAG shadow carrier: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcDagShadowCarrierRequest(reference) => {
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.carrier_request(self.peer_id, reference) {
+                        if shadow_transport_error_invalidates_run(&error) {
+                            invalidate_shadow_run(&self.metrics);
+                        }
+                        tracing::warn!("Failed to forward RBC-DAG shadow request: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcDagShadowCarrierResponse(response) => {
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.carrier_response(self.peer_id, response) {
+                        if shadow_transport_error_invalidates_run(&error) {
+                            invalidate_shadow_run(&self.metrics);
+                        }
+                        tracing::warn!("Failed to forward RBC-DAG shadow response: {error}");
+                    }
+                }
+            }
+            NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.carrier_sync_request(self.peer_id, request) {
+                        if shadow_transport_error_invalidates_run(&error) {
+                            invalidate_shadow_run(&self.metrics);
+                        }
+                        tracing::warn!(
+                            "Failed to forward RBC-DAG shadow carrier sync request: {error}"
+                        );
+                    }
+                }
+            }
+            NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => {
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.carrier_sync_response(self.peer_id, response) {
+                        if shadow_transport_error_invalidates_run(&error) {
+                            invalidate_shadow_run(&self.metrics);
+                        }
+                        tracing::warn!(
+                            "Failed to forward RBC-DAG shadow carrier sync response: {error}"
+                        );
+                    }
+                }
+            }
         }
         true
     }
@@ -889,6 +1271,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                     blocks_with_transactions.push(block);
                 }
                 ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed => {
@@ -913,6 +1296,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         if matches!(
             self.consensus_protocol,
             ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -960,27 +1344,45 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         // --- batch pre-filter (one read lock each) ---
         let block_known = self.filter_for_blocks.contains_batch(&incoming_digests);
+        let full_mac_known = self
+            .filter_for_blocks
+            .contains_full_mac_batch(&incoming_digests);
         let shard_full = self.filter_for_shards.has_full_batch(&incoming_digests);
 
         // --- verify loop (no lock acquisitions) ---
         let mut verified: Vec<(VerifiedBlock, Option<ProvableShard>)> = Vec::new();
-        for ((data_block, _digest), (bk, sf)) in blocks
-            .into_iter()
-            .zip(incoming_digests)
-            .zip(block_known.into_iter().zip(shard_full))
-        {
-            if bk && sf {
+        for (index, data_block) in blocks.into_iter().enumerate() {
+            let bk = block_known[index];
+            let sf = shard_full[index];
+            let incoming_has_full_mac = data_block.has_full_mac_vector();
+            if bk && sf && (!incoming_has_full_mac || full_mac_known[index]) {
                 self.metrics.filtered_blocks_total.inc();
                 continue;
             }
             let mut block: VerifiedBlock = (*data_block).clone();
             tracing::debug!("Received {} from {}", block, self.peer);
-            let shard = match block.verify(
+            if let Err(e) = verify_mac_transport(
+                &block,
+                self.inner.dag_state.block_authentication_scheme,
+                self.peer_id,
+                source,
+            ) {
+                tracing::warn!(
+                    "Rejected incorrectly transported block {} from {}: {:?}",
+                    block.reference(),
+                    self.peer,
+                    e
+                );
+                break;
+            }
+            let shard = match block.verify_with_authentication(
                 &self.inner.committee,
                 self.own_id as usize,
                 self.peer_id as usize,
                 &mut self.encoder,
                 self.consensus_protocol,
+                self.inner.dag_state.block_authentication_scheme,
+                &self.inner.mac_keys,
             ) {
                 Ok(shard) => shard,
                 Err(e) => {
@@ -1008,8 +1410,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
         }
 
         // --- batch filter updates (one write lock each) ---
-        let verified_digests: Vec<_> = verified.iter().map(|(b, _)| b.digest()).collect();
-        self.filter_for_blocks.insert_batch(&verified_digests);
+        let verified_filter_entries: Vec<_> = verified
+            .iter()
+            .map(|(block, _)| (block.digest(), block.has_full_mac_vector()))
+            .collect();
+        let verified_digests: Vec<_> = verified_filter_entries
+            .iter()
+            .map(|(digest, _)| *digest)
+            .collect();
+        self.filter_for_blocks
+            .insert_batch(&verified_filter_entries);
         self.filter_for_shards.mark_full_batch(&verified_digests);
 
         // --- preserialize + collect ---
@@ -1120,6 +1530,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         ) {
             self.metrics
                 .block_sync_requests_received
@@ -1192,6 +1603,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         ) {
             self.metrics
                 .tx_data_requests_received
@@ -1246,6 +1658,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 !known_voters.contains(b.authority()) && b.block_references().contains(&leader_ref)
             })
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.consensus_protocol,
+            self.peer_id,
+            missing,
+        );
         tracing::debug!(
             "UnprovableCertificateRequest from peer {:?} for leader {}: \
              known_voters={}, serving_blocks={}",
@@ -1281,6 +1699,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             .into_iter()
             .filter(|b| !known_authorities.contains(b.authority()))
             .collect();
+        let missing = prepare_forwarded_blocks_for_peer(
+            self.inner.dag_state.block_authentication_scheme,
+            self.consensus_protocol,
+            self.peer_id,
+            missing,
+        );
         if missing.is_empty() {
             return true;
         }
@@ -1315,6 +1739,10 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     bls_event_task: Option<JoinHandle<()>>,
     bls_broadcast_task: Option<JoinHandle<()>>,
     sf_event_task: Option<JoinHandle<()>>,
+    rbc_event_task: Option<JoinHandle<()>>,
+    rbc_service_task: Option<JoinHandle<()>>,
+    rbc_dag_shadow_event_task: Option<JoinHandle<()>>,
+    rbc_dag_shadow_service_task: Option<JoinHandle<()>>,
     cordial_knowledge_task: JoinHandle<()>,
 }
 
@@ -1329,6 +1757,7 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub block_ready_notify: Arc<Notify>,
     pub proposal_round_notify: Arc<Notify>,
     pub committee: Arc<Committee>,
+    pub mac_keys: Arc<Vec<MacKey>>,
     pub dissemination_mode: DisseminationMode,
     pub causal_push_shard_round_lag: RoundNumber,
     stop: mpsc::Sender<()>,
@@ -1339,11 +1768,22 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     pub cordial_knowledge: CordialKnowledgeHandle,
     /// Per-peer message senders for direct unicast (e.g. DAC partial sigs).
     pub peer_senders: parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::Sender<NetworkMessage>>>,
+    /// Nonblocking ingress to per-connection RBC outbound workers. Keeping
+    /// these queues separate prevents one backpressured peer from delaying
+    /// another peer or the actor's local HeaderStaged/Delivered effects.
+    rbc_peer_senders:
+        parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::UnboundedSender<NetworkMessage>>>,
     pub leader_timeout: Duration,
     pub soft_block_timeout: Duration,
     /// Sailfish++ service handle for sending control messages
     /// (timeout/no-vote). None for non-SailfishPlusPlus protocols.
     pub sailfish_handle: Option<SailfishServiceHandle>,
+    /// Central Starfish-RBC service. Connection workers only forward their
+    /// trusted peer identity and wire payload into this single owner.
+    pub(crate) starfish_rbc_service: Option<RbcServiceHandle>,
+    /// Non-authoritative persisted embedded-RBC shadow. It emits only network
+    /// and metric events and can never call the core dispatcher.
+    pub(crate) starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
     /// Wall-clock at NetworkSyncer start; consumed by time-dependent
     /// Byzantine strategies (e.g. RampUpWithholding) to ramp behavior
     /// over a fixed schedule.
@@ -1351,12 +1791,13 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
-    pub fn start(
+    pub async fn start(
         network: Network,
         mut core: Core<H>,
         mut commit_observer: C,
         metrics: Arc<Metrics>,
         node_parameters: NodeParameters,
+        starfish_rbc_dag_shadow_wal: PathBuf,
         partial_sig_outbox_rx: Option<mpsc::UnboundedReceiver<PartialSig>>,
         bls_cert_aggregator: Option<BlsCertificateAggregator>,
         bls_signer: Option<BlsSigner>,
@@ -1367,7 +1808,25 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
+        let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
+        let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow {
+            match recovered_local_rbc_headers(&core) {
+                Ok(headers) => Some(headers),
+                Err(error) => {
+                    // A partial local history would make delivery comparisons
+                    // meaningless in mirror mode and make autonomous local
+                    // application-origin reconciliation unsafe. Disable the
+                    // RBC-DAG runtime while allowing the legacy path to continue.
+                    tracing::error!(
+                        "Disabling RBC-DAG runtime because recovered direct headers cannot be reconciled: {error}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let dissemination_mode = dag_state
             .consensus_protocol
             .resolve_dissemination_mode(node_parameters.dissemination_mode);
@@ -1397,7 +1856,135 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let sf_handle_for_inner = sf_msg_tx
             .as_ref()
             .map(|tx| SailfishServiceHandle::new(tx.clone()));
-        let mut syncer = Syncer::new(
+        let (starfish_rbc_service, rbc_event_rx, rbc_service_task) =
+            if dag_state.consensus_protocol.is_starfish_rbc() {
+                let protocol_instance = node_parameters
+                .starfish_rbc_protocol_instance
+                .and_then(|bytes| RbcProtocolInstanceId::new(bytes).ok())
+                .expect(
+                    "validated Starfish-RBC configuration must contain a nonzero protocol instance",
+                );
+                let initial_authenticator = match dag_state.block_authentication_scheme {
+                    BlockAuthenticationScheme::Ed25519 => {
+                        RbcInitialAuthenticator::Ed25519(core.get_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa44 => {
+                        RbcInitialAuthenticator::MlDsa44(core.get_ml_dsa_44_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa65 => {
+                        RbcInitialAuthenticator::MlDsa65(core.get_ml_dsa_65_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
+                };
+                let phase_authority = if node_parameters.starfish_rbc_dag_embedded_rbc_authority {
+                    RbcPhaseAuthorityV1::EmbeddedCarrierDag
+                } else {
+                    RbcPhaseAuthorityV1::Direct
+                };
+                let (service, events, task) = start_starfish_rbc_service_with_phase_authority(
+                    committee.clone(),
+                    dag_state.get_own_authority_index(),
+                    protocol_instance,
+                    dag_state.block_authentication_scheme,
+                    mac_keys.clone(),
+                    initial_authenticator,
+                    dag_state.highest_round(),
+                    STARFISH_RBC_HEADER_RETRY_INTERVAL,
+                    phase_authority,
+                )
+                .expect("validated Starfish-RBC configuration must start its service");
+                (Some(service), Some(events), Some(task))
+            } else {
+                (None, None, None)
+            };
+        let (starfish_rbc_dag_shadow_service, rbc_dag_shadow_event_rx, rbc_dag_shadow_service_task) =
+            if let Some(recovered_local_headers) = recovered_shadow_local_headers {
+                let protocol_instance_bytes = node_parameters
+                    .starfish_rbc_protocol_instance
+                    .expect("validated shadow configuration must share the direct RBC instance");
+                let protocol_instance = rbc_dag_shadow_protocol_instance(
+                    protocol_instance_bytes,
+                    node_parameters.starfish_rbc_dag_autonomous_clock,
+                );
+                let committee_context = RbcDagCommitteeContextV1::new(committee.clone())
+                    .expect("validated committee must initialize the RBC-DAG shadow");
+                let context = RbcDagContextV1::new_with_committee(
+                    protocol_instance,
+                    &committee_context,
+                    dag_state.block_authentication_scheme,
+                );
+                let authorizer = match dag_state.block_authentication_scheme {
+                    BlockAuthenticationScheme::Ed25519 => {
+                        ShadowAuthorizerV1::Ed25519(core.get_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa44 => {
+                        ShadowAuthorizerV1::MlDsa44(core.get_ml_dsa_44_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MlDsa65 => {
+                        ShadowAuthorizerV1::MlDsa65(core.get_ml_dsa_65_signer().clone())
+                    }
+                    BlockAuthenticationScheme::MacVector => {
+                        ShadowAuthorizerV1::MacVector(mac_keys.as_ref().clone())
+                    }
+                };
+                // -1 means the background WAL replay has not completed yet;
+                // Ready moves the active observational mode to 1 unless work
+                // was already shed (0). The inactive verdict remains zero.
+                if node_parameters.starfish_rbc_dag_autonomous_clock {
+                    metrics.starfish_rbc_dag_shadow_clock_valid.set(-1);
+                    metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
+                } else {
+                    metrics.starfish_rbc_dag_shadow_comparison_valid.set(-1);
+                    metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                }
+                let started = if node_parameters.starfish_rbc_dag_autonomous_clock {
+                    let wal_sync_policy = if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
+                        ShadowWalSyncPolicyV1::OnShutdown
+                    } else {
+                        ShadowWalSyncPolicyV1::EveryBatch
+                    };
+                    start_starfish_rbc_dag_autonomous_clock_service_v1(
+                        starfish_rbc_dag_shadow_wal,
+                        committee_context,
+                        dag_state.get_own_authority_index(),
+                        context,
+                        authorizer,
+                        recovered_local_headers,
+                        // The idle carrier pacemaker deliberately shares the
+                        // resolved Starfish leader timeout. Application and
+                        // embedded RBC phase carriers remain event-driven.
+                        node_parameters.leader_timeout,
+                        wal_sync_policy,
+                    )
+                } else {
+                    let wal_sync_policy = if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
+                        ShadowWalSyncPolicyV1::OnShutdown
+                    } else {
+                        ShadowWalSyncPolicyV1::EveryBatch
+                    };
+                    start_starfish_rbc_dag_shadow_service_v1(
+                        starfish_rbc_dag_shadow_wal,
+                        committee_context,
+                        dag_state.get_own_authority_index(),
+                        context,
+                        authorizer,
+                        recovered_local_headers,
+                        wal_sync_policy,
+                    )
+                };
+                match started {
+                    Ok((service, events, task)) => (Some(service), Some(events), Some(task)),
+                    Err(error) => {
+                        invalidate_shadow_run(&metrics);
+                        tracing::error!("Disabling Starfish-RBC-DAG runtime: {error}");
+                        (None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None)
+            };
+        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
+        let syncer = Syncer::new(
             core,
             NetworkSyncSignals {
                 block_ready_notify: block_ready_notify.clone(),
@@ -1407,10 +1994,16 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             metrics.clone(),
             bls_msg_tx.clone(),
             sf_msg_tx.clone(),
+            starfish_rbc_service.clone(),
+            starfish_rbc_dag_shadow_service.clone(),
+            embedded_rbc_authority,
         );
         let initial_round = syncer.core().next_block_round();
-        syncer.force_new_block(initial_round);
         let syncer = CoreThreadDispatcher::start(syncer);
+        // Await the initial command while the async RBC actor remains
+        // schedulable. The command itself runs on the dedicated core thread,
+        // where synchronous local-INIT selection is safe.
+        syncer.force_new_block(initial_round).await;
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         // Occupy the only available permit, so that all other
         // calls to send() will block.
@@ -1422,6 +2015,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed
+                | ConsensusProtocol::StarfishRbc
         );
         let gc_round = Arc::new(AtomicU32::new(dag_state.gc_round()));
         let (shard_tx, decoded_rx) = if is_starfish {
@@ -1459,6 +2053,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             syncer,
             proposal_round_notify,
             committee,
+            mac_keys,
             dissemination_mode,
             causal_push_shard_round_lag: node_parameters.causal_push_shard_round_lag,
             stop: stop_sender.clone(),
@@ -1466,30 +2061,452 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             shard_tx: parking_lot::Mutex::new(shard_tx),
             cordial_knowledge: cordial_knowledge_handle,
             peer_senders: parking_lot::RwLock::new(AHashMap::new()),
+            rbc_peer_senders: parking_lot::RwLock::new(AHashMap::new()),
             leader_timeout: node_parameters.leader_timeout,
             soft_block_timeout: node_parameters.soft_block_timeout,
             sailfish_handle: sf_handle_for_inner,
+            starfish_rbc_service: starfish_rbc_service.clone(),
+            starfish_rbc_dag_shadow_service: starfish_rbc_dag_shadow_service.clone(),
             start_time: std::time::Instant::now(),
         });
 
+        // Bridge the single-owner RBC actor to direct network unicasts and to
+        // the core thread's dirty/clean DAG boundaries. Header staging never
+        // implies delivery; only a typed `Delivered` effect can mark a vertex
+        // clean.
+        let rbc_event_task = rbc_event_rx.map(|mut event_rx| {
+            let event_inner = inner.clone();
+            let rbc_metrics = metrics.clone();
+            handle.spawn(async move {
+                let mut payload_encoder = ReedSolomonEncoder::new(2, 4, 2)
+                    .expect("Starfish-RBC payload encoder should be created");
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        RbcServiceEvent::Network { recipient, message } => {
+                            let sender =
+                                event_inner.rbc_peer_senders.read().get(&recipient).cloned();
+                            if let Some(sender) = sender {
+                                if sender.send(message).is_err() {
+                                    tracing::debug!(
+                                        "Starfish-RBC outbound worker for authority {} stopped",
+                                        recipient
+                                    );
+                                }
+                            } else {
+                                // Local INITs and phase intents are retained by
+                                // the actor and replayed when this peer connects.
+                                tracing::debug!(
+                                    "Deferring Starfish-RBC message for disconnected authority {}",
+                                    recipient
+                                );
+                            }
+                        }
+                        RbcServiceEvent::HeaderStaged(header) => {
+                            let mut block = header.header().to_authentication_free_block();
+                            block.preserialize();
+                            let block_ref = *block.reference();
+                            event_inner
+                                .cordial_knowledge
+                                .send(CordialKnowledgeMessage::DagParts {
+                                    headers: vec![block_ref],
+                                    shards: Vec::new(),
+                                });
+                            let (missing_parents, _) = event_inner
+                                .syncer
+                                .add_headers(
+                                    vec![Data::new(block)],
+                                    DataSource::BlockBundleStreamingHeader,
+                                )
+                                .await;
+                            if !missing_parents.is_empty() {
+                                tracing::debug!(
+                                    "Starfish-RBC staged header {} waits for dependencies {:?}",
+                                    block_ref,
+                                    missing_parents
+                                );
+                            }
+                        }
+                        RbcServiceEvent::TransactionPayloadStaged {
+                            peer,
+                            header,
+                            transaction_data,
+                        } => {
+                            let block_ref = header.reference();
+                            let item = match verify_starfish_rbc_transaction_payload(
+                                header.header(),
+                                transaction_data,
+                                &event_inner.committee,
+                                event_inner.dag_state.get_own_authority_index(),
+                                peer,
+                                &mut payload_encoder,
+                                event_inner.dag_state.block_authentication_scheme,
+                                &event_inner.mac_keys,
+                            ) {
+                                Ok(item) => item,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        ?block_ref,
+                                        peer,
+                                        ?error,
+                                        "Rejected Starfish-RBC transaction payload"
+                                    );
+                                    continue;
+                                }
+                            };
+                            event_inner
+                                .cordial_knowledge
+                                .send(CordialKnowledgeMessage::DagParts {
+                                    headers: Vec::new(),
+                                    shards: vec![block_ref],
+                                });
+                            if let Some(shard_tx) = event_inner.shard_tx.lock().as_ref() {
+                                let _ = shard_tx.send(vec![ShardMessage::FullBlock(block_ref)]);
+                            }
+                            event_inner
+                                .syncer
+                                .add_transaction_data(vec![item], DataSource::StarfishRbcPayload)
+                                .await;
+                            if let Some(ref shadow) =
+                                event_inner.starfish_rbc_dag_shadow_service
+                            {
+                                if let Err(error) = shadow.application_data_available(block_ref) {
+                                    invalidate_shadow_run(&rbc_metrics);
+                                    tracing::warn!(
+                                        ?block_ref,
+                                        "Failed to record RBC-DAG application availability: {error}"
+                                    );
+                                }
+                            }
+                        }
+                        RbcServiceEvent::Delivered(header) => {
+                            if let Some(ref shadow) =
+                                event_inner.starfish_rbc_dag_shadow_service
+                            {
+                                let canonical = header.header();
+                                let identity = ShadowDeliveryIdentityV1::new(
+                                    canonical.reference().authority,
+                                    canonical.reference().round,
+                                    canonical.transactions_commitment(),
+                                );
+                                if let Err(error) = shadow.direct_delivered(identity) {
+                                    if shadow_transport_error_invalidates_run(&error) {
+                                        invalidate_shadow_run(&rbc_metrics);
+                                    }
+                                    tracing::warn!(
+                                        "Failed to notify RBC-DAG shadow of direct delivery: {error}"
+                                    );
+                                }
+                            }
+                            event_inner
+                                .syncer
+                                .apply_starfish_rbc_deliveries(vec![header])
+                                .await;
+                        }
+                        RbcServiceEvent::Rejected { peer, error } => {
+                            tracing::warn!(
+                                "Rejected Starfish-RBC input from {:?}: {}",
+                                peer,
+                                error
+                            );
+                        }
+                    }
+                }
+            })
+        });
+
+        let embedded_rbc_committee_id = embedded_rbc_authority.then(|| {
+            RbcCommitteeId::derive(&inner.committee)
+                .expect("validated direct RBC committee must retain a stable identifier")
+        });
+        let rbc_dag_shadow_event_task = rbc_dag_shadow_event_rx.map(|mut event_rx| {
+            let event_inner = inner.clone();
+            let shadow_metrics = metrics.clone();
+            handle.spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        ShadowServiceEventV1::Network { recipient, message } => {
+                            let sender = event_inner.peer_senders.read().get(&recipient).cloned();
+                            if let Some(sender) = sender {
+                                match sender.try_send(message) {
+                                    Ok(()) => shadow_metrics
+                                        .starfish_rbc_dag_shadow_inputs_total
+                                        .with_label_values(&["network", "sent"])
+                                        .inc(),
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        // The shadow is observational. It must
+                                        // shed work instead of backpressuring
+                                        // the authoritative network path.
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_inputs_total
+                                            .with_label_values(&["network", "dropped_backpressure"])
+                                            .inc();
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_comparison_valid
+                                            .set(0);
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_inputs_total
+                                            .with_label_values(&["network", "disconnected"])
+                                            .inc();
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_comparison_valid
+                                            .set(0);
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                    }
+                                }
+                            } else {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["network", "disconnected"])
+                                    .inc();
+                                // No observation was lost: the actor retains
+                                // local carriers and replays them when this
+                                // peer connects.
+                            }
+                        }
+                        ShadowServiceEventV1::Delivered(identity) => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "shadow"])
+                                .inc();
+                            tracing::debug!(?identity, "RBC-DAG shadow delivered carrier");
+                        }
+                        ShadowServiceEventV1::EmbeddedApplicationDelivered { carrier, header } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "embedded_application"])
+                                .inc();
+                            tracing::debug!(
+                                ?carrier,
+                                application = ?header.reference(),
+                                "RBC-DAG shadow delivered embedded application header"
+                            );
+                            if embedded_rbc_authority {
+                                match PinnedRbcHeader::validate_with_committee_id(
+                                    header,
+                                    &event_inner.committee,
+                                    embedded_rbc_committee_id
+                                        .expect("embedded authority must cache its committee ID"),
+                                ) {
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                        tracing::error!(
+                                            ?carrier,
+                                            ?error,
+                                            "Embedded RBC delivered an invalid application header"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        ShadowServiceEventV1::FrontierCommitted(delta) => {
+                            if embedded_rbc_authority {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "committed"])
+                                    .inc();
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "carrier"])
+                                    .inc_by(delta.carriers.len() as u64);
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "application"])
+                                    .inc_by(delta.applications.len() as u64);
+                                event_inner
+                                    .syncer
+                                    .apply_starfish_rbc_dag_frontier(delta)
+                                    .await;
+                            }
+                        }
+                        ShadowServiceEventV1::VertexProjected(reference) => {
+                            shadow_metrics
+                                .starfish_rbc_dag_projected_vertices_total
+                                .inc();
+                            tracing::debug!(?reference, "RBC-DAG consensus vertex projected");
+                        }
+                        ShadowServiceEventV1::LeaderDecided(decision) => {
+                            let outcome = match decision {
+                                ProjectionDecisionV1::DirectCommit { .. } => "direct_commit",
+                                ProjectionDecisionV1::DirectSkip { .. } => "direct_skip",
+                                ProjectionDecisionV1::IndirectCommit { .. } => "indirect_commit",
+                                ProjectionDecisionV1::IndirectSkip { .. } => "indirect_skip",
+                                ProjectionDecisionV1::Undecided { .. } => "undecided",
+                            };
+                            shadow_metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&[outcome])
+                                .inc();
+                            tracing::debug!(?decision, "RBC-DAG projected leader decided");
+                        }
+                        ShadowServiceEventV1::ComparisonBacklog {
+                            unpaired_direct,
+                            unpaired_shadow,
+                            max_round_lag,
+                        } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_unpaired_direct
+                                .set(i64::try_from(unpaired_direct).unwrap_or(i64::MAX));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_unpaired_shadow
+                                .set(i64::try_from(unpaired_shadow).unwrap_or(i64::MAX));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_unpaired_max_round_lag
+                                .set(i64::from(max_round_lag));
+                        }
+                        ShadowServiceEventV1::Comparison(comparison) => {
+                            let outcome = match &comparison {
+                                ShadowDeliveryComparisonV1::Match => "match",
+                                ShadowDeliveryComparisonV1::Mismatch {
+                                    direct_only,
+                                    shadow_only,
+                                } if !direct_only.is_empty() && shadow_only.is_empty() => {
+                                    "direct_only"
+                                }
+                                ShadowDeliveryComparisonV1::Mismatch {
+                                    direct_only,
+                                    shadow_only,
+                                } if direct_only.is_empty() && !shadow_only.is_empty() => {
+                                    "shadow_only"
+                                }
+                                ShadowDeliveryComparisonV1::Mismatch { .. } => "mismatch",
+                                ShadowDeliveryComparisonV1::Ambiguous { .. } => "ambiguous",
+                            };
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_delivery_comparisons_total
+                                .with_label_values(&[outcome])
+                                .inc();
+                        }
+                        ShadowServiceEventV1::Input { kind, outcome } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&[kind, outcome])
+                                .inc();
+                        }
+                        ShadowServiceEventV1::WalAppended {
+                            batches,
+                            records,
+                            durable,
+                        } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                                .inc_by(batches);
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_wal_appended_records_total
+                                .inc_by(records);
+                            if durable {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_wal_durable_batches_total
+                                    .inc_by(batches);
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_wal_durable_records_total
+                                    .inc_by(records);
+                            }
+                        }
+                        ShadowServiceEventV1::Ready { autonomous_clock } => {
+                            let verdict = if autonomous_clock {
+                                &shadow_metrics.starfish_rbc_dag_shadow_clock_valid
+                            } else {
+                                &shadow_metrics.starfish_rbc_dag_shadow_comparison_valid
+                            };
+                            if verdict.get() != 0 {
+                                verdict.set(1);
+                            }
+                        }
+                        ShadowServiceEventV1::ClockState {
+                            open_round,
+                            phase_backlog,
+                            admitted_authors,
+                            admitted_stake,
+                            buffered_authenticated,
+                        } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_carrier_round
+                                .set(i64::from(open_round));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_phase_backlog
+                                .set(i64::try_from(phase_backlog).unwrap_or(i64::MAX));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_admitted_authors
+                                .set(i64::try_from(admitted_authors).unwrap_or(i64::MAX));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_admitted_stake
+                                .set(i64::try_from(admitted_stake).unwrap_or(i64::MAX));
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_buffered_authenticated
+                                .set(i64::try_from(buffered_authenticated).unwrap_or(i64::MAX));
+                        }
+                        ShadowServiceEventV1::Recovered {
+                            batches,
+                            discarded_tail_bytes,
+                        } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_wal_replayed_batches
+                                .set(batches as i64);
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total
+                                .inc_by(discarded_tail_bytes);
+                        }
+                        ShadowServiceEventV1::PendingRecovery(pending) => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_pending_recovery
+                                .set(pending as i64);
+                        }
+                        ShadowServiceEventV1::Rejected { peer, error } => {
+                            if peer.is_none() {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_comparison_valid
+                                    .set(0);
+                                shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                            }
+                            tracing::warn!(
+                                "Rejected RBC-DAG runtime input from {:?}: {}",
+                                peer,
+                                error
+                            );
+                        }
+                    }
+                }
+            })
+        });
+
         // Start bridge task that forwards reconstructed transaction data to core
+        let bridge_metrics = metrics.clone();
         let bridge_task = decoded_rx.map(|mut decoded_rx| {
             let bridge_inner = inner.clone();
+            let bridge_metrics = bridge_metrics.clone();
             handle.spawn(async move {
                 while let Some(items) = decoded_rx.recv().await {
                     // Reconstruction proves we now have the shard data for the
                     // entire batch.
-                    let shard_refs = items.iter().map(|item| item.block_reference).collect();
+                    let shard_refs = items
+                        .iter()
+                        .map(|item| item.block_reference)
+                        .collect::<Vec<_>>();
                     bridge_inner
                         .cordial_knowledge
                         .send(CordialKnowledgeMessage::DagParts {
                             headers: Vec::new(),
-                            shards: shard_refs,
+                            shards: shard_refs.clone(),
                         });
                     bridge_inner
                         .syncer
                         .add_transaction_data(items, DataSource::ShardReconstructor)
                         .await;
+                    if let Some(ref shadow) = bridge_inner.starfish_rbc_dag_shadow_service {
+                        for reference in shard_refs {
+                            if let Err(error) = shadow.application_data_available(reference) {
+                                invalidate_shadow_run(&bridge_metrics);
+                                tracing::warn!(
+                                    ?reference,
+                                    "Failed to record reconstructed RBC-DAG availability: {error}"
+                                );
+                            }
+                        }
+                    }
                 }
             })
         });
@@ -1755,6 +2772,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             bls_event_task,
             bls_broadcast_task,
             sf_event_task,
+            rbc_event_task,
+            rbc_service_task,
+            rbc_dag_shadow_event_task,
+            rbc_dag_shadow_service_task,
             cordial_knowledge_task,
         }
     }
@@ -1792,6 +2813,19 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             sf_task.abort();
             sf_task.await.ok();
         }
+        // Stop RBC event ingress first, but keep the service actor alive while
+        // the core queue drains: an already queued core action may still
+        // synchronously select another local INIT.
+        if let Some(rbc_task) = self.rbc_event_task {
+            rbc_task.abort();
+            rbc_task.await.ok();
+        }
+        let rbc_service_task = self.rbc_service_task;
+        if let Some(shadow_task) = self.rbc_dag_shadow_event_task {
+            shadow_task.abort();
+            shadow_task.await.ok();
+        }
+        let rbc_dag_shadow_service_task = self.rbc_dag_shadow_service_task;
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
@@ -1817,7 +2851,44 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 }
             }
         };
-        inner.syncer.stop()
+        // `inner` is now exclusive, so no auxiliary task can enqueue after
+        // this FIFO barrier. Awaiting it keeps the runtime available to the
+        // RBC actor while any earlier core action completes.
+        let _ = inner.syncer.missing_parent_references().await;
+        let mut shadow_shutdown_timed_out = false;
+        if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
+            match tokio::time::timeout(STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT, shadow.shutdown())
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("RBC-DAG runtime did not acknowledge shutdown: {error}")
+                }
+                Err(_) => {
+                    shadow_shutdown_timed_out = true;
+                    tracing::warn!(
+                        "Timed out stopping RBC-DAG runtime; detaching it from validator shutdown"
+                    );
+                    if let Some(task) = rbc_dag_shadow_service_task.as_ref() {
+                        task.abort();
+                    }
+                }
+            }
+        }
+        let syncer = inner.syncer.stop();
+        if let Some(rbc_service_task) = rbc_service_task {
+            rbc_service_task.abort();
+            rbc_service_task.await.ok();
+        }
+        if let Some(shadow_service_task) = rbc_dag_shadow_service_task {
+            match shadow_service_task.await {
+                Err(error) if !shadow_shutdown_timed_out => tracing::warn!(
+                    "Non-authoritative RBC-DAG shadow supervisor failed during shutdown: {error}"
+                ),
+                _ => {}
+            }
+        }
+        syncer
     }
 
     async fn run(
@@ -1928,6 +2999,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .await
             .ok()?;
 
+        let shadow_metrics = metrics.clone();
         let mut handler = ConnectionHandler::new(
             &connection,
             universal_committer,
@@ -1948,6 +3020,37 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .peer_senders
             .write()
             .insert(peer_id, connection.sender.clone());
+        let rbc_outbound_task = inner.starfish_rbc_service.as_ref().map(|_| {
+            let (rbc_sender, mut rbc_receiver) = mpsc::unbounded_channel();
+            inner.rbc_peer_senders.write().insert(peer_id, rbc_sender);
+            let network_sender = connection.sender.clone();
+            Handle::current().spawn(async move {
+                while let Some(message) = rbc_receiver.recv().await {
+                    send_network_message_reliably(&network_sender, message).await;
+                }
+            })
+        });
+        if let Some(ref rbc) = inner.starfish_rbc_service {
+            if let Err(error) = rbc.peer_connected(peer_id) {
+                tracing::warn!(
+                    "Failed to notify Starfish-RBC service that authority {} connected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
+        if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
+            if let Err(error) = shadow.peer_connected(peer_id) {
+                if shadow_transport_error_invalidates_run(&error) {
+                    invalidate_shadow_run(&shadow_metrics);
+                }
+                tracing::warn!(
+                    "Failed to notify RBC-DAG shadow that authority {} connected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
 
         if inner.dag_state.consensus_protocol.uses_bls() {
             for (round, signature) in inner.dag_state.precomputed_round_sigs() {
@@ -1986,7 +3089,33 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
 
         tracing::debug!("Connection between {own_id} and {peer_id} is dropped");
+        if let Some(ref rbc) = inner.starfish_rbc_service {
+            if let Err(error) = rbc.peer_disconnected(peer_id) {
+                tracing::warn!(
+                    "Failed to notify Starfish-RBC service that authority {} disconnected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
+        if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
+            if let Err(error) = shadow.peer_disconnected(peer_id) {
+                if shadow_transport_error_invalidates_run(&error) {
+                    invalidate_shadow_run(&shadow_metrics);
+                }
+                tracing::warn!(
+                    "Failed to notify RBC-DAG shadow that authority {} disconnected: {}",
+                    peer_id,
+                    error
+                );
+            }
+        }
         inner.peer_senders.write().remove(&peer_id);
+        inner.rbc_peer_senders.write().remove(&peer_id);
+        if let Some(rbc_outbound_task) = rbc_outbound_task {
+            rbc_outbound_task.abort();
+            rbc_outbound_task.await.ok();
+        }
         inner.syncer.authority_connection(peer_id, false).await;
         handler.shutdown().await;
         block_fetcher.remove_authority(peer_id).await;
@@ -2363,8 +3492,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        crypto::SignatureBytes,
-        types::{BaseTransaction, BlockReference},
+        crypto::{self, SignatureBytes, TransactionsCommitment},
+        encoder::ShardEncoder,
+        types::{BaseTransaction, BlockReference, Transaction, TransactionData},
     };
 
     #[tokio::test]
@@ -2379,6 +3509,201 @@ mod tests {
         let wait = proposal_round_notify.notified();
         signals.proposal_round_advanced(5);
         wait.await;
+    }
+
+    #[test]
+    fn starfish_rbc_initial_payload_is_commitment_checked() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 64]))];
+        let mut commitment_encoder =
+            ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
+        let encoded = commitment_encoder.encode_transactions(
+            &transactions,
+            committee.info_length(),
+            committee.len() - committee.info_length(),
+        );
+        let (commitment, _) = TransactionsCommitment::new_from_encoded_transactions(&encoded, 1);
+        let canonical = RbcCanonicalHeader::try_new(
+            0,
+            1,
+            vec![
+                BlockReference::new_test(0, 0),
+                BlockReference::new_test(1, 0),
+                BlockReference::new_test(2, 0),
+            ],
+            Vec::new(),
+            11,
+            commitment,
+        )
+        .unwrap();
+        let payload = Arc::new(TransactionData::new(transactions.clone()));
+        let mut verifier = ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
+        let verified = verify_starfish_rbc_transaction_payload(
+            &canonical,
+            payload,
+            &committee,
+            1,
+            0,
+            &mut verifier,
+            BlockAuthenticationScheme::MacVector,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(verified.block_reference, canonical.reference());
+        assert_eq!(verified.transaction_data.transactions(), &transactions);
+        assert_eq!(verified.shard_data.shard_index(), 1);
+
+        let tampered = Arc::new(TransactionData::new(vec![BaseTransaction::Share(
+            Transaction::new(vec![8; 64]),
+        )]));
+        assert!(
+            verify_starfish_rbc_transaction_payload(
+                &canonical,
+                tampered,
+                &committee,
+                1,
+                0,
+                &mut verifier,
+                BlockAuthenticationScheme::MacVector,
+                &[],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn block_filter_allows_exactly_one_tag_to_full_mac_upgrade() {
+        let filter = FilterForBlocks::new();
+        let digest = BlockReference::new_test(1, 7).digest;
+
+        assert_eq!(
+            filter.needed_headers(&[(digest, false), (digest, true), (digest, true)]),
+            vec![true, true, false]
+        );
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, false)]),
+            vec![true]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, false)]), vec![false]);
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![true]);
+        assert_eq!(
+            filter.insert_and_report_useful(&[(digest, true), (digest, true)]),
+            vec![true, false]
+        );
+        assert_eq!(filter.needed_headers(&[(digest, true)]), vec![false]);
+        assert_eq!(filter.contains_full_mac_batch(&[digest]), vec![true]);
+    }
+
+    #[test]
+    fn full_mac_vectors_require_direct_author_block_streaming() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut full = VerifiedBlock::new(
+            1,
+            1,
+            Vec::new(),
+            Vec::new(),
+            0,
+            SignatureBytes::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let tags = keyrings[1]
+            .iter()
+            .enumerate()
+            .map(|(recipient, key)| key.compute_tag(1, recipient as AuthorityIndex, &full.digest()))
+            .collect();
+        full.header.authentication = BlockAuthentication::MacVector(tags);
+
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreamingHeader,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_mac_transport(
+                &full,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_err()
+        );
+
+        let tagged = full.with_recipient_mac(0).unwrap();
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockHeaderRequest,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_mac_transport(
+                &tagged,
+                BlockAuthenticationScheme::MacVector,
+                1,
+                DataSource::BlockBundleStreaming,
+            )
+            .is_err()
+        );
+
+        let round_gap_blocks = prepare_forwarded_blocks_for_peer(
+            BlockAuthenticationScheme::MacVector,
+            ConsensusProtocol::Bluestreak,
+            0,
+            vec![Data::new(full)],
+        );
+        assert_eq!(round_gap_blocks.len(), 1);
+        assert!(matches!(
+            round_gap_blocks[0].authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(
+            verify_mac_transport(
+                &round_gap_blocks[0],
+                BlockAuthenticationScheme::MacVector,
+                2,
+                DataSource::RoundGapResponse,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2490,5 +3815,20 @@ mod tests {
         assert_eq!(selected.len(), 5);
         assert_eq!(unique.len(), selected.len());
         assert!(selected.iter().all(|peer| candidates.contains(peer)));
+    }
+
+    #[test]
+    fn autonomous_carriers_use_a_distinct_authentication_namespace() {
+        let direct = [0x5A; 32];
+        let mirror = rbc_dag_shadow_protocol_instance(direct, false);
+        let autonomous = rbc_dag_shadow_protocol_instance(direct, true);
+
+        assert_eq!(mirror.as_bytes(), &direct);
+        assert_ne!(autonomous, mirror);
+        assert_eq!(
+            autonomous,
+            rbc_dag_shadow_protocol_instance(direct, true),
+            "derived autonomous namespace must be deterministic across nodes"
+        );
     }
 }

@@ -28,13 +28,14 @@ use crate::{
     metrics::{Metrics, UtilizationTimerExt},
     network::ShardPayload,
     rocks_store::RocksStore,
+    starfish_rbc::PinnedRbcHeader,
     state::{RecoveredState, RecoveredStateBuilder},
     store::Store,
     threshold_clock::ThresholdClockAggregator,
     types::{
-        AuthorityIndex, AuthoritySet, BlockDigest, BlockReference, BlsAggregateCertificate,
-        ProvableShard, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, TransactionData,
-        VerifiedBlock,
+        AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
+        BlockReference, BlsAggregateCertificate, ProvableShard, RoundNumber, SailfishNoVoteCert,
+        SailfishTimeoutCert, TransactionData, VerifiedBlock,
     },
 };
 
@@ -81,6 +82,8 @@ pub enum DataSource {
     /// Response to RoundGapRequest (blocks the requester was missing at a
     /// round).
     RoundGapResponse,
+    /// Transaction data co-carried by the direct Starfish-RBC INIT.
+    StarfishRbcPayload,
 }
 
 impl DataSource {
@@ -95,6 +98,7 @@ impl DataSource {
             Self::Recover => "recover",
             Self::UnprovableCertificateResponse => "unprovable_certificate_response",
             Self::RoundGapResponse => "round_gap_response",
+            Self::StarfishRbcPayload => "starfish_rbc_payload",
         }
     }
 }
@@ -113,11 +117,14 @@ pub enum DacCertificateVerificationState {
     Rejected,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, Eq, PartialEq)]
 pub enum ConsensusProtocol {
     Mysticeti,
     CordialMiners,
     Starfish,
+    /// Plain Starfish ordering over headers certified by the Starfish-RBC
+    /// reliable-broadcast service.
+    StarfishRbc,
     StarfishSpeed,
     StarfishBls,
     SailfishPlusPlus,
@@ -167,19 +174,26 @@ pub enum ConsensusProtocol {
 
 impl ConsensusProtocol {
     pub fn from_str(s: &str) -> Self {
+        ProtocolConfig::from_str(s)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .consensus_protocol
+    }
+
+    fn from_known_str(s: &str) -> Option<Self> {
         match s {
-            "mysticeti" => ConsensusProtocol::Mysticeti,
-            "cordial-miners" => ConsensusProtocol::CordialMiners,
-            "starfish" => ConsensusProtocol::Starfish,
-            "starfish-bls" | "starfish-l" => ConsensusProtocol::StarfishBls,
-            "starfish-speed" | "starfish-s" => ConsensusProtocol::StarfishSpeed,
-            "sailfish++" | "sailfish-pp" => ConsensusProtocol::SailfishPlusPlus,
-            "bluestreak" => ConsensusProtocol::Bluestreak,
-            "mysticeti-bls" | "mysticeti-l" => ConsensusProtocol::MysticetiBls,
+            "mysticeti" => Some(ConsensusProtocol::Mysticeti),
+            "cordial-miners" => Some(ConsensusProtocol::CordialMiners),
+            "starfish" => Some(ConsensusProtocol::Starfish),
+            "starfish-rbc" => Some(ConsensusProtocol::StarfishRbc),
+            "starfish-bls" | "starfish-l" => Some(ConsensusProtocol::StarfishBls),
+            "starfish-speed" | "starfish-s" => Some(ConsensusProtocol::StarfishSpeed),
+            "sailfish++" | "sailfish-pp" => Some(ConsensusProtocol::SailfishPlusPlus),
+            "bluestreak" => Some(ConsensusProtocol::Bluestreak),
+            "mysticeti-bls" | "mysticeti-l" => Some(ConsensusProtocol::MysticetiBls),
             "sparse-starfish-speed" | "sparse-starfish" | "ssfs" => {
-                ConsensusProtocol::SparseStarfishSpeed
+                Some(ConsensusProtocol::SparseStarfishSpeed)
             }
-            _ => ConsensusProtocol::Starfish,
+            _ => None,
         }
     }
 
@@ -187,6 +201,7 @@ impl ConsensusProtocol {
         matches!(
             self,
             ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -195,6 +210,10 @@ impl ConsensusProtocol {
 
     pub fn is_sailfish_pp(self) -> bool {
         matches!(self, ConsensusProtocol::SailfishPlusPlus)
+    }
+
+    pub fn is_starfish_rbc(self) -> bool {
+        matches!(self, ConsensusProtocol::StarfishRbc)
     }
 
     pub fn is_bluestreak(self) -> bool {
@@ -237,6 +256,7 @@ impl ConsensusProtocol {
         matches!(
             self,
             ConsensusProtocol::SailfishPlusPlus
+                | ConsensusProtocol::StarfishRbc
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::MysticetiBls
@@ -262,6 +282,7 @@ impl ConsensusProtocol {
             | ConsensusProtocol::StarfishBls => DisseminationMode::Pull,
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
             ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishRbc
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::SparseStarfishSpeed => DisseminationMode::PushUseful,
         }
@@ -286,6 +307,78 @@ impl ConsensusProtocol {
             }
             _ => crate::config::param_defaults::default_leader_timeout(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolConfig {
+    pub consensus_protocol: ConsensusProtocol,
+    pub block_authentication_scheme: BlockAuthenticationScheme,
+}
+
+impl ProtocolConfig {
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        Self::from_selection(value, None)
+    }
+
+    pub fn from_selection(
+        consensus: &str,
+        block_authentication: Option<&str>,
+    ) -> Result<Self, String> {
+        let (protocol_name, is_mac_experiment) = consensus
+            .strip_suffix("-mac")
+            .map(|base| (base, true))
+            .unwrap_or((consensus, false));
+        let consensus_protocol = ConsensusProtocol::from_known_str(protocol_name)
+            .ok_or_else(|| format!("Unknown consensus protocol '{consensus}'"))?;
+
+        let block_authentication_scheme = if is_mac_experiment {
+            if block_authentication.is_some() {
+                return Err(format!(
+                    "'{consensus}' is an experimental MAC protocol and cannot be combined with \
+                     --block-authentication"
+                ));
+            }
+            if !matches!(
+                consensus_protocol,
+                ConsensusProtocol::Starfish
+                    | ConsensusProtocol::StarfishSpeed
+                    | ConsensusProtocol::SparseStarfishSpeed
+                    | ConsensusProtocol::Bluestreak
+            ) {
+                return Err(format!(
+                    "The experimental MAC protocol is not available for '{protocol_name}'"
+                ));
+            }
+            BlockAuthenticationScheme::MacVector
+        } else {
+            match block_authentication.unwrap_or("ed25519") {
+                "ed25519" => BlockAuthenticationScheme::Ed25519,
+                "ml-dsa-44" => BlockAuthenticationScheme::MlDsa44,
+                "ml-dsa-65" => BlockAuthenticationScheme::MlDsa65,
+                "mac" if consensus_protocol.is_starfish_rbc() => {
+                    BlockAuthenticationScheme::MacVector
+                }
+                "mac" => {
+                    return Err(
+                        "MAC initial authentication is only available for 'starfish-rbc'; use an \
+                         experimental '*-mac' protocol for the legacy lower-bound benchmark"
+                            .to_string(),
+                    );
+                }
+                value => {
+                    return Err(format!(
+                        "Unknown block authentication scheme '{value}'. Use 'ed25519', \
+                         'ml-dsa-44', or 'ml-dsa-65' (and 'mac' for 'starfish-rbc')."
+                    ));
+                }
+            }
+        };
+
+        Ok(Self {
+            consensus_protocol,
+            block_authentication_scheme,
+        })
     }
 }
 
@@ -338,6 +431,7 @@ pub struct DagState {
     store: Arc<dyn Store>,
     metrics: Arc<Metrics>,
     pub(crate) consensus_protocol: ConsensusProtocol,
+    pub(crate) block_authentication_scheme: BlockAuthenticationScheme,
     pub(crate) committee_size: usize,
     pub(crate) byzantine_strategy: Option<ByzantineStrategy>,
     committee: Arc<Committee>,
@@ -458,6 +552,14 @@ struct DagStateInner {
     /// A vertex joins the clean DAG only once its direct parents are also
     /// clean (or genesis), making the usable clean DAG ancestor-closed.
     clean_vertices: Vec<BTreeSet<BlockReference>>,
+    /// Starfish-RBC headers that this validator has locally delivered.
+    ///
+    /// Delivery and dirty-DAG insertion are independent asynchronous events:
+    /// a delivered header may still be waiting in `BlockManager` for a
+    /// missing parent. Retaining this exact-reference latch makes either
+    /// event order safe. Version one deliberately keeps these latches for the
+    /// process lifetime because no RBC retirement watermark has been proved.
+    rbc_delivered_vertices: Vec<BTreeSet<BlockReference>>,
     /// Per-round support (by stake) for clean vertices. Tracks which
     /// authorities have at least one clean vertex at a given round so we can
     /// answer clean-quorum checks without scanning all authorities.
@@ -520,6 +622,32 @@ impl DagState {
         strong_vote_adaptive_acknowledgments: bool,
         dissemination_mode: DisseminationMode,
     ) -> RecoveredState {
+        let protocol_config = ProtocolConfig::from_str(&consensus).expect("validated protocol");
+        Self::open_with_protocol_config(
+            authority,
+            path,
+            metrics,
+            committee,
+            byzantine_strategy,
+            protocol_config,
+            storage_backend,
+            strong_vote_adaptive_acknowledgments,
+            dissemination_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_with_protocol_config(
+        authority: AuthorityIndex,
+        path: impl AsRef<Path>,
+        metrics: Arc<Metrics>,
+        committee: Arc<Committee>,
+        byzantine_strategy: String,
+        protocol_config: ProtocolConfig,
+        storage_backend: &StorageBackend,
+        strong_vote_adaptive_acknowledgments: bool,
+        dissemination_mode: DisseminationMode,
+    ) -> RecoveredState {
         assert!(
             committee.len() <= crate::types::MAX_COMMITTEE_SIZE as usize,
             "Committee size {} exceeds MAX_COMMITTEE_SIZE ({})",
@@ -542,7 +670,7 @@ impl DagState {
                 Arc::new(RocksStore::open(&path).expect("Failed to open RocksDB"))
             }
         };
-        let consensus_protocol = ConsensusProtocol::from_str(&consensus);
+        let consensus_protocol = protocol_config.consensus_protocol;
         let resolved_dissemination =
             consensus_protocol.resolve_dissemination_mode(dissemination_mode);
         let push_mode = matches!(
@@ -588,6 +716,7 @@ impl DagState {
             precomputed_round_sigs: BTreeMap::new(),
             precomputed_leader_sigs: BTreeMap::new(),
             clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
+            rbc_delivered_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
             clean_round_support: BTreeMap::new(),
             clean_quorum_round: 0,
             pending_clean_vertices: (0..n).map(|_| BTreeSet::new()).collect(),
@@ -805,6 +934,7 @@ impl DagState {
         match &consensus_protocol {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
+            ConsensusProtocol::StarfishRbc => tracing::info!("Starting Starfish-RBC protocol"),
             ConsensusProtocol::StarfishBls => tracing::info!("Starting Starfish-BLS protocol"),
             ConsensusProtocol::StarfishSpeed => tracing::info!("Starting Starfish-Speed protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
@@ -829,6 +959,7 @@ impl DagState {
             dag_state_inner: Arc::new(RwLock::new(inner)),
             metrics,
             consensus_protocol,
+            block_authentication_scheme: protocol_config.block_authentication_scheme,
             round_block_cache: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
             genesis,
             strong_vote_adaptive_acknowledgments,
@@ -1138,6 +1269,66 @@ impl DagState {
         self.dag_state_inner.read().get_storage_block(reference)
     }
 
+    /// Upgrade an already stored recipient-only MAC copy with a later verified
+    /// full-vector copy. This intentionally updates only the persisted header
+    /// and the matching in-memory value: the block is not re-added to the DAG,
+    /// so threshold clocks, votes, consensus notifications, and acceptance
+    /// metrics are left untouched.
+    pub(crate) fn upgrade_mac_authentication(&self, incoming: &VerifiedBlock) -> bool {
+        if !incoming.has_full_mac_vector() {
+            return false;
+        }
+
+        let reference = *incoming.reference();
+        let Some(existing) = self.get_storage_block(reference) else {
+            return false;
+        };
+        if !matches!(existing.authentication(), BlockAuthentication::MacTag(_)) {
+            return false;
+        }
+        let Some(mut upgraded) = existing.merge_same_block(incoming) else {
+            return false;
+        };
+        upgraded.preserialize();
+
+        let store_start = std::time::Instant::now();
+        self.store
+            .store_header_bytes(
+                upgraded.reference(),
+                upgraded
+                    .serialized_header_bytes()
+                    .expect("upgraded header should be preserialized"),
+            )
+            .expect("Failed to store upgraded MAC-vector header");
+        self.metrics
+            .store_block_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_block_count.inc();
+
+        // Preserve any transaction data that may have arrived concurrently
+        // with the authentication upgrade.
+        let mut inner = self.dag_state_inner.write();
+        let authority = reference.authority as usize;
+        let Some(blocks_at_round) = inner.index[authority].get_mut(&reference.round) else {
+            // The block was evicted; the persistent header update above is the
+            // authoritative copy and it should remain evicted from memory.
+            return true;
+        };
+        let Some(current) = blocks_at_round.get_mut(&reference.digest) else {
+            return true;
+        };
+        if matches!(current.authentication(), BlockAuthentication::MacTag(_)) {
+            let mut memory_upgrade = current
+                .merge_same_block(incoming)
+                .expect("tag-only copy should accept a full-vector upgrade");
+            memory_upgrade.preserialize();
+            *current = Data::new(memory_upgrade);
+            *inner.round_version.entry(reference.round).or_insert(0) += 1;
+        }
+
+        true
+    }
+
     /// Look up the `transactions_commitment` for a block in the DAG.
     pub fn get_transactions_commitment(
         &self,
@@ -1260,6 +1451,17 @@ impl DagState {
                     inner.precomputed_leader_sigs.insert(leader_ref, sig);
                 }
                 CertificateEvent::BlockVerified(block_ref) => {
+                    // This event is a capability produced only by the BLS
+                    // verifier. In particular it must never become an
+                    // alternate clean-admission path for Starfish-RBC, whose
+                    // sole production capability is `PinnedRbcHeader`.
+                    if !inner.consensus_protocol.uses_bls() {
+                        tracing::warn!(
+                            "Ignoring BLS block-verification event for non-BLS protocol: {}",
+                            block_ref
+                        );
+                        continue;
+                    }
                     let auth = block_ref.authority as usize;
                     if inner.get_block(block_ref).is_none() {
                         inner.bls_verified_blocks[auth].insert(block_ref);
@@ -1322,6 +1524,10 @@ impl DagState {
     /// A newly delivered vertex becomes usable only after all of its direct
     /// parents are also clean (or genesis).
     pub fn mark_vertices_clean(&self, block_refs: &[BlockReference]) -> bool {
+        assert!(
+            !self.consensus_protocol.is_starfish_rbc(),
+            "Starfish-RBC cleanliness requires a local RBC delivery event"
+        );
         if block_refs.is_empty() {
             return false;
         }
@@ -1339,6 +1545,42 @@ impl DagState {
     /// Mark a vertex as clean.
     pub fn mark_vertex_clean(&self, block_ref: BlockReference) -> bool {
         self.mark_vertices_clean(&[block_ref])
+    }
+
+    /// Apply locally observed Starfish-RBC deliveries.
+    ///
+    /// The pin is the service-to-core delivery capability. The delivery latch
+    /// is recorded even when the header is not dirty-DAG connected yet;
+    /// `add_block` completes activation after insertion.
+    pub(crate) fn apply_starfish_rbc_deliveries(&self, delivered: &[PinnedRbcHeader]) -> bool {
+        assert!(
+            self.consensus_protocol.is_starfish_rbc(),
+            "RBC deliveries are only valid for Starfish-RBC"
+        );
+        if delivered.is_empty() {
+            return false;
+        }
+
+        let mut inner = self.dag_state_inner.write();
+        let mut activated = Vec::new();
+        for header in delivered {
+            inner.record_rbc_delivery(header.reference(), &self.committee, &mut activated);
+        }
+        !activated.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_starfish_rbc_delivery_refs_for_test(
+        &self,
+        delivered: &[BlockReference],
+    ) -> bool {
+        assert!(self.consensus_protocol.is_starfish_rbc());
+        let mut inner = self.dag_state_inner.write();
+        let mut activated = Vec::new();
+        for &block_ref in delivered {
+            inner.record_rbc_delivery(block_ref, &self.committee, &mut activated);
+        }
+        !activated.is_empty()
     }
 
     /// Drain clean dual-DAG vertices that still need to be persisted at
@@ -1709,7 +1951,12 @@ impl DagState {
     ) -> bool {
         let inner = self.dag_state_inner.read();
         let leader_round = quorum_round - 1;
-        let blocks = inner.get_blocks_by_round(leader_round);
+        let mut blocks = inner.get_blocks_by_round(leader_round);
+        if self.consensus_protocol.is_starfish_rbc() {
+            blocks.retain(|block| {
+                inner.clean_vertices[block.authority() as usize].contains(block.reference())
+            });
+        }
         if blocks.is_empty() {
             return false;
         }
@@ -2290,6 +2537,15 @@ impl DagState {
     pub fn cleanup(&self) {
         let _timer = self.metrics.dag_state_cleanup_util.utilization_timer();
 
+        // Version-one Starfish-RBC deliberately has no state-retirement
+        // rule. Phase locks, delivered slots, clean dependencies, and the
+        // blocks consumed by clean-only consensus must remain available for
+        // the process lifetime. A bounded GC requires a proved durable
+        // retirement watermark and is deferred with crash recovery.
+        if self.consensus_protocol.is_starfish_rbc() {
+            return;
+        }
+
         let (highest_round, lowest_round, block_count, max_evicted, evicted_rounds) = {
             let mut inner = self.dag_state_inner.write();
             inner.evict_per_authority();
@@ -2711,6 +2967,24 @@ impl DagStateInner {
         }
     }
 
+    /// Record local reliable delivery and activate the exact vertex if its
+    /// dirty-DAG carrier is already present. If insertion is still blocked on
+    /// a missing parent, `add_block` observes the retained latch later.
+    fn record_rbc_delivery(
+        &mut self,
+        block_ref: BlockReference,
+        committee: &Committee,
+        activated: &mut Vec<BlockReference>,
+    ) {
+        let auth = block_ref.authority as usize;
+        if !self.rbc_delivered_vertices[auth].insert(block_ref) {
+            return;
+        }
+        if self.get_block(block_ref).is_some() {
+            self.note_clean_vertex(block_ref, committee, activated);
+        }
+    }
+
     /// Register a locally verified dual-DAG vertex.
     /// If all causal predecessors are already clean, the vertex activates
     /// immediately; otherwise it waits on the missing clean dependencies.
@@ -2727,51 +3001,60 @@ impl DagStateInner {
             return;
         }
 
-        let missing_parents = self.missing_clean_parents(block_ref);
-        if missing_parents.is_empty() {
+        let missing_dependencies = self.missing_clean_dependencies(block_ref);
+        if missing_dependencies.is_empty() {
             self.activate_clean_vertex(block_ref, committee, activated);
             return;
         }
 
         self.pending_clean_vertices[auth].insert(block_ref);
         self.pending_clean_vertex_counts
-            .insert(block_ref, missing_parents.len());
-        for parent in missing_parents {
+            .insert(block_ref, missing_dependencies.len());
+        for dependency in missing_dependencies {
             self.pending_clean_vertex_children
-                .entry(parent)
+                .entry(dependency)
                 .or_default()
                 .insert(block_ref);
         }
     }
 
-    /// Return the direct causal dependencies that still block this vertex from
-    /// entering the clean DAG.
-    fn missing_clean_parents(&self, block_ref: BlockReference) -> Vec<BlockReference> {
+    /// Return the exact clean dependencies that still block this vertex.
+    /// Starfish-RBC includes logical acknowledgments because they can affect
+    /// sequencing. A reference shared by the parent and compressed-ack lists
+    /// is counted once; otherwise the reverse BTreeSet would wake the child
+    /// once while its missing count remained above zero.
+    fn missing_clean_dependencies(&self, block_ref: BlockReference) -> Vec<BlockReference> {
         let block = self
             .get_storage_block(block_ref)
             .unwrap_or_else(|| panic!("Clean block {block_ref} should exist in DagState"));
-        let mut missing = Vec::new();
+        let mut dependencies = BTreeSet::new();
         for parent in block.block_references() {
-            if parent.round == 0 {
-                continue;
+            if parent.round > 0 {
+                dependencies.insert(*parent);
             }
-            if !self.clean_vertices[parent.authority as usize].contains(parent) {
-                missing.push(*parent);
+        }
+        if self.consensus_protocol.is_starfish_rbc() {
+            for acknowledgment in block.acknowledgments() {
+                if acknowledgment.round > 0 {
+                    dependencies.insert(acknowledgment);
+                }
             }
         }
         // Bluestreak / SparseStarfishSpeed: the unprovable_certificate target
         // is also a causal dependency that must be ancestor-closed.
         if self.consensus_protocol.carries_unprovable_certificate() {
             if let Some((cert_ref, _strong)) = block.unprovable_certificate() {
-                if cert_ref.round > 0
-                    && !self.clean_vertices[cert_ref.authority as usize].contains(&cert_ref)
-                    && !missing.contains(&cert_ref)
-                {
-                    missing.push(cert_ref);
+                if cert_ref.round > 0 {
+                    dependencies.insert(cert_ref);
                 }
             }
         }
-        missing
+        dependencies
+            .into_iter()
+            .filter(|dependency| {
+                !self.clean_vertices[dependency.authority as usize].contains(dependency)
+            })
+            .collect()
     }
 
     /// Move a vertex into the clean DAG and recursively wake any children that
@@ -2795,11 +3078,25 @@ impl DagStateInner {
         let block = self
             .get_storage_block(block_ref)
             .unwrap_or_else(|| panic!("Clean block {block_ref} should exist in DagState"));
-        for parent in block.block_references() {
-            if let Some(children) = self.pending_clean_vertex_children.get_mut(parent) {
+        let mut dependencies: BTreeSet<BlockReference> = block
+            .block_references()
+            .iter()
+            .copied()
+            .filter(|reference| reference.round > 0)
+            .collect();
+        if self.consensus_protocol.is_starfish_rbc() {
+            dependencies.extend(
+                block
+                    .acknowledgments()
+                    .into_iter()
+                    .filter(|reference| reference.round > 0),
+            );
+        }
+        for dependency in dependencies {
+            if let Some(children) = self.pending_clean_vertex_children.get_mut(&dependency) {
                 children.remove(&block_ref);
                 if children.is_empty() {
-                    self.pending_clean_vertex_children.remove(parent);
+                    self.pending_clean_vertex_children.remove(&dependency);
                 }
             }
         }
@@ -2817,6 +3114,14 @@ impl DagStateInner {
 
         activated.push(block_ref);
         self.pending_persisted_clean_vertices[auth].insert(block_ref);
+        if self.consensus_protocol.is_starfish_rbc() {
+            // Invalidate the universal committer's cached voter view when an
+            // already-inserted block becomes consensus-visible.
+            *self.round_version.entry(block_ref.round).or_insert(0) += 1;
+            if !block.has_empty_payload() {
+                self.maybe_queue_ack(block_ref);
+            }
+        }
 
         let waiting_children = self
             .pending_clean_vertex_children
@@ -2885,7 +3190,12 @@ impl DagStateInner {
         // For SSFS this also gives `compute_unprovable_certificate` an O(1)
         // precomputed strong-quorum lookup at block creation.
         self.check_pre_clean(&block, committee, activated);
-        if self.bls_verified_blocks[auth].remove(reference) {
+        if self.consensus_protocol.is_starfish_rbc()
+            && self.rbc_delivered_vertices[auth].contains(reference)
+        {
+            self.note_clean_vertex(*reference, committee, activated);
+        }
+        if self.consensus_protocol.uses_bls() && self.bls_verified_blocks[auth].remove(reference) {
             self.note_clean_vertex(*reference, committee, activated);
         }
     }
@@ -2900,7 +3210,10 @@ impl DagStateInner {
         committee: &Committee,
         activated: &mut Vec<BlockReference>,
     ) {
-        if !self.consensus_protocol.uses_dual_dag() || block.round() <= 1 {
+        if !self.consensus_protocol.uses_dual_dag()
+            || self.consensus_protocol.is_starfish_rbc()
+            || block.round() <= 1
+        {
             return;
         }
 
@@ -3166,19 +3479,29 @@ impl DagStateInner {
 
     /// Queue an acknowledgment for `block_ref` only when all prerequisites are
     /// met. For StarfishBls the block must be both data-available and
-    /// DAC-certified; other protocols only require data availability.
+    /// DAC-certified. Starfish-RBC additionally requires local clean
+    /// activation, so dirty headers can never influence acknowledgment-based
+    /// sequencing.
     fn maybe_queue_ack(&mut self, block_ref: BlockReference) {
-        let Some(pending) = self.pending_acknowledgment.as_mut() else {
-            return;
-        };
         let auth = block_ref.authority as usize;
         if !self.data_availability[auth].contains(&block_ref) {
+            return;
+        }
+        if self.consensus_protocol.is_starfish_rbc()
+            && !self.clean_vertices[auth].contains(&block_ref)
+        {
             return;
         }
         if self.consensus_protocol == ConsensusProtocol::StarfishBls
             && (block_ref.authority != self.authority
                 || !self.dac_certificates[auth].contains_key(&block_ref))
         {
+            return;
+        }
+        let Some(pending) = self.pending_acknowledgment.as_mut() else {
+            return;
+        };
+        if self.consensus_protocol.is_starfish_rbc() && pending.contains(&block_ref) {
             return;
         }
         pending.push(block_ref);
@@ -3400,21 +3723,23 @@ mod tests {
 
     use super::{
         ByzantineStrategy, CACHED_ROUNDS, CertificateEvent, ConsensusProtocol,
-        DacCertificateVerificationState, DagState, DataSource, OwnBlockData,
+        DacCertificateVerificationState, DagState, DataSource, OwnBlockData, ProtocolConfig,
     };
     use crate::{
         committee::Committee,
         config::{DisseminationMode, StorageBackend},
         crypto::{
-            BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
+            self, BLS_SIGNATURE_SIZE, BlockDigest, BlsSignatureBytes, SignatureBytes,
             TransactionsCommitment,
         },
         data::Data,
+        encoder::ShardEncoder,
         metrics::Metrics,
         types::{
-            AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, BlsAggregateCertificate,
-            ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
-            VerifiedBlock,
+            AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthentication,
+            BlockAuthenticationScheme, BlockAuthorizer, BlockReference, BlsAggregateCertificate,
+            Encoder, ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
+            TransactionData, VerifiedBlock,
         },
     };
 
@@ -3599,11 +3924,31 @@ mod tests {
         Data::new(block)
     }
 
+    fn make_starfish_rbc_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+        acknowledgments: Vec<BlockReference>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_starfish_rbc(
+            authority,
+            round,
+            parents,
+            acknowledgments,
+            round as u64,
+            Vec::new(),
+            None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
     #[test]
     fn acknowledgments_are_only_enabled_for_starfish_variants() {
         assert!(!ConsensusProtocol::Mysticeti.supports_acknowledgments());
         assert!(!ConsensusProtocol::CordialMiners.supports_acknowledgments());
         assert!(ConsensusProtocol::Starfish.supports_acknowledgments());
+        assert!(ConsensusProtocol::StarfishRbc.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishSpeed.supports_acknowledgments());
         assert!(ConsensusProtocol::StarfishBls.supports_acknowledgments());
         assert!(ConsensusProtocol::SparseStarfishSpeed.supports_acknowledgments());
@@ -3669,6 +4014,65 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![*block.reference()]
         );
+    }
+
+    #[test]
+    fn full_mac_vector_upgrades_tag_only_block_in_memory_and_storage() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = crypto::mac_keyrings_for_test(committee.len());
+        let mut full = VerifiedBlock::new_with_authorizer_and_unprovable(
+            1,
+            1,
+            committee
+                .authorities()
+                .map(|authority| BlockReference::new_test(authority, 0))
+                .collect(),
+            None,
+            Vec::new(),
+            0,
+            &BlockAuthorizer::MacVector(&keyrings[1]),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            ConsensusProtocol::Starfish,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        full.preserialize();
+        let reference = *full.reference();
+
+        let mut tagged = full.with_recipient_mac(0).unwrap();
+        tagged.preserialize();
+        let dag_state = open_test_dag_state_for("starfish-mac", 0);
+        dag_state.insert_general_block(Data::new(tagged), DataSource::BlockBundleStreaming);
+
+        assert!(matches!(
+            dag_state
+                .get_storage_block(reference)
+                .unwrap()
+                .authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(matches!(
+            dag_state.get_blocks_by_round_cached(1)[0].authentication(),
+            BlockAuthentication::MacTag(_)
+        ));
+        assert!(dag_state.upgrade_mac_authentication(&full));
+
+        let upgraded = dag_state.get_storage_block(reference).unwrap();
+        assert!(upgraded.has_full_mac_vector());
+        assert!(upgraded.with_recipient_mac(2).is_some());
+        assert!(dag_state.get_blocks_by_round_cached(1)[0].has_full_mac_vector());
+        let persisted = dag_state.store.get_block(&reference).unwrap().unwrap();
+        assert!(persisted.has_full_mac_vector());
+        assert!(!dag_state.upgrade_mac_authentication(&full));
     }
 
     #[test]
@@ -3740,6 +4144,222 @@ mod tests {
 
         assert!(dag_state.has_clean_vertex(&parent_ref));
         assert!(dag_state.has_clean_vertex(&child_ref));
+    }
+
+    #[test]
+    fn starfish_rbc_delivery_is_order_independent_and_waits_for_ack_closure() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let parent_a = make_starfish_rbc_block(0, 1, genesis.clone(), Vec::new());
+        let parent_b = make_starfish_rbc_block(1, 1, genesis.clone(), Vec::new());
+        let parent_c = make_starfish_rbc_block(2, 1, genesis, Vec::new());
+        let parent_a_ref = *parent_a.reference();
+        let parent_b_ref = *parent_b.reference();
+        let parent_c_ref = *parent_c.reference();
+        // parent_b is both a causal parent and a compressed logical ack. It
+        // must contribute only one missing dependency/wakeup.
+        let child = make_starfish_rbc_block(
+            3,
+            2,
+            vec![parent_a_ref, parent_b_ref, parent_c_ref],
+            vec![parent_b_ref],
+        );
+        let child_ref = *child.reference();
+
+        dag_state.insert_general_blocks(
+            vec![parent_a, parent_b, parent_c, child],
+            DataSource::BlockBundleStreaming,
+        );
+
+        assert!(!dag_state.apply_starfish_rbc_delivery_refs_for_test(&[child_ref]));
+        assert!(!dag_state.has_clean_vertex(&child_ref));
+        assert!(
+            dag_state.apply_starfish_rbc_delivery_refs_for_test(&[parent_a_ref, parent_c_ref,])
+        );
+        assert!(!dag_state.has_clean_vertex(&child_ref));
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&[parent_b_ref]));
+        assert!(dag_state.has_clean_vertex(&child_ref));
+    }
+
+    #[test]
+    fn starfish_rbc_delivery_before_dirty_insertion_is_latched() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let block = make_starfish_rbc_block(1, 1, genesis, Vec::new());
+        let block_ref = *block.reference();
+
+        assert!(
+            !dag_state.apply_starfish_rbc_delivery_refs_for_test(&[block_ref]),
+            "delivery is retained but cannot activate an absent dirty carrier"
+        );
+        assert!(!dag_state.has_clean_vertex(&block_ref));
+
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        assert!(
+            dag_state.has_clean_vertex(&block_ref),
+            "later dirty insertion must consume the exact-reference delivery latch"
+        );
+    }
+
+    #[test]
+    fn starfish_rbc_disables_reference_inferred_cleanliness() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let target = make_starfish_rbc_block(1, 1, genesis.clone(), Vec::new());
+        let filler_a = make_starfish_rbc_block(0, 1, genesis.clone(), Vec::new());
+        let filler_b = make_starfish_rbc_block(2, 1, genesis, Vec::new());
+        let target_ref = *target.reference();
+        let round_one_refs = vec![target_ref, *filler_a.reference(), *filler_b.reference()];
+        let supporter_a = make_starfish_rbc_block(0, 2, round_one_refs.clone(), Vec::new());
+        let supporter_b = make_starfish_rbc_block(2, 2, round_one_refs, Vec::new());
+
+        dag_state.insert_general_blocks(
+            vec![target, filler_a, filler_b, supporter_a, supporter_b],
+            DataSource::BlockBundleStreaming,
+        );
+
+        assert!(
+            !dag_state.has_clean_vertex(&target_ref),
+            "f+1 dirty descendants are not a Starfish-RBC delivery certificate"
+        );
+    }
+
+    #[test]
+    fn starfish_rbc_rejects_bls_verification_as_a_clean_capability() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let block = make_starfish_rbc_block(1, 1, genesis, Vec::new());
+        let block_ref = *block.reference();
+
+        // Neither event ordering may bypass the typed RBC delivery boundary.
+        assert!(
+            !dag_state.apply_certificate_events(vec![CertificateEvent::BlockVerified(block_ref,)])
+        );
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        assert!(!dag_state.has_clean_vertex(&block_ref));
+        assert!(
+            !dag_state.apply_certificate_events(vec![CertificateEvent::BlockVerified(block_ref,)])
+        );
+        assert!(!dag_state.has_clean_vertex(&block_ref));
+
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&[block_ref]));
+        assert!(dag_state.has_clean_vertex(&block_ref));
+    }
+
+    #[test]
+    fn starfish_rbc_dirty_quorum_cannot_advance_proposal_readiness() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let committee = Committee::new_for_benchmarks(4);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let round_one: Vec<_> = (0..3)
+            .map(|authority| make_starfish_rbc_block(authority, 1, genesis.clone(), Vec::new()))
+            .collect();
+        let round_one_refs: Vec<_> = round_one.iter().map(|block| *block.reference()).collect();
+
+        dag_state.insert_general_blocks(round_one, DataSource::BlockBundleStreaming);
+        assert_eq!(dag_state.threshold_clock_round(), 2);
+        assert_eq!(dag_state.proposal_round(), 1);
+        assert!(!dag_state.is_ready_for_new_block(
+            2,
+            &[committee.elect_leader(1)],
+            false,
+            0,
+            committee.as_ref(),
+        ));
+
+        let version_before_delivery = dag_state.round_version(1);
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&round_one_refs));
+        assert_eq!(dag_state.proposal_round(), 2);
+        assert!(dag_state.is_ready_for_new_block(
+            2,
+            &[committee.elect_leader(1)],
+            false,
+            0,
+            committee.as_ref(),
+        ));
+        assert!(
+            dag_state.round_version(1) > version_before_delivery,
+            "clean activation must invalidate consensus round caches"
+        );
+    }
+
+    #[test]
+    fn starfish_rbc_acknowledgment_waits_for_both_cleanliness_and_data() {
+        let dag_state = open_test_dag_state_for("starfish-rbc", 0);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![1, 2, 3]))];
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let encoded = encoder.encode_transactions(&transactions, 2, 2);
+
+        // Data first: insertion marks availability, but the dirty header must
+        // not enter the pending acknowledgment queue.
+        let mut data_first = VerifiedBlock::new_starfish_rbc(
+            1,
+            1,
+            genesis.clone(),
+            Vec::new(),
+            1,
+            transactions.clone(),
+            Some(encoded.clone()),
+        );
+        data_first.preserialize();
+        let data_first = Data::new(data_first);
+        let data_first_ref = *data_first.reference();
+        dag_state.insert_general_block(data_first, DataSource::BlockBundleStreaming);
+        assert!(dag_state.is_data_available(&data_first_ref));
+        assert!(dag_state.get_pending_acknowledgment(1).is_empty());
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&[data_first_ref]));
+        assert_eq!(
+            dag_state.get_pending_acknowledgment(1),
+            vec![data_first_ref]
+        );
+
+        // Clean first: the header carries the non-empty commitment but no
+        // local payload. Attaching the verified payload later queues it once.
+        let mut clean_first = VerifiedBlock::new_starfish_rbc(
+            2,
+            1,
+            genesis,
+            Vec::new(),
+            2,
+            Vec::new(),
+            Some(encoded.clone()),
+        );
+        clean_first.preserialize();
+        let clean_first = Data::new(clean_first);
+        let clean_first_ref = *clean_first.reference();
+        dag_state.insert_general_block(clean_first, DataSource::BlockBundleStreaming);
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&[clean_first_ref]));
+        assert!(dag_state.get_pending_acknowledgment(1).is_empty());
+
+        let mut transaction_data = TransactionData::new(transactions);
+        transaction_data.preserialize();
+        let (commitment, proof) =
+            TransactionsCommitment::new_from_encoded_transactions(&encoded, 2);
+        let mut shard = ProvableShard::new(encoded[2].clone(), 2, proof, commitment);
+        shard.preserialize();
+        assert!(dag_state.attach_transaction_data(
+            clean_first_ref,
+            &transaction_data,
+            &shard,
+            DataSource::ShardReconstructor,
+        ));
+        assert_eq!(
+            dag_state.get_pending_acknowledgment(1),
+            vec![clean_first_ref]
+        );
     }
 
     #[test]
@@ -4749,6 +5369,12 @@ mod tests {
             DisseminationMode::PushUseful
         );
         assert_eq!(
+            ConsensusProtocol::StarfishRbc.default_dissemination_mode(),
+            DisseminationMode::PushUseful
+        );
+        assert!(ConsensusProtocol::StarfishRbc.is_starfish_rbc());
+        assert!(ConsensusProtocol::StarfishRbc.uses_dual_dag());
+        assert_eq!(
             ConsensusProtocol::StarfishSpeed.default_dissemination_mode(),
             DisseminationMode::PushUseful
         );
@@ -4761,5 +5387,75 @@ mod tests {
             ConsensusProtocol::Starfish.resolve_dissemination_mode(DisseminationMode::PushCausal),
             DisseminationMode::PushCausal
         );
+    }
+
+    #[test]
+    fn protocol_config_selects_block_authentication() {
+        let protocols = [
+            ("mysticeti", ConsensusProtocol::Mysticeti),
+            ("cordial-miners", ConsensusProtocol::CordialMiners),
+            ("starfish", ConsensusProtocol::Starfish),
+            ("starfish-rbc", ConsensusProtocol::StarfishRbc),
+            ("starfish-speed", ConsensusProtocol::StarfishSpeed),
+            ("starfish-bls", ConsensusProtocol::StarfishBls),
+            ("sailfish-pp", ConsensusProtocol::SailfishPlusPlus),
+            ("bluestreak", ConsensusProtocol::Bluestreak),
+            ("mysticeti-bls", ConsensusProtocol::MysticetiBls),
+            (
+                "sparse-starfish-speed",
+                ConsensusProtocol::SparseStarfishSpeed,
+            ),
+        ];
+        let signature_schemes = [
+            (None, BlockAuthenticationScheme::Ed25519),
+            (Some("ed25519"), BlockAuthenticationScheme::Ed25519),
+            (Some("ml-dsa-44"), BlockAuthenticationScheme::MlDsa44),
+            (Some("ml-dsa-65"), BlockAuthenticationScheme::MlDsa65),
+        ];
+
+        for (name, consensus_protocol) in protocols {
+            for (selection, block_authentication_scheme) in signature_schemes {
+                assert_eq!(
+                    ProtocolConfig::from_selection(name, selection).unwrap(),
+                    ProtocolConfig {
+                        consensus_protocol,
+                        block_authentication_scheme,
+                    }
+                );
+            }
+        }
+
+        assert_eq!(
+            ProtocolConfig::from_selection("starfish-rbc", Some("mac")).unwrap(),
+            ProtocolConfig {
+                consensus_protocol: ConsensusProtocol::StarfishRbc,
+                block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+            }
+        );
+        assert!(ProtocolConfig::from_selection("starfish", Some("mac")).is_err());
+        assert!(ProtocolConfig::from_str("starfish-rbc-mac").is_err());
+
+        for (name, consensus_protocol) in [
+            ("starfish-mac", ConsensusProtocol::Starfish),
+            ("starfish-speed-mac", ConsensusProtocol::StarfishSpeed),
+            (
+                "sparse-starfish-speed-mac",
+                ConsensusProtocol::SparseStarfishSpeed,
+            ),
+            ("bluestreak-mac", ConsensusProtocol::Bluestreak),
+        ] {
+            assert_eq!(
+                ProtocolConfig::from_str(name).unwrap(),
+                ProtocolConfig {
+                    consensus_protocol,
+                    block_authentication_scheme: BlockAuthenticationScheme::MacVector,
+                }
+            );
+            assert!(ProtocolConfig::from_selection(name, Some("ed25519")).is_err());
+        }
+
+        assert!(ProtocolConfig::from_str("mysticeti-mac").is_err());
+        assert!(ProtocolConfig::from_selection("starfish", Some("unknown")).is_err());
+        assert!(ProtocolConfig::from_str("starfish-unknown").is_err());
     }
 }

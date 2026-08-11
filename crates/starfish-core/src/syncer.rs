@@ -19,6 +19,10 @@ use crate::{
     metrics::Metrics,
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
+    starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader},
+    starfish_rbc_dag_shadow::CommittedFrontierDeltaV1,
+    starfish_rbc_dag_shadow_service::StarfishRbcDagShadowServiceHandleV1,
+    starfish_rbc_service::{RbcLocalHeader, RbcServiceHandle},
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
         ReconstructedTransactionData, RoundNumber, SailfishNoVoteCert, SailfishTimeoutCert, Stake,
@@ -64,6 +68,9 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     pub(crate) metrics: Arc<Metrics>,
     bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
     sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
+    starfish_rbc_service: Option<RbcServiceHandle>,
+    starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
+    rbc_dag_frontier_authority: bool,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -78,6 +85,13 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
+    fn handle_rbc_dag_commit(
+        &mut self,
+        dag_state: &DagState,
+        anchor: BlockReference,
+        applications: &[BlockReference],
+    ) -> Vec<CommittedSubDag>;
+
     fn recover_committed(
         &mut self,
         committed: AHashSet<BlockReference>,
@@ -89,13 +103,19 @@ pub trait CommitObserver: Send + Sync {
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn new(
-        core: Core<H>,
+        mut core: Core<H>,
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
         bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
         sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
+        starfish_rbc_service: Option<RbcServiceHandle>,
+        starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
+        rbc_dag_frontier_authority: bool,
     ) -> Self {
+        if rbc_dag_frontier_authority {
+            core.enable_rbc_dag_application_production();
+        }
         let committee_size = core.committee().len();
         let own_stake = core
             .committee()
@@ -114,6 +134,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             metrics,
             bls_tx,
             sailfish_tx,
+            starfish_rbc_service,
+            starfish_rbc_dag_shadow_service,
+            rbc_dag_frontier_authority,
         }
     }
 
@@ -147,6 +170,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if success {
             tracing::debug!("Attempt to create block from syncer after adding block");
             self.try_new_block(BlockCreationReason::NewBlocks);
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                // A previously delivered header may have become dirty-DAG
+                // connected and clean during insertion.
+                self.try_new_commit();
+            }
         }
         (
             pending_blocks_with_transactions,
@@ -175,6 +203,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         if success {
             tracing::debug!("Attempt to create block from syncer after adding headers");
             self.try_new_block(BlockCreationReason::NewHeaders);
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                self.try_new_commit();
+            }
         }
         (missing_parents, processed_refs)
     }
@@ -202,6 +233,46 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
+    }
+
+    /// Called after the local Starfish-RBC service delivers exact header
+    /// references. Delivery is separate from dirty insertion and transaction
+    /// availability; any newly dependency-closed vertices can immediately
+    /// unblock both proposal and commit paths.
+    pub fn apply_starfish_rbc_deliveries(&mut self, delivered_headers: Vec<PinnedRbcHeader>) {
+        let previous_rounds = self.capture_rounds();
+        if self
+            .core
+            .dag_state()
+            .apply_starfish_rbc_deliveries(&delivered_headers)
+        {
+            self.maybe_update_proposal_wait();
+            self.maybe_signal_proposal_round_advance(previous_rounds);
+            self.try_new_block(BlockCreationReason::CertificateEvent);
+            self.try_new_commit();
+        }
+    }
+
+    /// Sequence one exact deterministic carrier-frontier delta. In M7 this is
+    /// the sole application-ordering authority; the legacy Starfish committer
+    /// remains disabled in this mode.
+    pub fn apply_starfish_rbc_dag_frontier(&mut self, delta: CommittedFrontierDeltaV1) {
+        assert!(
+            self.rbc_dag_frontier_authority,
+            "RBC-DAG frontier output requires the explicit authority mode"
+        );
+        let applications = delta
+            .applications
+            .iter()
+            .map(RbcCanonicalHeader::reference)
+            .collect::<Vec<_>>();
+        let committed = self.commit_observer.handle_rbc_dag_commit(
+            self.core.dag_state(),
+            delta.anchor.carrier(),
+            &applications,
+        );
+        self.core.handle_rbc_dag_committed_delta(committed);
+        self.try_new_block(BlockCreationReason::PostCommit);
     }
 
     /// Store a Sailfish++ timeout certificate in DagState and retry block
@@ -306,6 +377,43 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
         let previous_rounds = self.capture_rounds();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
+            if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
+                let canonical = RbcCanonicalHeader::from_block_header(block.header())
+                    .expect("locally built Starfish-RBC block must have canonical header content");
+                let selected = self
+                    .starfish_rbc_service
+                    .as_ref()
+                    .expect("Starfish-RBC protocol must start its RBC service")
+                    .start_local_header_with_payload_blocking(
+                        RbcLocalHeader::from_canonical(&canonical),
+                        block.transaction_data().cloned(),
+                    )
+                    .expect("local Starfish-RBC header must be accepted before dissemination");
+                assert_eq!(
+                    selected.reference(),
+                    *block.reference(),
+                    "RBC service selected a different local header reference"
+                );
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.local_header(&canonical) {
+                        self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
+                        self.metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["local", "dropped"])
+                            .inc();
+                        tracing::warn!(
+                            "Failed to enqueue RBC-DAG application carrier; the research run is invalid: {error}"
+                        );
+                    } else if let Err(error) =
+                        shadow.application_data_available(canonical.reference())
+                    {
+                        self.metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                        tracing::warn!(
+                            "Failed to record local RBC-DAG application availability: {error}"
+                        );
+                    }
+                }
+            }
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
                     .proposal_wait_time_total_us
@@ -405,6 +513,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     pub fn try_new_commit(&mut self) {
+        if self.rbc_dag_frontier_authority {
+            return;
+        }
         let (newly_committed, any_decided) = self.core.try_commit();
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {
@@ -487,6 +598,15 @@ mod tests {
             &mut self,
             _dag_state: &DagState,
             _committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
+
+        fn handle_rbc_dag_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _anchor: BlockReference,
+            _applications: &[BlockReference],
         ) -> Vec<CommittedSubDag> {
             Vec::new()
         }
@@ -584,7 +704,17 @@ mod tests {
         assert_eq!(core.dag_state().proposal_round(), 3);
         assert_eq!(core.last_proposed(), 0);
 
-        let mut syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None);
+        let mut syncer = Syncer::new(
+            core,
+            false,
+            NoopCommitObserver,
+            metrics,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);
         syncer.recompute_subscriber_stake();
@@ -681,6 +811,9 @@ mod tests {
             metrics,
             None,
             None,
+            None,
+            None,
+            false,
         );
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);

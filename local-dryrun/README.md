@@ -30,11 +30,16 @@ NUM_NODES=10 DESIRED_TPS=1000 CONSENSUS=starfish \
 | `NUM_CRASHED_NODES` | `0` | Number of highest-numbered authorities to leave down from startup |
 | `DESIRED_TPS` | `1000` | Target transactions per second (split evenly across nodes) |
 | `CONSENSUS` | `bluestreak` | Consensus protocol (see below) |
+| `BLOCK_AUTHENTICATION` | *(unset)* | `ed25519`, `ml-dsa-44`, or `ml-dsa-65`; unset defaults to Ed25519 |
 | `TEST_TIME` | `3000` | Experiment duration in seconds |
 
-Supported `CONSENSUS` values: `starfish`, `starfish-speed`,
-`sparse-starfish-speed`, `starfish-bls`, `cordial-miners`,
-`mysticeti`, `sailfish-pp`, `bluestreak`, `mysticeti-bls`.
+Supported `CONSENSUS` values are `starfish`, `starfish-speed`,
+`sparse-starfish-speed`, `bluestreak`, `starfish-bls`, `cordial-miners`,
+`mysticeti`, `sailfish-pp`, and `mysticeti-bls`. `BLOCK_AUTHENTICATION`
+selects Ed25519, ML-DSA-44, or ML-DSA-65 for any of them. The
+`starfish-mac`, `starfish-speed-mac`, `sparse-starfish-speed-mac`, and
+`bluestreak-mac` names are separate experimental protocols; leave
+`BLOCK_AUTHENTICATION` unset when using one.
 
 ### Protocol Tuning
 

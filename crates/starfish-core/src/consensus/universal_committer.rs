@@ -88,6 +88,11 @@ impl UniversalCommitter {
                     let mut voters = AHashSet::new();
                     let mut voter_strong_votes = AHashMap::new();
                     for vb in potential_voting_blocks.iter() {
+                        if self.dag_state.consensus_protocol.is_starfish_rbc()
+                            && !self.dag_state.has_clean_vertex(vb.reference())
+                        {
+                            continue;
+                        }
                         let vb_ref = *vb.reference();
                         if self.dag_state.consensus_protocol.uses_bls() {
                             if let Some(leader_ref) =
@@ -404,6 +409,7 @@ impl UniversalCommitterBuilder {
         match dag_state.consensus_protocol {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
+            | ConsensusProtocol::StarfishRbc
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::MysticetiBls

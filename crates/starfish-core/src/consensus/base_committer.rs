@@ -166,6 +166,7 @@ impl BaseCommitter {
         let potential_certificates: Vec<_> = certifying_blocks
             .iter()
             .filter(|block| reachable.contains(block.reference()))
+            .filter(|block| self.is_consensus_evidence(block))
             .collect();
 
         // Use those potential certificates to determine which (if any) of the target
@@ -238,7 +239,10 @@ impl BaseCommitter {
     ) -> bool {
         let voting_blocks = self.dag_state.get_blocks_by_round_cached(voting_round);
         let mut blame_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
-        for voting_block in voting_blocks.iter() {
+        for voting_block in voting_blocks
+            .iter()
+            .filter(|block| self.is_consensus_evidence(block))
+        {
             let voter = voting_block.authority();
             blame_stake_aggregator.add(voter, &self.committee);
         }
@@ -256,7 +260,10 @@ impl BaseCommitter {
         for leader_block in &leader_blocks {
             let mut vote_stake_aggregator = StakeAggregator::<QuorumThreshold>::new();
             let leader_block_reference = leader_block.reference();
-            for voting_block in voting_blocks.iter() {
+            for voting_block in voting_blocks
+                .iter()
+                .filter(|block| self.is_consensus_evidence(block))
+            {
                 let voter = voting_block.authority();
                 if voter_info
                     .voters
@@ -292,7 +299,10 @@ impl BaseCommitter {
         // Quickly reject if there isn't enough stake to support the leader from
         // the potential certificates.
         let mut early_stop = true;
-        for certifying_block in certifying_blocks.iter() {
+        for certifying_block in certifying_blocks
+            .iter()
+            .filter(|block| self.is_consensus_evidence(block))
+        {
             if total_stake_aggregator.add(certifying_block.authority(), &self.committee) {
                 early_stop = false;
                 break;
@@ -310,6 +320,7 @@ impl BaseCommitter {
         self.has_quorum_support(
             certifying_blocks
                 .iter()
+                .filter(|block| self.is_consensus_evidence(block))
                 .filter(|b| self.is_certificate(b, leader_block, voter_info))
                 .map(|b| b.authority()),
         )
@@ -419,11 +430,19 @@ impl BaseCommitter {
     }
 
     fn requires_clean_leader_for_commit(&self) -> bool {
-        self.dag_state.consensus_protocol.is_sailfish_pp()
+        self.dag_state.consensus_protocol.is_starfish_rbc()
+            || self.dag_state.consensus_protocol.is_sailfish_pp()
             || self
                 .dag_state
                 .consensus_protocol
                 .carries_unprovable_certificate()
+    }
+
+    /// Starfish-RBC dirty headers exist only for dependency fetching and RBC
+    /// progress. They cannot vote, blame, or certify a leader.
+    fn is_consensus_evidence(&self, block: &VerifiedBlock) -> bool {
+        !self.dag_state.consensus_protocol.is_starfish_rbc()
+            || self.dag_state.has_clean_vertex(block.reference())
     }
 
     /// Apply the indirect decision rule to the specified leader
@@ -525,5 +544,99 @@ impl BaseCommitter {
 impl Display for BaseCommitter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Committer-Round-Offset{}", self.options.round_offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ahash::{AHashMap, AHashSet};
+    use prometheus::Registry;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        config::{DisseminationMode, StorageBackend},
+        dag_state::DataSource,
+        metrics::Metrics,
+    };
+
+    #[test]
+    fn starfish_rbc_dirty_voters_cannot_force_a_skip() {
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let dag_state = DagState::open(
+            0,
+            dir.path(),
+            metrics,
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        )
+        .dag_state;
+        let genesis: Vec<_> = committee
+            .authorities()
+            .map(|authority| BlockReference::new_test(authority, 0))
+            .collect();
+        let mut parent_blocks = Vec::new();
+        for authority in [0, 1, 2] {
+            let mut block = VerifiedBlock::new_starfish_rbc(
+                authority,
+                1,
+                genesis.clone(),
+                Vec::new(),
+                authority as u64,
+                Vec::new(),
+                None,
+            );
+            block.preserialize();
+            parent_blocks.push(Data::new(block));
+        }
+        let parent_refs: Vec<_> = parent_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        dag_state.insert_general_blocks(parent_blocks, DataSource::BlockBundleStreaming);
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&parent_refs));
+
+        let mut voting_blocks = Vec::new();
+        for authority in [0, 2, 3] {
+            let mut block = VerifiedBlock::new_starfish_rbc(
+                authority,
+                2,
+                parent_refs.clone(),
+                Vec::new(),
+                authority as u64,
+                Vec::new(),
+                None,
+            );
+            block.preserialize();
+            voting_blocks.push(Data::new(block));
+        }
+        let voting_refs: Vec<_> = voting_blocks
+            .iter()
+            .map(|block| *block.reference())
+            .collect();
+        dag_state.insert_general_blocks(voting_blocks, DataSource::BlockBundleStreaming);
+
+        let committer = BaseCommitter::new(committee.clone(), dag_state.clone());
+        let voter_info = VoterInfo {
+            voters: AHashSet::new(),
+            voter_strong_votes: AHashMap::new(),
+        };
+        let leader = committee.elect_leader(1);
+        assert!(!committer.decide_skip(2, leader, &voter_info));
+
+        assert!(dag_state.apply_starfish_rbc_delivery_refs_for_test(&voting_refs));
+        assert!(committer.decide_skip(2, leader, &voter_info));
     }
 }
