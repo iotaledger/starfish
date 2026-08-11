@@ -128,6 +128,11 @@ impl Hasher for Blake3 {
 }
 
 impl TransactionsCommitment {
+    /// Construct a transaction commitment from its canonical 32-byte form.
+    pub const fn from_bytes(bytes: [u8; TRANSACTIONS_DIGEST_SIZE]) -> Self {
+        Self(bytes)
+    }
+
     pub fn new_from_encoded_transactions(
         encoded_transactions: &Vec<Shard>,
         authority_index: usize,
@@ -910,6 +915,13 @@ impl AsRef<[u8]> for BlockDigest {
 impl AsRef<[u8]> for SignatureBytes {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl SignatureBytes {
+    /// Construct an Ed25519 signature from its canonical fixed-width form.
+    pub const fn from_bytes(bytes: [u8; SIGNATURE_SIZE]) -> Self {
+        Self(bytes)
     }
 }
 

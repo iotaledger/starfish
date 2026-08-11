@@ -1,6 +1,6 @@
 # Starfish-RBC-DAG protocol design
 
-Status: design milestone; no implementation or safety/liveness claim yet
+Status: milestone-two reference codec and executable model; no runtime or safety/liveness claim
 
 The provisional CLI name for this protocol is `starfish-rbc-dag`. It is a new protocol, not a
 transport option or a version-two alias for `starfish-rbc`.
@@ -33,10 +33,17 @@ remain selectable outer-authentication baselines; changing that selector does no
 embedded RBC or consensus rules.
 
 This is a proposed composition. The reliable-broadcast thresholds are standard, and the Starfish
-commit rules already exist, but their composition through two clocks, two logical projections, and
-frontier-based payload ordering still requires an executable model, adversarial tests, and a proof.
-Until those obligations are discharged, `starfish-rbc-dag` must be described as an experimental
-prototype rather than a proven signature-free Starfish variant.
+commit rules already exist. The isolated milestone-two implementation now provides a canonical
+codec plus deterministic carrier/RBC, certified-projection, decision, and crash-journal models.
+Those models are not runtime integration or a proof: the composition through two clocks, two
+logical projections, and frontier-based payload ordering still requires shadow execution,
+additional adversarial testing, and a safety/liveness argument. Until those obligations are
+discharged, `starfish-rbc-dag` must be described as an experimental reference model rather than a
+proven signature-free Starfish variant.
+
+The milestone-two model accepts `DataAvailable` as a trusted input from the existing verified
+Reed-Solomon/reconstruction layer. It models the resulting prefix and ordering transitions, but not
+payload reconstruction or the runtime transition from delivered acknowledgments to that input.
 
 Transaction bytes remain outside header RBC. The existing Reed-Solomon dissemination,
 acknowledgment, reconstruction, and transaction-commitment checks remain responsible for data
@@ -97,8 +104,8 @@ strong parents and certified frontier constrain consensus.
 
 ## 4. Canonical objects
 
-The milestone-two codec should implement the following logical types. Field widths, enum codes,
-maximum lengths, and golden bytes are frozen by that milestone, before runtime integration.
+The milestone-two codec implements the following logical types. Field widths, enum codes, maximum
+lengths, and golden bytes are frozen before runtime integration.
 
 ```rust
 struct CarrierHeaderV1 {
@@ -125,8 +132,7 @@ struct ConsensusVertexV1 {
     consensus_round: RoundNumber,
     strong_parents: Vec<ConsensusVertexReference>,
     delivery_frontier: Vec<Option<BlockReference>>,
-    // None only for the fixed genesis consensus round.
-    leader_choice: Option<LeaderChoiceV1>,
+    leader_choice: LeaderChoiceV1,
 }
 
 struct ConsensusVertexReference {
@@ -150,18 +156,30 @@ For non-genesis carrier round `r`:
 - every weak parent has carrier round `r - 1` and a distinct non-local author;
 - the stake of `{ own_prev } union weak_parents` reaches `Q`;
 - phase targets have carrier rounds strictly below `r`; and
-- every vector is canonically ordered and duplicate-free.
+- weak parents are in strict authority order and duplicate-free;
+- acknowledgments commit to the unique normalized sequence described below, and phase batches are
+  order-significant logs whose exact order is committed;
+- a phase batch contains at most one statement for each `(phase, target author, target round)`; and
+- strong-parent ordering, frontier indexing, and leader-choice validity are checked only when the
+  optional consensus vertex is projected, so an ineligible vertex cannot invalidate its carrier.
+
+The first encoded carrier has round one and names the fixed virtual round-zero carrier reference of
+its author as `own_prev`; no round-zero carrier is sent on the wire. Consensus genesis is likewise
+virtual. Every embedded consensus vertex has a positive consensus round and an explicit leader
+choice. These conventions avoid making genesis a second, partially authenticated wire format.
 
 Weak references are syntax and pacing declarations, not availability assertions. Their target
 headers need not be present to authenticate, admit, process, or RBC-deliver the enclosing carrier.
 
-Acknowledgments retain Starfish's logical order and compression on the wire. The content digest
-commits to the expanded logical vector, while the stored compression must be canonical. An honest
-author creates an acknowledgment only after the exact target is locally RBC-delivered and its
-transaction data reconstructs to the committed root. The acknowledgment becomes usable as
-data-availability evidence only after its enclosing carrier is also locally RBC-delivered; an
-optimistically admitted Byzantine carrier cannot create inconsistent availability facts at
-different validators.
+Acknowledgments have one canonical logical order: first the unique maximal suffix shared with
+`[own_prev] || weak_parents`, then all remaining acknowledgments in their original relative order.
+The content digest commits to this expanded, suffix-first sequence, while the wire codec stores the
+shared suffix as an intersection index and retains the order-significant extras. Non-canonical wire
+aliases and duplicate acknowledgments are rejected. An honest author creates an acknowledgment
+only after the exact target is locally RBC-delivered and its transaction data reconstructs to the
+committed root. The acknowledgment becomes usable as data-availability evidence only after its
+enclosing carrier is also locally RBC-delivered; an optimistically admitted Byzantine carrier
+cannot create inconsistent availability facts at different validators.
 
 `delivery_frontier` has exactly one indexed entry per committee authority. `None` denotes that
 authority's fixed genesis/empty prefix. A `Some(reference)` entry must name the same authority as
@@ -185,10 +203,42 @@ phase batch and optional consensus vertex. It excludes:
 - receipt peer, arrival time, and local admission state; and
 - recovery or transport metadata.
 
-The byte grammar uses fixed field markers, fixed-width integers, and explicit vector lengths. It
-does not add a `starfish:block-ref:v2` string to the block identity. A format-version field and the
-unambiguous grammar distinguish this carrier layout; changing the layout requires a new version and
-new golden vectors.
+The byte grammar uses a one-byte format version, fixed field markers, big-endian fixed-width
+integers, and explicit vector lengths. It does not add a `starfish:block-ref:v2` string to the block
+identity. The format byte and unambiguous grammar distinguish this carrier layout; changing the
+layout requires a new version and new golden vectors. The canonical identity codec is handwritten;
+serde or bincode framing is never hashed.
+
+Milestone two freezes the version-one identity grammar as follows. `Ref` is
+`author:u16 || carrier_round:u32 || digest:[u8;32]`; every integer is big-endian and every vector
+count is `u16`.
+
+```text
+00 01
+01 author:u16
+02 carrier_round:u32
+03 own_prev:Ref
+04 weak_count:u16 weak:Ref[]
+05 transactions_commitment:[u8;32]
+06 acknowledgment_count:u16 expanded_acknowledgments:Ref[]
+07 phase_count:u16 (phase:u8 target:Ref)[]       // ECHO=0, READY=1
+08 consensus_present:u8 [ConsensusVertexV1]
+09 creation_time_ns:u64
+```
+
+The optional consensus encoding uses markers `01` through `04` for consensus round, strong
+parents, delivery frontier, and leader choice. A strong reference is `Ref || consensus_round:u32`;
+frontier entries use `0=None` and `1=Some(Ref)`; leader choices use `1=Vote` and `2=NoVote` (`0` is
+reserved for virtual genesis and is rejected on the wire). The canonical transport codec replaces
+the expanded acknowledgment field with `intersection_start:u16 || extra_count:u16 || extras`, where
+the intersection is the unique maximal suffix of `[own_prev] || weak_parents`. Decoding expands and
+recompresses this field and rejects aliases. To keep the two byte grammars self-describing, this
+compressed transport form starts with `00 81`; only expanded identity content starts with `00 01`.
+
+Version one caps canonical carrier content at 4 MiB, weak and strong parents at the committee size,
+the frontier at exactly the committee size when projected, and encoded phase batches at
+`min(4n, 2048)`. The `4n` bound gives two times the expected `2n` steady-state phase arrival rate;
+the scheduler still needs the fair-prefix and active-window rules described in Section 8.3.
 
 Consensus vertices are referenced by their exact enclosing `BlockReference` plus their declared
 `consensus_round`. Because there is at most one consensus vertex per carrier, that pair identifies
@@ -407,12 +457,18 @@ authenticated holders eventually obtains the value after GST.
 
 ### 8.3 Batching and fairness
 
-Phase batches are bounded. A deterministic fair queue must prevent Byzantine traffic for one slot
+Phase batches are bounded. The encoded order is preserved and processed as an authenticated log;
+two different orders intentionally identify different carriers. A deterministic fair queue must
+prevent Byzantine traffic for one slot
 from starving honest ECHO/READY actions for other slots. In steady state, one authority can owe one
 ECHO and one READY for each of `n` previous-round carriers, so `2n` is the expected arrival rate and
-not a safe capacity. The executable model initially uses an unbounded fair queue. A bounded runtime
-must reserve strictly more than `2n` statements per carrier, plus an active-slot window, so delayed
-work drains instead of remaining at permanent saturation.
+not a safe capacity. The executable model retains an unbounded pending FIFO and drains the first
+`4n` statements eligible for the carrier being built (capped by the version-one codec limit of
+2,048 statements). A temporarily ineligible future-round statement remains in its stable queue
+position but does not block older eligible work behind it. This exercises backlog, runahead, and
+batching without pretending to solve adversarial fairness. A bounded runtime must use a fair
+per-slot scheduler, reserve strictly more than `2n` statements per carrier, and enforce an
+active-slot window so delayed work drains instead of remaining at permanent saturation.
 
 ## 9. Certified consensus vertices
 
@@ -622,11 +678,20 @@ vector dissemination is a later optimization and requires redundant routes or di
 
 An authoritative implementation must persist proof-critical choices before exposing effects:
 
-1. journal authenticated inbound provenance and its local ingress sequence;
-2. persist local ECHO, READY, explicit no-vote, delivery, carrier-slot, and consensus-slot locks;
-3. construct and persist the exact outbound carrier bytes, reference, and authentication sidecar;
-4. only then send the carrier; and
-5. after restart, replay the journal in recorded order and retransmit the identical carrier.
+1. journal typed authenticated inbound provenance, exact bytes, and its local ingress sequence;
+2. before fixing a local slot, construct and persist the typed candidate plus its exact canonical
+   carrier bytes and reference;
+3. persist local ECHO, READY, explicit leader-choice, delivery, carrier-slot, and consensus-slot
+   locks that match that retained candidate (recovered content is likewise retained before READY);
+4. persist the exact authentication sidecar and an outbound-exposure marker, and only then send the
+   carrier; and
+5. after restart, replay the journal in recorded order and retransmit the identical carrier and
+   sidecar.
+
+Persisting a bare local reference before its canonical carrier bytes is not sufficient: a crash in
+that gap would leave the slot fixed without the data needed to reconstruct the exact carrier. The
+write-ahead model therefore makes content retention precede slot fixation and prevents exposure
+until every lock encoded by that carrier is durable.
 
 Every persisted slot, candidate, lifecycle predicate, journal entry, and outbound-carrier key is
 namespaced by both `protocol_instance` and `committee_id`; storage from another run or committee
@@ -718,7 +783,8 @@ minimum it must cover:
 - equal committed anchors producing byte-identical output deltas;
 - delayed data availability followed by eventual prefix inclusion;
 - crash points before and after each persisted lock and outbound-carrier write; and
-- shadow replay matching the current direct RBC kernel's delivered references.
+- once milestone three supplies the non-authoritative runtime path, shadow replay matching the
+  current direct RBC kernel's delivered references.
 
 Property tests should mutate every canonical field and verify carrier-reference binding, while
 golden tests freeze the version-one encoding and flat vector length.
@@ -752,11 +818,13 @@ Every milestone is committed separately.
 1. **Protocol specification (this document):** lock the two clocks, lifecycle, full-vector sidecar,
    embedded Bracha transitions, certified prefix/frontier, commit/skip boundary, proof obligations,
    and experiment plan. No protocol code or CLI selector is added.
-2. **Canonical codec and executable model:** add isolated carrier, phase, consensus, frontier, and
-   sidecar types; golden encodings; a pure in-memory state machine; and deterministic adversarial
-   simulations. No network or existing consensus path changes.
+2. **Canonical codec and executable model (implemented):** isolated carrier, phase, consensus,
+   frontier, and sidecar types; golden encodings; pure carrier/RBC, projection/decision, and durable
+   journal models; and deterministic adversarial simulations. No network or existing consensus path
+   changes.
 3. **Persisted shadow carrier path:** build and store carriers alongside the current direct
-   `starfish-rbc` service, journal ingress and local locks, and compare embedded versus direct RBC
+   `starfish-rbc` service, cache the validated committee/domain identity rather than re-hashing all
+   public keys per carrier, journal ingress and local locks, and compare embedded versus direct RBC
    delivery. Direct RBC remains authoritative; shadow results never affect proposals or commits.
 4. **Optimistic carrier clock:** add the distinct authenticated-admission latch, sequential quorum
    clock, heartbeats, bounded future buffer, and carrier synchronization while consensus still uses
@@ -777,8 +845,8 @@ Every milestone is committed separately.
 The following values are not safe to guess in the documentation milestone and must be resolved by
 the executable model or measured prototype:
 
-- exact canonical field widths and maximum phase-batch size;
-- maximum future-carrier buffer and payload runahead;
+- production maximum future-carrier buffer and payload runahead (the executable model deliberately
+  uses admission lookahead `2` and hard buffer lookahead `4` only as test parameters);
 - the control-heartbeat rate under low load and backpressure;
 - a safe state-retirement, garbage-collection, and late-catch-up watermark;
 - whether all supported storage backends are required before authoritative mode;
