@@ -462,7 +462,7 @@ where
                 let all_blocks: Vec<_> = self
                     .inner
                     .dag_state
-                    .get_storage_blocks(&block_references)
+                    .get_transmission_blocks(&block_references)
                     .into_iter()
                     .flatten()
                     .collect();
