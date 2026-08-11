@@ -67,6 +67,11 @@ pub struct NodeParameters {
     /// other protocols.
     #[serde(default)]
     pub starfish_rbc_protocol_instance: Option<[u8; 32]>,
+    /// Run the persisted Starfish-RBC-DAG carrier implementation alongside
+    /// the authoritative direct Starfish-RBC service. Shadow delivery is
+    /// observational only and cannot affect the DAG, pacemaker, or commits.
+    #[serde(default)]
+    pub starfish_rbc_dag_shadow: bool,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -142,6 +147,7 @@ impl Default for NodeParameters {
             dissemination_mode: DisseminationMode::default(),
             block_authentication: None,
             starfish_rbc_protocol_instance: None,
+            starfish_rbc_dag_shadow: false,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
@@ -375,6 +381,10 @@ impl NodePrivateConfig {
     pub fn rocksdb(&self) -> PathBuf {
         self.storage_path.join("rocksdb")
     }
+
+    pub fn starfish_rbc_dag_shadow_wal(&self) -> PathBuf {
+        self.storage_path.join("starfish-rbc-dag-shadow-v1.wal")
+    }
 }
 
 impl ImportExport for NodePrivateConfig {}
@@ -387,6 +397,7 @@ mod tests {
     fn starfish_rbc_protocol_instance_is_optional_and_roundtrips() {
         let mut parameters: NodeParameters = serde_yaml::from_str("{}").unwrap();
         assert_eq!(parameters.starfish_rbc_protocol_instance, None);
+        assert!(!parameters.starfish_rbc_dag_shadow);
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
         assert_ne!(protocol_instance, [0; 32]);
@@ -397,6 +408,7 @@ mod tests {
             decoded.starfish_rbc_protocol_instance,
             Some(protocol_instance)
         );
+        assert!(!decoded.starfish_rbc_dag_shadow);
     }
 }
 

@@ -72,6 +72,10 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_shadow: bool,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -105,6 +109,10 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_shadow: bool,
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
@@ -160,6 +168,10 @@ enum Operation {
         /// to the experimental `*-mac` protocols.
         #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac")]
         block_authentication: Option<String>,
+        /// Run the persisted, non-authoritative RBC-DAG shadow alongside
+        /// `starfish-rbc`.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_shadow: bool,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
         /// Dissemination mode override:
@@ -194,6 +206,7 @@ async fn main() -> Result<()> {
             byzantine_strategy,
             consensus: consensus_protocol,
             block_authentication,
+            starfish_rbc_dag_shadow,
         } => {
             run(
                 authority,
@@ -204,6 +217,7 @@ async fn main() -> Result<()> {
                 byzantine_strategy,
                 consensus_protocol,
                 block_authentication,
+                starfish_rbc_dag_shadow,
             )
             .await?
         }
@@ -218,6 +232,7 @@ async fn main() -> Result<()> {
             adversarial_latency_percent,
             consensus: consensus_protocol,
             block_authentication,
+            starfish_rbc_dag_shadow,
             data_dir,
             base_ip,
             storage_backend,
@@ -237,6 +252,7 @@ async fn main() -> Result<()> {
                 adversarial_latency_percent,
                 consensus_protocol,
                 block_authentication,
+                starfish_rbc_dag_shadow,
                 data_dir,
                 base_ip,
                 storage_backend,
@@ -258,6 +274,7 @@ async fn main() -> Result<()> {
             adversarial_latency_percent,
             consensus: consensus_protocol,
             block_authentication,
+            starfish_rbc_dag_shadow,
             duration_secs,
             dissemination_mode,
         } => {
@@ -268,6 +285,7 @@ async fn main() -> Result<()> {
             node_parameters.adversarial_latency = adversarial_latency;
             node_parameters.adversarial_latency_percent = adversarial_latency_percent;
             node_parameters.block_authentication = block_authentication;
+            node_parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
             if consensus_protocol == "starfish-rbc" {
                 node_parameters.refresh_starfish_rbc_protocol_instance();
             }
@@ -412,6 +430,7 @@ async fn local_benchmark(
         parameters.clone()
     };
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
+    let starfish_rbc_dag_shadow_expected = node_parameters.starfish_rbc_dag_shadow;
 
     // Create temporary directories for each validator
     let base_dir = PathBuf::from("local-benchmark");
@@ -498,6 +517,30 @@ async fn local_benchmark(
         handles.push(handle);
     }
 
+    if starfish_rbc_dag_shadow_expected {
+        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if metrics_of_honest_validators
+                    .iter()
+                    .all(|metrics| metrics.starfish_rbc_dag_shadow_comparison_valid.get() == 1)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            for abort_handle in &abort_handles {
+                abort_handle.abort();
+            }
+            fs::remove_dir_all(&base_dir)?;
+            eyre::bail!(
+                "Starfish-RBC-DAG shadow did not become ready on every honest validator; benchmark was not started"
+            );
+        }
+    }
+
     // Run for specified duration
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {
@@ -510,6 +553,8 @@ async fn local_benchmark(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
                 duration_secs,
+                committee_size,
+                starfish_rbc_dag_shadow_expected,
             );
 
             // Abort all tasks
@@ -533,6 +578,8 @@ async fn local_benchmark(
                 metrics_of_honest_validators,
                 reporters_of_honest_validators,
                 duration_secs,
+                committee_size,
+                starfish_rbc_dag_shadow_expected,
             );
             fs::remove_dir_all(base_dir)?;
             Ok(())
@@ -550,6 +597,7 @@ async fn run(
     byzantine_strategy: String,
     consensus_protocol: String,
     block_authentication: Option<String>,
+    starfish_rbc_dag_shadow: bool,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
@@ -560,6 +608,9 @@ async fn run(
     ))?;
     if block_authentication.is_some() {
         public_config.parameters.block_authentication = block_authentication;
+    }
+    if starfish_rbc_dag_shadow {
+        public_config.parameters.starfish_rbc_dag_shadow = true;
     }
     let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{private_config_path}'"
@@ -598,6 +649,7 @@ async fn dryrun(
     adversarial_latency_percent: u32,
     consensus_protocol: String,
     block_authentication: Option<String>,
+    starfish_rbc_dag_shadow: bool,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
     storage_backend: Option<String>,
@@ -640,6 +692,8 @@ async fn dryrun(
     node_parameters.adversarial_latency_percent = adversarial_latency_percent;
     node_parameters.compress_network = compress_network;
     node_parameters.block_authentication = block_authentication;
+    node_parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
+    ensure_starfish_rbc_protocol_instance(&consensus_protocol, &mut node_parameters);
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
     }
@@ -687,6 +741,17 @@ async fn dryrun(
     network_result.expect("Validator crashed");
 
     Ok(())
+}
+
+fn ensure_starfish_rbc_protocol_instance(
+    consensus_protocol: &str,
+    node_parameters: &mut NodeParameters,
+) {
+    if consensus_protocol == "starfish-rbc"
+        && node_parameters.starfish_rbc_protocol_instance.is_none()
+    {
+        node_parameters.refresh_starfish_rbc_protocol_instance();
+    }
 }
 
 fn ipv4_add_offset(base: Ipv4Addr, offset: usize) -> Result<Ipv4Addr> {
@@ -750,7 +815,8 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Operation, ipv4_add_offset};
+    use super::{Args, Operation, ensure_starfish_rbc_protocol_instance, ipv4_add_offset};
+    use starfish_core::config::NodeParameters;
 
     #[test]
     fn ipv4_add_offset_crosses_octet_boundary() {
@@ -806,12 +872,14 @@ mod tests {
             "starfish-rbc",
             "--block-authentication",
             "mac",
+            "--starfish-rbc-dag-shadow",
         ])
         .unwrap();
 
         let Operation::LocalBenchmark {
             consensus,
             block_authentication,
+            starfish_rbc_dag_shadow,
             ..
         } = args.operation
         else {
@@ -819,5 +887,23 @@ mod tests {
         };
         assert_eq!(consensus, "starfish-rbc");
         assert_eq!(block_authentication.as_deref(), Some("mac"));
+        assert!(starfish_rbc_dag_shadow);
+    }
+
+    #[test]
+    fn dry_run_starfish_rbc_configuration_gets_a_protocol_instance() {
+        let mut parameters = NodeParameters {
+            starfish_rbc_dag_shadow: true,
+            ..NodeParameters::default()
+        };
+
+        ensure_starfish_rbc_protocol_instance("starfish-rbc", &mut parameters);
+
+        assert!(
+            parameters
+                .starfish_rbc_protocol_instance
+                .is_some_and(|instance| instance != [0; 32])
+        );
+        assert!(parameters.starfish_rbc_dag_shadow);
     }
 }

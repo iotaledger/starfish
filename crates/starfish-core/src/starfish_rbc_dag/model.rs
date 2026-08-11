@@ -19,6 +19,7 @@ use std::{
 
 use crate::{
     committee::Committee,
+    crypto::Blake3Hasher,
     types::{AuthorityIndex, BlockReference, RoundNumber, Stake},
 };
 
@@ -33,6 +34,9 @@ use super::{
 /// benchmarking decision.
 pub const EXECUTABLE_MODEL_ADMISSION_WINDOW_V1: RoundNumber = 2;
 pub const EXECUTABLE_MODEL_BUFFER_WINDOW_V1: RoundNumber = 4;
+
+const MODEL_LINEAGE_DERIVE_CONTEXT: &str = "starfish-rbc-dag-model-lineage-v1";
+type ModelLineage = [u8; 32];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IngressAuthentication {
@@ -57,6 +61,116 @@ pub enum ModelEffect {
     },
     /// The sequential fast clock opened the next local carrier round.
     CarrierRoundAdvanced(RoundNumber),
+}
+
+/// One proof-critical or externally observable step of a reducer transition.
+///
+/// The order is part of the runtime contract. A caller may plan a transition
+/// on a clone, persist these entries in order, and only then install the
+/// planned model with [`RbcDagModel::commit_plan`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelTraceEvent {
+    /// The first authenticated value selected for a remote carrier slot.
+    AdmissionLocked(BlockReference),
+    /// A locally generated ECHO or READY became slot-global and immutable.
+    LocalPhaseLocked(RbcPhaseStatementV1),
+    /// One exact entry of an enclosing carrier's authenticated phase log is
+    /// about to be applied. Any lock enabled by that entry follows this event.
+    PhaseBatchEntryApplied {
+        outer: BlockReference,
+        index: usize,
+        sender: AuthorityIndex,
+        statement: RbcPhaseStatementV1,
+    },
+    /// The entry at `index` was applied and the durable cursor may advance to
+    /// `next_index`. This always follows the matching application event.
+    PhaseBatchCursorAdvanced {
+        outer: BlockReference,
+        index: usize,
+        next_index: usize,
+    },
+    /// The local author fixed one exact carrier before authorizing its ECHO.
+    LocalCarrierFixed(BlockReference),
+    /// Bracha delivery became slot-global and immutable.
+    DeliveryLocked(BlockReference),
+    /// Existing non-durable output retained in its exact reducer order.
+    Effect(ModelEffect),
+}
+
+/// Ordered typed input from which the executable model can be reconstructed.
+///
+/// `CandidateRetained` is ordinary candidate-only retention. The stricter
+/// `CandidateRecovered` variant additionally requires prior phase evidence,
+/// matching [`RbcDagModel::recover_carrier`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelInputRecord {
+    CandidateRetained(CandidateCarrierV1),
+    CandidateRecovered(CandidateCarrierV1),
+    AuthenticatedIngress(AuthenticatedCarrierV1),
+    LocalCarrierFixed(LocallyAuthenticatedCarrierV1),
+    DataAvailable(BlockReference),
+}
+
+#[derive(Default)]
+struct TransitionLog {
+    trace: Vec<ModelTraceEvent>,
+}
+
+impl TransitionLog {
+    fn proof(&mut self, event: ModelTraceEvent) {
+        self.trace.push(event);
+    }
+
+    fn effect(&mut self, effect: ModelEffect) {
+        self.trace.push(ModelTraceEvent::Effect(effect));
+    }
+
+    fn effects(&self) -> Vec<ModelEffect> {
+        self.trace
+            .iter()
+            .filter_map(|entry| match entry {
+                ModelTraceEvent::Effect(effect) => Some(effect.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A transition evaluated against an immutable model revision.
+///
+/// Fields are deliberately private: the only way to install the planned state
+/// is [`RbcDagModel::commit_plan`], which rejects a stale or foreign base.
+#[derive(Clone)]
+pub struct ModelTransitionPlan {
+    base_revision: u64,
+    base_lineage: ModelLineage,
+    base_context: RbcDagContextV1,
+    base_authority: AuthorityIndex,
+    input: ModelInputRecord,
+    trace: Vec<ModelTraceEvent>,
+    next_model: RbcDagModel,
+}
+
+impl ModelTransitionPlan {
+    /// The typed reducer input must be durably recorded before the ordered
+    /// proof trace is persisted and this plan is committed.
+    pub fn input(&self) -> &ModelInputRecord {
+        &self.input
+    }
+
+    pub fn trace(&self) -> &[ModelTraceEvent] {
+        &self.trace
+    }
+
+    pub fn effects(&self) -> Vec<ModelEffect> {
+        self.trace
+            .iter()
+            .filter_map(|entry| match entry {
+                ModelTraceEvent::Effect(effect) => Some(effect.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Snapshot of the lifecycle predicates for one exact carrier.
@@ -122,6 +236,12 @@ pub enum ModelError {
         previous: Option<BlockReference>,
         proposed: Option<BlockReference>,
     },
+    RevisionOverflow,
+    StaleTransitionPlan {
+        expected_revision: u64,
+        actual_revision: u64,
+    },
+    ForeignTransitionPlan,
 }
 
 impl fmt::Display for ModelError {
@@ -210,6 +330,8 @@ pub struct RbcDagModel {
     committee_id: RbcDagCommitteeId,
     context: RbcDagContextV1,
     own_authority: AuthorityIndex,
+    revision: u64,
+    lineage: ModelLineage,
     local_carrier_round: RoundNumber,
     own_fixed: BTreeMap<RoundNumber, BlockReference>,
     carriers: BTreeMap<BlockReference, CarrierRecord>,
@@ -248,6 +370,8 @@ impl RbcDagModel {
             committee_id,
             context,
             own_authority,
+            revision: 0,
+            lineage: [0; 32],
             local_carrier_round: 1,
             own_fixed: BTreeMap::new(),
             carriers: BTreeMap::new(),
@@ -268,6 +392,127 @@ impl RbcDagModel {
 
     pub fn context(&self) -> RbcDagContextV1 {
         self.context
+    }
+
+    /// Monotonic reducer revision used to reject a plan computed from stale
+    /// state. It is advanced once per successfully applied typed input record.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Evaluate one typed input against a clone without changing live state.
+    /// A durable adapter records [`ModelTransitionPlan::input`] first, then
+    /// [`ModelTransitionPlan::trace`] in order, and commits only after both
+    /// writes are durable.
+    pub fn plan_input(&self, input: ModelInputRecord) -> Result<ModelTransitionPlan, ModelError> {
+        let mut next_model = self.clone();
+        let log = next_model.apply_input_traced(input.clone())?;
+        Ok(ModelTransitionPlan {
+            base_revision: self.revision,
+            base_lineage: self.lineage,
+            base_context: self.context,
+            base_authority: self.own_authority,
+            input,
+            trace: log.trace,
+            next_model,
+        })
+    }
+
+    /// Atomically install a previously planned state after its ordered trace
+    /// has been durably recorded by the caller.
+    pub fn commit_plan(
+        &mut self,
+        plan: ModelTransitionPlan,
+    ) -> Result<Vec<ModelEffect>, ModelError> {
+        if self.context != plan.base_context || self.own_authority != plan.base_authority {
+            return Err(ModelError::ForeignTransitionPlan);
+        }
+        if self.revision != plan.base_revision {
+            return Err(ModelError::StaleTransitionPlan {
+                expected_revision: plan.base_revision,
+                actual_revision: self.revision,
+            });
+        }
+        if self.lineage != plan.base_lineage {
+            return Err(ModelError::ForeignTransitionPlan);
+        }
+        let effects = plan.effects();
+        *self = plan.next_model;
+        Ok(effects)
+    }
+
+    /// Apply one typed record immediately. Runtime adapters that need
+    /// write-ahead durability should use [`Self::plan_input`] and
+    /// [`Self::commit_plan`] instead.
+    pub fn apply_input(&mut self, input: ModelInputRecord) -> Result<Vec<ModelEffect>, ModelError> {
+        self.apply_input_traced(input).map(|log| log.effects())
+    }
+
+    /// Deterministically reconstruct a model by replaying the original typed
+    /// inputs in their recorded order. No round or lock is synthesized.
+    pub fn replay_from_records<I>(
+        committee: Arc<Committee>,
+        own_authority: AuthorityIndex,
+        context: RbcDagContextV1,
+        records: I,
+    ) -> Result<(Self, Vec<ModelTraceEvent>), ModelError>
+    where
+        I: IntoIterator<Item = ModelInputRecord>,
+    {
+        let mut model = Self::new(committee, own_authority, context)?;
+        let mut trace = Vec::new();
+        for record in records {
+            trace.extend(model.apply_input_traced(record)?.trace);
+        }
+        Ok((model, trace))
+    }
+
+    fn apply_input_traced(&mut self, input: ModelInputRecord) -> Result<TransitionLog, ModelError> {
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(ModelError::RevisionOverflow)?;
+        let next_lineage = self.input_lineage(&input);
+        let mut log = TransitionLog::default();
+        match input {
+            ModelInputRecord::CandidateRetained(carrier) => {
+                self.receive_carrier_traced(
+                    carrier,
+                    IngressAuthentication::CandidateOnly,
+                    &mut log,
+                )?;
+            }
+            ModelInputRecord::CandidateRecovered(carrier) => {
+                self.recover_carrier_traced(carrier, &mut log)?;
+            }
+            ModelInputRecord::AuthenticatedIngress(authenticated) => {
+                self.receive_authenticated_traced(authenticated, &mut log)?;
+            }
+            ModelInputRecord::LocalCarrierFixed(authenticated) => {
+                self.start_local_carrier_traced(authenticated, &mut log)?;
+            }
+            ModelInputRecord::DataAvailable(reference) => {
+                self.mark_data_available_traced(reference, &mut log)?;
+            }
+        }
+        self.lineage = next_lineage;
+        self.revision = next_revision;
+        Ok(log)
+    }
+
+    fn input_lineage(&self, input: &ModelInputRecord) -> ModelLineage {
+        let (kind, reference) = match input {
+            ModelInputRecord::CandidateRetained(carrier) => (0, carrier.reference()),
+            ModelInputRecord::CandidateRecovered(carrier) => (1, carrier.reference()),
+            ModelInputRecord::AuthenticatedIngress(carrier) => (2, carrier.reference()),
+            ModelInputRecord::LocalCarrierFixed(carrier) => (3, carrier.reference()),
+            ModelInputRecord::DataAvailable(reference) => (4, *reference),
+        };
+        let mut hasher = Blake3Hasher::new_derive_key(MODEL_LINEAGE_DERIVE_CONTEXT);
+        hasher.update(&self.lineage);
+        hasher.update(&[kind]);
+        update_lineage_reference(&mut hasher, reference);
+        hasher.finalize().into()
     }
 
     /// Current sequential local carrier slot. If `can_create_carrier` is
@@ -353,6 +598,14 @@ impl RbcDagModel {
         &mut self,
         authenticated: LocallyAuthenticatedCarrierV1,
     ) -> Result<Vec<ModelEffect>, ModelError> {
+        self.apply_input(ModelInputRecord::LocalCarrierFixed(authenticated))
+    }
+
+    fn start_local_carrier_traced(
+        &mut self,
+        authenticated: LocallyAuthenticatedCarrierV1,
+        log: &mut TransitionLog,
+    ) -> Result<(), ModelError> {
         self.ensure_locally_authenticated(&authenticated)?;
         let carrier = authenticated.candidate().clone();
         self.ensure_committee(&carrier)?;
@@ -408,6 +661,7 @@ impl RbcDagModel {
         // ECHO is authorized or any embedded phase statement is exposed.
         self.preflight_receive(&carrier)?;
         self.own_fixed.insert(round, reference);
+        log.proof(ModelTraceEvent::LocalCarrierFixed(reference));
         for statement in &expected_phase_batch {
             self.pending_phase_set.remove(statement);
         }
@@ -419,10 +673,9 @@ impl RbcDagModel {
                 (!selected_phase_indices.contains(&index)).then_some(statement)
             })
             .collect();
-        let mut effects =
-            self.apply_received_carrier(carrier, IngressAuthentication::Authenticated);
-        self.maybe_advance_fast_clock(&mut effects);
-        Ok(effects)
+        self.apply_received_carrier(carrier, IngressAuthentication::Authenticated, log);
+        self.maybe_advance_fast_clock(log);
+        Ok(())
     }
 
     /// Stage canonical content without granting optimistic admission or ECHO.
@@ -430,7 +683,7 @@ impl RbcDagModel {
         &mut self,
         carrier: CandidateCarrierV1,
     ) -> Result<Vec<ModelEffect>, ModelError> {
-        self.receive_carrier(carrier, IngressAuthentication::CandidateOnly)
+        self.apply_input(ModelInputRecord::CandidateRetained(carrier))
     }
 
     /// Admit a carrier only through the opaque capability produced by the
@@ -439,25 +692,36 @@ impl RbcDagModel {
         &mut self,
         authenticated: AuthenticatedCarrierV1,
     ) -> Result<Vec<ModelEffect>, ModelError> {
+        self.apply_input(ModelInputRecord::AuthenticatedIngress(authenticated))
+    }
+
+    fn receive_authenticated_traced(
+        &mut self,
+        authenticated: AuthenticatedCarrierV1,
+        log: &mut TransitionLog,
+    ) -> Result<(), ModelError> {
         self.ensure_authenticated(&authenticated)?;
         if authenticated.candidate().header().author() == self.own_authority {
             return Err(ModelError::LocalCarrierRequiresStart(
                 authenticated.candidate().reference(),
             ));
         }
-        self.receive_carrier(
+        self.receive_carrier_traced(
             authenticated.candidate().clone(),
             IngressAuthentication::Authenticated,
+            log,
         )
     }
 
-    fn receive_carrier(
+    fn receive_carrier_traced(
         &mut self,
         carrier: CandidateCarrierV1,
         authentication: IngressAuthentication,
-    ) -> Result<Vec<ModelEffect>, ModelError> {
+        log: &mut TransitionLog,
+    ) -> Result<(), ModelError> {
         self.preflight_receive(&carrier)?;
-        Ok(self.apply_received_carrier(carrier, authentication))
+        self.apply_received_carrier(carrier, authentication, log);
+        Ok(())
     }
 
     fn preflight_receive(&self, carrier: &CandidateCarrierV1) -> Result<(), ModelError> {
@@ -490,16 +754,16 @@ impl RbcDagModel {
         &mut self,
         carrier: CandidateCarrierV1,
         authentication: IngressAuthentication,
-    ) -> Vec<ModelEffect> {
+        log: &mut TransitionLog,
+    ) {
         let reference = carrier.reference();
         self.carriers
             .entry(reference)
             .or_insert_with(|| CarrierRecord::new(carrier));
 
-        let mut effects = Vec::new();
         // Canonical content can satisfy a previously latched recovery even if
         // the receiver-specific authenticator is invalid.
-        self.drive_rbc(reference, &mut effects);
+        self.drive_rbc(reference, log);
 
         if authentication == IngressAuthentication::Authenticated {
             self.carriers
@@ -515,12 +779,11 @@ impl RbcDagModel {
                 }
             };
             if selected && self.in_admission_window(reference.round) {
-                self.promote_authenticated(reference, &mut effects);
+                self.promote_authenticated(reference, log);
             }
         }
-        self.maybe_advance_fast_clock(&mut effects);
-        self.drain_delivered_phase_batches(&mut effects);
-        effects
+        self.maybe_advance_fast_clock(log);
+        self.drain_delivered_phase_batches(log);
     }
 
     /// Accept an exact recovered carrier only after authenticated phase
@@ -529,6 +792,14 @@ impl RbcDagModel {
         &mut self,
         carrier: CandidateCarrierV1,
     ) -> Result<Vec<ModelEffect>, ModelError> {
+        self.apply_input(ModelInputRecord::CandidateRecovered(carrier))
+    }
+
+    fn recover_carrier_traced(
+        &mut self,
+        carrier: CandidateCarrierV1,
+        log: &mut TransitionLog,
+    ) -> Result<(), ModelError> {
         self.ensure_committee(&carrier)?;
         let reference = carrier.reference();
         let key = (reference.round, reference.authority);
@@ -539,7 +810,7 @@ impl RbcDagModel {
         if !expected {
             return Err(ModelError::UnexpectedRecovery(reference));
         }
-        self.receive_carrier(carrier, IngressAuthentication::CandidateOnly)
+        self.receive_carrier_traced(carrier, IngressAuthentication::CandidateOnly, log)
     }
 
     /// Record transaction-data availability established by the external
@@ -550,13 +821,20 @@ impl RbcDagModel {
         &mut self,
         reference: BlockReference,
     ) -> Result<Vec<ModelEffect>, ModelError> {
+        self.apply_input(ModelInputRecord::DataAvailable(reference))
+    }
+
+    fn mark_data_available_traced(
+        &mut self,
+        reference: BlockReference,
+        log: &mut TransitionLog,
+    ) -> Result<(), ModelError> {
         self.carriers
             .get_mut(&reference)
             .ok_or(ModelError::MissingCarrier(reference))?
             .data_available = true;
-        let mut effects = Vec::new();
-        self.drive_prefix(reference.authority, &mut effects);
-        Ok(effects)
+        self.drive_prefix(reference.authority, log);
+        Ok(())
     }
 
     pub fn lifecycle(&self, reference: &BlockReference) -> Option<CarrierLifecycle> {
@@ -593,6 +871,10 @@ impl RbcDagModel {
         &mut self,
         frontier: &[Option<BlockReference>],
     ) -> Result<Vec<BlockReference>, ModelError> {
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(ModelError::RevisionOverflow)?;
         if frontier.len() != self.committee.len() {
             return Err(ModelError::FrontierLength {
                 expected: self.committee.len(),
@@ -622,7 +904,28 @@ impl RbcDagModel {
         }
         self.included_frontier.clone_from_slice(frontier);
         self.included.extend(delta.iter().copied());
+        self.advance_frontier_lineage(frontier);
+        self.revision = next_revision;
         Ok(delta.into_iter().collect())
+    }
+
+    fn advance_frontier_lineage(&mut self, frontier: &[Option<BlockReference>]) {
+        let mut hasher = Blake3Hasher::new_derive_key(MODEL_LINEAGE_DERIVE_CONTEXT);
+        hasher.update(&self.lineage);
+        hasher.update(&[5]);
+        hasher.update(&(frontier.len() as u64).to_be_bytes());
+        for reference in frontier {
+            match reference {
+                Some(reference) => {
+                    hasher.update(&[1]);
+                    update_lineage_reference(&mut hasher, *reference);
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+        self.lineage = hasher.finalize().into();
     }
 
     fn collect_frontier_extension(
@@ -724,7 +1027,7 @@ impl RbcDagModel {
             .or_default()
     }
 
-    fn authorize_local_echo(&mut self, reference: BlockReference, effects: &mut Vec<ModelEffect>) {
+    fn authorize_local_echo(&mut self, reference: BlockReference, log: &mut TransitionLog) {
         let own = self.own_authority;
         let slot = self.rbc_slot_mut(reference);
         if slot.echoed.is_some() {
@@ -737,8 +1040,10 @@ impl RbcDagModel {
             .or_default()
             .echoes
             .insert(own);
-        self.queue_local_phase(RbcPhaseStatementV1::Echo { target: reference });
-        self.drive_rbc(reference, effects);
+        let statement = RbcPhaseStatementV1::Echo { target: reference };
+        log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
+        self.queue_local_phase(statement);
+        self.drive_rbc(reference, log);
     }
 
     fn queue_local_phase(&mut self, statement: RbcPhaseStatementV1) {
@@ -747,14 +1052,14 @@ impl RbcDagModel {
         }
     }
 
-    fn process_phase_batch(&mut self, outer: BlockReference, effects: &mut Vec<ModelEffect>) {
-        self.process_phase_batch_steps(outer, usize::MAX, effects);
-        self.drain_delivered_phase_batches(effects);
+    fn process_phase_batch(&mut self, outer: BlockReference, log: &mut TransitionLog) {
+        self.process_phase_batch_steps(outer, usize::MAX, log);
+        self.drain_delivered_phase_batches(log);
     }
 
-    fn drain_delivered_phase_batches(&mut self, effects: &mut Vec<ModelEffect>) {
+    fn drain_delivered_phase_batches(&mut self, log: &mut TransitionLog) {
         while let Some(outer) = self.pending_delivered_batch_replays.pop_front() {
-            self.process_phase_batch_steps(outer, usize::MAX, effects);
+            self.process_phase_batch_steps(outer, usize::MAX, log);
         }
     }
 
@@ -762,32 +1067,48 @@ impl RbcDagModel {
         &mut self,
         outer: BlockReference,
         maximum_steps: usize,
-        effects: &mut Vec<ModelEffect>,
+        log: &mut TransitionLog,
     ) {
         let mut processed = 0;
         loop {
             if processed == maximum_steps {
                 return;
             }
-            let Some((sender, statement)) = self.carriers.get(&outer).and_then(|record| {
+            let Some((index, sender, statement)) = self.carriers.get(&outer).and_then(|record| {
+                let index = record.phase_batch_cursor;
                 record
                     .carrier
                     .header()
                     .phase_batch()
-                    .get(record.phase_batch_cursor)
+                    .get(index)
                     .copied()
-                    .map(|statement| (record.carrier.header().author(), statement))
+                    .map(|statement| (index, record.carrier.header().author(), statement))
             }) else {
                 return;
             };
             // Applying the statement is idempotent. Advance the persisted
             // cursor only afterwards, so a crash between the two replays the
             // same statement rather than skipping the unprocessed tail.
-            self.record_phase(sender, statement, effects);
-            self.carriers
-                .get_mut(&outer)
-                .expect("the outer carrier remains pinned")
-                .phase_batch_cursor += 1;
+            log.proof(ModelTraceEvent::PhaseBatchEntryApplied {
+                outer,
+                index,
+                sender,
+                statement,
+            });
+            self.record_phase(sender, statement, log);
+            let next_index = {
+                let record = self
+                    .carriers
+                    .get_mut(&outer)
+                    .expect("the outer carrier remains pinned");
+                record.phase_batch_cursor += 1;
+                record.phase_batch_cursor
+            };
+            log.proof(ModelTraceEvent::PhaseBatchCursorAdvanced {
+                outer,
+                index,
+                next_index,
+            });
             processed += 1;
         }
     }
@@ -796,7 +1117,7 @@ impl RbcDagModel {
         &mut self,
         sender: AuthorityIndex,
         statement: RbcPhaseStatementV1,
-        effects: &mut Vec<ModelEffect>,
+        log: &mut TransitionLog,
     ) {
         if !self.committee.known_authority(sender) {
             return;
@@ -838,10 +1159,10 @@ impl RbcDagModel {
                 candidate.readies.insert(sender);
             }
         }
-        self.drive_rbc(target, effects);
+        self.drive_rbc(target, log);
     }
 
-    fn drive_rbc(&mut self, target: BlockReference, effects: &mut Vec<ModelEffect>) {
+    fn drive_rbc(&mut self, target: BlockReference, log: &mut TransitionLog) {
         let slot_key = (target.round, target.authority);
         if !self
             .rbc_slots
@@ -908,7 +1229,7 @@ impl RbcDagModel {
                         .unwrap_or_default()
                         .into_iter()
                         .collect();
-                    effects.push(ModelEffect::NeedCarrier { target, holders });
+                    log.effect(ModelEffect::NeedCarrier { target, holders });
                     break;
                 }
                 RbcAction::SendReady => {
@@ -921,7 +1242,9 @@ impl RbcDagModel {
                         .or_default()
                         .readies
                         .insert(own);
-                    self.queue_local_phase(RbcPhaseStatementV1::Ready { target });
+                    let statement = RbcPhaseStatementV1::Ready { target };
+                    log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
+                    self.queue_local_phase(statement);
                 }
                 RbcAction::Deliver => {
                     self.rbc_slot_mut(target).delivered = Some(target);
@@ -930,16 +1253,17 @@ impl RbcDagModel {
                         .get_mut(&target)
                         .expect("delivery requires exact canonical carrier content");
                     record.delivered = true;
-                    effects.push(ModelEffect::Delivered(target));
+                    log.proof(ModelTraceEvent::DeliveryLocked(target));
+                    log.effect(ModelEffect::Delivered(target));
                     self.pending_delivered_batch_replays.push_back(target);
-                    self.drive_prefix(target.authority, effects);
+                    self.drive_prefix(target.authority, log);
                 }
                 RbcAction::None => break,
             }
         }
     }
 
-    fn maybe_advance_fast_clock(&mut self, effects: &mut Vec<ModelEffect>) {
+    fn maybe_advance_fast_clock(&mut self, log: &mut TransitionLog) {
         let round = self.local_carrier_round;
         if !self.own_fixed.contains_key(&round) {
             return;
@@ -955,8 +1279,8 @@ impl RbcDagModel {
             return;
         }
         self.local_carrier_round = round.saturating_add(1);
-        effects.push(ModelEffect::CarrierRoundAdvanced(self.local_carrier_round));
-        self.promote_buffered_window(effects);
+        log.effect(ModelEffect::CarrierRoundAdvanced(self.local_carrier_round));
+        self.promote_buffered_window(log);
     }
 
     fn in_admission_window(&self, round: RoundNumber) -> bool {
@@ -966,7 +1290,7 @@ impl RbcDagModel {
                 .saturating_add(EXECUTABLE_MODEL_ADMISSION_WINDOW_V1)
     }
 
-    fn promote_authenticated(&mut self, reference: BlockReference, effects: &mut Vec<ModelEffect>) {
+    fn promote_authenticated(&mut self, reference: BlockReference, log: &mut TransitionLog) {
         let slot_key = (reference.round, reference.authority);
         if self.authenticated_by_slot.get(&slot_key) != Some(&reference)
             || self
@@ -981,11 +1305,12 @@ impl RbcDagModel {
             .get_mut(&reference)
             .expect("an authenticated carrier remains staged")
             .admitted = true;
-        self.authorize_local_echo(reference, effects);
-        self.process_phase_batch(reference, effects);
+        log.proof(ModelTraceEvent::AdmissionLocked(reference));
+        self.authorize_local_echo(reference, log);
+        self.process_phase_batch(reference, log);
     }
 
-    fn promote_buffered_window(&mut self, effects: &mut Vec<ModelEffect>) {
+    fn promote_buffered_window(&mut self, log: &mut TransitionLog) {
         let eligible: Vec<_> = self
             .authenticated_by_slot
             .values()
@@ -993,11 +1318,11 @@ impl RbcDagModel {
             .filter(|reference| self.in_admission_window(reference.round))
             .collect();
         for reference in eligible {
-            self.promote_authenticated(reference, effects);
+            self.promote_authenticated(reference, log);
         }
     }
 
-    fn drive_prefix(&mut self, authority: AuthorityIndex, effects: &mut Vec<ModelEffect>) {
+    fn drive_prefix(&mut self, authority: AuthorityIndex, log: &mut TransitionLog) {
         loop {
             let Some(current_tip) = self.prefix_tips.get(authority as usize).copied() else {
                 return;
@@ -1021,12 +1346,18 @@ impl RbcDagModel {
                 .expect("delivered carrier exists")
                 .prefix_closed = true;
             self.prefix_tips[authority as usize] = next;
-            effects.push(ModelEffect::PrefixAdvanced {
+            log.effect(ModelEffect::PrefixAdvanced {
                 authority,
                 tip: next,
             });
         }
     }
+}
+
+fn update_lineage_reference(hasher: &mut Blake3Hasher, reference: BlockReference) {
+    hasher.update(&reference.authority.to_be_bytes());
+    hasher.update(&reference.round.to_be_bytes());
+    hasher.update(reference.digest.as_array());
 }
 
 #[cfg(test)]
@@ -1233,6 +1564,345 @@ mod tests {
     }
 
     #[test]
+    fn planned_authenticated_ingress_locks_admission_before_echo() {
+        let committee = committee(4);
+        let model = model(Arc::clone(&committee), 3);
+        let (own_prev, weak_parents) = genesis_parents(&committee, 0);
+        let carrier =
+            candidate(&committee, 0, 1, own_prev, weak_parents, Vec::new(), 0xD0).unwrap();
+        let target = carrier.reference();
+        let authenticated = authenticate_for(&committee, &carrier, 3);
+        let plan = model
+            .plan_input(ModelInputRecord::AuthenticatedIngress(authenticated))
+            .unwrap();
+
+        let admission = plan
+            .trace()
+            .iter()
+            .position(|event| *event == ModelTraceEvent::AdmissionLocked(target))
+            .unwrap();
+        let echo = plan
+            .trace()
+            .iter()
+            .position(|event| {
+                *event == ModelTraceEvent::LocalPhaseLocked(RbcPhaseStatementV1::Echo { target })
+            })
+            .unwrap();
+        assert!(admission < echo);
+        assert_eq!(model.revision(), 0);
+        assert!(model.lifecycle(&target).is_none());
+    }
+
+    #[test]
+    fn phase_application_precedes_ready_and_ready_precedes_delivery() {
+        let committee = committee(4);
+        let mut model = model(Arc::clone(&committee), 3);
+        let (own_prev, weak_parents) = genesis_parents(&committee, 0);
+        let target_carrier =
+            candidate(&committee, 0, 1, own_prev, weak_parents, Vec::new(), 0xD1).unwrap();
+        let target = target_carrier.reference();
+        model.stage_candidate(target_carrier).unwrap();
+        // One remote READY is below V. The enclosing carrier supplies the
+        // second; the resulting local READY is then the third vote and delivers.
+        let mut setup = TransitionLog::default();
+        model.record_phase(0, RbcPhaseStatementV1::Ready { target }, &mut setup);
+
+        let outer = candidate(
+            &committee,
+            1,
+            2,
+            BlockReference::new_test(1, 1),
+            vec![
+                BlockReference::new_test(0, 1),
+                BlockReference::new_test(2, 1),
+            ],
+            vec![RbcPhaseStatementV1::Ready { target }],
+            0xD2,
+        )
+        .unwrap();
+        let outer_reference = outer.reference();
+        let authenticated = authenticate_for(&committee, &outer, 3);
+        let plan = model
+            .plan_input(ModelInputRecord::AuthenticatedIngress(authenticated))
+            .unwrap();
+        let trace = plan.trace();
+
+        let applied = trace
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ModelTraceEvent::PhaseBatchEntryApplied {
+                        outer,
+                        index: 0,
+                        sender: 1,
+                        statement: RbcPhaseStatementV1::Ready { target: actual },
+                    } if *outer == outer_reference && *actual == target
+                )
+            })
+            .unwrap();
+        let ready = trace
+            .iter()
+            .position(|event| {
+                *event == ModelTraceEvent::LocalPhaseLocked(RbcPhaseStatementV1::Ready { target })
+            })
+            .unwrap();
+        let delivery = trace
+            .iter()
+            .position(|event| *event == ModelTraceEvent::DeliveryLocked(target))
+            .unwrap();
+        let cursor = trace
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ModelTraceEvent::PhaseBatchCursorAdvanced {
+                        outer,
+                        index: 0,
+                        next_index: 1,
+                    } if *outer == outer_reference
+                )
+            })
+            .unwrap();
+        assert!(applied < ready);
+        assert!(ready < delivery);
+        assert!(delivery < cursor);
+    }
+
+    #[test]
+    fn delivery_lock_precedes_replay_of_the_delivered_carrier_batch() {
+        let committee = committee(4);
+        let mut model = model(Arc::clone(&committee), 3);
+        let replay_target = BlockReference::new_test(2, 1);
+        let target_carrier = candidate(
+            &committee,
+            0,
+            2,
+            BlockReference::new_test(0, 1),
+            vec![
+                BlockReference::new_test(1, 1),
+                BlockReference::new_test(2, 1),
+            ],
+            vec![RbcPhaseStatementV1::Echo {
+                target: replay_target,
+            }],
+            0xD3,
+        )
+        .unwrap();
+        let target = target_carrier.reference();
+        model.stage_candidate(target_carrier).unwrap();
+        let mut setup = TransitionLog::default();
+        model.record_phase(0, RbcPhaseStatementV1::Ready { target }, &mut setup);
+
+        let outer = candidate(
+            &committee,
+            1,
+            3,
+            BlockReference::new_test(1, 2),
+            vec![
+                BlockReference::new_test(0, 2),
+                BlockReference::new_test(2, 2),
+            ],
+            vec![RbcPhaseStatementV1::Ready { target }],
+            0xD4,
+        )
+        .unwrap();
+        let authenticated = authenticate_for(&committee, &outer, 3);
+        let plan = model
+            .plan_input(ModelInputRecord::AuthenticatedIngress(authenticated))
+            .unwrap();
+        let trace = plan.trace();
+        let delivery = trace
+            .iter()
+            .position(|event| *event == ModelTraceEvent::DeliveryLocked(target))
+            .unwrap();
+        let replay = trace
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ModelTraceEvent::PhaseBatchEntryApplied {
+                        outer,
+                        index: 0,
+                        sender: 0,
+                        statement: RbcPhaseStatementV1::Echo { target: actual },
+                    } if *outer == target && *actual == replay_target
+                )
+            })
+            .unwrap();
+        assert!(delivery < replay);
+    }
+
+    #[test]
+    fn planned_transition_is_rollback_safe_and_rejects_stale_or_divergent_commits() {
+        let committee = committee(4);
+        let mut live = model(Arc::clone(&committee), 3);
+        let (own_prev, weak_parents) = genesis_parents(&committee, 0);
+        let carrier =
+            candidate(&committee, 0, 1, own_prev, weak_parents, Vec::new(), 0xD5).unwrap();
+        let reference = carrier.reference();
+        let authenticated = authenticate_for(&committee, &carrier, 3);
+        let plan = live
+            .plan_input(ModelInputRecord::AuthenticatedIngress(
+                authenticated.clone(),
+            ))
+            .unwrap();
+
+        // Planning and dropping a clone cannot expose any live transition.
+        assert_eq!(live.revision(), 0);
+        assert!(live.lifecycle(&reference).is_none());
+        let mut committed = live.clone();
+        committed.commit_plan(plan.clone()).unwrap();
+        assert_eq!(committed.revision(), 1);
+        assert!(committed.lifecycle(&reference).unwrap().admitted);
+        assert!(live.lifecycle(&reference).is_none());
+
+        // Any intervening successful input invalidates the old base revision.
+        live.stage_candidate(carrier).unwrap();
+        assert_eq!(live.revision(), 1);
+        assert_eq!(
+            live.commit_plan(plan),
+            Err(ModelError::StaleTransitionPlan {
+                expected_revision: 0,
+                actual_revision: 1,
+            })
+        );
+        let lifecycle = live.lifecycle(&reference).unwrap();
+        assert!(!lifecycle.authenticated);
+        assert!(!lifecycle.admitted);
+
+        // Equal revision numbers do not make independently evolved clones
+        // interchangeable: their private lineages bind a plan to its exact
+        // base state.
+        let divergent_plan = committed
+            .plan_input(ModelInputRecord::DataAvailable(reference))
+            .unwrap();
+        assert_eq!(
+            live.commit_plan(divergent_plan),
+            Err(ModelError::ForeignTransitionPlan)
+        );
+        let lifecycle = live.lifecycle(&reference).unwrap();
+        assert!(!lifecycle.authenticated);
+        assert!(!lifecycle.data_available);
+    }
+
+    #[test]
+    fn ordered_typed_replay_reconstructs_rounds_and_local_locks() {
+        let committee = committee(4);
+        let context = context(&committee);
+        let mut live = RbcDagModel::new(Arc::clone(&committee), 3, context).unwrap();
+        let mut records = Vec::new();
+        let mut references = Vec::new();
+
+        let (own_prev, weak_parents) = live.local_parent_set().unwrap();
+        let local_one = candidate(
+            &committee,
+            3,
+            1,
+            own_prev,
+            weak_parents,
+            live.pending_phase_batch(),
+            0xE0,
+        )
+        .unwrap();
+        let local_one_record =
+            ModelInputRecord::LocalCarrierFixed(authenticate_local(&committee, &local_one));
+        live.apply_input(local_one_record.clone()).unwrap();
+        records.push(local_one_record);
+        references.push(local_one.reference());
+
+        let mut round_one = BTreeMap::new();
+        for (author, marker) in [(0, 0xE1), (1, 0xE2)] {
+            let (own_prev, weak_parents) = genesis_parents(&committee, author);
+            let carrier = candidate(
+                &committee,
+                author,
+                1,
+                own_prev,
+                weak_parents,
+                Vec::new(),
+                marker,
+            )
+            .unwrap();
+            if author == 0 {
+                let retained = ModelInputRecord::CandidateRetained(carrier.clone());
+                live.apply_input(retained.clone()).unwrap();
+                records.push(retained);
+            }
+            let ingress =
+                ModelInputRecord::AuthenticatedIngress(authenticate_for(&committee, &carrier, 3));
+            live.apply_input(ingress.clone()).unwrap();
+            records.push(ingress);
+            references.push(carrier.reference());
+            round_one.insert(author, carrier);
+        }
+        assert_eq!(live.local_carrier_round(), 2);
+
+        let (own_prev, weak_parents) = live.local_parent_set().unwrap();
+        let local_two = candidate(
+            &committee,
+            3,
+            2,
+            own_prev,
+            weak_parents,
+            live.pending_phase_batch(),
+            0xE3,
+        )
+        .unwrap();
+        let local_two_record =
+            ModelInputRecord::LocalCarrierFixed(authenticate_local(&committee, &local_two));
+        live.apply_input(local_two_record.clone()).unwrap();
+        records.push(local_two_record);
+        references.push(local_two.reference());
+
+        for (author, marker, other) in [(0, 0xE4, 1), (1, 0xE5, 0)] {
+            let carrier = candidate(
+                &committee,
+                author,
+                2,
+                round_one[&author].reference(),
+                vec![round_one[&other].reference(), local_one.reference()],
+                Vec::new(),
+                marker,
+            )
+            .unwrap();
+            let ingress =
+                ModelInputRecord::AuthenticatedIngress(authenticate_for(&committee, &carrier, 3));
+            live.apply_input(ingress.clone()).unwrap();
+            records.push(ingress);
+            references.push(carrier.reference());
+        }
+        assert_eq!(live.local_carrier_round(), 3);
+
+        let (replayed, trace) =
+            RbcDagModel::replay_from_records(Arc::clone(&committee), 3, context, records.clone())
+                .unwrap();
+        assert!(!trace.is_empty());
+        assert_eq!(replayed.revision(), records.len() as u64);
+        assert_eq!(replayed.lineage, live.lineage);
+        assert_eq!(replayed.local_carrier_round, live.local_carrier_round);
+        assert_eq!(replayed.own_fixed, live.own_fixed);
+        assert_eq!(replayed.authenticated_by_slot, live.authenticated_by_slot);
+        assert_eq!(replayed.admitted_by_slot, live.admitted_by_slot);
+        assert_eq!(replayed.rbc_slots, live.rbc_slots);
+        assert_eq!(replayed.pending_phases, live.pending_phases);
+        assert_eq!(replayed.pending_phase_set, live.pending_phase_set);
+        for reference in references {
+            assert_eq!(replayed.lifecycle(&reference), live.lifecycle(&reference));
+        }
+
+        // Recovery is sequential: retaining only the round-two local record
+        // cannot synthesize round one or jump the local carrier clock.
+        assert!(matches!(
+            RbcDagModel::replay_from_records(committee, 3, context, [records[4].clone()],),
+            Err(ModelError::UnexpectedLocalRound {
+                expected: 1,
+                actual: 2,
+            })
+        ));
+    }
+
+    #[test]
     fn phase_backlog_exposes_only_a_bounded_fifo_prefix() {
         let committee = committee(4);
         let mut model = model(committee, 0);
@@ -1302,10 +1972,10 @@ mod tests {
         sender: AuthorityIndex,
         statement: RbcPhaseStatementV1,
     ) -> Vec<ModelEffect> {
-        let mut effects = Vec::new();
-        model.record_phase(sender, statement, &mut effects);
-        model.drain_delivered_phase_batches(&mut effects);
-        effects
+        let mut log = TransitionLog::default();
+        model.record_phase(sender, statement, &mut log);
+        model.drain_delivered_phase_batches(&mut log);
+        log.effects()
     }
 
     fn force_deliver(model: &mut RbcDagModel, carrier: CandidateCarrierV1) {
@@ -1785,7 +2455,7 @@ mod tests {
         model.stage_candidate(outer).unwrap();
 
         let mut uninterrupted = model.clone();
-        uninterrupted.process_phase_batch(outer_ref, &mut Vec::new());
+        uninterrupted.process_phase_batch(outer_ref, &mut TransitionLog::default());
 
         // Model a crash after the first idempotent statement was persisted but
         // before the outer batch cursor was advanced.
@@ -1793,9 +2463,9 @@ mod tests {
         restarted.record_phase(
             0,
             RbcPhaseStatementV1::Echo { target: first },
-            &mut Vec::new(),
+            &mut TransitionLog::default(),
         );
-        restarted.process_phase_batch(outer_ref, &mut Vec::new());
+        restarted.process_phase_batch(outer_ref, &mut TransitionLog::default());
 
         assert_eq!(restarted.rbc_slots, uninterrupted.rbc_slots);
         assert_eq!(restarted.pending_phases, uninterrupted.pending_phases);
@@ -1855,8 +2525,7 @@ mod tests {
         model
             .pending_delivered_batch_replays
             .push_back(*references.last().unwrap());
-        let mut effects = Vec::new();
-        model.drain_delivered_phase_batches(&mut effects);
+        model.drain_delivered_phase_batches(&mut TransitionLog::default());
 
         assert!(model.pending_delivered_batch_replays.is_empty());
         assert_eq!(model.delivered(0, 1), Some(references[0]));

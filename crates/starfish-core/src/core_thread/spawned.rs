@@ -504,7 +504,16 @@ mod tests {
             recovered,
             None,
         );
-        let syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None, None);
+        let syncer = Syncer::new(
+            core,
+            false,
+            NoopCommitObserver,
+            metrics,
+            None,
+            None,
+            None,
+            None,
+        );
         CoreThreadDispatcher::start(syncer)
     }
 

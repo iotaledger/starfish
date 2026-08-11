@@ -398,6 +398,23 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         (node_count as f64 * Self::MAX_TOLERATED_BOOT_FAILURE_RATIO).floor() as usize
     }
 
+    fn max_tolerated_boot_failures_for(
+        parameters: &BenchmarkParameters,
+        node_count: usize,
+    ) -> usize {
+        if parameters.consensus_protocol == "starfish-rbc"
+            && parameters.node_parameters.starfish_rbc_dag_shadow
+        {
+            // A partial shadow committee cannot produce a complete paired
+            // comparison. Pre-declared startup faults are already excluded
+            // through `skipped_node_ids`; every remaining participant must
+            // finish background replay before measurement begins.
+            0
+        } else {
+            Self::max_tolerated_boot_failures(node_count)
+        }
+    }
+
     fn apt_get_noninteractive(args: &str) -> String {
         format!("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get {args}")
     }
@@ -573,7 +590,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         }
 
         let timeout = Self::node_boot_timeout(total);
-        let max_failures = Self::max_tolerated_boot_failures(total);
+        let max_failures = Self::max_tolerated_boot_failures_for(parameters, total);
         let start = Instant::now();
         display::status(format!("ready 0/{total}"));
 
@@ -1076,6 +1093,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let final_metrics_commands = self
             .protocol_commands
             .nodes_final_metrics_command(nodes.clone(), parameters);
+        let initial_live_scraper_ids: HashSet<_> = nodes
+            .iter()
+            .filter(|node| !killed_node_ids.contains(&node.id))
+            .filter_map(|node| node_indices.get(&node.id).copied())
+            .collect();
+        let shadow_final_scrape_required = parameters.consensus_protocol == "starfish-rbc"
+            && parameters.node_parameters.starfish_rbc_dag_shadow;
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
@@ -1165,6 +1189,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let mut final_instances = final_metrics_commands;
         final_instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+        let mut fresh_final_shadow_scrapers = HashSet::new();
         if !final_instances.is_empty() {
             let expected_nodes = final_instances.len();
             let stdio = self
@@ -1175,35 +1200,56 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                 )
                 .await;
 
-            if stdio.is_empty() {
+            if stdio.is_empty() && !shadow_final_scrape_required {
                 display::warn(
                     "Final metrics scrape failed for all reachable nodes; \
                      reporting the last successful samples",
                 );
             } else {
-                let successful_ids: HashSet<_> = stdio
-                    .iter()
-                    .map(|(instance, _)| instance.id.clone())
-                    .collect();
-                let missed = expected_nodes.saturating_sub(successful_ids.len());
-                if missed != 0 {
-                    display::warn(format!(
-                        "Final metrics scrape missed {missed} of {expected_nodes} nodes; \
-                         reporting partial results",
-                    ));
+                if !shadow_final_scrape_required {
+                    let successful_ids: HashSet<_> = stdio
+                        .iter()
+                        .map(|(instance, _)| instance.id.clone())
+                        .collect();
+                    let missed = expected_nodes.saturating_sub(successful_ids.len());
+                    if missed != 0 {
+                        display::warn(format!(
+                            "Final metrics scrape missed {missed} of {expected_nodes} nodes; \
+                             reporting partial results",
+                        ));
+                    }
                 }
-
                 for (instance, (stdout, _stderr)) in &stdio {
                     let Some(i) = node_indices.get(&instance.id).copied() else {
                         continue;
                     };
-                    for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                    let parsed = Measurement::from_prometheus::<P>(stdout);
+                    if parsed.contains_key("starfish_rbc_dag_shadow_comparison_valid") {
+                        fresh_final_shadow_scrapers.insert(i);
+                    }
+                    for (label, measurement) in parsed {
                         aggregator.add(i, label, measurement);
                     }
                 }
-                aggregator.save(&self.suite_results_dir);
             }
         }
+        if shadow_final_scrape_required {
+            let missed = initial_live_scraper_ids
+                .difference(&fresh_final_shadow_scrapers)
+                .count();
+            if missed != 0 {
+                display::warn(format!(
+                    "Final metrics scrape was missing or lacked shadow validity evidence for \
+                     {missed} of {} initially-live nodes; missing final evidence invalidates stale \
+                     shadow results",
+                    initial_live_scraper_ids.len(),
+                ));
+            }
+            for scraper_id in initial_live_scraper_ids.difference(&fresh_final_shadow_scrapers) {
+                aggregator.mark_shadow_final_scrape_missing(*scraper_id);
+            }
+        }
+        aggregator.save(&self.suite_results_dir);
 
         display::done();
         Ok(aggregator)
@@ -1379,6 +1425,13 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
         let final_metrics_commands = self
             .protocol_commands
             .nodes_final_metrics_command(nodes.clone(), parameters);
+        let initial_live_scraper_ids: HashSet<_> = nodes
+            .iter()
+            .filter(|node| !killed_node_ids.contains(&node.id))
+            .filter_map(|node| node_indices.get(&node.id).copied())
+            .collect();
+        let shadow_final_scrape_required = parameters.consensus_protocol == "starfish-rbc"
+            && parameters.node_parameters.starfish_rbc_dag_shadow;
 
         let mut aggregator = MeasurementsCollection::new(parameters.clone());
         aggregator.set_ready_nodes_at_boot(nodes.len().saturating_sub(killed_node_ids.len()));
@@ -1759,7 +1812,9 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 
         let mut final_instances = final_metrics_commands;
         final_instances.retain(|(instance, _)| !killed_node_ids.contains(&instance.id));
+        let mut fresh_final_shadow_scrapers = HashSet::new();
         if !final_instances.is_empty() {
+            let expected_nodes = final_instances.len();
             let stdio = self
                 .execute_per_instance_best_effort(
                     final_instances,
@@ -1767,16 +1822,54 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
                     "Final stability metrics scrape",
                 )
                 .await;
+            if stdio.is_empty() && !shadow_final_scrape_required {
+                display::warn(
+                    "Final stability metrics scrape failed for all reachable nodes; \
+                     reporting the last successful samples",
+                );
+            } else if !shadow_final_scrape_required {
+                let successful_ids: HashSet<_> = stdio
+                    .iter()
+                    .map(|(instance, _)| instance.id.clone())
+                    .collect();
+                let missed = expected_nodes.saturating_sub(successful_ids.len());
+                if missed != 0 {
+                    display::warn(format!(
+                        "Final stability metrics scrape missed {missed} of {expected_nodes} nodes; \
+                         reporting partial results",
+                    ));
+                }
+            }
             for (instance, (stdout, _stderr)) in &stdio {
                 let Some(i) = node_indices.get(&instance.id).copied() else {
                     continue;
                 };
-                for (label, measurement) in Measurement::from_prometheus::<P>(stdout) {
+                let parsed = Measurement::from_prometheus::<P>(stdout);
+                if parsed.contains_key("starfish_rbc_dag_shadow_comparison_valid") {
+                    fresh_final_shadow_scrapers.insert(i);
+                }
+                for (label, measurement) in parsed {
                     aggregator.add(i, label, measurement);
                 }
             }
-            aggregator.save(&self.suite_results_dir);
         }
+        if shadow_final_scrape_required {
+            let missed = initial_live_scraper_ids
+                .difference(&fresh_final_shadow_scrapers)
+                .count();
+            if missed != 0 {
+                display::warn(format!(
+                    "Final stability scrape was missing or lacked shadow validity evidence for \
+                     {missed} of {} initially-live nodes; missing final evidence invalidates stale \
+                     shadow results",
+                    initial_live_scraper_ids.len(),
+                ));
+            }
+            for scraper_id in initial_live_scraper_ids.difference(&fresh_final_shadow_scrapers) {
+                aggregator.mark_shadow_final_scrape_missing(*scraper_id);
+            }
+        }
+        aggregator.save(&self.suite_results_dir);
 
         display::done();
         Ok((aggregator, report))
@@ -2201,6 +2294,7 @@ impl<P: ProtocolCommands + ProtocolMetrics> Orchestrator<P> {
 #[cfg(test)]
 mod tests {
     use super::Orchestrator;
+    use crate::benchmark::BenchmarkParameters;
     use crate::protocol::starfish::StarfishProtocol;
     use crate::{client::Instance, faults::FaultsType};
 
@@ -2229,6 +2323,18 @@ mod tests {
         assert_eq!(
             Orchestrator::<StarfishProtocol>::max_tolerated_boot_failures(400),
             40
+        );
+    }
+
+    #[test]
+    fn shadow_readiness_requires_every_non_skipped_validator() {
+        let mut parameters = BenchmarkParameters::new_for_tests();
+        parameters.consensus_protocol = "starfish-rbc".to_owned();
+        parameters.node_parameters.starfish_rbc_dag_shadow = true;
+
+        assert_eq!(
+            Orchestrator::<StarfishProtocol>::max_tolerated_boot_failures_for(&parameters, 10),
+            0
         );
     }
 

@@ -8,7 +8,7 @@
 //! decoding. Callers validate canonical bytes before journaling them; the
 //! reducer pins the exact byte strings and rejects any later alternative.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 use crate::types::{AuthorityIndex, BlockReference, RoundNumber};
 
@@ -1010,6 +1010,10 @@ pub enum JournalErrorV1 {
         outer: BlockReference,
         index: usize,
     },
+    StaleValidatedBatch {
+        expected_events: usize,
+        actual_events: usize,
+    },
 }
 
 impl fmt::Display for JournalErrorV1 {
@@ -1026,7 +1030,17 @@ pub struct WriteAheadJournalV1 {
     context: RbcDagContextV1,
     own_authority: AuthorityIndex,
     durable_events: Vec<JournalEventV1>,
-    snapshot: JournalSnapshotV1,
+    snapshot: Arc<JournalSnapshotV1>,
+}
+
+/// A transition checked against one exact journal prefix. Keeping only the
+/// newly appended events avoids cloning the complete durable history on every
+/// live shadow input.
+pub(crate) struct ValidatedJournalBatchV1 {
+    base_event_count: usize,
+    base_snapshot: Arc<JournalSnapshotV1>,
+    events: Vec<JournalEventV1>,
+    snapshot: Arc<JournalSnapshotV1>,
 }
 
 impl WriteAheadJournalV1 {
@@ -1035,7 +1049,7 @@ impl WriteAheadJournalV1 {
             context,
             own_authority,
             durable_events: Vec::new(),
-            snapshot: JournalSnapshotV1::new(context, own_authority),
+            snapshot: Arc::new(JournalSnapshotV1::new(context, own_authority)),
         }
     }
 
@@ -1043,10 +1057,43 @@ impl WriteAheadJournalV1 {
     /// durable and visible. A real backend maps this boundary to its durable
     /// transaction commit.
     pub fn append(&mut self, event: JournalEventV1) -> Result<(), JournalErrorV1> {
-        let mut next = self.snapshot.clone();
+        let mut next = self.snapshot.as_ref().clone();
         next.apply(&event)?;
         self.durable_events.push(event);
-        self.snapshot = next;
+        self.snapshot = Arc::new(next);
+        Ok(())
+    }
+
+    pub(crate) fn validate_batch(
+        &self,
+        events: Vec<JournalEventV1>,
+    ) -> Result<ValidatedJournalBatchV1, JournalErrorV1> {
+        let mut snapshot = self.snapshot.as_ref().clone();
+        for event in &events {
+            snapshot.apply(event)?;
+        }
+        Ok(ValidatedJournalBatchV1 {
+            base_event_count: self.durable_events.len(),
+            base_snapshot: Arc::clone(&self.snapshot),
+            events,
+            snapshot: Arc::new(snapshot),
+        })
+    }
+
+    pub(crate) fn commit_validated_batch(
+        &mut self,
+        batch: ValidatedJournalBatchV1,
+    ) -> Result<(), JournalErrorV1> {
+        if self.durable_events.len() != batch.base_event_count
+            || !Arc::ptr_eq(&self.snapshot, &batch.base_snapshot)
+        {
+            return Err(JournalErrorV1::StaleValidatedBatch {
+                expected_events: batch.base_event_count,
+                actual_events: self.durable_events.len(),
+            });
+        }
+        self.durable_events.extend(batch.events);
+        self.snapshot = batch.snapshot;
         Ok(())
     }
 
@@ -1070,7 +1117,7 @@ impl WriteAheadJournalV1 {
     }
 
     pub fn snapshot(&self) -> &JournalSnapshotV1 {
-        &self.snapshot
+        self.snapshot.as_ref()
     }
 
     /// Rebuild volatile state in exact durable order.
@@ -1095,7 +1142,7 @@ impl WriteAheadJournalV1 {
             context,
             own_authority,
             durable_events,
-            snapshot,
+            snapshot: Arc::new(snapshot),
         })
     }
 }
@@ -1369,6 +1416,121 @@ mod tests {
         after.append(event).unwrap();
         let after = after.restart().unwrap();
         assert!(assertion(after.snapshot()));
+    }
+
+    #[test]
+    fn validated_batch_matches_sequential_append_and_restart() {
+        let mut batched = journal();
+        let mut sequential = batched.clone();
+        let own_candidate = candidate(1, 1, 0x0A, Vec::new(), None);
+        let events = vec![
+            outbound_content_event(&batched, &own_candidate),
+            fix_event(&batched, own_candidate.reference()),
+        ];
+
+        let batch = batched.validate_batch(events.clone()).unwrap();
+        batched.commit_validated_batch(batch).unwrap();
+        for event in events {
+            sequential.append(event).unwrap();
+        }
+
+        assert_eq!(batched.durable_events(), sequential.durable_events());
+        assert_eq!(batched.snapshot(), sequential.snapshot());
+        assert_eq!(batched.restart().unwrap(), sequential.restart().unwrap());
+    }
+
+    #[test]
+    fn failed_batch_validation_leaves_the_journal_unchanged() {
+        let journal = journal();
+        let before = journal.clone();
+        let own = candidate(1, 1, 0x0B, Vec::new(), None).reference();
+
+        let result = journal.validate_batch(vec![fix_event(&journal, own)]);
+
+        assert!(matches!(
+            result,
+            Err(JournalErrorV1::OutboundContentNotPersisted(reference)) if reference == own
+        ));
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn validated_batch_rejects_an_intervening_append_without_mutation() {
+        let mut journal = journal();
+        let planned = candidate(0, 1, 0x0C, Vec::new(), None);
+        let intervening = candidate(2, 1, 0x0D, Vec::new(), None);
+        let batch = journal
+            .validate_batch(vec![JournalEventV1::RetainCandidateContent {
+                context: journal.context,
+                candidate: planned,
+            }])
+            .unwrap();
+        journal
+            .append(JournalEventV1::RetainCandidateContent {
+                context: journal.context,
+                candidate: intervening,
+            })
+            .unwrap();
+        let after_intervening = journal.clone();
+
+        assert_eq!(
+            journal.commit_validated_batch(batch).unwrap_err(),
+            JournalErrorV1::StaleValidatedBatch {
+                expected_events: 0,
+                actual_events: 1,
+            }
+        );
+        assert_eq!(journal, after_intervening);
+        assert_eq!(
+            journal.restart().unwrap(),
+            after_intervening.restart().unwrap()
+        );
+    }
+
+    #[test]
+    fn validated_batch_rejects_a_divergent_equal_length_journal() {
+        let mut source = journal();
+        let mut divergent = source.clone();
+        let source_candidate = candidate(0, 1, 0x0E, Vec::new(), None);
+        let divergent_candidate = candidate(2, 1, 0x0F, Vec::new(), None);
+        source
+            .append(JournalEventV1::RetainCandidateContent {
+                context: source.context,
+                candidate: source_candidate.clone(),
+            })
+            .unwrap();
+        divergent
+            .append(JournalEventV1::RetainCandidateContent {
+                context: divergent.context,
+                candidate: divergent_candidate,
+            })
+            .unwrap();
+        assert_eq!(
+            source.durable_events().len(),
+            divergent.durable_events().len()
+        );
+        assert_ne!(source.snapshot(), divergent.snapshot());
+
+        let batch = source
+            .validate_batch(vec![JournalEventV1::LockReady {
+                context: source.context,
+                target: source_candidate.reference(),
+            }])
+            .unwrap();
+        let before_commit = divergent.clone();
+
+        assert_eq!(
+            divergent.commit_validated_batch(batch).unwrap_err(),
+            JournalErrorV1::StaleValidatedBatch {
+                expected_events: 1,
+                actual_events: 1,
+            }
+        );
+        assert_eq!(divergent, before_commit);
+        assert_eq!(
+            divergent.restart().unwrap(),
+            before_commit.restart().unwrap()
+        );
     }
 
     #[test]

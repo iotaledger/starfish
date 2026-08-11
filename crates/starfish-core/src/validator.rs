@@ -52,6 +52,11 @@ impl Validator {
         )
         .map_err(|error| eyre!(error))?;
         let is_starfish_rbc = protocol_config.consensus_protocol.is_starfish_rbc();
+        if public_config.parameters.starfish_rbc_dag_shadow && !is_starfish_rbc {
+            return Err(eyre!(
+                "Starfish-RBC-DAG shadow mode requires consensus 'starfish-rbc'"
+            ));
+        }
         if is_starfish_rbc {
             let protocol_instance = public_config
                 .parameters
@@ -195,6 +200,7 @@ impl Validator {
         } else {
             None
         };
+        let starfish_rbc_dag_shadow_wal = private_config.starfish_rbc_dag_shadow_wal();
 
         let (core, bls_cert_aggregator) = Core::open(
             block_handler,
@@ -226,6 +232,7 @@ impl Validator {
             commit_handler,
             metrics.clone(),
             public_config.parameters.clone(),
+            starfish_rbc_dag_shadow_wal,
             partial_sig_rx,
             bls_cert_aggregator,
             bls_signer_for_service,
@@ -288,6 +295,10 @@ mod smoke_tests {
     use crate::{
         committee::Committee,
         config::{self, NodePrivateConfig, NodePublicConfig, Parameters},
+        metrics::{
+            STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR,
+            STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG,
+        },
         prometheus,
         types::AuthorityIndex,
     };
@@ -315,16 +326,54 @@ mod smoke_tests {
         }
     }
 
+    #[tokio::test]
+    async fn starfish_rbc_dag_shadow_rejects_non_rbc_protocol() {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config.parameters.starfish_rbc_dag_shadow = true;
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("shadow mode requires consensus 'starfish-rbc'")
+        }));
+    }
+
     async fn run_commit_test(
         consensus: &str,
         block_authentication: Option<&str>,
         port_offset: u16,
+    ) {
+        run_commit_test_with_shadow(consensus, block_authentication, port_offset, false).await;
+    }
+
+    async fn run_commit_test_with_shadow(
+        consensus: &str,
+        block_authentication: Option<&str>,
+        port_offset: u16,
+        starfish_rbc_dag_shadow: bool,
     ) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
         let mut public_config =
             NodePublicConfig::new_for_tests(committee_size).with_port_offset(port_offset);
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
+        public_config.parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
         if consensus == "starfish-rbc" {
             public_config
                 .parameters
@@ -370,6 +419,94 @@ mod smoke_tests {
                 "[{consensus}] Failed to gather commits \
                 within a few timeouts"
             ),
+        }
+
+        if starfish_rbc_dag_shadow {
+            let maximum_unpaired = STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR
+                * i64::try_from(committee_size).unwrap();
+            tokio::time::timeout(timeout, async {
+                loop {
+                    let complete = validators.iter().all(|validator| {
+                        let metrics = validator.metrics();
+                        let direct_deliveries = metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["delivery", "direct"])
+                            .get();
+                        let shadow_deliveries = metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["delivery", "shadow"])
+                            .get();
+                        let matches = metrics
+                            .starfish_rbc_dag_shadow_delivery_comparisons_total
+                            .with_label_values(&["match"])
+                            .get();
+                        metrics.starfish_rbc_dag_shadow_comparison_valid.get() == 1
+                            && metrics
+                                .starfish_rbc_dag_shadow_wal_durable_records_total
+                                .get()
+                                > 0
+                            && direct_deliveries > 0
+                            && shadow_deliveries > 0
+                            && matches > 0
+                            && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
+                            && metrics.starfish_rbc_dag_shadow_unpaired_direct.get()
+                                <= maximum_unpaired
+                            && metrics.starfish_rbc_dag_shadow_unpaired_shadow.get()
+                                <= maximum_unpaired
+                            && metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                                <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+                    });
+                    if complete {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("shadow did not durably deliver and match direct RBC before timeout");
+
+            for validator in &validators {
+                let metrics = validator.metrics();
+                assert_eq!(
+                    metrics.starfish_rbc_dag_shadow_comparison_valid.get(),
+                    1,
+                    "shadow observation stream shed work while direct RBC committed"
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["mismatch"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["direct_only"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["shadow_only"])
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["ambiguous"])
+                        .get(),
+                    0
+                );
+                assert!(metrics.starfish_rbc_dag_shadow_unpaired_direct.get() <= maximum_unpaired);
+                assert!(metrics.starfish_rbc_dag_shadow_unpaired_shadow.get() <= maximum_unpaired);
+                assert!(
+                    metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                        <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+                );
+            }
         }
 
         for v in validators {
@@ -419,6 +556,11 @@ mod smoke_tests {
     #[tokio::test]
     async fn validator_commit_bluestreak_basic() {
         run_commit_test("bluestreak", None, 150).await;
+    }
+
+    #[tokio::test]
+    async fn starfish_rbc_dag_shadow_mac_keeps_direct_commits_live() {
+        run_commit_test_with_shadow("starfish-rbc", Some("mac"), 1640, true).await;
     }
 
     #[tokio::test]

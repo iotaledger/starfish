@@ -1,9 +1,13 @@
 # Starfish-RBC-DAG protocol design
 
-Status: milestone-two reference codec and executable model; no runtime or safety/liveness claim
+Status: milestone-three persisted, non-authoritative shadow runtime; no authoritative protocol,
+safety/liveness, or performance claim
 
-The provisional CLI name for this protocol is `starfish-rbc-dag`. It is a new protocol, not a
-transport option or a version-two alias for `starfish-rbc`.
+The provisional CLI name for the eventual protocol is `starfish-rbc-dag`. That selector is not
+implemented. The current runtime is enabled with `--consensus starfish-rbc
+--starfish-rbc-dag-shadow`; it observes the direct prototype without changing its DAG, pacemaker,
+commit, or output. The eventual protocol is new, not a transport option or a version-two alias for
+`starfish-rbc`.
 
 The implemented [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains the conservative
 baseline: it sends Bracha INIT/ECHO/READY as direct network messages, advances Starfish only through
@@ -33,13 +37,43 @@ remain selectable outer-authentication baselines; changing that selector does no
 embedded RBC or consensus rules.
 
 This is a proposed composition. The reliable-broadcast thresholds are standard, and the Starfish
-commit rules already exist. The isolated milestone-two implementation now provides a canonical
-codec plus deterministic carrier/RBC, certified-projection, decision, and crash-journal models.
-Those models are not runtime integration or a proof: the composition through two clocks, two
-logical projections, and frontier-based payload ordering still requires shadow execution,
-additional adversarial testing, and a safety/liveness argument. Until those obligations are
-discharged, `starfish-rbc-dag` must be described as an experimental reference model rather than a
-proven signature-free Starfish variant.
+commit rules already exist. Milestone two provides a canonical codec plus deterministic
+carrier/RBC, certified-projection, decision, and crash-journal models. Milestone three adds an
+opt-in persisted shadow actor, full-vector carrier transport, recovery messages, and paired
+direct/shadow delivery observations. The direct `starfish-rbc` service remains the only authority:
+shadow admission, delivery, recovery, or failure cannot advance a proposal, mark a DAG vertex
+clean, vote, commit, or order output.
+
+Milestone-three restart coverage is deliberately scoped to reopening the shadow actor and its WAL
+against an identical recovered direct-header history. It is not a full validator crash-recovery
+claim. The authoritative direct `starfish-rbc` baseline does not yet durably record its remote-slot
+ECHO/READY choices, delivery locks, or retained phase evidence. Restarting that baseline after it
+has proposed a non-genesis block can therefore forget proof-critical choices and leave the newest
+recovered own header dirty. Full validator restart remains fail-stop until those direct-RBC locks
+are persisted and replayed; replaying only the observational shadow WAL cannot repair or safely
+substitute for them.
+
+That isolation is logical, not physical: shadow frames share the validator's existing TCP
+connections, outbound queues, bandwidth, and CPU process with direct RBC, so enabling the shadow
+can perturb authoritative timing even though no shadow result is consumed by consensus. Version
+one has no feature handshake. Every validator in a shadow run must use a binary that understands
+the append-only shadow wire variants and the flag must be deployed committee-wide; an older peer
+will reject an unknown bincode variant and may close the shared connection. Mixed-version or
+partially enabled runs are not valid comparisons.
+
+Shadow shutdown is bounded so an observational WAL failure cannot indefinitely block validator
+shutdown. If that timeout fires, the blocking worker may still hold the shadow WAL's single-writer
+handle even after its async supervisor is detached. A same-process restart against that storage is
+therefore forbidden until the worker has exited; process exit remains safe. A production-quality
+same-process restart path needs an operating-system file lock or a fully cancellable storage task.
+
+The shadow runtime is not a proof or a performance implementation. It intentionally fsyncs every
+accepted transition and its reference reducer clones retained model/journal history, so total CPU
+work grows superlinearly with a long run. It also uses a fixed unsolicited-retention window only as
+a benchmark resource guard; that window is not a safe asynchronous pruning rule. Until the
+composition, resource bounds, and performance path are completed, `starfish-rbc-dag` must be
+described as an experimental shadow/reference implementation rather than a proven signature-free
+Starfish variant or a fair throughput baseline.
 
 The milestone-two model accepts `DataAvailable` as a trusted input from the existing verified
 Reed-Solomon/reconstruction layer. It models the resulting prefix and ordering transitions, but not
@@ -701,19 +735,40 @@ Hash-sorting recovered carriers is not a valid reconstruction rule. Byzantine eq
 arrival order determine which value a local slot-global guard selects, and a different restart order
 could make one honest authority appear to send conflicting phases.
 
-The initial model and shadow prototype retain all proof-critical carrier, phase, prefix, and
-consensus state for the run. Before garbage collection is enabled, the design needs a common
-retirement watermark that preserves:
+The proof model retains all proof-critical carrier, phase, prefix, and consensus state for the run.
+The milestone-three shadow bounds newly arriving unsolicited content to a fixed recent-round
+window solely to keep a faulty peer from growing an observational benchmark process without limit.
+This is not a protocol-safe retirement rule: an honest INIT may be delayed longer than that under
+asynchrony. Recovery of an exact already-requested value is exempt. Before authoritative garbage
+collection is enabled, the design needs a common certified or committed retirement watermark that
+preserves:
 
 - pending Bracha totality and header recovery;
 - exact self-prefix expansion from the last committed frontier;
 - committed-anchor reconstruction for a late validator; and
 - deterministic replay of local locks.
 
-Resource bounds still required before authoritative deployment include a future carrier window,
-per-peer candidate caps, a fair phase backlog, a rate-limited control heartbeat, a bounded payload
-runahead policy, and disk-backed recovery. Resource exhaustion is excluded from the initial proof
-model but must be measured in the prototype.
+Resource bounds still required before authoritative deployment include a proof-safe future and
+retirement window, per-peer candidate caps, a fair phase backlog, a rate-limited control heartbeat,
+a bounded payload runahead policy, and checkpointed disk-backed recovery. Shadow input and output
+channels are bounded and shed observational work instead of backpressuring direct consensus, but
+the reference reducer's retained history and per-transition validation are not yet bounded-runtime
+architecture. Resource exhaustion is excluded from the initial proof model and must be measured in
+the prototype. Any run in which work is shed is invalid for direct/shadow comparison;
+`starfish_rbc_dag_shadow_comparison_valid` must remain `1` for the entire measured interval. A live
+pipeline does not have equal cumulative direct and shadow delivery counters at an arbitrary
+instant: embedded ECHO/READY normally leaves a short shadow tail. Benchmark verification therefore
+requires monotone nonzero direct, shadow, and paired-match progress, no conflict outcome, and bounds
+both the current unpaired slots (`<= 4n` per validator) and the oldest unpaired round lag against the
+newest current-process observation (`<= 4`). These are empirical benchmark coverage guards, not
+asynchronous protocol bounds; a run exceeding either guard is discarded rather than treated as
+proof of a protocol failure.
+
+The milestone-three actor reserves the full hard 64-entry queue so several fan-in bursts can wait
+behind a synchronous fsync, capping queued maximum-sized carrier bodies at 256 MiB (plus sidecars
+and allocator overhead). It still verifies that one peer fan-in plus five local/control inputs fits;
+shadow runs above 60 validators are rejected rather than silently producing an incomplete
+comparison.
 
 ## 15. Safety obligations
 
@@ -783,8 +838,10 @@ minimum it must cover:
 - equal committed anchors producing byte-identical output deltas;
 - delayed data availability followed by eventual prefix inclusion;
 - crash points before and after each persisted lock and outbound-carrier write; and
-- once milestone three supplies the non-authoritative runtime path, shadow replay matching the
-  current direct RBC kernel's delivered references.
+- persisted shadow-actor restart with byte-identical retransmission against an identical recovered
+  direct-header history, bounded overload, poisoned-tag candidate retention, exact recovery, and
+  paired delivery observations against the current direct RBC kernel. Full validator restart is
+  excluded until the authoritative direct-RBC locks are durable.
 
 Property tests should mutate every canonical field and verify carrier-reference binding, while
 golden tests freeze the version-one encoding and flat vector length.
@@ -809,7 +866,10 @@ Batching can reduce the number of separately scheduled RBC control messages, but
 their logical quorum evidence. Full-vector all-to-all transport sends `n` tags in each of `n - 1`
 copies per carrier, so it is not expected to improve author egress until a tree or bounded-fanout
 transport is added. Shadow mode also sends both direct and embedded transcripts and is a correctness
-instrument, not a performance result.
+instrument, not a performance result. In milestone three it additionally fsyncs each accepted
+transition and validates through a clone-based reference reducer. Those costs are deliberately not
+charged as protocol overhead: performance runs require incremental state transitions/checkpoints
+or an equivalently durable baseline, plus separate WAL/fsync accounting.
 
 ## 19. Contained implementation milestones
 
@@ -822,10 +882,12 @@ Every milestone is committed separately.
    frontier, and sidecar types; golden encodings; pure carrier/RBC, projection/decision, and durable
    journal models; and deterministic adversarial simulations. No network or existing consensus path
    changes.
-3. **Persisted shadow carrier path:** build and store carriers alongside the current direct
+3. **Persisted shadow carrier path (implemented, opt-in):** build and store carriers alongside the current direct
    `starfish-rbc` service, cache the validated committee/domain identity rather than re-hashing all
    public keys per carrier, journal ingress and local locks, and compare embedded versus direct RBC
-   delivery. Direct RBC remains authoritative; shadow results never affect proposals or commits.
+   delivery through current-process paired observations. Direct RBC remains authoritative; shadow
+   results never affect proposals or commits. The reference WAL/reducer is a correctness instrument,
+   not yet an interpretable protocol-performance path.
 4. **Optimistic carrier clock:** add the distinct authenticated-admission latch, sequential quorum
    clock, heartbeats, bounded future buffer, and carrier synchronization while consensus still uses
    the current baseline.

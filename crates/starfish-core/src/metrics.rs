@@ -36,6 +36,11 @@ pub const BENCHMARK_DURATION: &str = "benchmark_duration";
 pub const TRANSACTION_CERTIFIED_LATENCY: &str = "transaction_certified_latency";
 pub const TRANSACTION_CERTIFIED_LATENCY_SQUARED: &str = "latency_s";
 
+/// Benchmark-only live-tail guards for the observational RBC-DAG shadow.
+/// They are not asynchronous protocol or garbage-collection bounds.
+pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR: i64 = 4;
+pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG: i64 = 4;
+
 #[derive(Clone)]
 pub struct Metrics {
     pub benchmark_duration: IntCounter,
@@ -134,6 +139,21 @@ pub struct Metrics {
     pub network_requests_received_total: IntCounterVec,
     pub network_message_bytes_sent_total: IntCounterVec,
     pub network_message_bytes_received_total: IntCounterVec,
+
+    // Starfish-RBC-DAG shadow instrumentation. These metrics are strictly
+    // observational: the shadow path never feeds the authoritative DAG or
+    // consensus state.
+    pub starfish_rbc_dag_shadow_inputs_total: IntCounterVec,
+    pub starfish_rbc_dag_shadow_delivery_comparisons_total: IntCounterVec,
+    pub starfish_rbc_dag_shadow_wal_durable_batches_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_durable_records_total: IntCounter,
+    pub starfish_rbc_dag_shadow_wal_replayed_batches: IntGauge,
+    pub starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total: IntCounter,
+    pub starfish_rbc_dag_shadow_pending_recovery: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_direct: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_shadow: IntGauge,
+    pub starfish_rbc_dag_shadow_unpaired_max_round_lag: IntGauge,
+    pub starfish_rbc_dag_shadow_comparison_valid: IntGauge,
 
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
@@ -513,6 +533,76 @@ impl Metrics {
                 "network_message_bytes_received_total",
                 "Total framed network-message bytes received, by type",
                 &["request_type"],
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_inputs_total: register_int_counter_vec_with_registry!(
+                "starfish_rbc_dag_shadow_inputs_total",
+                "Starfish-RBC-DAG shadow inputs, by bounded input kind and processing outcome",
+                &["kind", "outcome"],
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_delivery_comparisons_total:
+                register_int_counter_vec_with_registry!(
+                    "starfish_rbc_dag_shadow_delivery_comparisons_total",
+                    "Non-authoritative current-process paired direct-vs-shadow delivery observations, by outcome; unmatched observations are not mismatches",
+                    &["outcome"],
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_wal_durable_batches_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_shadow_wal_durable_batches_total",
+                "Starfish-RBC-DAG shadow WAL batches durably synchronized",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_durable_records_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_shadow_wal_durable_records_total",
+                "Starfish-RBC-DAG shadow WAL records durably synchronized",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_replayed_batches: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_wal_replayed_batches",
+                "Starfish-RBC-DAG shadow WAL batches replayed during this process startup",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total:
+                register_int_counter_with_registry!(
+                    "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total",
+                    "Physically incomplete final Starfish-RBC-DAG shadow WAL bytes discarded during recovery",
+                    registry,
+                )
+                .unwrap(),
+            starfish_rbc_dag_shadow_pending_recovery: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_pending_recovery",
+                "Current Starfish-RBC-DAG shadow carrier-content recoveries pending",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_direct: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_direct",
+                "Current direct-delivery slots without an observed shadow-delivery slot, including recovered shadow state",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_shadow: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_shadow",
+                "Current shadow-delivery slots first observed in this process without a direct-delivery slot observed in this process",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_unpaired_max_round_lag: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_unpaired_max_round_lag",
+                "Maximum round lag from a current unpaired direct or current-epoch shadow delivery slot to the newest current-process observation",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_shadow_comparison_valid: register_int_gauge_with_registry!(
+                "starfish_rbc_dag_shadow_comparison_valid",
+                "State of the non-authoritative shadow observation stream (1 valid, 0 disabled/invalid, -1 starting)",
                 registry,
             )
             .unwrap(),
@@ -972,6 +1062,8 @@ impl Metrics {
         metrics: Vec<Arc<Metrics>>,
         reporters: Vec<Arc<MetricReporter>>,
         duration_secs: u64,
+        committee_size: usize,
+        starfish_rbc_dag_shadow_expected: bool,
     ) {
         let num_validators = metrics.len() as u64;
 
@@ -1109,6 +1201,9 @@ impl Metrics {
             "rbc_ready",
             "rbc_header_request",
             "rbc_header_response",
+            "rbc_dag_shadow_carrier",
+            "rbc_dag_shadow_carrier_request",
+            "rbc_dag_shadow_carrier_response",
         ];
         let outbound_message_breakdown = NETWORK_MESSAGE_TYPES
             .iter()
@@ -1163,6 +1258,154 @@ impl Metrics {
             0.0
         };
         table.add_row(row![b->"Bandwidth efficiency:", format!("{:.2}", bandwidth_efficiency)]);
+
+        if starfish_rbc_dag_shadow_expected {
+            let valid_nodes = metrics
+                .iter()
+                .filter(|metrics| metrics.starfish_rbc_dag_shadow_comparison_valid.get() == 1)
+                .count();
+            let matches = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["match"])
+                        .get()
+                })
+                .sum::<u64>();
+            let mismatches = metrics
+                .iter()
+                .map(|metrics| {
+                    ["mismatch", "direct_only", "shadow_only"]
+                        .into_iter()
+                        .map(|outcome| {
+                            metrics
+                                .starfish_rbc_dag_shadow_delivery_comparisons_total
+                                .with_label_values(&[outcome])
+                                .get()
+                        })
+                        .sum::<u64>()
+                })
+                .sum::<u64>();
+            let ambiguous = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_delivery_comparisons_total
+                        .with_label_values(&["ambiguous"])
+                        .get()
+                })
+                .sum::<u64>();
+            let shadow_deliveries = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "shadow"])
+                        .get()
+                })
+                .sum::<u64>();
+            let direct_deliveries = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "direct"])
+                        .get()
+                })
+                .sum::<u64>();
+            let wal_records = metrics
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .starfish_rbc_dag_shadow_wal_durable_records_total
+                        .get()
+                })
+                .sum::<u64>();
+            let pending_recovery = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_pending_recovery.get())
+                .sum::<i64>();
+            let maximum_unpaired = STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR
+                .saturating_mul(i64::try_from(committee_size).unwrap_or(i64::MAX));
+            let every_node_has_exact_coverage = metrics.iter().all(|metrics| {
+                let direct = metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "direct"])
+                    .get();
+                let shadow = metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "shadow"])
+                    .get();
+                let matched = metrics
+                    .starfish_rbc_dag_shadow_delivery_comparisons_total
+                    .with_label_values(&["match"])
+                    .get();
+                direct > 0
+                    && shadow > 0
+                    && matched > 0
+                    && metrics
+                        .starfish_rbc_dag_shadow_wal_durable_records_total
+                        .get()
+                        > 0
+                    && metrics.starfish_rbc_dag_shadow_unpaired_direct.get() <= maximum_unpaired
+                    && metrics.starfish_rbc_dag_shadow_unpaired_shadow.get() <= maximum_unpaired
+                    && metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get()
+                        <= STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG
+            });
+            let comparison_valid = valid_nodes == metrics.len()
+                && every_node_has_exact_coverage
+                && mismatches == 0
+                && ambiguous == 0
+                && wal_records > 0
+                && pending_recovery == 0;
+
+            table.add_row(row![bH2->""]);
+            table.add_row(row![bH2->"RBC-DAG Shadow Verification"]);
+            table.add_row(row![
+                b->"Comparison verdict:",
+                if comparison_valid {
+                    "VALID".to_owned()
+                } else {
+                    "INVALID — DISCARD THIS SHADOW COMPARISON".to_owned()
+                }
+            ]);
+            table.add_row(row![
+                b->"Valid validators:",
+                format!("{valid_nodes}/{}", metrics.len())
+            ]);
+            table.add_row(row![
+                b->"Paired deliveries:",
+                format!(
+                    "direct={direct_deliveries}, shadow={shadow_deliveries}, matches={matches}, \
+                     mismatches={mismatches}, ambiguous={ambiguous}"
+                )
+            ]);
+            table.add_row(row![
+                b->"Durability/recovery:",
+                format!("WAL records={wal_records}, pending recovery={pending_recovery}")
+            ]);
+            let unpaired_direct = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_direct.get())
+                .sum::<i64>();
+            let unpaired_shadow = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_shadow.get())
+                .sum::<i64>();
+            let max_unpaired_lag = metrics
+                .iter()
+                .map(|metrics| metrics.starfish_rbc_dag_shadow_unpaired_max_round_lag.get())
+                .max()
+                .unwrap_or_default();
+            table.add_row(row![
+                b->"Live comparison tail:",
+                format!(
+                    "unpaired direct/shadow={unpaired_direct}/{unpaired_shadow}, \
+                     max lag={max_unpaired_lag} rounds"
+                )
+            ]);
+        }
 
         // Shard reconstruction metrics
         table.add_row(row![bH2->""]);
@@ -1461,4 +1704,61 @@ impl Drop for OwnedUtilizationTimer {
 struct NetworkAddressTable {
     peer: String,
     address: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_starfish_rbc_dag_shadow_metrics() {
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(&registry, None, None, None);
+
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["authenticated_ingress", "accepted"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_delivery_comparisons_total
+            .with_label_values(&["match"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_durable_records_total
+            .inc_by(3);
+        metrics.starfish_rbc_dag_shadow_wal_replayed_batches.set(4);
+        metrics
+            .starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total
+            .inc_by(5);
+        metrics.starfish_rbc_dag_shadow_pending_recovery.set(2);
+        metrics.starfish_rbc_dag_shadow_unpaired_direct.set(6);
+        metrics.starfish_rbc_dag_shadow_unpaired_shadow.set(7);
+        metrics
+            .starfish_rbc_dag_shadow_unpaired_max_round_lag
+            .set(8);
+        metrics.starfish_rbc_dag_shadow_comparison_valid.set(1);
+
+        let gathered = registry.gather();
+        for name in [
+            "starfish_rbc_dag_shadow_inputs_total",
+            "starfish_rbc_dag_shadow_delivery_comparisons_total",
+            "starfish_rbc_dag_shadow_wal_durable_batches_total",
+            "starfish_rbc_dag_shadow_wal_durable_records_total",
+            "starfish_rbc_dag_shadow_wal_replayed_batches",
+            "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total",
+            "starfish_rbc_dag_shadow_pending_recovery",
+            "starfish_rbc_dag_shadow_unpaired_direct",
+            "starfish_rbc_dag_shadow_unpaired_shadow",
+            "starfish_rbc_dag_shadow_unpaired_max_round_lag",
+            "starfish_rbc_dag_shadow_comparison_valid",
+        ] {
+            assert!(
+                gathered.iter().any(|family| family.get_name() == name),
+                "metric family {name} was not registered",
+            );
+        }
+    }
 }
