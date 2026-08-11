@@ -1138,6 +1138,43 @@ impl DagState {
         self.dag_state_inner.read().get_storage_block(reference)
     }
 
+    /// Replaces in-memory sequenced blocks with headers. Payloads remain in
+    /// storage.
+    pub fn compact_sequenced_payloads(&self, references: &[BlockReference]) -> usize {
+        let mut compacted_rounds = AHashSet::new();
+        let compacted = {
+            let mut inner = self.dag_state_inner.write();
+            let mut compacted = 0;
+            for reference in references {
+                let Some(block) = inner.index[reference.authority as usize]
+                    .get_mut(&reference.round)
+                    .and_then(|blocks| blocks.get_mut(&reference.digest))
+                else {
+                    continue;
+                };
+                if !block.has_transaction_data() {
+                    continue;
+                }
+
+                *block = Data::new(block.as_header_only());
+                *inner.round_version.entry(reference.round).or_insert(0) += 1;
+                compacted_rounds.insert(reference.round);
+                compacted += 1;
+            }
+            compacted
+        };
+
+        if !compacted_rounds.is_empty() {
+            self.round_block_cache
+                .lock()
+                .retain(|round, _| !compacted_rounds.contains(round));
+            self.metrics
+                .dag_state_unloaded_blocks
+                .inc_by(compacted as u64);
+        }
+        compacted
+    }
+
     /// Look up the `transactions_commitment` for a block in the DAG.
     pub fn get_transactions_commitment(
         &self,
@@ -1545,9 +1582,10 @@ impl DagState {
     }
 
     pub fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
-        self.dag_state_inner
-            .read()
-            .get_transmission_block(reference)
+        self.get_transmission_blocks(&[reference])
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     pub fn get_pending_acknowledgment(&self, round_number: RoundNumber) -> Vec<BlockReference> {
@@ -1855,6 +1893,7 @@ impl DagState {
     fn get_blocks_with_store_fallback(
         &self,
         refs: &[BlockReference],
+        require_available_payload: bool,
     ) -> Vec<Option<Data<VerifiedBlock>>> {
         let mut blocks = vec![None; refs.len()];
         let mut missing_refs = Vec::new();
@@ -1864,11 +1903,16 @@ impl DagState {
             let inner = self.dag_state_inner.read();
             for (index, reference) in refs.iter().enumerate() {
                 if let Some(block) = inner.get_block(*reference) {
-                    blocks[index] = Some(block);
-                } else {
-                    missing_refs.push(*reference);
-                    missing_indices.push(index);
+                    let load_payload = require_available_payload
+                        && !block.has_transaction_data()
+                        && inner.is_data_available(reference);
+                    if !load_payload {
+                        blocks[index] = Some(block);
+                        continue;
+                    }
                 }
+                missing_refs.push(*reference);
+                missing_indices.push(index);
             }
         }
 
@@ -1887,7 +1931,7 @@ impl DagState {
 
     /// Batch variant of `get_storage_block` — single read lock for N lookups.
     pub fn get_storage_blocks(&self, refs: &[BlockReference]) -> Vec<Option<Data<VerifiedBlock>>> {
-        self.get_blocks_with_store_fallback(refs)
+        self.get_blocks_with_store_fallback(refs, false)
     }
 
     /// Batch variant of `get_transmission_block` — single read lock for N
@@ -1896,7 +1940,7 @@ impl DagState {
         &self,
         refs: &[BlockReference],
     ) -> Vec<Option<Data<VerifiedBlock>>> {
-        self.get_blocks_with_store_fallback(refs)
+        self.get_blocks_with_store_fallback(refs, true)
     }
 
     /// Fetch blocks as header-only for the given references.
@@ -2330,12 +2374,14 @@ impl DagState {
         from_excluded: RoundNumber,
         limit: usize,
     ) -> Vec<Data<VerifiedBlock>> {
-        let inner = self.dag_state_inner.read();
-        let references =
-            inner.get_own_block_references(to_whom_authority_index, from_excluded, limit);
-        references
+        let references = self.dag_state_inner.read().get_own_block_references(
+            to_whom_authority_index,
+            from_excluded,
+            limit,
+        );
+        self.get_transmission_blocks(&references)
             .into_iter()
-            .filter_map(|reference| inner.get_transmission_block(reference))
+            .flatten()
             .collect()
     }
 
@@ -2347,9 +2393,15 @@ impl DagState {
         peer: AuthorityIndex,
         batch_own_block_size: usize,
     ) -> Vec<Data<VerifiedBlock>> {
-        let inner = self.dag_state_inner.read();
-        let own = inner.collect_own_blocks_no_dag(sent, peer, batch_own_block_size);
-        DagStateInner::into_sorted_blocks(own)
+        let references = self.dag_state_inner.read().collect_unsent_own_block_refs(
+            sent,
+            peer,
+            batch_own_block_size,
+        );
+        self.get_transmission_blocks(&references)
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     pub fn last_seen_by_authority(&self, authority: AuthorityIndex) -> RoundNumber {
@@ -2504,12 +2556,6 @@ impl DagStateInner {
         self.store
             .get_block(&reference)
             .expect("Storage read failed")
-    }
-
-    /// Get a block suitable for transmission to peers. Same as storage block
-    /// since transmission views are now constructed at send time.
-    fn get_transmission_block(&self, reference: BlockReference) -> Option<Data<VerifiedBlock>> {
-        self.get_storage_block(reference)
     }
 
     /// Check whether `earlier_block` is an ancestor of `later_block`.
@@ -3272,23 +3318,12 @@ impl DagStateInner {
             .collect()
     }
 
-    /// Collect unsent blocks for a peer by iterating the DAG, skipping those in
-    /// `sent`.
-    fn into_sorted_blocks(
-        mut blocks: Vec<(Data<VerifiedBlock>, RoundNumber)>,
-    ) -> Vec<Data<VerifiedBlock>> {
-        blocks.sort_by_key(|x| x.1);
-        blocks.into_iter().map(|x| x.0).collect()
-    }
-
-    /// Collect own unsent blocks. Pull-mode dissemination: blocks are
-    /// always kept; the broadcaster's `sent` set provides idempotency.
-    fn collect_own_blocks_no_dag(
+    fn collect_unsent_own_block_refs(
         &self,
         sent: &AHashSet<BlockReference>,
         peer: AuthorityIndex,
         limit: usize,
-    ) -> Vec<(Data<VerifiedBlock>, RoundNumber)> {
+    ) -> Vec<BlockReference> {
         if limit == 0 {
             return Vec::new();
         }
@@ -3308,10 +3343,7 @@ impl DagStateInner {
             if sent.contains(&block_ref) {
                 continue;
             }
-            let Some(block) = self.get_block(block_ref) else {
-                continue;
-            };
-            result.push((block, *round));
+            result.push(block_ref);
         }
         result
     }
@@ -4327,6 +4359,36 @@ mod tests {
             shards[0].shard.transactions_commitment(),
             shard.transactions_commitment()
         );
+    }
+
+    #[test]
+    fn compact_sequenced_payloads_keeps_headers_and_serves_payloads() {
+        let dag_state = open_test_dag_state_for("bluestreak", 0);
+        let block = make_transaction_block(1, 4);
+        let reference = *block.reference();
+
+        dag_state.insert_general_block(block, DataSource::BlockBundleStreaming);
+        assert!(
+            dag_state
+                .get_storage_block(reference)
+                .unwrap()
+                .has_transaction_data()
+        );
+        assert!(dag_state.get_blocks_by_round_cached(4)[0].has_transaction_data());
+
+        assert_eq!(dag_state.compact_sequenced_payloads(&[reference]), 1);
+        assert!(
+            !dag_state
+                .get_storage_block(reference)
+                .unwrap()
+                .has_transaction_data()
+        );
+        assert!(!dag_state.get_blocks_by_round_cached(4)[0].has_transaction_data());
+
+        let transmitted = dag_state.get_transmission_block(reference).unwrap();
+        assert!(transmitted.has_transaction_data());
+        assert_eq!(transmitted.number_transactions(), 1);
+        assert_eq!(dag_state.compact_sequenced_payloads(&[reference]), 0);
     }
 
     #[test]

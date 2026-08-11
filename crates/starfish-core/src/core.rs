@@ -1431,15 +1431,15 @@ impl<H: BlockHandler> Core<H> {
             let committed_rounds = self.dag_state.update_commit_state(commit);
             commit_data.push(CommitData::new(commit, committed_rounds));
         }
+        let sequenced: Vec<BlockReference> = committed
+            .iter()
+            .flat_map(|commit| commit.blocks.iter().map(|block| *block.reference()))
+            .collect();
         // SparseStarfishSpeed: drop sequenced refs from the local pending
         // acknowledgment queue right after each commit so future leaders
         // don't republish them. Other protocols leave the queue intact and
         // rely on round-bounded drains in `get_pending_acknowledgment`.
         if self.dag_state.consensus_protocol == ConsensusProtocol::SparseStarfishSpeed {
-            let sequenced: Vec<BlockReference> = committed
-                .iter()
-                .flat_map(|c| c.blocks.iter().map(|b| *b.reference()))
-                .collect();
             self.dag_state.purge_pending_acknowledgments(&sequenced);
         }
         let store_start = std::time::Instant::now();
@@ -1451,6 +1451,7 @@ impl<H: BlockHandler> Core<H> {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
         self.flush_pending_clean_refs();
+        self.dag_state.compact_sequenced_payloads(&sequenced);
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
