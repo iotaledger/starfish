@@ -7,7 +7,9 @@ The provisional CLI name for the eventual protocol is `starfish-rbc-dag`. That s
 implemented. The milestone-three direct-header comparison runtime is enabled with `--consensus
 starfish-rbc --starfish-rbc-dag-shadow`. Milestone four adds a separate control-only runtime with
 `--starfish-rbc-dag-autonomous-clock`; its carrier rounds advance independently through
-authenticated admission and empty heartbeats. Both modes leave the direct prototype's DAG,
+authenticated admission and empty heartbeats. Performance experiments may add
+`--starfish-rbc-dag-shadow-buffered-wal` to remove per-transition disk synchronization; that
+profile is explicitly not crash-safe. Both modes leave the direct prototype's DAG,
 pacemaker, commit, and output unchanged. The eventual protocol is new, not a transport option or a
 version-two alias for `starfish-rbc`.
 
@@ -81,13 +83,15 @@ handle even after its async supervisor is detached. A same-process restart again
 therefore forbidden until the worker has exited; process exit remains safe. A production-quality
 same-process restart path needs an operating-system file lock or a fully cancellable storage task.
 
-The shadow runtime is not a proof or a performance implementation. It intentionally fsyncs every
-accepted transition and its reference reducer clones retained model/journal history, so total CPU
-work grows superlinearly with a long run. It also uses a fixed unsolicited-retention window only as
-a benchmark resource guard; that window is not a safe asynchronous pruning rule. Until the
-composition, resource bounds, and performance path are completed, `starfish-rbc-dag` must be
-described as an experimental shadow/reference implementation rather than a proven signature-free
-Starfish variant or a fair throughput baseline.
+The shadow runtime is not a proof or a production performance implementation. Its default
+crash-safe profile intentionally fsyncs every accepted transition, and its reference reducer clones
+retained model/journal history. A separate explicit benchmark profile writes the same ordered,
+checksummed frames but syncs them only on clean shutdown; it reports appended and durable records
+separately and makes no crash-safety claim. This removes the known persistence observer effect
+without changing the protocol reducer. The runtime also uses a fixed unsolicited-retention window
+only as a benchmark resource guard; that window is not a safe asynchronous pruning rule. Until the
+composition and resource bounds are completed, `starfish-rbc-dag` remains an experimental
+shadow/reference implementation rather than a proven signature-free Starfish variant.
 
 The milestone-two model accepts `DataAvailable` as a trusted input from the existing verified
 Reed-Solomon/reconstruction layer. It models the resulting prefix and ordering transitions, but not
@@ -778,9 +782,10 @@ newest current-process observation (`<= 4`). These are empirical benchmark cover
 asynchronous protocol bounds; a run exceeding either guard is discarded rather than treated as
 proof of a protocol failure.
 
-The actor reserves the full hard 64-entry queue so several fan-in bursts can wait behind a
-synchronous fsync, capping queued maximum-sized carrier bodies at 256 MiB (plus sidecars and
-allocator overhead). Mirror mode budgets one peer fan-in plus five local/control inputs and accepts
+The actor reserves the full hard 64-entry queue so several fan-in bursts can wait behind a slow
+reference transition (including synchronous fsync in the crash-safe profile), capping queued
+maximum-sized carrier bodies at 256 MiB (plus sidecars and allocator overhead). Mirror mode budgets
+one peer fan-in plus five local/control inputs and accepts
 at most 60 validators. Autonomous mode budgets a simultaneous carrier, exact-slot request, and
 exact-slot response per peer plus five control inputs and accepts at most 20 validators. Larger runs
 are rejected rather than silently producing incomplete evidence. Timer notifications are coalesced,
@@ -789,7 +794,7 @@ per peer. Requested historical slots remain recoverable beyond the benchmark-onl
 retention window.
 
 Autonomous benchmark validity is separate from delivery comparison validity.
-`starfish_rbc_dag_shadow_clock_valid` must remain `1`, the WAL and heartbeat counters must progress,
+`starfish_rbc_dag_shadow_clock_valid` must remain `1`, the appended-WAL and heartbeat counters must progress,
 the carrier round and embedded-RBC delivery count must advance during the measured interval,
 recovery must drain, and the reported clock-state/backlog and cross-node skew must remain within the
 configured empirical guards. These checks establish that the observational carrier plane stayed
@@ -895,20 +900,32 @@ state.
 Batching can reduce the number of separately scheduled RBC control messages, but it does not remove
 their logical quorum evidence. Full-vector all-to-all transport sends `n` tags in each of `n - 1`
 copies per carrier, so it is not expected to improve author egress until a tree or bounded-fanout
-transport is added. Shadow mode also sends both direct and embedded transcripts and is a correctness
-instrument, not a performance result. In milestone three it additionally fsyncs each accepted
-transition and validates through a clone-based reference reducer. Those costs are deliberately not
-charged as protocol overhead: performance runs require incremental state transitions/checkpoints
-or an equivalently durable baseline, plus separate WAL/fsync accounting.
+transport is added. Shadow mode also sends both direct and embedded transcripts. The default
+crash-safe reference profile fsyncs each accepted transition and validates through a clone-based
+reducer; it is a correctness/replay instrument, not a protocol-performance result. The explicit
+buffered-WAL profile keeps the exact framed event path but syncs only on clean shutdown and therefore
+cannot be used for crash-safety claims. Benchmark output reports appended and durable WAL work
+separately. The clone-based reducer remains intentionally unoptimized until measurement shows it
+matters.
 
-As an implementation-continuity check, a 10-validator, 60-second local run on 2026-08-11 used the
-AWS RTT emulator, a nominal 1,000 tx/s load, MAC authentication, and a 250 ms autonomous heartbeat.
-All validators reached carrier round 196 with zero skew and zero pending recovery; the control
-plane recorded 1,959 heartbeats and 19,280 embedded-RBC deliveries. The authoritative direct
-Starfish-RBC path reported 776.50 tx/s, 3,378.4 ms p50 block latency, 3,953.8 ms p50 end-to-end
-latency, and 0.45 MB/s average outbound bandwidth. This is not a comparative performance claim:
-the cutoff includes the local generator warmup, and the control-only shadow still performs
-per-transition fsync/reference-model work on the authoritative network socket.
+A matched 10-validator local A/B on 2026-08-11 used a full 60-second active transaction window,
+the AWS RTT emulator, nominal 1,000 tx/s load, MAC authentication, and a 250 ms autonomous
+heartbeat. The harness waits through generator warmup, snapshots cumulative counters at the active
+boundary, and drains final latency samples.
+
+| Profile | Verdict | TPS | p50 block | p50 E2E | Outbound |
+|---|---:|---:|---:|---:|---:|
+| Direct Starfish-RBC, shadow off | n/a | 972.25 | 1,508.0 ms | 1,724.0 ms | 0.53 MB/s |
+| Autonomous RBC-DAG, buffered WAL | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
+| Autonomous RBC-DAG, per-transition fsync | INVALID 9/10 | 948.83 | 2,569.1 ms | 3,067.4 ms | 0.54 MB/s |
+
+The valid buffered run reached carrier round 275 at every validator, with 2,749 accepted
+heartbeats, 27,180 embedded-RBC deliveries, 27,424 appended batches, zero round skew, and zero
+pending recovery. Its latency and throughput match the shadow-off baseline while making the
+expected extra carrier traffic visible. The crash-safe run shed shadow work and is reported only
+as a diagnostic: it isolates synchronous persistence as a severe observer effect and must not be
+cited as a protocol result. Neither run measures application latency through the carrier DAG yet,
+because the direct Starfish-RBC path remains authoritative in milestone four.
 
 ## 19. Contained implementation milestones
 
