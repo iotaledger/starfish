@@ -258,13 +258,16 @@ impl Measurement {
                     x.as_str(),
                     "starfish_rbc_dag_shadow_inputs_total"
                         | "starfish_rbc_dag_shadow_delivery_comparisons_total"
+                        | "starfish_rbc_dag_projection_decisions_total"
                 ) =>
                 {
                     match sample.value {
                         prometheus_parse::Value::Counter(value) => {
-                            let shadow_bucket = if x
-                                == "starfish_rbc_dag_shadow_delivery_comparisons_total"
-                            {
+                            let shadow_bucket = if matches!(
+                                x.as_str(),
+                                "starfish_rbc_dag_shadow_delivery_comparisons_total"
+                                    | "starfish_rbc_dag_projection_decisions_total"
+                            ) {
                                 sample
                                     .labels
                                     .get("outcome")
@@ -291,6 +294,7 @@ impl Measurement {
                         | "starfish_rbc_dag_shadow_wal_durable_batches_total"
                         | "starfish_rbc_dag_shadow_wal_durable_records_total"
                         | "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total"
+                        | "starfish_rbc_dag_projected_vertices_total"
                 ) =>
                 {
                     match sample.value {
@@ -1159,6 +1163,13 @@ impl MeasurementsCollection {
                     ) && self.scalar_counter_increased(
                         "starfish_rbc_dag_shadow_wal_appended_records_total",
                         *scraper_id,
+                    ) && self.scalar_counter_increased(
+                        "starfish_rbc_dag_projected_vertices_total",
+                        *scraper_id,
+                    ) && self.count_bucket_increased(
+                        "starfish_rbc_dag_projection_decisions_total",
+                        *scraper_id,
+                        "direct_commit",
                     ) && self.scalar_gauge_increased(
                         "starfish_rbc_dag_shadow_carrier_round",
                         *scraper_id,
@@ -1634,6 +1645,26 @@ mod test {
                 timestamp,
                 count: wal_durable_records,
                 scalar: wal_durable_records as f64,
+                ..Measurement::default()
+            },
+        );
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_projected_vertices_total".to_owned(),
+            Measurement {
+                timestamp,
+                count: wal_durable_records,
+                scalar: wal_durable_records as f64,
+                ..Measurement::default()
+            },
+        );
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_projection_decisions_total".to_owned(),
+            Measurement {
+                timestamp,
+                count_buckets: HashMap::from([("direct_commit".to_owned(), wal_durable_records)]),
+                count: wal_durable_records,
                 ..Measurement::default()
             },
         );

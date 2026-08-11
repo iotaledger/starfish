@@ -51,7 +51,8 @@ prototype with the limitations documented in its [protocol specification](docs/s
 **Starfish-RBC-DAG** is a follow-up that pipelines all-carrier RBC through an optimistic carrier DAG
 while keeping certified Starfish consensus and ordering in a separate logical projection. Its
 canonical types, deterministic models, crash journal, comparison shadow, autonomous carrier clock,
-and opt-in authoritative embedded-RBC path are implemented. Run the comparison shadow with
+authoritative embedded-RBC path, and certified logical consensus projection are implemented. Run
+the comparison shadow with
 `--consensus starfish-rbc --starfish-rbc-dag-shadow`; add
 `--starfish-rbc-dag-autonomous-clock --starfish-rbc-dag-embedded-rbc-authority` to encode exact
 application headers in version-two carriers and make embedded ECHO/READY/delivery their sole
@@ -59,9 +60,11 @@ certification authority. Direct INIT remains payload transport, but direct ECHO/
 blocks in that mode. Idle carrier heartbeats reuse Starfish's resolved leader timeout (600 ms for
 Starfish-RBC by default); application and encodable phase carriers are emitted immediately.
 
-The current milestone changes certification, not consensus: the existing Starfish DAG still
-consumes the embedded deliveries and retains its clean-predecessor proposal gate. The certified
-carrier projection and frontier linearizer are the next milestones. Shadow traffic shares the
+Autonomous carriers now embed durably locked consensus vertices with quorum strong parents,
+explicit Vote/NoVote choices, and exact delivery frontiers. Only RBC-delivered, data-available,
+prefix-closed vertices enter the projection or its leader decisions. The existing Starfish DAG is
+still the temporary application-output scaffold; the committed frontier linearizer is the next
+milestone. Shadow traffic shares the
 validator's network socket and bandwidth, and deployment requires a homogeneous new-binary
 committee. The default WAL is crash-safe but too intrusive for a fair latency experiment;
 `--starfish-rbc-dag-shadow-buffered-wal` preserves the ordered log while syncing only on clean
@@ -74,8 +77,9 @@ production retains a short embedded-RBC pipeline tail, so benchmark validation u
 unpaired-count and oldest-round-lag gauges rather than requiring instantaneous equality between
 the cumulative direct and shadow delivery counters. Autonomous runs instead require
 `starfish_rbc_dag_shadow_clock_valid == 1`, heartbeat/WAL progress, advancing carrier rounds,
-in-window embedded-RBC delivery, and bounded clock-state gauges. The current queue budget supports
-at most 60 validators in mirror mode and 20 in autonomous mode.
+in-window embedded-RBC delivery, projected-vertex and clean projected-commit progress, and bounded
+clock-state gauges. The current queue budget supports at most 60 validators in mirror mode and 20
+in autonomous mode.
 
 A matched 10-validator, 60-second-active-window local run on 2026-08-11 used the AWS RTT emulator,
 nominal 1,000 tx/s load, MAC authentication, the buffered benchmark WAL, and Starfish's shared
@@ -86,14 +90,22 @@ nominal 1,000 tx/s load, MAC authentication, the buffered benchmark WAL, and Sta
 | Direct Starfish-RBC, shadow off | n/a | 972.25 | 1,508.0 ms | 1,724.0 ms | 0.53 MB/s |
 | Autonomous comparison, direct RBC authoritative | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
 | Embedded RBC authoritative (milestone five) | VALID 10/10 | 861.92 | 3,539.3 ms | 5,477.5 ms | 0.52 MB/s |
+| Certified projection (milestone six) | VALID 10/10 | 799.07 | 5,102.9 ms | 8,650.9 ms | 0.50 MB/s |
 
 The milestone-five run produced 10,722 embedded application deliveries, reached carrier rounds
 458–459, and ended with zero pending recovery. It also proves that the earlier 250 ms experimental
 heartbeat was not the latency cause: application and phase carriers are already event-driven, and
 using the shared 600 ms timeout did not restore the direct baseline. The remaining slowdown is an
 expected warning about the transitional architecture—the old direct DAG still serializes proposal
-creation on embedded RBC cleanliness. Do not tune that obsolete gate; milestone six must let the
-optimistic carrier clock advance independently and feed only certified vertices into consensus.
+creation on embedded RBC cleanliness. Milestone six now lets the optimistic carrier clock advance
+independently and feeds only certified vertices into the logical committer; milestone seven must
+remove the remaining legacy output gate by committing deterministic frontier deltas.
+The milestone-six run reached carrier rounds 356–359 with 35,506 carrier deliveries, 8,059
+application deliveries, 8,487 projected vertices, 830 clean direct commits, and zero pending
+recovery. Its further latency increase is a structural red flag, not a projection-speed claim:
+certified decisions currently run alongside the old clean-predecessor/output path, so the benchmark
+still pays for both. The next measurement is meaningful only after milestone seven removes that
+legacy gate.
 The local harness starts its timer after transaction-generator warmup, subtracts warmup counters,
 and drains the final latency samples.
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower

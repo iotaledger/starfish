@@ -48,7 +48,7 @@ use crate::{
     starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader, RbcCommitteeId, RbcProtocolInstanceId},
     starfish_rbc_dag::{
         RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
-        storage::ShadowWalSyncPolicyV1,
+        projection::ProjectionDecisionV1, storage::ShadowWalSyncPolicyV1,
     },
     starfish_rbc_dag_shadow::{
         ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
@@ -1815,10 +1815,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 Ok(headers) => Some(headers),
                 Err(error) => {
                     // A partial local history would make delivery comparisons
-                    // meaningless. Disable the whole observational run while
-                    // allowing authoritative direct RBC to continue.
+                    // meaningless in mirror mode and make autonomous local
+                    // application-origin reconciliation unsafe. Disable the
+                    // RBC-DAG runtime while allowing the legacy path to continue.
                     tracing::error!(
-                        "Disabling non-authoritative RBC-DAG shadow because recovered direct headers cannot be reconciled: {error}"
+                        "Disabling RBC-DAG runtime because recovered direct headers cannot be reconciled: {error}"
                     );
                     None
                 }
@@ -1975,9 +1976,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     Ok((service, events, task)) => (Some(service), Some(events), Some(task)),
                     Err(error) => {
                         invalidate_shadow_run(&metrics);
-                        tracing::error!(
-                            "Disabling non-authoritative Starfish-RBC-DAG shadow: {error}"
-                        );
+                        tracing::error!("Disabling Starfish-RBC-DAG runtime: {error}");
                         (None, None, None)
                     }
                 }
@@ -2165,6 +2164,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .syncer
                                 .add_transaction_data(vec![item], DataSource::StarfishRbcPayload)
                                 .await;
+                            if let Some(ref shadow) =
+                                event_inner.starfish_rbc_dag_shadow_service
+                            {
+                                if let Err(error) = shadow.application_data_available(block_ref) {
+                                    invalidate_shadow_run(&rbc_metrics);
+                                    tracing::warn!(
+                                        ?block_ref,
+                                        "Failed to record RBC-DAG application availability: {error}"
+                                    );
+                                }
+                            }
                         }
                         RbcServiceEvent::Delivered(header) => {
                             if let Some(ref shadow) =
@@ -2296,6 +2306,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 }
                             }
                         }
+                        ShadowServiceEventV1::VertexProjected(reference) => {
+                            shadow_metrics
+                                .starfish_rbc_dag_projected_vertices_total
+                                .inc();
+                            tracing::debug!(?reference, "RBC-DAG consensus vertex projected");
+                        }
+                        ShadowServiceEventV1::LeaderDecided(decision) => {
+                            let outcome = match decision {
+                                ProjectionDecisionV1::DirectCommit { .. } => "direct_commit",
+                                ProjectionDecisionV1::DirectSkip { .. } => "direct_skip",
+                                ProjectionDecisionV1::IndirectCommit { .. } => "indirect_commit",
+                                ProjectionDecisionV1::IndirectSkip { .. } => "indirect_skip",
+                                ProjectionDecisionV1::Undecided { .. } => "undecided",
+                            };
+                            shadow_metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&[outcome])
+                                .inc();
+                            tracing::debug!(?decision, "RBC-DAG projected leader decided");
+                        }
                         ShadowServiceEventV1::ComparisonBacklog {
                             unpaired_direct,
                             unpaired_shadow,
@@ -2417,7 +2447,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                             }
                             tracing::warn!(
-                                "Rejected non-authoritative RBC-DAG shadow input from {:?}: {}",
+                                "Rejected RBC-DAG runtime input from {:?}: {}",
                                 peer,
                                 error
                             );
@@ -2428,23 +2458,39 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
+        let bridge_metrics = metrics.clone();
         let bridge_task = decoded_rx.map(|mut decoded_rx| {
             let bridge_inner = inner.clone();
+            let bridge_metrics = bridge_metrics.clone();
             handle.spawn(async move {
                 while let Some(items) = decoded_rx.recv().await {
                     // Reconstruction proves we now have the shard data for the
                     // entire batch.
-                    let shard_refs = items.iter().map(|item| item.block_reference).collect();
+                    let shard_refs = items
+                        .iter()
+                        .map(|item| item.block_reference)
+                        .collect::<Vec<_>>();
                     bridge_inner
                         .cordial_knowledge
                         .send(CordialKnowledgeMessage::DagParts {
                             headers: Vec::new(),
-                            shards: shard_refs,
+                            shards: shard_refs.clone(),
                         });
                     bridge_inner
                         .syncer
                         .add_transaction_data(items, DataSource::ShardReconstructor)
                         .await;
+                    if let Some(ref shadow) = bridge_inner.starfish_rbc_dag_shadow_service {
+                        for reference in shard_refs {
+                            if let Err(error) = shadow.application_data_available(reference) {
+                                invalidate_shadow_run(&bridge_metrics);
+                                tracing::warn!(
+                                    ?reference,
+                                    "Failed to record reconstructed RBC-DAG availability: {error}"
+                                );
+                            }
+                        }
+                    }
                 }
             })
         });
@@ -2799,13 +2845,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                 .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(
-                    "Non-authoritative RBC-DAG shadow did not acknowledge shutdown: {error}"
-                ),
+                Ok(Err(error)) => {
+                    tracing::warn!("RBC-DAG runtime did not acknowledge shutdown: {error}")
+                }
                 Err(_) => {
                     shadow_shutdown_timed_out = true;
                     tracing::warn!(
-                        "Timed out stopping non-authoritative RBC-DAG shadow; detaching it from validator shutdown"
+                        "Timed out stopping RBC-DAG runtime; detaching it from validator shutdown"
                     );
                     if let Some(task) = rbc_dag_shadow_service_task.as_ref() {
                         task.abort();

@@ -35,7 +35,7 @@ pub struct LeaderSlotV1 {
     pub round: RoundNumber,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProjectionDecisionV1 {
     DirectCommit {
         leader: ConsensusVertexReference,
@@ -252,6 +252,35 @@ impl CertifiedProjectionModel {
 
     pub fn is_projected(&self, reference: ConsensusVertexReference) -> bool {
         self.vertices.contains_key(&reference)
+    }
+
+    /// Deterministic clean values at one logical consensus round. Byzantine
+    /// equivocations remain visible as distinct exact references.
+    pub fn projected_values_at_round(&self, round: RoundNumber) -> Vec<ConsensusVertexReference> {
+        self.vertices_at_round(round)
+            .map(|(reference, _)| reference)
+            .collect()
+    }
+
+    pub fn projected_vertex(
+        &self,
+        reference: ConsensusVertexReference,
+    ) -> Option<&ConsensusVertexV1> {
+        self.vertices
+            .get(&reference)
+            .map(|projected| &projected.vertex)
+    }
+
+    /// Current exact closed carrier-prefix frontier in authority order.
+    pub fn closed_frontier(&self) -> DeliveryFrontierV1 {
+        self.committee
+            .authorities()
+            .map(|authority| self.closed_tip(authority))
+            .collect()
+    }
+
+    pub fn projected_vertex_count(&self) -> usize {
+        self.vertices.len()
     }
 
     pub fn slot_values(

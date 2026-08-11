@@ -67,14 +67,13 @@ pub struct NodeParameters {
     /// other protocols.
     #[serde(default)]
     pub starfish_rbc_protocol_instance: Option<[u8; 32]>,
-    /// Run the persisted Starfish-RBC-DAG carrier implementation alongside
-    /// the authoritative direct Starfish-RBC service. Shadow delivery is
-    /// observational only and cannot affect the DAG, pacemaker, or commits.
+    /// Run the persisted Starfish-RBC-DAG implementation alongside the
+    /// legacy direct Starfish-RBC service. Without autonomous mode it is a
+    /// comparison-only mirror.
     #[serde(default)]
     pub starfish_rbc_dag_shadow: bool,
-    /// Let the non-authoritative Starfish-RBC-DAG shadow create an autonomous
-    /// optimistic carrier clock. This remains experimental and requires
-    /// `starfish_rbc_dag_shadow`.
+    /// Run an independent carrier clock and certified logical projection.
+    /// This remains experimental and requires `starfish_rbc_dag_shadow`.
     #[serde(default)]
     pub starfish_rbc_dag_autonomous_clock: bool,
     /// Use embedded carrier ECHO/READY delivery as the certification authority

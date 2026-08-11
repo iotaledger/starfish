@@ -586,7 +586,7 @@ mod smoke_tests {
         }
 
         if autonomous_clock {
-            tokio::time::timeout(timeout, async {
+            let autonomous_progress = tokio::time::timeout(timeout, async {
                 loop {
                     if validators.iter().all(|validator| {
                         let metrics = validator.metrics();
@@ -606,6 +606,12 @@ mod smoke_tests {
                                 .with_label_values(&["delivery", "shadow"])
                                 .get()
                                 > 0
+                            && metrics.starfish_rbc_dag_projected_vertices_total.get() > 0
+                            && metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&["direct_commit"])
+                                .get()
+                                > 0
                             && (!embedded_rbc_authority
                                 || metrics
                                     .starfish_rbc_dag_shadow_inputs_total
@@ -619,13 +625,46 @@ mod smoke_tests {
                     time::sleep(Duration::from_millis(25)).await;
                 }
             })
-            .await
-            .expect("autonomous carrier clock did not advance while direct RBC committed");
+            .await;
+            if autonomous_progress.is_err() {
+                let state = validators
+                    .iter()
+                    .map(|validator| {
+                        let metrics = validator.metrics();
+                        (
+                            metrics.starfish_rbc_dag_shadow_clock_valid.get(),
+                            metrics.starfish_rbc_dag_shadow_carrier_round.get(),
+                            metrics.starfish_rbc_dag_projected_vertices_total.get(),
+                            metrics
+                                .starfish_rbc_dag_projection_decisions_total
+                                .with_label_values(&["direct_commit"])
+                                .get(),
+                            metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "shadow"])
+                                .get(),
+                            metrics.starfish_rbc_dag_shadow_pending_recovery.get(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "autonomous carrier projection did not advance while direct RBC committed; \
+                     per-node (valid, round, projected, commits, deliveries, recovery)={state:?}"
+                );
+            }
 
             for validator in &validators {
                 let metrics = validator.metrics();
                 assert_eq!(metrics.starfish_rbc_dag_shadow_clock_valid.get(), 1);
                 assert!(metrics.starfish_rbc_dag_shadow_carrier_round.get() > 3);
+                assert!(metrics.starfish_rbc_dag_projected_vertices_total.get() > 0);
+                assert!(
+                    metrics
+                        .starfish_rbc_dag_projection_decisions_total
+                        .with_label_values(&["direct_commit"])
+                        .get()
+                        > 0
+                );
                 assert_eq!(
                     metrics.starfish_rbc_dag_shadow_comparison_valid.get(),
                     0,

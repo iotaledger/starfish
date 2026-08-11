@@ -41,8 +41,8 @@ pub const TRANSACTION_CERTIFIED_LATENCY_SQUARED: &str = "latency_s";
 pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR: i64 = 4;
 pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG: i64 = 4;
 
-/// Local-benchmark guards for the non-authoritative autonomous carrier
-/// clock. The round-skew limit matches the executable model's bounded future
+/// Local-benchmark guards for the autonomous RBC-DAG carrier clock. The
+/// round-skew limit matches the executable model's bounded future
 /// buffer. A healthy clock can transiently retain phase work, but its carrier
 /// capacity exceeds the two RBC statements generated per admitted value; a
 /// sixteen-committee backlog therefore leaves generous scheduling headroom
@@ -198,6 +198,8 @@ pub struct Metrics {
     pub starfish_rbc_dag_shadow_admitted_authors: IntGauge,
     pub starfish_rbc_dag_shadow_admitted_stake: IntGauge,
     pub starfish_rbc_dag_shadow_buffered_authenticated: IntGauge,
+    pub starfish_rbc_dag_projected_vertices_total: IntCounter,
+    pub starfish_rbc_dag_projection_decisions_total: IntCounterVec,
 
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
@@ -268,6 +270,8 @@ pub struct AutonomousClockBenchmarkBaseline {
     accepted_heartbeats: u64,
     delivered_carriers: u64,
     delivered_applications: u64,
+    projected_vertices: u64,
+    projection_decisions: u64,
     wal_batches: u64,
     wal_records: u64,
     carrier_round: i64,
@@ -293,6 +297,8 @@ struct AutonomousClockBenchmarkSummary {
     accepted_heartbeats: u64,
     delivered_carriers: u64,
     delivered_applications: u64,
+    projected_vertices: u64,
+    projection_decisions: u64,
     wal_batches: u64,
     wal_records: u64,
     pending_recovery: i64,
@@ -347,6 +353,13 @@ fn summarize_autonomous_clock_benchmark(
                         .with_label_values(&["delivery", "embedded_application"])
                         .get()
                         > baseline.delivered_applications)
+                && metrics.starfish_rbc_dag_projected_vertices_total.get()
+                    > baseline.projected_vertices
+                && metrics
+                    .starfish_rbc_dag_projection_decisions_total
+                    .with_label_values(&["direct_commit"])
+                    .get()
+                    > baseline.projection_decisions
                 && metrics
                     .starfish_rbc_dag_shadow_wal_appended_batches_total
                     .get()
@@ -400,6 +413,19 @@ fn summarize_autonomous_clock_benchmark(
             metrics
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "embedded_application"])
+                .get()
+        })
+        .sum();
+    let projected_vertices = metrics
+        .iter()
+        .map(|metrics| metrics.starfish_rbc_dag_projected_vertices_total.get())
+        .sum();
+    let projection_decisions = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
                 .get()
         })
         .sum();
@@ -470,6 +496,8 @@ fn summarize_autonomous_clock_benchmark(
         accepted_heartbeats,
         delivered_carriers,
         delivered_applications,
+        projected_vertices,
+        projection_decisions,
         wal_batches,
         wal_records,
         pending_recovery,
@@ -509,6 +537,11 @@ impl Metrics {
             delivered_applications: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "embedded_application"])
+                .get(),
+            projected_vertices: self.starfish_rbc_dag_projected_vertices_total.get(),
+            projection_decisions: self
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
                 .get(),
             wal_batches: self
                 .starfish_rbc_dag_shadow_wal_appended_batches_total
@@ -936,7 +969,7 @@ impl Metrics {
             .unwrap(),
             starfish_rbc_dag_shadow_clock_valid: register_int_gauge_with_registry!(
                 "starfish_rbc_dag_shadow_clock_valid",
-                "State of the non-authoritative autonomous carrier clock (1 valid, 0 disabled/invalid, -1 starting)",
+                "State of the autonomous RBC-DAG carrier clock and projection runtime (1 valid, 0 disabled/invalid, -1 starting)",
                 registry,
             )
             .unwrap(),
@@ -970,6 +1003,20 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            starfish_rbc_dag_projected_vertices_total: register_int_counter_with_registry!(
+                "starfish_rbc_dag_projected_vertices_total",
+                "RBC-delivered, data-available consensus vertices admitted to the certified carrier projection",
+                registry,
+            )
+            .unwrap(),
+            starfish_rbc_dag_projection_decisions_total:
+                register_int_counter_vec_with_registry!(
+                    "starfish_rbc_dag_projection_decisions_total",
+                    "Clean-only Starfish leader decisions produced by the certified carrier projection",
+                    &["outcome"],
+                    registry,
+                )
+                .unwrap(),
             subscribed_to_peers: register_int_gauge_with_registry!(
                 "subscribed_to_peers",
                 "Number of peers this validator is subscribed to",
@@ -1712,10 +1759,12 @@ impl Metrics {
             table.add_row(row![
                 b->"Clock/WAL progress:",
                 format!(
-                    "heartbeats={}, carrier deliveries={}, application deliveries={}, WAL batches={}, records={}, open rounds={}..{}",
+                    "heartbeats={}, carrier deliveries={}, application deliveries={}, projected vertices={}, projected commits={}, WAL batches={}, records={}, open rounds={}..{}",
                     summary.accepted_heartbeats,
                     summary.delivered_carriers,
                     summary.delivered_applications,
+                    summary.projected_vertices,
+                    summary.projection_decisions,
                     summary.wal_batches,
                     summary.wal_records,
                     summary.minimum_round,
@@ -2232,6 +2281,11 @@ mod tests {
         metrics
             .starfish_rbc_dag_shadow_buffered_authenticated
             .set(2);
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
 
         let gathered = registry.gather();
         for name in [
@@ -2254,6 +2308,8 @@ mod tests {
             "starfish_rbc_dag_shadow_admitted_authors",
             "starfish_rbc_dag_shadow_admitted_stake",
             "starfish_rbc_dag_shadow_buffered_authenticated",
+            "starfish_rbc_dag_projected_vertices_total",
+            "starfish_rbc_dag_projection_decisions_total",
         ] {
             assert!(
                 gathered.iter().any(|family| family.get_name() == name),
@@ -2299,6 +2355,11 @@ mod tests {
         metrics
             .starfish_rbc_dag_shadow_buffered_authenticated
             .set(buffered_authenticated);
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
         metrics
     }
 
@@ -2363,6 +2424,11 @@ mod tests {
                 .starfish_rbc_dag_shadow_wal_durable_records_total
                 .inc();
             metrics.starfish_rbc_dag_shadow_carrier_round.inc();
+            metrics.starfish_rbc_dag_projected_vertices_total.inc();
+            metrics
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
+                .inc();
         }
 
         assert!(
@@ -2373,7 +2439,7 @@ mod tests {
 
     #[test]
     fn embedded_authority_summary_requires_application_delivery_progress() {
-        let metrics = vec![autonomous_clock_metrics(8, 0, 0)];
+        let metrics = [autonomous_clock_metrics(8, 0, 0)];
         let baselines = metrics
             .iter()
             .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
@@ -2394,6 +2460,11 @@ mod tests {
             .starfish_rbc_dag_shadow_wal_appended_records_total
             .inc();
         metrics.starfish_rbc_dag_shadow_carrier_round.inc();
+        metrics.starfish_rbc_dag_projected_vertices_total.inc();
+        metrics
+            .starfish_rbc_dag_projection_decisions_total
+            .with_label_values(&["direct_commit"])
+            .inc();
 
         assert!(
             !summarize_autonomous_clock_benchmark(
