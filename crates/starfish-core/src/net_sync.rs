@@ -45,7 +45,7 @@ use crate::{
         SailfishCertEvent, SailfishServiceHandle, SailfishServiceMessage, start_sailfish_service,
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
-    starfish_rbc::{RbcCanonicalHeader, RbcProtocolInstanceId},
+    starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader, RbcCommitteeId, RbcProtocolInstanceId},
     starfish_rbc_dag::{
         RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
         storage::ShadowWalSyncPolicyV1,
@@ -59,7 +59,8 @@ use crate::{
         start_starfish_rbc_dag_shadow_service_v1,
     },
     starfish_rbc_service::{
-        RbcInitialAuthenticator, RbcServiceEvent, RbcServiceHandle, start_starfish_rbc_service,
+        RbcInitialAuthenticator, RbcPhaseAuthorityV1, RbcServiceEvent, RbcServiceHandle,
+        start_starfish_rbc_service_with_phase_authority,
     },
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
@@ -1809,13 +1810,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         let committee = core.committee().clone();
         let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
-        let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow
-            && node_parameters.starfish_rbc_dag_autonomous_clock
-        {
-            // Autonomous carrier rounds are independent of direct consensus
-            // rounds and recover entirely from their distinct WAL.
-            Some(Vec::new())
-        } else if node_parameters.starfish_rbc_dag_shadow {
+        let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow {
             match recovered_local_rbc_headers(&core) {
                 Ok(headers) => Some(headers),
                 Err(error) => {
@@ -1880,7 +1875,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     }
                     BlockAuthenticationScheme::MacVector => RbcInitialAuthenticator::Mac,
                 };
-                let (service, events, task) = start_starfish_rbc_service(
+                let phase_authority = if node_parameters.starfish_rbc_dag_embedded_rbc_authority {
+                    RbcPhaseAuthorityV1::EmbeddedCarrierDag
+                } else {
+                    RbcPhaseAuthorityV1::Direct
+                };
+                let (service, events, task) = start_starfish_rbc_service_with_phase_authority(
                     committee.clone(),
                     dag_state.get_own_authority_index(),
                     protocol_instance,
@@ -1889,6 +1889,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     initial_authenticator,
                     dag_state.highest_round(),
                     STARFISH_RBC_HEADER_RETRY_INTERVAL,
+                    phase_authority,
                 )
                 .expect("validated Starfish-RBC configuration must start its service");
                 (Some(service), Some(events), Some(task))
@@ -1947,9 +1948,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         dag_state.get_own_authority_index(),
                         context,
                         authorizer,
-                        Duration::from_millis(
-                            node_parameters.starfish_rbc_dag_heartbeat_interval_ms,
-                        ),
+                        recovered_local_headers,
+                        // The idle carrier pacemaker deliberately shares the
+                        // resolved Starfish leader timeout. Application and
+                        // embedded RBC phase carriers remain event-driven.
+                        node_parameters.leader_timeout,
                         wal_sync_policy,
                     )
                 } else {
@@ -2199,6 +2202,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             })
         });
 
+        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
+        let embedded_rbc_committee_id = embedded_rbc_authority.then(|| {
+            RbcCommitteeId::derive(&inner.committee)
+                .expect("validated direct RBC committee must retain a stable identifier")
+        });
         let rbc_dag_shadow_event_task = rbc_dag_shadow_event_rx.map(|mut event_rx| {
             let event_inner = inner.clone();
             let shadow_metrics = metrics.clone();
@@ -2253,6 +2261,40 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .with_label_values(&["delivery", "shadow"])
                                 .inc();
                             tracing::debug!(?identity, "RBC-DAG shadow delivered carrier");
+                        }
+                        ShadowServiceEventV1::EmbeddedApplicationDelivered { carrier, header } => {
+                            shadow_metrics
+                                .starfish_rbc_dag_shadow_inputs_total
+                                .with_label_values(&["delivery", "embedded_application"])
+                                .inc();
+                            tracing::debug!(
+                                ?carrier,
+                                application = ?header.reference(),
+                                "RBC-DAG shadow delivered embedded application header"
+                            );
+                            if embedded_rbc_authority {
+                                match PinnedRbcHeader::validate_with_committee_id(
+                                    header,
+                                    &event_inner.committee,
+                                    embedded_rbc_committee_id
+                                        .expect("embedded authority must cache its committee ID"),
+                                ) {
+                                    Ok(header) => {
+                                        event_inner
+                                            .syncer
+                                            .apply_starfish_rbc_deliveries(vec![header])
+                                            .await;
+                                    }
+                                    Err(error) => {
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                        tracing::error!(
+                                            ?carrier,
+                                            ?error,
+                                            "Embedded RBC delivered an invalid application header"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         ShadowServiceEventV1::ComparisonBacklog {
                             unpaired_direct,

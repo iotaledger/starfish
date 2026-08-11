@@ -27,6 +27,7 @@ use crate::{
         MacTag, MlDsa44SignatureBytes, MlDsa44Signer, MlDsa65SignatureBytes, MlDsa65Signer,
         SIGNATURE_SIZE, SignatureBytes, Signer, TransactionsCommitment,
     },
+    starfish_rbc::RbcCanonicalHeader,
     types::{
         AuthorityIndex, BlockAuthenticationScheme, BlockDigest, BlockReference, MAX_COMMITTEE_SIZE,
         RoundNumber, TimestampNs,
@@ -35,6 +36,10 @@ use crate::{
 
 pub const CARRIER_FORMAT_VERSION_V1: u8 = 1;
 pub const CARRIER_WIRE_FORMAT_VERSION_V1: u8 = 0x81;
+/// V2 extends V1 with one complete canonical application header. Control-only
+/// carriers remain byte-for-byte V1 so existing autonomous-clock WALs reopen.
+pub const CARRIER_FORMAT_VERSION_V2: u8 = 2;
+pub const CARRIER_WIRE_FORMAT_VERSION_V2: u8 = 0x82;
 pub const MAX_CARRIER_CONTENT_SIZE_V1: usize = 4 * 1024 * 1024;
 pub const MAX_PHASE_STATEMENTS_V1: usize = 2_048;
 
@@ -48,6 +53,7 @@ const ACKNOWLEDGMENTS_FIELD: u8 = 0x06;
 const PHASE_BATCH_FIELD: u8 = 0x07;
 const CONSENSUS_VERTEX_FIELD: u8 = 0x08;
 const CREATION_TIME_FIELD: u8 = 0x09;
+const APPLICATION_HEADER_FIELD: u8 = 0x0A;
 const CONSENSUS_ROUND_FIELD: u8 = 0x01;
 const STRONG_PARENTS_FIELD: u8 = 0x02;
 const DELIVERY_FRONTIER_FIELD: u8 = 0x03;
@@ -317,6 +323,7 @@ pub struct CarrierHeaderV1 {
     own_prev: BlockReference,
     weak_parents: Vec<BlockReference>,
     transactions_commitment: TransactionsCommitment,
+    application_header: Option<RbcCanonicalHeader>,
     data_acknowledgments: Vec<BlockReference>,
     phase_batch: Vec<RbcPhaseStatementV1>,
     consensus_vertex: Option<ConsensusVertexV1>,
@@ -330,6 +337,9 @@ pub struct CarrierHeaderV1Args {
     pub own_prev: BlockReference,
     pub weak_parents: Vec<BlockReference>,
     pub transactions_commitment: TransactionsCommitment,
+    /// Exact application header disseminated by this carrier. `None` denotes
+    /// a control-only heartbeat and retains the frozen V1 byte grammar.
+    pub application_header: Option<RbcCanonicalHeader>,
     pub data_acknowledgments: Vec<BlockReference>,
     pub phase_batch: Vec<RbcPhaseStatementV1>,
     pub consensus_vertex: Option<ConsensusVertexV1>,
@@ -344,6 +354,7 @@ impl CarrierHeaderV1 {
             own_prev: args.own_prev,
             weak_parents: args.weak_parents,
             transactions_commitment: args.transactions_commitment,
+            application_header: args.application_header,
             data_acknowledgments: args.data_acknowledgments,
             phase_batch: args.phase_batch,
             consensus_vertex: args.consensus_vertex,
@@ -371,6 +382,10 @@ impl CarrierHeaderV1 {
 
     pub fn transactions_commitment(&self) -> TransactionsCommitment {
         self.transactions_commitment
+    }
+
+    pub fn application_header(&self) -> Option<&RbcCanonicalHeader> {
+        self.application_header.as_ref()
     }
 
     pub fn data_acknowledgments(&self) -> &[BlockReference] {
@@ -1542,6 +1557,12 @@ pub enum RbcDagError {
     InvalidWeakParent(BlockReference),
     WeakParentsNotOrdered,
     InvalidCarrierThreshold,
+    InvalidApplicationHeader,
+    ApplicationAuthorMismatch {
+        carrier: AuthorityIndex,
+        application: AuthorityIndex,
+    },
+    ApplicationCommitmentMismatch,
     InvalidAcknowledgment(BlockReference),
     DuplicateAcknowledgment(BlockReference),
     InvalidPhaseTarget(BlockReference),
@@ -1641,6 +1662,22 @@ fn validate_outer_header(
         return Err(RbcDagError::InvalidCarrierThreshold);
     }
 
+    if let Some(application_header) = &header.application_header {
+        application_header
+            .validate_for_committee(committee)
+            .map_err(|_| RbcDagError::InvalidApplicationHeader)?;
+        let application = application_header.reference().authority;
+        if application != header.author {
+            return Err(RbcDagError::ApplicationAuthorMismatch {
+                carrier: header.author,
+                application,
+            });
+        }
+        if application_header.transactions_commitment() != header.transactions_commitment {
+            return Err(RbcDagError::ApplicationCommitmentMismatch);
+        }
+    }
+
     if header.data_acknowledgments.len() > u16::MAX as usize {
         return Err(RbcDagError::VectorTooLong {
             field: "acknowledgments",
@@ -1736,10 +1773,14 @@ fn encode_header(
 ) -> Result<Vec<u8>, RbcDagError> {
     let mut bytes = Vec::new();
     bytes.push(CONTENT_FORMAT_FIELD);
-    bytes.push(match acknowledgment_encoding {
-        AckEncoding::Expanded => CARRIER_FORMAT_VERSION_V1,
-        AckEncoding::Compressed => CARRIER_WIRE_FORMAT_VERSION_V1,
-    });
+    bytes.push(
+        match (acknowledgment_encoding, header.application_header.is_some()) {
+            (AckEncoding::Expanded, false) => CARRIER_FORMAT_VERSION_V1,
+            (AckEncoding::Compressed, false) => CARRIER_WIRE_FORMAT_VERSION_V1,
+            (AckEncoding::Expanded, true) => CARRIER_FORMAT_VERSION_V2,
+            (AckEncoding::Compressed, true) => CARRIER_WIRE_FORMAT_VERSION_V2,
+        },
+    );
     bytes.push(AUTHOR_FIELD);
     bytes.extend_from_slice(&header.author.to_be_bytes());
     bytes.push(CARRIER_ROUND_FIELD);
@@ -1753,6 +1794,10 @@ fn encode_header(
     }
     bytes.push(TRANSACTIONS_COMMITMENT_FIELD);
     bytes.extend_from_slice(header.transactions_commitment.as_ref());
+    if let Some(application_header) = &header.application_header {
+        bytes.push(APPLICATION_HEADER_FIELD);
+        encode_application_header(&mut bytes, application_header)?;
+    }
     bytes.push(ACKNOWLEDGMENTS_FIELD);
     match acknowledgment_encoding {
         AckEncoding::Expanded => {
@@ -1794,6 +1839,37 @@ fn encode_header(
         return Err(RbcDagError::ContentTooLarge(bytes.len()));
     }
     Ok(bytes)
+}
+
+fn encode_application_header(
+    bytes: &mut Vec<u8>,
+    header: &RbcCanonicalHeader,
+) -> Result<(), RbcDagError> {
+    let reference = header.reference();
+    bytes.push(0x01);
+    bytes.extend_from_slice(&reference.authority.to_be_bytes());
+    bytes.push(0x02);
+    bytes.extend_from_slice(&reference.round.to_be_bytes());
+    bytes.push(0x03);
+    encode_count(
+        bytes,
+        "application parents",
+        header.block_references().len(),
+    )?;
+    for parent in header.block_references() {
+        encode_reference(bytes, *parent);
+    }
+    let acknowledgments = header.acknowledgment_references();
+    bytes.push(0x04);
+    encode_count(bytes, "application acknowledgments", acknowledgments.len())?;
+    for acknowledgment in acknowledgments {
+        encode_reference(bytes, acknowledgment);
+    }
+    bytes.push(0x05);
+    bytes.extend_from_slice(&header.meta_creation_time_ns().to_be_bytes());
+    bytes.push(0x06);
+    bytes.extend_from_slice(header.transactions_commitment().as_ref());
+    Ok(())
 }
 
 fn encode_consensus_vertex(
@@ -1908,13 +1984,15 @@ fn decode_header(
     let mut decoder = Decoder::new(bytes);
     decoder.expect_marker(CONTENT_FORMAT_FIELD)?;
     let version = decoder.read_u8()?;
-    let expected_version = match acknowledgment_encoding {
-        AckEncoding::Expanded => CARRIER_FORMAT_VERSION_V1,
-        AckEncoding::Compressed => CARRIER_WIRE_FORMAT_VERSION_V1,
+    let has_application_header = match (acknowledgment_encoding, version) {
+        (AckEncoding::Expanded, CARRIER_FORMAT_VERSION_V1)
+        | (AckEncoding::Compressed, CARRIER_WIRE_FORMAT_VERSION_V1) => false,
+        (AckEncoding::Expanded, CARRIER_FORMAT_VERSION_V2)
+        | (AckEncoding::Compressed, CARRIER_WIRE_FORMAT_VERSION_V2) => true,
+        _ => {
+            return Err(RbcDagError::UnsupportedVersion(version));
+        }
     };
-    if version != expected_version {
-        return Err(RbcDagError::UnsupportedVersion(version));
-    }
     decoder.expect_marker(AUTHOR_FIELD)?;
     let author = decoder.read_u16()?;
     decoder.expect_marker(CARRIER_ROUND_FIELD)?;
@@ -1926,6 +2004,12 @@ fn decode_header(
     let weak_parents = decoder.read_references(weak_count)?;
     decoder.expect_marker(TRANSACTIONS_COMMITMENT_FIELD)?;
     let transactions_commitment = TransactionsCommitment::from_bytes(decoder.read_array()?);
+    let application_header = if has_application_header {
+        decoder.expect_marker(APPLICATION_HEADER_FIELD)?;
+        Some(decoder.read_application_header()?)
+    } else {
+        None
+    };
     decoder.expect_marker(ACKNOWLEDGMENTS_FIELD)?;
     let data_acknowledgments = match acknowledgment_encoding {
         AckEncoding::Expanded => {
@@ -1950,6 +2034,7 @@ fn decode_header(
                 own_prev,
                 weak_parents: weak_parents.clone(),
                 transactions_commitment,
+                application_header: application_header.clone(),
                 data_acknowledgments: acknowledgments.clone(),
                 phase_batch: Vec::new(),
                 consensus_vertex: None,
@@ -1990,6 +2075,7 @@ fn decode_header(
         own_prev,
         weak_parents,
         transactions_commitment,
+        application_header,
         data_acknowledgments,
         phase_batch,
         consensus_vertex,
@@ -2040,6 +2126,33 @@ impl<'a> Decoder<'a> {
 
     fn read_u64(&mut self) -> Result<u64, RbcDagError> {
         Ok(u64::from_be_bytes(self.read_array()?))
+    }
+
+    fn read_application_header(&mut self) -> Result<RbcCanonicalHeader, RbcDagError> {
+        self.expect_marker(0x01)?;
+        let author = self.read_u16()?;
+        self.expect_marker(0x02)?;
+        let round = self.read_u32()?;
+        self.expect_marker(0x03)?;
+        let parent_count = self.read_count("application parents", u16::MAX as usize)?;
+        let parents = self.read_references(parent_count)?;
+        self.expect_marker(0x04)?;
+        let acknowledgment_count =
+            self.read_count("application acknowledgments", u16::MAX as usize)?;
+        let acknowledgments = self.read_references(acknowledgment_count)?;
+        self.expect_marker(0x05)?;
+        let creation_time_ns = self.read_u64()?;
+        self.expect_marker(0x06)?;
+        let transactions_commitment = TransactionsCommitment::from_bytes(self.read_array()?);
+        RbcCanonicalHeader::try_new(
+            author,
+            round,
+            parents,
+            acknowledgments,
+            creation_time_ns,
+            transactions_commitment,
+        )
+        .map_err(|_| RbcDagError::InvalidApplicationHeader)
     }
 
     fn expect_marker(&mut self, expected: u8) -> Result<(), RbcDagError> {
@@ -2183,6 +2296,7 @@ mod tests {
     use crate::crypto::{
         dummy_ml_dsa_44_signer, dummy_ml_dsa_65_signer, dummy_signer, mac_keyrings_for_test,
     };
+    use crate::types::VerifiedBlock;
 
     fn reference(authority: AuthorityIndex, round: RoundNumber, marker: u8) -> BlockReference {
         BlockReference {
@@ -2228,6 +2342,7 @@ mod tests {
                 .map(parent)
                 .collect(),
             transactions_commitment: TransactionsCommitment::from_bytes([0x55; 32]),
+            application_header: None,
             data_acknowledgments: Vec::new(),
             phase_batch: Vec::new(),
             consensus_vertex: None,
@@ -2264,6 +2379,25 @@ mod tests {
 
     fn full_candidate(committee: &Committee) -> CandidateCarrierV1 {
         CandidateCarrierV1::try_new(full_args(committee), committee).unwrap()
+    }
+
+    fn application_header(
+        committee: &Committee,
+        author: AuthorityIndex,
+        marker: u8,
+    ) -> RbcCanonicalHeader {
+        RbcCanonicalHeader::try_new(
+            author,
+            1,
+            committee
+                .authorities()
+                .map(|authority| *VerifiedBlock::new_genesis(authority).reference())
+                .collect(),
+            Vec::new(),
+            0x1122_3344_5566_7700 + u64::from(marker),
+            TransactionsCommitment::from_bytes([marker; 32]),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2315,6 +2449,65 @@ mod tests {
         assert_eq!(
             hex::encode(candidate.reference().digest.as_ref()),
             "797b7ffa348c94889c36ea4a0c02070963efe6b7326aaed057f47e825867012f"
+        );
+    }
+
+    #[test]
+    fn application_carrier_uses_v2_and_round_trips_the_exact_canonical_header() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let application = application_header(&committee, 3, 0xA5);
+        let mut application_args = args(&committee, 3, 2);
+        application_args.transactions_commitment = application.transactions_commitment();
+        application_args.application_header = Some(application.clone());
+        let candidate = CandidateCarrierV1::try_new(application_args.clone(), &committee).unwrap();
+        let content = candidate.canonical_content_bytes().unwrap();
+        let wire = candidate.canonical_wire_bytes().unwrap();
+        assert_eq!(content[1], CARRIER_FORMAT_VERSION_V2);
+        assert_eq!(wire[1], CARRIER_WIRE_FORMAT_VERSION_V2);
+
+        let decoded_content =
+            CandidateCarrierV1::decode_content(&content, &committee, Some(candidate.reference()))
+                .unwrap();
+        let decoded_wire =
+            CandidateCarrierV1::decode_wire(&wire, &committee, Some(candidate.reference()))
+                .unwrap();
+        assert_eq!(
+            decoded_content.header().application_header(),
+            Some(&application)
+        );
+        assert_eq!(decoded_wire, decoded_content);
+
+        let changed_application = application_header(&committee, 3, 0xA6);
+        application_args.transactions_commitment = changed_application.transactions_commitment();
+        application_args.application_header = Some(changed_application);
+        assert_ne!(
+            CandidateCarrierV1::try_new(application_args, &committee)
+                .unwrap()
+                .reference(),
+            candidate.reference()
+        );
+    }
+
+    #[test]
+    fn application_carrier_rejects_author_or_commitment_mismatch() {
+        let committee = Committee::new_test(vec![1; 4]);
+        let application = application_header(&committee, 3, 0xB1);
+        let mut bad_commitment = args(&committee, 3, 2);
+        bad_commitment.application_header = Some(application.clone());
+        assert_eq!(
+            CandidateCarrierV1::try_new(bad_commitment, &committee),
+            Err(RbcDagError::ApplicationCommitmentMismatch)
+        );
+
+        let mut bad_author = args(&committee, 2, 2);
+        bad_author.transactions_commitment = application.transactions_commitment();
+        bad_author.application_header = Some(application);
+        assert_eq!(
+            CandidateCarrierV1::try_new(bad_author, &committee),
+            Err(RbcDagError::ApplicationAuthorMismatch {
+                carrier: 2,
+                application: 3,
+            })
         );
     }
 

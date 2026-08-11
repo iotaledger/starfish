@@ -80,9 +80,10 @@ enum Operation {
         /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
-        /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
-        #[clap(long, value_name = "INT")]
-        starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+        /// Let embedded carrier ECHO/READY delivery certify application
+        /// headers. Requires the autonomous RBC-DAG mode.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_embedded_rbc_authority: bool,
     },
     /// Deploy a local validator for test. Dryrun mode uses
     /// default keys and committee configurations.
@@ -124,9 +125,10 @@ enum Operation {
         /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
-        /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
-        #[clap(long, value_name = "INT")]
-        starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+        /// Let embedded carrier ECHO/READY delivery certify application
+        /// headers. Requires the autonomous RBC-DAG mode.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_embedded_rbc_authority: bool,
         /// Directory to store validator data (default: current directory)
         #[clap(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
@@ -190,9 +192,10 @@ enum Operation {
         /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_autonomous_clock: bool,
-        /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
-        #[clap(long, value_name = "INT")]
-        starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+        /// Let embedded carrier ECHO/READY delivery certify application
+        /// headers. Requires the autonomous RBC-DAG mode.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_dag_embedded_rbc_authority: bool,
         /// Benchmark-only: write ordered shadow-WAL frames but force them to
         /// stable storage only at clean shutdown. This run is not crash-safe.
         #[clap(long, default_value_t = false)]
@@ -233,7 +236,7 @@ async fn main() -> Result<()> {
             block_authentication,
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
-            starfish_rbc_dag_heartbeat_interval_ms,
+            starfish_rbc_dag_embedded_rbc_authority,
         } => {
             run(
                 authority,
@@ -246,7 +249,7 @@ async fn main() -> Result<()> {
                 block_authentication,
                 starfish_rbc_dag_shadow,
                 starfish_rbc_dag_autonomous_clock,
-                starfish_rbc_dag_heartbeat_interval_ms,
+                starfish_rbc_dag_embedded_rbc_authority,
             )
             .await?
         }
@@ -263,7 +266,7 @@ async fn main() -> Result<()> {
             block_authentication,
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
-            starfish_rbc_dag_heartbeat_interval_ms,
+            starfish_rbc_dag_embedded_rbc_authority,
             data_dir,
             base_ip,
             storage_backend,
@@ -285,7 +288,7 @@ async fn main() -> Result<()> {
                 block_authentication,
                 starfish_rbc_dag_shadow,
                 starfish_rbc_dag_autonomous_clock,
-                starfish_rbc_dag_heartbeat_interval_ms,
+                starfish_rbc_dag_embedded_rbc_authority,
                 data_dir,
                 base_ip,
                 storage_backend,
@@ -309,7 +312,7 @@ async fn main() -> Result<()> {
             block_authentication,
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
-            starfish_rbc_dag_heartbeat_interval_ms,
+            starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_shadow_buffered_wal,
             duration_secs,
             dissemination_mode,
@@ -323,11 +326,10 @@ async fn main() -> Result<()> {
             node_parameters.block_authentication = block_authentication;
             node_parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
             node_parameters.starfish_rbc_dag_autonomous_clock = starfish_rbc_dag_autonomous_clock;
+            node_parameters.starfish_rbc_dag_embedded_rbc_authority =
+                starfish_rbc_dag_embedded_rbc_authority;
             node_parameters.starfish_rbc_dag_shadow_buffered_wal =
                 starfish_rbc_dag_shadow_buffered_wal;
-            if let Some(interval_ms) = starfish_rbc_dag_heartbeat_interval_ms {
-                node_parameters.starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
-            }
             if consensus_protocol == "starfish-rbc" {
                 node_parameters.refresh_starfish_rbc_protocol_instance();
             }
@@ -451,6 +453,12 @@ async fn local_benchmark(
             }
         );
     }
+    if node_parameters.starfish_rbc_dag_autonomous_clock {
+        println!(
+            "Carrier idle timeout: {} ms (shared Starfish leader pacemaker)",
+            node_parameters.leader_timeout.as_millis()
+        );
+    }
     if let Some(latency) = node_parameters.uniform_latency_ms {
         println!("Network Latency: {latency} ms (uniform)");
     } else {
@@ -489,6 +497,8 @@ async fn local_benchmark(
     let starfish_rbc_dag_shadow_expected = node_parameters.starfish_rbc_dag_shadow;
     let starfish_rbc_dag_autonomous_clock_expected =
         node_parameters.starfish_rbc_dag_autonomous_clock;
+    let starfish_rbc_dag_embedded_rbc_authority_expected =
+        node_parameters.starfish_rbc_dag_embedded_rbc_authority;
 
     // Create temporary directories for each validator
     let base_dir = PathBuf::from("local-benchmark");
@@ -661,6 +671,7 @@ async fn local_benchmark(
                 committee_size,
                 starfish_rbc_dag_shadow_expected,
                 starfish_rbc_dag_autonomous_clock_expected,
+                starfish_rbc_dag_embedded_rbc_authority_expected,
                 autonomous_clock_baselines.clone(),
                 Some(counter_baselines.clone()),
             );
@@ -689,6 +700,7 @@ async fn local_benchmark(
                 committee_size,
                 starfish_rbc_dag_shadow_expected,
                 starfish_rbc_dag_autonomous_clock_expected,
+                starfish_rbc_dag_embedded_rbc_authority_expected,
                 autonomous_clock_baselines,
                 Some(counter_baselines),
             );
@@ -710,7 +722,7 @@ async fn run(
     block_authentication: Option<String>,
     starfish_rbc_dag_shadow: bool,
     starfish_rbc_dag_autonomous_clock: bool,
-    starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+    starfish_rbc_dag_embedded_rbc_authority: bool,
 ) -> Result<()> {
     tracing::info!("Starting node {authority}");
 
@@ -728,10 +740,10 @@ async fn run(
     if starfish_rbc_dag_autonomous_clock {
         public_config.parameters.starfish_rbc_dag_autonomous_clock = true;
     }
-    if let Some(interval_ms) = starfish_rbc_dag_heartbeat_interval_ms {
+    if starfish_rbc_dag_embedded_rbc_authority {
         public_config
             .parameters
-            .starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
+            .starfish_rbc_dag_embedded_rbc_authority = true;
     }
     let private_config = NodePrivateConfig::load(&private_config_path).wrap_err(format!(
         "Failed to load private configuration file '{private_config_path}'"
@@ -772,7 +784,7 @@ async fn dryrun(
     block_authentication: Option<String>,
     starfish_rbc_dag_shadow: bool,
     starfish_rbc_dag_autonomous_clock: bool,
-    starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+    starfish_rbc_dag_embedded_rbc_authority: bool,
     data_dir: Option<PathBuf>,
     base_ip: Option<IpAddr>,
     storage_backend: Option<String>,
@@ -817,9 +829,8 @@ async fn dryrun(
     node_parameters.block_authentication = block_authentication;
     node_parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
     node_parameters.starfish_rbc_dag_autonomous_clock = starfish_rbc_dag_autonomous_clock;
-    if let Some(interval_ms) = starfish_rbc_dag_heartbeat_interval_ms {
-        node_parameters.starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
-    }
+    node_parameters.starfish_rbc_dag_embedded_rbc_authority =
+        starfish_rbc_dag_embedded_rbc_authority;
     ensure_starfish_rbc_protocol_instance(&consensus_protocol, &mut node_parameters);
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
@@ -1001,8 +1012,7 @@ mod tests {
             "mac",
             "--starfish-rbc-dag-shadow",
             "--starfish-rbc-dag-autonomous-clock",
-            "--starfish-rbc-dag-heartbeat-interval-ms",
-            "125",
+            "--starfish-rbc-dag-embedded-rbc-authority",
             "--starfish-rbc-dag-shadow-buffered-wal",
         ])
         .unwrap();
@@ -1012,7 +1022,7 @@ mod tests {
             block_authentication,
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
-            starfish_rbc_dag_heartbeat_interval_ms,
+            starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_shadow_buffered_wal,
             ..
         } = args.operation
@@ -1023,7 +1033,7 @@ mod tests {
         assert_eq!(block_authentication.as_deref(), Some("mac"));
         assert!(starfish_rbc_dag_shadow);
         assert!(starfish_rbc_dag_autonomous_clock);
-        assert_eq!(starfish_rbc_dag_heartbeat_interval_ms, Some(125));
+        assert!(starfish_rbc_dag_embedded_rbc_authority);
         assert!(starfish_rbc_dag_shadow_buffered_wal);
     }
 
@@ -1032,7 +1042,6 @@ mod tests {
         let mut parameters = NodeParameters {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
             ..NodeParameters::default()
         };
 
@@ -1045,6 +1054,5 @@ mod tests {
         );
         assert!(parameters.starfish_rbc_dag_shadow);
         assert!(parameters.starfish_rbc_dag_autonomous_clock);
-        assert_eq!(parameters.starfish_rbc_dag_heartbeat_interval_ms, 125);
     }
 }

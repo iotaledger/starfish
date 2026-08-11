@@ -73,9 +73,10 @@ pub struct Opts {
     #[clap(long, global = true)]
     starfish_rbc_dag_autonomous_clock: bool,
 
-    /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
-    #[clap(long, value_name = "INT", global = true)]
-    starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
+    /// Let embedded carrier ECHO/READY delivery certify Starfish-RBC
+    /// application headers. Requires autonomous RBC-DAG mode.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_embedded_rbc_authority: bool,
 
     /// Benchmark-only: sync the framed shadow WAL only at clean shutdown.
     /// This removes per-transition disk pressure and is not crash-safe.
@@ -91,7 +92,7 @@ pub struct Opts {
 struct StarfishRbcDagOverrides {
     shadow: bool,
     autonomous_clock: bool,
-    heartbeat_interval_ms: Option<u64>,
+    embedded_rbc_authority: bool,
     buffered_wal: bool,
 }
 
@@ -896,8 +897,8 @@ fn load_benchmark_configs(
     if starfish_rbc_dag.autonomous_clock {
         node_parameters.starfish_rbc_dag_autonomous_clock = true;
     }
-    if let Some(interval_ms) = starfish_rbc_dag.heartbeat_interval_ms {
-        node_parameters.starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
+    if starfish_rbc_dag.embedded_rbc_authority {
+        node_parameters.starfish_rbc_dag_embedded_rbc_authority = true;
     }
     if starfish_rbc_dag.buffered_wal {
         node_parameters.starfish_rbc_dag_shadow_buffered_wal = true;
@@ -1085,7 +1086,7 @@ async fn run<C: ServerProviderClient>(
     let starfish_rbc_dag = StarfishRbcDagOverrides {
         shadow: opts.starfish_rbc_dag_shadow,
         autonomous_clock: opts.starfish_rbc_dag_autonomous_clock,
-        heartbeat_interval_ms: opts.starfish_rbc_dag_heartbeat_interval_ms,
+        embedded_rbc_authority: opts.starfish_rbc_dag_embedded_rbc_authority,
         buffered_wal: opts.starfish_rbc_dag_shadow_buffered_wal,
     };
     match opts.operation {
@@ -2383,8 +2384,7 @@ mod tests {
             "mac",
             "--starfish-rbc-dag-shadow",
             "--starfish-rbc-dag-autonomous-clock",
-            "--starfish-rbc-dag-heartbeat-interval-ms",
-            "125",
+            "--starfish-rbc-dag-embedded-rbc-authority",
             "--starfish-rbc-dag-shadow-buffered-wal",
             "--protocols",
             "starfish-rbc",
@@ -2394,8 +2394,8 @@ mod tests {
         assert_eq!(opts.block_authentication.as_deref(), Some("mac"));
         assert!(opts.starfish_rbc_dag_shadow);
         assert!(opts.starfish_rbc_dag_autonomous_clock);
+        assert!(opts.starfish_rbc_dag_embedded_rbc_authority);
         assert!(opts.starfish_rbc_dag_shadow_buffered_wal);
-        assert_eq!(opts.starfish_rbc_dag_heartbeat_interval_ms, Some(125));
         let Operation::Benchmark { protocols, .. } = opts.operation else {
             panic!("expected benchmark operation");
         };

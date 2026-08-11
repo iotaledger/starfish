@@ -267,6 +267,7 @@ pub struct MetricReporter {
 pub struct AutonomousClockBenchmarkBaseline {
     accepted_heartbeats: u64,
     delivered_carriers: u64,
+    delivered_applications: u64,
     wal_batches: u64,
     wal_records: u64,
     carrier_round: i64,
@@ -291,6 +292,7 @@ struct AutonomousClockBenchmarkSummary {
     bounded_nodes: usize,
     accepted_heartbeats: u64,
     delivered_carriers: u64,
+    delivered_applications: u64,
     wal_batches: u64,
     wal_records: u64,
     pending_recovery: i64,
@@ -309,6 +311,7 @@ fn summarize_autonomous_clock_benchmark(
     metrics: &[Arc<Metrics>],
     committee_size: usize,
     baselines: Option<&[AutonomousClockBenchmarkBaseline]>,
+    embedded_rbc_authority: bool,
 ) -> AutonomousClockBenchmarkSummary {
     let committee_size = i64::try_from(committee_size).unwrap_or(i64::MAX);
     let maximum_phase_backlog_bound =
@@ -338,6 +341,12 @@ fn summarize_autonomous_clock_benchmark(
                     .with_label_values(&["delivery", "shadow"])
                     .get()
                     > baseline.delivered_carriers
+                && (!embedded_rbc_authority
+                    || metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "embedded_application"])
+                        .get()
+                        > baseline.delivered_applications)
                 && metrics
                     .starfish_rbc_dag_shadow_wal_appended_batches_total
                     .get()
@@ -382,6 +391,15 @@ fn summarize_autonomous_clock_benchmark(
             metrics
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
+                .get()
+        })
+        .sum();
+    let delivered_applications = metrics
+        .iter()
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "embedded_application"])
                 .get()
         })
         .sum();
@@ -451,6 +469,7 @@ fn summarize_autonomous_clock_benchmark(
         bounded_nodes,
         accepted_heartbeats,
         delivered_carriers,
+        delivered_applications,
         wal_batches,
         wal_records,
         pending_recovery,
@@ -486,6 +505,10 @@ impl Metrics {
             delivered_carriers: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
+                .get(),
+            delivered_applications: self
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "embedded_application"])
                 .get(),
             wal_batches: self
                 .starfish_rbc_dag_shadow_wal_appended_batches_total
@@ -1406,6 +1429,7 @@ impl Metrics {
         committee_size: usize,
         starfish_rbc_dag_shadow_expected: bool,
         starfish_rbc_dag_autonomous_clock_expected: bool,
+        starfish_rbc_dag_embedded_rbc_authority_expected: bool,
         autonomous_clock_baselines: Option<Vec<AutonomousClockBenchmarkBaseline>>,
         counter_baselines: Option<Vec<LocalBenchmarkCounterBaseline>>,
     ) {
@@ -1653,11 +1677,18 @@ impl Metrics {
                 &metrics,
                 committee_size,
                 autonomous_clock_baselines.as_deref(),
+                starfish_rbc_dag_embedded_rbc_authority_expected,
             );
             let round_lag = summary.maximum_round.saturating_sub(summary.minimum_round);
 
             table.add_row(row![bH2->""]);
-            table.add_row(row![bH2->"RBC-DAG Autonomous Clock Verification"]);
+            table.add_row(row![
+                bH2->if starfish_rbc_dag_embedded_rbc_authority_expected {
+                    "RBC-DAG Embedded RBC Authority Verification"
+                } else {
+                    "RBC-DAG Autonomous Clock Verification"
+                }
+            ]);
             table.add_row(row![
                 b->"Clock verdict:",
                 if summary.verdict_valid {
@@ -1681,9 +1712,10 @@ impl Metrics {
             table.add_row(row![
                 b->"Clock/WAL progress:",
                 format!(
-                    "heartbeats={}, RBC deliveries={}, WAL batches={}, records={}, open rounds={}..{}",
+                    "heartbeats={}, carrier deliveries={}, application deliveries={}, WAL batches={}, records={}, open rounds={}..{}",
                     summary.accepted_heartbeats,
                     summary.delivered_carriers,
+                    summary.delivered_applications,
                     summary.wal_batches,
                     summary.wal_records,
                     summary.minimum_round,
@@ -2279,7 +2311,7 @@ mod tests {
             autonomous_clock_metrics(11, 6, 1),
         ];
 
-        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None);
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
 
         assert!(summary.verdict_valid);
         assert_eq!(summary.valid_nodes, 4);
@@ -2304,7 +2336,10 @@ mod tests {
             .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
             .collect::<Vec<_>>();
 
-        assert!(!summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines)).verdict_valid);
+        assert!(
+            !summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
+                .verdict_valid
+        );
 
         for metrics in &metrics {
             metrics
@@ -2330,7 +2365,59 @@ mod tests {
             metrics.starfish_rbc_dag_shadow_carrier_round.inc();
         }
 
-        assert!(summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines)).verdict_valid);
+        assert!(
+            summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
+                .verdict_valid
+        );
+    }
+
+    #[test]
+    fn embedded_authority_summary_requires_application_delivery_progress() {
+        let metrics = vec![autonomous_clock_metrics(8, 0, 0)];
+        let baselines = metrics
+            .iter()
+            .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
+            .collect::<Vec<_>>();
+        let metrics = &metrics[0];
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["heartbeat", "accepted"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["delivery", "shadow"])
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_batches_total
+            .inc();
+        metrics
+            .starfish_rbc_dag_shadow_wal_appended_records_total
+            .inc();
+        metrics.starfish_rbc_dag_shadow_carrier_round.inc();
+
+        assert!(
+            !summarize_autonomous_clock_benchmark(
+                &[Arc::clone(metrics)],
+                2,
+                Some(&baselines),
+                true,
+            )
+            .verdict_valid
+        );
+
+        metrics
+            .starfish_rbc_dag_shadow_inputs_total
+            .with_label_values(&["delivery", "embedded_application"])
+            .inc();
+        assert!(
+            summarize_autonomous_clock_benchmark(
+                &[Arc::clone(metrics)],
+                2,
+                Some(&baselines),
+                true,
+            )
+            .verdict_valid
+        );
     }
 
     #[test]
@@ -2349,7 +2436,7 @@ mod tests {
         );
         let metrics = vec![no_progress, invalid_clock, unbounded];
 
-        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None);
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
 
         assert!(!summary.verdict_valid);
         assert_eq!(summary.valid_nodes, 2);

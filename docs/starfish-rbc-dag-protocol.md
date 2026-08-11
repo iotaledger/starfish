@@ -1,17 +1,18 @@
 # Starfish-RBC-DAG protocol design
 
-Status: milestone-four persisted, non-authoritative optimistic carrier-clock shadow; no
-authoritative protocol, safety/liveness, or performance claim
+Status: milestone-five authoritative embedded-RBC prototype; consensus projection and end-to-end
+safety/liveness proof remain incomplete
 
 The provisional CLI name for the eventual protocol is `starfish-rbc-dag`. That selector is not
-implemented. The milestone-three direct-header comparison runtime is enabled with `--consensus
-starfish-rbc --starfish-rbc-dag-shadow`. Milestone four adds a separate control-only runtime with
-`--starfish-rbc-dag-autonomous-clock`; its carrier rounds advance independently through
-authenticated admission and empty heartbeats. Performance experiments may add
-`--starfish-rbc-dag-shadow-buffered-wal` to remove per-transition disk synchronization; that
-profile is explicitly not crash-safe. Both modes leave the direct prototype's DAG,
-pacemaker, commit, and output unchanged. The eventual protocol is new, not a transport option or a
-version-two alias for `starfish-rbc`.
+implemented. The staged prototype runs under `starfish-rbc`: direct-header comparison uses
+`--starfish-rbc-dag-shadow`, the independent carrier clock adds
+`--starfish-rbc-dag-autonomous-clock`, and milestone five makes embedded carrier ECHO/READY the
+only application-header certification authority with
+`--starfish-rbc-dag-embedded-rbc-authority`. Direct INIT still transports the application payload,
+but direct ECHO, READY, and delivery are suppressed in that mode. Performance experiments may add
+`--starfish-rbc-dag-shadow-buffered-wal`; that profile is explicitly not crash-safe. Consensus
+projection, commit, and output still use the existing Starfish DAG. The eventual protocol is new,
+not a transport option or a version-two alias for `starfish-rbc`.
 
 The implemented [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains the conservative
 baseline: it sends Bracha INIT/ECHO/READY as direct network messages, advances Starfish only through
@@ -46,20 +47,24 @@ carrier/RBC, certified-projection, decision, and crash-journal models. Milestone
 opt-in persisted shadow actor, full-vector carrier transport, recovery messages, and paired
 direct/shadow delivery observations. Milestone four adds an independently authenticated autonomous
 heartbeat namespace, sequential `Q`-admitted carrier clock, bounded future buffering, exact-slot
-synchronization, and clock-state metrics. The direct `starfish-rbc` service remains the only
-authority: shadow admission, delivery, recovery, clock advancement, or failure cannot advance a
-proposal, mark a DAG vertex clean, vote, commit, or order output.
+synchronization, and clock-state metrics. Milestone five adds a version-two application carrier
+containing the exact canonical application header, durable application-origin reconciliation,
+immediate application/phase scheduling, and an opt-in authority boundary that prevents direct
+ECHO/READY from certifying a header. Idle control heartbeats use the same resolved leader timeout as
+the Starfish pacemaker (600 ms for Push/Starfish-RBC by default); application carriers and their
+encodable ECHO/READY follow-ups are event-driven and do not wait for that timeout.
 
-Autonomous mode is intentionally control-only at this milestone. It ignores direct application
-headers and uses a distinct WAL and authentication protocol instance. This avoids falsely equating
-direct consensus rounds with faster carrier rounds, but also means milestone four does not yet
-measure application latency through the new carrier DAG. Application-origin assignment and the
-certified consensus projection remain later milestones.
+The current authoritative mode changes only header certification. Consensus vertices, certified
+projection, commits, and application ordering remain on the existing Starfish DAG. Direct INIT is
+still the application-payload transport and is not a certification vote. Replacing that remaining
+wrapper with a payload-only path and moving consensus into the clean carrier projection are later
+milestones.
 
 Shadow restart coverage is deliberately scoped to reopening the actor and its WAL: mirror mode
-requires an identical recovered direct-header history, while autonomous mode reopens its
-control-only heartbeat history without direct headers and serves byte-identical exact-slot
-responses. This is not a full validator crash-recovery claim. The authoritative direct
+requires an identical recovered direct-header history, control-only autonomous history reopens
+without direct headers, and autonomous application origins must match recovered direct history.
+Every mode serves byte-identical exact-slot responses. This is not a full validator crash-recovery
+claim. The authoritative direct
 `starfish-rbc` baseline does not yet durably record its remote-slot
 ECHO/READY choices, delivery locks, or retained phase evidence. Restarting that baseline after it
 has proposed a non-genesis block can therefore forget proof-critical choices and leave the newest
@@ -908,15 +913,18 @@ cannot be used for crash-safety claims. Benchmark output reports appended and du
 separately. The clone-based reducer remains intentionally unoptimized until measurement shows it
 matters.
 
-A matched 10-validator local A/B on 2026-08-11 used a full 60-second active transaction window,
-the AWS RTT emulator, nominal 1,000 tx/s load, MAC authentication, and a 250 ms autonomous
-heartbeat. The harness waits through generator warmup, snapshots cumulative counters at the active
-boundary, and drains final latency samples.
+A matched 10-validator local sequence on 2026-08-11 used a full 60-second active transaction
+window, the AWS RTT emulator, nominal 1,000 tx/s load, MAC authentication, and the buffered
+benchmark WAL. Milestone-five idle carriers use the same resolved 600 ms Push leader timeout as
+Starfish-RBC; application and encodable phase carriers are immediate. The harness waits through
+generator warmup, snapshots cumulative counters at the active boundary, and drains final latency
+samples.
 
 | Profile | Verdict | TPS | p50 block | p50 E2E | Outbound |
 |---|---:|---:|---:|---:|---:|
 | Direct Starfish-RBC, shadow off | n/a | 972.25 | 1,508.0 ms | 1,724.0 ms | 0.53 MB/s |
 | Autonomous RBC-DAG, buffered WAL | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
+| Embedded RBC authoritative (milestone five) | VALID 10/10 | 861.92 | 3,539.3 ms | 5,477.5 ms | 0.52 MB/s |
 | Autonomous RBC-DAG, per-transition fsync | INVALID 9/10 | 948.83 | 2,569.1 ms | 3,067.4 ms | 0.54 MB/s |
 
 The valid buffered run reached carrier round 275 at every validator, with 2,749 accepted
@@ -924,8 +932,16 @@ heartbeats, 27,180 embedded-RBC deliveries, 27,424 appended batches, zero round 
 pending recovery. Its latency and throughput match the shadow-off baseline while making the
 expected extra carrier traffic visible. The crash-safe run shed shadow work and is reported only
 as a diagnostic: it isolates synchronous persistence as a severe observer effect and must not be
-cited as a protocol result. Neither run measures application latency through the carrier DAG yet,
-because the direct Starfish-RBC path remains authoritative in milestone four.
+cited as a protocol result.
+
+The milestone-five run delivered 10,722 application headers through embedded RBC, reached carrier
+rounds 458–459, and ended with zero pending recovery. Its direct ECHO and READY paths were disabled;
+the composed four-validator test also asserts zero such outbound messages. Its higher latency is
+not evidence for a bad 250 ms timer—the independent timer was removed, and the same Starfish
+timeout was used. It exposes the transitional clean-predecessor gate: the existing direct Starfish
+DAG still serializes proposal creation on embedded delivery. Milestone six must replace that gate
+with the optimistic carrier clock plus certified consensus projection before the complete protocol
+can be expected to recover Starfish pipelining.
 
 ## 19. Contained implementation milestones
 
@@ -947,10 +963,11 @@ Every milestone is committed separately.
 4. **Optimistic carrier clock (implemented, opt-in control shadow):** run a separately namespaced,
    control-only heartbeat carrier plane with the distinct authenticated-admission latch, sequential
    quorum clock, bounded future buffer, exact-slot synchronization, durable restart, and clock
-   validity metrics while consensus still uses the current direct baseline. Application headers are
-   not assigned to autonomous carrier rounds yet.
-5. **Authoritative embedded RBC:** remove direct ECHO/READY authority only after shadow tests show
-   identical delivery under reordering, loss, equivocation, poisoned tags, and restart.
+   validity metrics while consensus still uses the current direct baseline.
+5. **Authoritative embedded RBC (implemented, opt-in):** encode exact canonical application headers
+   in version-two carriers, durably reconcile their origins, schedule application/phase carriers
+   immediately, and remove direct ECHO/READY/delivery authority. Direct INIT remains payload
+   transport; composed tests assert zero direct ECHO/READY traffic and positive embedded delivery.
 6. **Certified consensus projection:** add optional consensus vertices, strong parents, explicit
    leader choice, contiguous delivery frontiers, and strict clean-only committer consumers.
 7. **Frontier linearizer and recovery:** commit deterministic frontier deltas, persist/reconstruct
@@ -967,8 +984,8 @@ the executable model or measured prototype:
 
 - production maximum future-carrier buffer and payload runahead (the executable model deliberately
   uses admission lookahead `2` and hard buffer lookahead `4` only as test parameters);
-- the production control-heartbeat rate under low load and backpressure (the autonomous shadow's
-  configurable 250 ms default is an empirical test value, not a protocol constant);
+- whether the shared Starfish leader-timeout policy needs a separately proved adaptive low-load
+  rule; the prototype intentionally does not introduce a second heartbeat timeout;
 - a safe state-retirement, garbage-collection, and late-catch-up watermark;
 - whether all supported storage backends are required before authoritative mode;
 - quantitative shadow-promotion thresholds and acceptable latency/bandwidth regression; and

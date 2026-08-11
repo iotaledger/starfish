@@ -324,9 +324,8 @@ impl StarfishProtocol {
             // validator configuration.
             node_parameters.starfish_rbc_dag_shadow = false;
             node_parameters.starfish_rbc_dag_autonomous_clock = false;
+            node_parameters.starfish_rbc_dag_embedded_rbc_authority = false;
             node_parameters.starfish_rbc_dag_shadow_buffered_wal = false;
-            node_parameters.starfish_rbc_dag_heartbeat_interval_ms =
-                config::node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms();
         }
         node_parameters
     }
@@ -363,14 +362,13 @@ impl StarfishProtocol {
 mod tests {
     use super::{ProtocolMetrics, StarfishNodeParameters, StarfishProtocol};
     use crate::{benchmark::BenchmarkParameters, client::Instance};
-    use starfish_core::config::{NodeParameters, node_defaults};
+    use starfish_core::config::NodeParameters;
 
     #[test]
     fn starfish_rbc_genesis_gets_one_nonzero_protocol_instance() {
         let shared_parameters = StarfishNodeParameters(NodeParameters {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
             starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         });
@@ -384,7 +382,6 @@ mod tests {
         assert!(parameters.starfish_rbc_dag_shadow);
         assert!(parameters.starfish_rbc_dag_autonomous_clock);
         assert!(parameters.starfish_rbc_dag_shadow_buffered_wal);
-        assert_eq!(parameters.starfish_rbc_dag_heartbeat_interval_ms, 125);
     }
 
     #[test]
@@ -392,7 +389,6 @@ mod tests {
         let shared_parameters = StarfishNodeParameters(NodeParameters {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
-            starfish_rbc_dag_heartbeat_interval_ms: 125,
             starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         });
@@ -410,11 +406,6 @@ mod tests {
         assert!(
             !parameters.starfish_rbc_dag_shadow_buffered_wal,
             "a global buffered-WAL flag must not leak into non-RBC comparison members"
-        );
-        assert_eq!(
-            parameters.starfish_rbc_dag_heartbeat_interval_ms,
-            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms(),
-            "a global heartbeat override must not leak into non-RBC comparison members"
         );
     }
 
