@@ -1138,7 +1138,8 @@ impl DagState {
         self.dag_state_inner.read().get_storage_block(reference)
     }
 
-    /// Replaces in-memory sequenced blocks with headers. Payloads remain in storage.
+    /// Replaces in-memory sequenced blocks with headers. Payloads remain in
+    /// storage.
     pub fn compact_sequenced_payloads(&self, references: &[BlockReference]) -> usize {
         let mut compacted_rounds = AHashSet::new();
         let compacted = {
