@@ -63,13 +63,30 @@ pub struct Opts {
     #[clap(long, value_name = "ed25519|ml-dsa-44|ml-dsa-65|mac", global = true)]
     block_authentication: Option<String>,
 
-    /// Run the embedded Starfish-RBC-DAG implementation as a non-authoritative shadow.
+    /// Run the embedded Starfish-RBC-DAG implementation as a non-authoritative
+    /// shadow.
     #[clap(long, global = true)]
     starfish_rbc_dag_shadow: bool,
+
+    /// Let the non-authoritative Starfish-RBC-DAG shadow create its own
+    /// optimistic carrier clock. Requires `--starfish-rbc-dag-shadow`.
+    #[clap(long, global = true)]
+    starfish_rbc_dag_autonomous_clock: bool,
+
+    /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
+    #[clap(long, value_name = "INT", global = true)]
+    starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
 
     /// The type of operation to run.
     #[clap(subcommand)]
     operation: Operation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StarfishRbcDagOverrides {
+    shadow: bool,
+    autonomous_clock: bool,
+    heartbeat_interval_ms: Option<u64>,
 }
 
 /// The type of operation to run.
@@ -856,7 +873,7 @@ fn load_benchmark_configs(
     compress_network: Option<bool>,
     bls_workers: Option<usize>,
     block_authentication: &Option<String>,
-    starfish_rbc_dag_shadow: bool,
+    starfish_rbc_dag: StarfishRbcDagOverrides,
 ) -> eyre::Result<(NodeParameters, ClientParameters)> {
     let mut node_parameters = match &settings.node_parameters_path {
         Some(path) => NodeParameters::load(path).wrap_err("Failed to load node's parameters")?,
@@ -867,8 +884,14 @@ fn load_benchmark_configs(
     if block_authentication.is_some() {
         node_parameters.block_authentication = block_authentication.clone();
     }
-    if starfish_rbc_dag_shadow {
+    if starfish_rbc_dag.shadow {
         node_parameters.starfish_rbc_dag_shadow = true;
+    }
+    if starfish_rbc_dag.autonomous_clock {
+        node_parameters.starfish_rbc_dag_autonomous_clock = true;
+    }
+    if let Some(interval_ms) = starfish_rbc_dag.heartbeat_interval_ms {
+        node_parameters.starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
     }
     if let Some(workers) = bls_workers {
         node_parameters.bls_verification_workers = workers;
@@ -1050,7 +1073,11 @@ async fn run<C: ServerProviderClient>(
         .wrap_err("Failed to crate testbed")?;
 
     let block_authentication = opts.block_authentication.clone();
-    let starfish_rbc_dag_shadow = opts.starfish_rbc_dag_shadow;
+    let starfish_rbc_dag = StarfishRbcDagOverrides {
+        shadow: opts.starfish_rbc_dag_shadow,
+        autonomous_clock: opts.starfish_rbc_dag_autonomous_clock,
+        heartbeat_interval_ms: opts.starfish_rbc_dag_heartbeat_interval_ms,
+    };
     match opts.operation {
         Operation::Testbed { action } => match action {
             // Display the current status of the testbed.
@@ -1248,7 +1275,7 @@ async fn run<C: ServerProviderClient>(
                 compress_network,
                 resolved_bls_workers.override_workers,
                 &block_authentication,
-                starfish_rbc_dag_shadow,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1416,7 +1443,7 @@ async fn run<C: ServerProviderClient>(
                 compress_network,
                 resolved_bls_workers.override_workers,
                 &block_authentication,
-                starfish_rbc_dag_shadow,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1624,7 +1651,7 @@ async fn run<C: ServerProviderClient>(
                 compress_network,
                 resolved_bls_workers.override_workers,
                 &block_authentication,
-                starfish_rbc_dag_shadow,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1791,7 +1818,7 @@ async fn run<C: ServerProviderClient>(
                 compress_network,
                 resolved_bls_workers.override_workers,
                 &block_authentication,
-                starfish_rbc_dag_shadow,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -1998,7 +2025,7 @@ async fn run<C: ServerProviderClient>(
                 compress_network,
                 resolved_bls_workers.override_workers,
                 &block_authentication,
-                starfish_rbc_dag_shadow,
+                starfish_rbc_dag,
             )?;
 
             display::newline();
@@ -2345,6 +2372,9 @@ mod tests {
             "--block-authentication",
             "mac",
             "--starfish-rbc-dag-shadow",
+            "--starfish-rbc-dag-autonomous-clock",
+            "--starfish-rbc-dag-heartbeat-interval-ms",
+            "125",
             "--protocols",
             "starfish-rbc",
         ])
@@ -2352,6 +2382,8 @@ mod tests {
 
         assert_eq!(opts.block_authentication.as_deref(), Some("mac"));
         assert!(opts.starfish_rbc_dag_shadow);
+        assert!(opts.starfish_rbc_dag_autonomous_clock);
+        assert_eq!(opts.starfish_rbc_dag_heartbeat_interval_ms, Some(125));
         let Operation::Benchmark { protocols, .. } = opts.operation else {
             panic!("expected benchmark operation");
         };

@@ -16,7 +16,10 @@ use prettytable::{Table, row};
 use prometheus_parse::Scrape;
 use serde::{Deserialize, Serialize};
 use starfish_core::metrics::{
-    STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR, STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG,
+    STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR,
+    STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR,
+    STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG, STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR,
+    STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG,
 };
 
 use crate::{
@@ -29,6 +32,28 @@ use crate::{
 type BucketId = String;
 /// The identifier of a measurement type.
 type Label = String;
+
+pub(crate) const SHADOW_COMPARISON_VALID_METRIC: &str = "starfish_rbc_dag_shadow_comparison_valid";
+pub(crate) const SHADOW_AUTONOMOUS_CLOCK_VALID_METRIC: &str = "starfish_rbc_dag_shadow_clock_valid";
+
+/// Select the validity gauge for the configured observational mode. Mirror
+/// mode compares direct and embedded RBC deliveries; autonomous mode has no
+/// one-to-one direct stream and therefore owns a separate clock verdict.
+pub(crate) fn shadow_validity_metric(parameters: &BenchmarkParameters) -> Option<&'static str> {
+    if parameters.consensus_protocol != "starfish-rbc"
+        || !parameters.node_parameters.starfish_rbc_dag_shadow
+    {
+        return None;
+    }
+
+    Some(
+        if parameters.node_parameters.starfish_rbc_dag_autonomous_clock {
+            SHADOW_AUTONOMOUS_CLOCK_VALID_METRIC
+        } else {
+            SHADOW_COMPARISON_VALID_METRIC
+        },
+    )
+}
 
 /// A snapshot measurement at a given time.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -279,6 +304,12 @@ impl Measurement {
                     "starfish_rbc_dag_shadow_wal_replayed_batches"
                         | "starfish_rbc_dag_shadow_pending_recovery"
                         | "starfish_rbc_dag_shadow_comparison_valid"
+                        | "starfish_rbc_dag_shadow_clock_valid"
+                        | "starfish_rbc_dag_shadow_carrier_round"
+                        | "starfish_rbc_dag_shadow_phase_backlog"
+                        | "starfish_rbc_dag_shadow_admitted_authors"
+                        | "starfish_rbc_dag_shadow_admitted_stake"
+                        | "starfish_rbc_dag_shadow_buffered_authenticated"
                         | "starfish_rbc_dag_shadow_unpaired_direct"
                         | "starfish_rbc_dag_shadow_unpaired_shadow"
                         | "starfish_rbc_dag_shadow_unpaired_max_round_lag"
@@ -412,6 +443,9 @@ impl MeasurementsCollection {
     /// shadow scrape. Appending an explicit invalid observation prevents an
     /// earlier successful scrape from being mistaken for fresh final evidence.
     pub fn mark_shadow_final_scrape_missing(&mut self, scraper_id: ScraperId) {
+        let Some(validity_metric) = shadow_validity_metric(&self.parameters) else {
+            return;
+        };
         let timestamp = self
             .data
             .values()
@@ -424,7 +458,7 @@ impl MeasurementsCollection {
             self.synthetic_only_scrapers.insert(scraper_id);
         }
         self.data
-            .entry("starfish_rbc_dag_shadow_comparison_valid".to_owned())
+            .entry(validity_metric.to_owned())
             .or_default()
             .entry(scraper_id)
             .or_default()
@@ -529,6 +563,14 @@ impl MeasurementsCollection {
             .sum()
     }
 
+    fn min_latest_scalar_as_usize(&self, label: &str) -> usize {
+        self.latest_measurements(label)
+            .into_iter()
+            .map(|measurement| measurement.scalar.max(0.0) as usize)
+            .min()
+            .unwrap_or_default()
+    }
+
     /// Sum scalar Prometheus counter increments across scrapers and resets.
     fn sum_scalar_counter_increments(&self, label: &str) -> usize {
         self.data
@@ -556,6 +598,27 @@ impl MeasurementsCollection {
         self.data.get(label)?.get(&scraper_id).map(Vec::as_slice)
     }
 
+    fn active_window_series(&self, label: &str, scraper_id: ScraperId) -> Option<&[Measurement]> {
+        let series = self.scraper_series(label, scraper_id)?;
+        if !series
+            .windows(2)
+            .all(|window| window[1].timestamp >= window[0].timestamp)
+        {
+            return None;
+        }
+        let start = series
+            .iter()
+            .position(|measurement| !measurement.timestamp.is_zero())?;
+        let maximum_timestamp = series.iter().map(Measurement::timestamp).max()?;
+        let end = series
+            .iter()
+            .position(|measurement| measurement.timestamp == maximum_timestamp)?;
+        let active = series.get(start..=end)?;
+        let first = active.first()?;
+        let last = active.last()?;
+        (active.len() >= 2 && last.timestamp > first.timestamp).then_some(active)
+    }
+
     fn gauge_always_equals(&self, label: &str, scraper_id: ScraperId, expected: f64) -> bool {
         self.scraper_series(label, scraper_id)
             .is_some_and(|series| {
@@ -579,6 +642,20 @@ impl MeasurementsCollection {
                 .is_some_and(|measurement| measurement.scalar > 0.0)
     }
 
+    fn scalar_counter_increased(&self, label: &str, scraper_id: ScraperId) -> bool {
+        let Some(series) = self.active_window_series(label, scraper_id) else {
+            return false;
+        };
+        series.len() >= 2
+            && series
+                .windows(2)
+                .all(|window| window[1].scalar >= window[0].scalar)
+            && series
+                .last()
+                .zip(series.first())
+                .is_some_and(|(last, first)| last.scalar > first.scalar)
+    }
+
     fn count_bucket_is_monotonic_and_positive(
         &self,
         label: &str,
@@ -594,6 +671,22 @@ impl MeasurementsCollection {
             .collect::<Vec<_>>();
         values.windows(2).all(|window| window[1] >= window[0])
             && values.last().is_some_and(|value| *value > 0)
+    }
+
+    fn count_bucket_increased(&self, label: &str, scraper_id: ScraperId, bucket: &str) -> bool {
+        let Some(series) = self.active_window_series(label, scraper_id) else {
+            return false;
+        };
+        let values = series
+            .iter()
+            .map(|measurement| measurement.count_buckets.get(bucket).copied().unwrap_or(0))
+            .collect::<Vec<_>>();
+        values.len() >= 2
+            && values.windows(2).all(|window| window[1] >= window[0])
+            && values
+                .last()
+                .zip(values.first())
+                .is_some_and(|(last, first)| last > first)
     }
 
     fn count_bucket_is_always_zero(
@@ -613,6 +706,26 @@ impl MeasurementsCollection {
         self.scraper_series(label, scraper_id)
             .and_then(|series| series.last())
             .is_some_and(|measurement| measurement.scalar == expected)
+    }
+
+    fn latest_scalar_greater_than(&self, label: &str, scraper_id: ScraperId, minimum: f64) -> bool {
+        self.scraper_series(label, scraper_id)
+            .and_then(|series| series.last())
+            .is_some_and(|measurement| measurement.scalar > minimum)
+    }
+
+    fn scalar_gauge_increased(&self, label: &str, scraper_id: ScraperId) -> bool {
+        self.active_window_series(label, scraper_id)
+            .is_some_and(|series| {
+                series.len() >= 2
+                    && series
+                        .windows(2)
+                        .all(|window| window[1].scalar >= window[0].scalar)
+                    && series
+                        .last()
+                        .zip(series.first())
+                        .is_some_and(|(last, first)| last.scalar > first.scalar)
+            })
     }
 
     fn gauge_always_at_most(&self, label: &str, scraper_id: ScraperId, maximum: f64) -> bool {
@@ -860,8 +973,14 @@ impl MeasurementsCollection {
                 }
             })
             .collect();
-        let shadow_comparison_enabled = self.parameters.consensus_protocol == "starfish-rbc"
+        let shadow_enabled = self.parameters.consensus_protocol == "starfish-rbc"
             && self.parameters.node_parameters.starfish_rbc_dag_shadow;
+        let shadow_autonomous_clock_enabled = shadow_enabled
+            && self
+                .parameters
+                .node_parameters
+                .starfish_rbc_dag_autonomous_clock;
+        let shadow_comparison_enabled = shadow_enabled && !shadow_autonomous_clock_enabled;
         let shadow_valid_scrapers = self
             .data
             .get("starfish_rbc_dag_shadow_comparison_valid")
@@ -975,6 +1094,103 @@ impl MeasurementsCollection {
             && every_shadow_scraper_has_coverage
             && shadow_delivery_mismatches == 0
             && shadow_delivery_ambiguous == 0;
+        let shadow_autonomous_clock_valid_scrapers = self
+            .data
+            .get(SHADOW_AUTONOMOUS_CLOCK_VALID_METRIC)
+            .map(|by_scraper| {
+                by_scraper
+                    .keys()
+                    .copied()
+                    .filter(|scraper_id| {
+                        self.gauge_always_equals(
+                            SHADOW_AUTONOMOUS_CLOCK_VALID_METRIC,
+                            *scraper_id,
+                            1.0,
+                        )
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let shadow_autonomous_clock_valid_nodes = shadow_autonomous_clock_valid_scrapers.len();
+        let (
+            shadow_autonomous_clock_carrier_round_min,
+            shadow_autonomous_clock_carrier_round_max,
+            shadow_autonomous_clock_phase_backlog_total,
+            shadow_autonomous_clock_admitted_authors_min,
+            shadow_autonomous_clock_admitted_stake_min,
+            shadow_autonomous_clock_buffered_authenticated_total,
+        ) = if shadow_autonomous_clock_enabled {
+            (
+                self.min_latest_scalar_as_usize("starfish_rbc_dag_shadow_carrier_round"),
+                self.max_result("starfish_rbc_dag_shadow_carrier_round", |measurement| {
+                    measurement.scalar.max(0.0) as usize
+                }),
+                self.sum_latest_scalar_as_usize("starfish_rbc_dag_shadow_phase_backlog"),
+                self.min_latest_scalar_as_usize("starfish_rbc_dag_shadow_admitted_authors"),
+                self.min_latest_scalar_as_usize("starfish_rbc_dag_shadow_admitted_stake"),
+                self.sum_latest_scalar_as_usize("starfish_rbc_dag_shadow_buffered_authenticated"),
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0)
+        };
+        let autonomous_phase_backlog_bound = STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR
+            .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
+        let autonomous_buffered_bound = STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR
+            .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
+        let every_autonomous_scraper_has_progress =
+            shadow_autonomous_clock_valid_scrapers
+                .iter()
+                .all(|scraper_id| {
+                    self.count_bucket_increased(
+                        "starfish_rbc_dag_shadow_inputs_total",
+                        *scraper_id,
+                        "heartbeat,accepted",
+                    ) && self.count_bucket_increased(
+                        "starfish_rbc_dag_shadow_inputs_total",
+                        *scraper_id,
+                        "delivery,shadow",
+                    ) && self.scalar_counter_increased(
+                        "starfish_rbc_dag_shadow_wal_durable_batches_total",
+                        *scraper_id,
+                    ) && self.scalar_counter_increased(
+                        "starfish_rbc_dag_shadow_wal_durable_records_total",
+                        *scraper_id,
+                    ) && self.scalar_gauge_increased(
+                        "starfish_rbc_dag_shadow_carrier_round",
+                        *scraper_id,
+                    ) && self.latest_scalar_greater_than(
+                        "starfish_rbc_dag_shadow_carrier_round",
+                        *scraper_id,
+                        1.0,
+                    ) && self.latest_scalar_equals(
+                        "starfish_rbc_dag_shadow_pending_recovery",
+                        *scraper_id,
+                        0.0,
+                    ) && self.gauge_always_at_most(
+                        "starfish_rbc_dag_shadow_phase_backlog",
+                        *scraper_id,
+                        autonomous_phase_backlog_bound as f64,
+                    ) && self.gauge_always_at_most(
+                        "starfish_rbc_dag_shadow_admitted_authors",
+                        *scraper_id,
+                        self.parameters.nodes as f64,
+                    ) && self.gauge_always_at_most(
+                        "starfish_rbc_dag_shadow_admitted_stake",
+                        *scraper_id,
+                        f64::MAX,
+                    ) && self.gauge_always_at_most(
+                        "starfish_rbc_dag_shadow_buffered_authenticated",
+                        *scraper_id,
+                        autonomous_buffered_bound as f64,
+                    )
+                });
+        let shadow_autonomous_clock_valid = shadow_autonomous_clock_enabled
+            && expected_shadow_nodes != 0
+            && shadow_autonomous_clock_valid_nodes == expected_shadow_nodes
+            && every_autonomous_scraper_has_progress
+            && shadow_autonomous_clock_carrier_round_max
+                .saturating_sub(shadow_autonomous_clock_carrier_round_min)
+                <= usize::try_from(STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG).unwrap_or(usize::MAX);
 
         BenchmarkRunSummary {
             protocol: self.parameters.consensus_protocol.clone(),
@@ -1021,6 +1237,15 @@ impl MeasurementsCollection {
             shadow_unpaired_direct,
             shadow_unpaired_shadow,
             shadow_unpaired_max_round_lag,
+            shadow_autonomous_clock_enabled,
+            shadow_autonomous_clock_valid,
+            shadow_autonomous_clock_valid_nodes,
+            shadow_autonomous_clock_carrier_round_min,
+            shadow_autonomous_clock_carrier_round_max,
+            shadow_autonomous_clock_phase_backlog_total,
+            shadow_autonomous_clock_admitted_authors_min,
+            shadow_autonomous_clock_admitted_stake_min,
+            shadow_autonomous_clock_buffered_authenticated_total,
         }
     }
 
@@ -1090,6 +1315,28 @@ impl MeasurementsCollection {
                     summary.shadow_unpaired_direct,
                     summary.shadow_unpaired_shadow,
                     summary.shadow_unpaired_max_round_lag,
+                )
+            ]);
+        }
+        if summary.shadow_autonomous_clock_enabled {
+            table.add_row(row![
+                b->"RBC-DAG autonomous clock:",
+                format!(
+                    "valid={} ({}/{} validators), carrier rounds={}..={}, embedded deliveries={}, phase backlog={}, \
+                     admitted authors/stake min={}/{}, buffered authenticated={}, WAL records={}, \
+                     pending recovery={}",
+                    summary.shadow_autonomous_clock_valid,
+                    summary.shadow_autonomous_clock_valid_nodes,
+                    summary.ready_nodes_at_boot,
+                    summary.shadow_autonomous_clock_carrier_round_min,
+                    summary.shadow_autonomous_clock_carrier_round_max,
+                    summary.shadow_deliveries,
+                    summary.shadow_autonomous_clock_phase_backlog_total,
+                    summary.shadow_autonomous_clock_admitted_authors_min,
+                    summary.shadow_autonomous_clock_admitted_stake_min,
+                    summary.shadow_autonomous_clock_buffered_authenticated_total,
+                    summary.shadow_wal_durable_records,
+                    summary.shadow_pending_recovery,
                 )
             ]);
         }
@@ -1177,6 +1424,12 @@ mod test {
         parameters
     }
 
+    fn autonomous_shadow_benchmark_parameters(nodes: usize) -> BenchmarkParameters {
+        let mut parameters = shadow_benchmark_parameters(nodes);
+        parameters.node_parameters.starfish_rbc_dag_autonomous_clock = true;
+        parameters
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_shadow_snapshot(
         collection: &mut MeasurementsCollection,
@@ -1189,7 +1442,7 @@ mod test {
         direct_only: usize,
         shadow_only: usize,
         ambiguous: usize,
-        wal_durable_records: f64,
+        wal_durable_records: usize,
     ) {
         collection.add(
             scraper_id,
@@ -1230,8 +1483,8 @@ mod test {
             scraper_id,
             "starfish_rbc_dag_shadow_wal_durable_records_total".to_owned(),
             Measurement {
-                count: wal_durable_records as usize,
-                scalar: wal_durable_records,
+                count: wal_durable_records,
+                scalar: wal_durable_records as f64,
                 ..Measurement::default()
             },
         );
@@ -1267,6 +1520,95 @@ mod test {
                 },
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_autonomous_clock_snapshot(
+        collection: &mut MeasurementsCollection,
+        scraper_id: usize,
+        clock_valid: f64,
+        carrier_round: usize,
+        phase_backlog: usize,
+        admitted_authors: usize,
+        admitted_stake: usize,
+        buffered_authenticated: usize,
+        wal_durable_records: usize,
+    ) {
+        let timestamp = Duration::from_secs(carrier_round as u64);
+        for (label, value) in [
+            ("starfish_rbc_dag_shadow_clock_valid", clock_valid),
+            (
+                "starfish_rbc_dag_shadow_carrier_round",
+                carrier_round as f64,
+            ),
+            (
+                "starfish_rbc_dag_shadow_phase_backlog",
+                phase_backlog as f64,
+            ),
+            (
+                "starfish_rbc_dag_shadow_admitted_authors",
+                admitted_authors as f64,
+            ),
+            (
+                "starfish_rbc_dag_shadow_admitted_stake",
+                admitted_stake as f64,
+            ),
+            (
+                "starfish_rbc_dag_shadow_buffered_authenticated",
+                buffered_authenticated as f64,
+            ),
+        ] {
+            collection.add(
+                scraper_id,
+                label.to_owned(),
+                Measurement {
+                    timestamp,
+                    scalar: value,
+                    ..Measurement::default()
+                },
+            );
+        }
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_shadow_inputs_total".to_owned(),
+            Measurement {
+                timestamp,
+                count_buckets: HashMap::from([
+                    ("heartbeat,accepted".to_owned(), wal_durable_records),
+                    ("delivery,shadow".to_owned(), wal_durable_records),
+                ]),
+                count: wal_durable_records.saturating_mul(2),
+                ..Measurement::default()
+            },
+        );
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_shadow_wal_durable_batches_total".to_owned(),
+            Measurement {
+                timestamp,
+                count: wal_durable_records,
+                scalar: wal_durable_records as f64,
+                ..Measurement::default()
+            },
+        );
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_shadow_wal_durable_records_total".to_owned(),
+            Measurement {
+                timestamp,
+                count: wal_durable_records,
+                scalar: wal_durable_records as f64,
+                ..Measurement::default()
+            },
+        );
+        collection.add(
+            scraper_id,
+            "starfish_rbc_dag_shadow_pending_recovery".to_owned(),
+            Measurement {
+                timestamp,
+                ..Measurement::default()
+            },
+        );
     }
 
     #[test]
@@ -1490,6 +1832,98 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
     }
 
     #[test]
+    fn prometheus_parse_preserves_autonomous_clock_state() {
+        let report = r#"
+# TYPE benchmark_duration counter
+benchmark_duration 30
+# TYPE starfish_rbc_dag_shadow_clock_valid gauge
+starfish_rbc_dag_shadow_clock_valid 1
+# TYPE starfish_rbc_dag_shadow_carrier_round gauge
+starfish_rbc_dag_shadow_carrier_round 12
+# TYPE starfish_rbc_dag_shadow_phase_backlog gauge
+starfish_rbc_dag_shadow_phase_backlog 3
+# TYPE starfish_rbc_dag_shadow_admitted_authors gauge
+starfish_rbc_dag_shadow_admitted_authors 4
+# TYPE starfish_rbc_dag_shadow_admitted_stake gauge
+starfish_rbc_dag_shadow_admitted_stake 7
+# TYPE starfish_rbc_dag_shadow_buffered_authenticated gauge
+starfish_rbc_dag_shadow_buffered_authenticated 2
+"#;
+
+        let measurements = Measurement::from_prometheus::<TestProtocolMetrics>(report);
+        for (label, expected) in [
+            ("starfish_rbc_dag_shadow_clock_valid", 1.0),
+            ("starfish_rbc_dag_shadow_carrier_round", 12.0),
+            ("starfish_rbc_dag_shadow_phase_backlog", 3.0),
+            ("starfish_rbc_dag_shadow_admitted_authors", 4.0),
+            ("starfish_rbc_dag_shadow_admitted_stake", 7.0),
+            ("starfish_rbc_dag_shadow_buffered_authenticated", 2.0),
+        ] {
+            assert_eq!(measurements[label].scalar, expected, "metric {label}");
+        }
+    }
+
+    #[test]
+    fn autonomous_clock_has_a_distinct_sticky_summary() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(2));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 1, 2, 7, 1, 5);
+        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 8, 1, 2, 6, 1, 6);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 12, 3, 2, 7, 2, 10);
+        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 10, 4, 2, 6, 3, 11);
+
+        let summary = collection.benchmark_run_summary();
+        assert!(!summary.shadow_comparison_enabled);
+        assert!(!summary.shadow_comparison_valid);
+        assert!(summary.shadow_autonomous_clock_enabled);
+        assert!(summary.shadow_autonomous_clock_valid);
+        assert_eq!(summary.shadow_autonomous_clock_valid_nodes, 2);
+        assert_eq!(summary.shadow_autonomous_clock_carrier_round_min, 10);
+        assert_eq!(summary.shadow_autonomous_clock_carrier_round_max, 12);
+        assert_eq!(summary.shadow_autonomous_clock_phase_backlog_total, 7);
+        assert_eq!(summary.shadow_autonomous_clock_admitted_authors_min, 2);
+        assert_eq!(summary.shadow_autonomous_clock_admitted_stake_min, 6);
+        assert_eq!(
+            summary.shadow_autonomous_clock_buffered_authenticated_total,
+            5
+        );
+        assert_eq!(summary.shadow_wal_durable_records, 21);
+
+        // A later healthy scrape must not erase an earlier invalid verdict.
+        add_autonomous_clock_snapshot(&mut collection, 0, 0.0, 13, 0, 3, 7, 0, 12);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 14, 0, 3, 7, 0, 13);
+        let summary = collection.benchmark_run_summary();
+        assert_eq!(summary.shadow_autonomous_clock_valid_nodes, 1);
+        assert!(!summary.shadow_autonomous_clock_valid);
+    }
+
+    #[test]
+    fn missing_final_autonomous_scrape_invalidates_only_clock_verdict() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 7, 0, 5);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 12, 0, 1, 7, 0, 10);
+        assert!(
+            collection
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid
+        );
+
+        collection.mark_shadow_final_scrape_missing(0);
+
+        let validity = collection
+            .scraper_series("starfish_rbc_dag_shadow_clock_valid", 0)
+            .unwrap();
+        assert_eq!(validity.last().unwrap().scalar_value(), 0.0);
+        assert!(
+            collection
+                .scraper_series("starfish_rbc_dag_shadow_comparison_valid", 0)
+                .is_none()
+        );
+        let summary = collection.benchmark_run_summary();
+        assert_eq!(summary.shadow_autonomous_clock_valid_nodes, 0);
+        assert!(!summary.shadow_autonomous_clock_valid);
+    }
+
+    #[test]
     fn shadow_verdict_remains_invalid_after_historical_failure_and_counter_reset() {
         let mut collection = MeasurementsCollection::new(shadow_benchmark_parameters(1));
 
@@ -1497,8 +1931,8 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
         // comparison category. The second scrape deliberately looks clean,
         // including reset comparison counters, so a latest-value-only verdict
         // would incorrectly accept the run.
-        add_shadow_snapshot(&mut collection, 0, 0.0, 1, 1, 1, 1, 1, 1, 1, 1.0);
-        add_shadow_snapshot(&mut collection, 0, 1.0, 2, 2, 2, 0, 0, 0, 0, 2.0);
+        add_shadow_snapshot(&mut collection, 0, 0.0, 1, 1, 1, 1, 1, 1, 1, 1);
+        add_shadow_snapshot(&mut collection, 0, 1.0, 2, 2, 2, 0, 0, 0, 0, 2);
 
         assert!(!collection.gauge_always_equals(
             "starfish_rbc_dag_shadow_comparison_valid",
@@ -1520,9 +1954,99 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
     }
 
     #[test]
+    fn autonomous_clock_valid_gauge_without_durable_progress_is_invalid() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
+
+        let summary = collection.benchmark_run_summary();
+        assert_eq!(summary.shadow_autonomous_clock_valid_nodes, 1);
+        assert!(!summary.shadow_autonomous_clock_valid);
+    }
+
+    #[test]
+    fn autonomous_clock_warmup_only_progress_is_invalid() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 2, 0, 1, 1, 0, 3);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 4, 0, 1, 1, 0, 6);
+        for by_scraper in collection.data.values_mut() {
+            for measurement in by_scraper.get_mut(&0).into_iter().flatten() {
+                measurement.timestamp = Duration::ZERO;
+            }
+        }
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 4, 0, 1, 1, 0, 6);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 4, 0, 1, 1, 0, 6);
+        for by_scraper in collection.data.values_mut() {
+            if let Some(last) = by_scraper.get_mut(&0).and_then(|series| series.last_mut()) {
+                last.timestamp = Duration::from_secs(5);
+            }
+        }
+
+        assert!(
+            !collection
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid
+        );
+    }
+
+    #[test]
+    fn autonomous_clock_verdict_requires_in_window_rbc_delivery() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 10, 0, 1, 1, 0, 6);
+        collection
+            .data
+            .get_mut("starfish_rbc_dag_shadow_inputs_total")
+            .and_then(|by_scraper| by_scraper.get_mut(&0))
+            .and_then(|series| series.last_mut())
+            .unwrap()
+            .count_buckets
+            .insert("delivery,shadow".to_owned(), 3);
+
+        assert!(
+            !collection
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid
+        );
+    }
+
+    #[test]
+    fn autonomous_clock_verdict_rejects_observed_round_rollback() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 1, 0, 1, 1, 0, 4);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 9, 0, 1, 1, 0, 5);
+
+        assert!(
+            !collection
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid
+        );
+    }
+
+    #[test]
+    fn autonomous_clock_verdict_rejects_benchmark_timestamp_reset() {
+        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 10, 0, 1, 1, 0, 5);
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 12, 0, 1, 1, 0, 7);
+        for by_scraper in collection.data.values_mut() {
+            if let Some(last) = by_scraper.get_mut(&0).and_then(|series| series.last_mut()) {
+                last.timestamp = Duration::from_secs(1);
+            }
+        }
+
+        assert!(
+            !collection
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid
+        );
+    }
+
+    #[test]
     fn missing_final_shadow_scrape_invalidates_a_previously_valid_snapshot() {
         let mut collection = MeasurementsCollection::new(shadow_benchmark_parameters(1));
-        add_shadow_snapshot(&mut collection, 0, 1.0, 4, 4, 4, 0, 0, 0, 0, 8.0);
+        add_shadow_snapshot(&mut collection, 0, 1.0, 4, 4, 4, 0, 0, 0, 0, 8);
         assert!(collection.benchmark_run_summary().shadow_comparison_valid);
 
         collection.mark_shadow_final_scrape_missing(0);
@@ -1549,8 +2073,8 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
     #[test]
     fn shadow_verdict_requires_delivery_and_wal_coverage_from_every_scraper() {
         let mut collection = MeasurementsCollection::new(shadow_benchmark_parameters(2));
-        add_shadow_snapshot(&mut collection, 0, 1.0, 4, 4, 4, 0, 0, 0, 0, 8.0);
-        add_shadow_snapshot(&mut collection, 1, 1.0, 0, 0, 0, 0, 0, 0, 0, 0.0);
+        add_shadow_snapshot(&mut collection, 0, 1.0, 4, 4, 4, 0, 0, 0, 0, 8);
+        add_shadow_snapshot(&mut collection, 1, 1.0, 0, 0, 0, 0, 0, 0, 0, 0);
 
         let summary = collection.benchmark_run_summary();
         assert_eq!(summary.shadow_comparison_valid_nodes, 2);
@@ -1576,7 +2100,7 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
                 0,
                 0,
                 0,
-                8.0,
+                8,
             );
             add_shadow_backlog_snapshot(
                 &mut collection,
@@ -1598,7 +2122,7 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
     fn shadow_verdict_rejects_excessive_or_old_unpaired_work() {
         for (unpaired_direct, unpaired_shadow, max_round_lag) in [(5, 0, 1), (0, 5, 1), (1, 0, 5)] {
             let mut collection = MeasurementsCollection::new(shadow_benchmark_parameters(1));
-            add_shadow_snapshot(&mut collection, 0, 1.0, 8, 7, 7, 0, 0, 0, 0, 8.0);
+            add_shadow_snapshot(&mut collection, 0, 1.0, 8, 7, 7, 0, 0, 0, 0, 8);
             add_shadow_backlog_snapshot(
                 &mut collection,
                 0,

@@ -8,8 +8,11 @@ use std::{
     error::Error,
     fmt,
     path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
@@ -24,7 +27,10 @@ use tokio::{
 
 use crate::{
     crypto::{MAC_TAG_SIZE, ML_DSA_44_SIGNATURE_SIZE, ML_DSA_65_SIGNATURE_SIZE, SIGNATURE_SIZE},
-    network::{NetworkMessage, RbcDagShadowCarrier, RbcDagShadowCarrierResponse},
+    network::{
+        NetworkMessage, RbcDagShadowCarrier, RbcDagShadowCarrierResponse,
+        RbcDagShadowCarrierSyncRequest, RbcDagShadowCarrierSyncResponse,
+    },
     starfish_rbc::RbcCanonicalHeader,
     starfish_rbc_dag::{
         MAX_CARRIER_CONTENT_SIZE_V1, RbcDagCommitteeContextV1, RbcDagContextV1,
@@ -38,13 +44,14 @@ use crate::{
     types::{AuthorityIndex, BlockAuthenticationScheme, BlockReference, RoundNumber, TimestampNs},
 };
 
-// A shadow run must absorb one complete committee fan-in plus a small reserve
-// for the local carrier and control notifications before its single fsync
-// owner can drain. At the four-MiB carrier cap, allowing at most 64 queued
-// inputs also caps carrier payload retention at 256 MiB (plus bounded
-// sidecars and allocator overhead). Larger committees are rejected for this
-// benchmark prototype instead of silently under-sizing the queue and
-// reporting incomparable results.
+// A mirror run must absorb one complete committee fan-in plus a small reserve;
+// autonomous repair additionally budgets a simultaneous request and response
+// per peer. At the four-MiB carrier cap, allowing at most 64 queued inputs also
+// caps carrier payload retention at 256 MiB (plus bounded sidecars and
+// allocator overhead). This permits 60 mirror validators or 20 autonomous
+// validators. Larger committees are rejected for this benchmark prototype
+// instead of silently under-sizing the queue and reporting incomparable
+// results.
 // Use the full bounded allowance even for a small committee. A single fan-in
 // reserve is insufficient when several round bursts arrive while the actor is
 // synchronously making the previous transition durable.
@@ -52,7 +59,42 @@ const SHADOW_SERVICE_MIN_INPUT_CAPACITY_V1: usize = 64;
 const SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1: usize = 64;
 const SHADOW_SERVICE_CONTROL_RESERVE_V1: usize = 5;
 const SHADOW_SERVICE_EVENT_CAPACITY_V1: usize = 16;
+const SHADOW_MAINTENANCE_INTERVAL_V1: Duration = Duration::from_millis(100);
 const SHADOW_RECOVERY_RETRY_INTERVAL_V1: Duration = Duration::from_millis(500);
+const SHADOW_CARRIER_SYNC_RETRY_INTERVAL_V1: Duration = Duration::from_millis(100);
+const SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1: Duration = Duration::from_millis(500);
+
+/// Runtime role of the persisted carrier actor.
+///
+/// Mirror mode preserves milestone three's one-to-one comparison against
+/// direct Starfish-RBC headers. Autonomous mode opens an independent,
+/// heartbeat-only carrier clock. It remains observational: neither mode can
+/// call the core dispatcher or mutate authoritative consensus state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShadowServiceModeV1 {
+    DirectMirror,
+    AutonomousClock { heartbeat_interval: Duration },
+}
+
+impl ShadowServiceModeV1 {
+    fn is_autonomous(self) -> bool {
+        matches!(self, Self::AutonomousClock { .. })
+    }
+
+    fn heartbeat_interval(self) -> Option<Duration> {
+        match self {
+            Self::DirectMirror => None,
+            Self::AutonomousClock { heartbeat_interval } => Some(heartbeat_interval),
+        }
+    }
+
+    fn carrier_sync_grace_interval(self) -> Duration {
+        self.heartbeat_interval()
+            .map(|interval| interval.saturating_mul(2))
+            .unwrap_or_default()
+            .max(SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ShadowLocalCarrierV1 {
@@ -87,9 +129,18 @@ enum ShadowServiceMessageV1 {
         peer: AuthorityIndex,
         response: RbcDagShadowCarrierResponse,
     },
+    CarrierSyncRequest {
+        peer: AuthorityIndex,
+        request: RbcDagShadowCarrierSyncRequest,
+    },
+    CarrierSyncResponse {
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierSyncResponse,
+    },
     DirectDeliveriesChanged,
     TopologyChanged,
     RetryRecovery,
+    HeartbeatTick,
     Shutdown(oneshot::Sender<Result<(), ShadowServiceErrorV1>>),
 }
 
@@ -100,6 +151,7 @@ pub(crate) struct StarfishRbcDagShadowServiceHandleV1 {
     own_authority: AuthorityIndex,
     committee_size: usize,
     input_capacity: usize,
+    mode: ShadowServiceModeV1,
     desired_topology: Arc<Mutex<BTreeMap<AuthorityIndex, (bool, u64)>>>,
     desired_direct_deliveries: Arc<Mutex<BTreeSet<ShadowDeliveryIdentityV1>>>,
     invalidated_by_overload: Arc<Mutex<Option<&'static str>>>,
@@ -127,6 +179,12 @@ impl StarfishRbcDagShadowServiceHandleV1 {
         &self,
         header: &RbcCanonicalHeader,
     ) -> Result<(), ShadowServiceErrorV1> {
+        if self.mode.is_autonomous() {
+            // The autonomous carrier clock is deliberately independent from
+            // direct consensus rounds. Direct headers continue through the
+            // authoritative path and cannot consume carrier slots.
+            return Ok(());
+        }
         self.send(ShadowServiceMessageV1::LocalCarrier(
             ShadowLocalCarrierV1::from_direct_header(header),
         ))
@@ -171,10 +229,45 @@ impl StarfishRbcDagShadowServiceHandleV1 {
         self.send(ShadowServiceMessageV1::CarrierResponse { peer, response })
     }
 
+    pub(crate) fn carrier_sync_request(
+        &self,
+        peer: AuthorityIndex,
+        request: RbcDagShadowCarrierSyncRequest,
+    ) -> Result<(), ShadowServiceErrorV1> {
+        if !self.mode.is_autonomous() {
+            return Ok(());
+        }
+        self.send(ShadowServiceMessageV1::CarrierSyncRequest { peer, request })
+    }
+
+    pub(crate) fn carrier_sync_response(
+        &self,
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierSyncResponse,
+    ) -> Result<(), ShadowServiceErrorV1> {
+        if !self.mode.is_autonomous() {
+            return Ok(());
+        }
+        validate_wire_size(
+            "carrier sync response",
+            response.canonical_carrier.len(),
+            MAX_CARRIER_CONTENT_SIZE_V1,
+        )?;
+        validate_wire_size(
+            "carrier sync authentication sidecar",
+            response.authentication_sidecar.len(),
+            self.max_sidecar_size,
+        )?;
+        self.send(ShadowServiceMessageV1::CarrierSyncResponse { peer, response })
+    }
+
     pub(crate) fn direct_delivered(
         &self,
         identity: ShadowDeliveryIdentityV1,
     ) -> Result<(), ShadowServiceErrorV1> {
+        if self.mode.is_autonomous() {
+            return Ok(());
+        }
         if identity.author as usize >= self.committee_size {
             return Err(ShadowServiceErrorV1::UnknownAuthority(identity.author));
         }
@@ -245,9 +338,12 @@ impl ShadowServiceMessageV1 {
             Self::Carrier { .. } => "carrier",
             Self::CarrierRequest { .. } => "carrier_request",
             Self::CarrierResponse { .. } => "carrier_response",
+            Self::CarrierSyncRequest { .. } => "carrier_sync_request",
+            Self::CarrierSyncResponse { .. } => "carrier_sync_response",
             Self::DirectDeliveriesChanged => "direct_deliveries_changed",
             Self::TopologyChanged => "topology_changed",
             Self::RetryRecovery => "recovery_retry",
+            Self::HeartbeatTick => "heartbeat_tick",
             Self::Shutdown(_) => "shutdown",
         }
     }
@@ -255,7 +351,16 @@ impl ShadowServiceMessageV1 {
 
 #[derive(Debug)]
 pub(crate) enum ShadowServiceEventV1 {
-    Ready,
+    Ready {
+        autonomous_clock: bool,
+    },
+    ClockState {
+        open_round: RoundNumber,
+        phase_backlog: usize,
+        admitted_authors: usize,
+        admitted_stake: u64,
+        buffered_authenticated: usize,
+    },
     ComparisonBacklog {
         unpaired_direct: usize,
         unpaired_shadow: usize,
@@ -305,6 +410,7 @@ pub(crate) enum ShadowServiceErrorV1 {
     },
     CommitteeBurstTooLarge {
         committee_size: usize,
+        required_capacity: usize,
         maximum_capacity: usize,
     },
     UnknownAuthority(AuthorityIndex),
@@ -312,6 +418,7 @@ pub(crate) enum ShadowServiceErrorV1 {
     ConflictingLocalHeader(RoundNumber),
     MissingRecoveredLocalHeader(RoundNumber),
     RecoveredLocalHeaderMismatch(RoundNumber),
+    AutonomousWalContainsApplicationCarrier(RoundNumber),
     LocalHeaderAuthority {
         expected: AuthorityIndex,
         actual: AuthorityIndex,
@@ -321,6 +428,21 @@ pub(crate) enum ShadowServiceErrorV1 {
     ResponseFromNonHolder {
         peer: AuthorityIndex,
         reference: BlockReference,
+    },
+    InvalidHeartbeatInterval,
+    SyncRequestForForeignAuthor {
+        expected: AuthorityIndex,
+        actual: AuthorityIndex,
+    },
+    UnexpectedSyncResponse {
+        author: AuthorityIndex,
+        round: RoundNumber,
+    },
+    SyncResponseSlotMismatch {
+        expected_author: AuthorityIndex,
+        expected_round: RoundNumber,
+        actual_author: AuthorityIndex,
+        actual_round: RoundNumber,
     },
 }
 
@@ -352,14 +474,12 @@ impl fmt::Display for ShadowServiceErrorV1 {
             ),
             Self::CommitteeBurstTooLarge {
                 committee_size,
+                required_capacity,
                 maximum_capacity,
             } => write!(
                 formatter,
                 "Starfish-RBC-DAG shadow committee size {committee_size} needs a burst queue of \
-                 {}, above the memory-safe capacity limit {maximum_capacity}",
-                committee_size
-                    .saturating_sub(1)
-                    .saturating_add(SHADOW_SERVICE_CONTROL_RESERVE_V1),
+                 {required_capacity}, above the memory-safe capacity limit {maximum_capacity}",
             ),
             Self::UnknownAuthority(authority) => {
                 write!(formatter, "unknown shadow peer authority {authority}")
@@ -379,6 +499,10 @@ impl fmt::Display for ShadowServiceErrorV1 {
                 formatter,
                 "persisted shadow carrier and recovered direct header disagree at round {round}"
             ),
+            Self::AutonomousWalContainsApplicationCarrier(round) => write!(
+                formatter,
+                "autonomous carrier-clock WAL contains a non-heartbeat local carrier at round {round}"
+            ),
             Self::LocalHeaderAuthority { expected, actual } => write!(
                 formatter,
                 "shadow local header authority {actual} does not match local authority {expected}"
@@ -392,6 +516,26 @@ impl fmt::Display for ShadowServiceErrorV1 {
             Self::ResponseFromNonHolder { peer, reference } => write!(
                 formatter,
                 "shadow response for {reference} came from non-holder {peer}"
+            ),
+            Self::InvalidHeartbeatInterval => formatter.write_str(
+                "Starfish-RBC-DAG autonomous heartbeat interval must be nonzero",
+            ),
+            Self::SyncRequestForForeignAuthor { expected, actual } => write!(
+                formatter,
+                "shadow carrier sync request asked authority {expected} to serve authority {actual}"
+            ),
+            Self::UnexpectedSyncResponse { author, round } => write!(
+                formatter,
+                "unexpected shadow carrier sync response for authority {author} round {round}"
+            ),
+            Self::SyncResponseSlotMismatch {
+                expected_author,
+                expected_round,
+                actual_author,
+                actual_round,
+            } => write!(
+                formatter,
+                "shadow carrier sync response for authority {expected_author} round {expected_round} contained authority {actual_author} round {actual_round}"
             ),
         }
     }
@@ -428,8 +572,64 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
     ),
     ShadowServiceErrorV1,
 > {
+    start_starfish_rbc_dag_shadow_service_with_mode_v1(
+        path,
+        committee,
+        own_authority,
+        context,
+        authorizer,
+        recovered_local_headers,
+        ShadowServiceModeV1::DirectMirror,
+    )
+}
+
+pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
+    path: impl AsRef<Path>,
+    committee: RbcDagCommitteeContextV1,
+    own_authority: AuthorityIndex,
+    context: RbcDagContextV1,
+    authorizer: ShadowAuthorizerV1,
+    heartbeat_interval: Duration,
+) -> Result<
+    (
+        StarfishRbcDagShadowServiceHandleV1,
+        mpsc::Receiver<ShadowServiceEventV1>,
+        JoinHandle<()>,
+    ),
+    ShadowServiceErrorV1,
+> {
+    if heartbeat_interval.is_zero() {
+        return Err(ShadowServiceErrorV1::InvalidHeartbeatInterval);
+    }
+    start_starfish_rbc_dag_shadow_service_with_mode_v1(
+        path,
+        committee,
+        own_authority,
+        context,
+        authorizer,
+        Vec::new(),
+        ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+    )
+}
+
+fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
+    path: impl AsRef<Path>,
+    committee: RbcDagCommitteeContextV1,
+    own_authority: AuthorityIndex,
+    context: RbcDagContextV1,
+    authorizer: ShadowAuthorizerV1,
+    recovered_local_headers: Vec<RbcCanonicalHeader>,
+    mode: ShadowServiceModeV1,
+) -> Result<
+    (
+        StarfishRbcDagShadowServiceHandleV1,
+        mpsc::Receiver<ShadowServiceEventV1>,
+        JoinHandle<()>,
+    ),
+    ShadowServiceErrorV1,
+> {
     let committee_size = committee.committee().len();
-    let input_capacity = shadow_input_capacity(committee_size)?;
+    let input_capacity = shadow_input_capacity(committee_size, mode)?;
     let max_sidecar_size =
         authentication_sidecar_size(context.authentication_scheme(), committee_size);
     let path = path.as_ref().to_path_buf();
@@ -453,9 +653,12 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
     let desired_topology = Arc::new(Mutex::new(BTreeMap::new()));
     let desired_direct_deliveries = Arc::new(Mutex::new(BTreeSet::new()));
     let invalidated_by_overload = Arc::new(Mutex::new(None));
+    let retry_notification_pending = Arc::new(AtomicBool::new(false));
+    let heartbeat_notification_pending = Arc::new(AtomicBool::new(false));
     let retry_tx = message_tx.downgrade();
+    let retry_pending = Arc::clone(&retry_notification_pending);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SHADOW_RECOVERY_RETRY_INTERVAL_V1);
+        let mut interval = tokio::time::interval(SHADOW_MAINTENANCE_INTERVAL_V1);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
@@ -463,16 +666,56 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
             let Some(retry_tx) = retry_tx.upgrade() else {
                 break;
             };
+            if retry_pending.swap(true, Ordering::AcqRel) {
+                continue;
+            }
             match retry_tx.try_send(ShadowServiceMessageV1::RetryRecovery) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Closed(_)) => break,
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => retry_pending.store(false, Ordering::Release),
+                Err(TrySendError::Closed(_)) => {
+                    retry_pending.store(false, Ordering::Release);
+                    break;
+                }
             }
         }
     });
+    if let Some(heartbeat_interval) = mode.heartbeat_interval() {
+        let heartbeat_tx = message_tx.downgrade();
+        let heartbeat_pending = Arc::clone(&heartbeat_notification_pending);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(heartbeat_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Give startup/WAL replay one full interval before the first
+            // carrier. A missed/full notification is harmless: a later tick
+            // retries the still-open local slot.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(heartbeat_tx) = heartbeat_tx.upgrade() else {
+                    break;
+                };
+                if heartbeat_pending.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                match heartbeat_tx.try_send(ShadowServiceMessageV1::HeartbeatTick) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        heartbeat_pending.store(false, Ordering::Release);
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        heartbeat_pending.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        });
+    }
     let startup_events = event_tx.clone();
     let actor_desired_topology = Arc::clone(&desired_topology);
     let actor_desired_direct_deliveries = Arc::clone(&desired_direct_deliveries);
     let actor_invalidated_by_overload = Arc::clone(&invalidated_by_overload);
+    let actor_retry_notification_pending = Arc::clone(&retry_notification_pending);
+    let actor_heartbeat_notification_pending = Arc::clone(&heartbeat_notification_pending);
     let task = tokio::spawn(async move {
         let opened = tokio::task::spawn_blocking(move || {
             StarfishRbcDagShadowV1::open(path, committee, own_authority, context, authorizer)
@@ -502,8 +745,8 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
         let persisted_local = match core.local_outbound_metadata() {
             Ok(metadata) => metadata
                 .into_iter()
-                .map(|(round, commitment, creation_time_ns)| {
-                    (round, (commitment, creation_time_ns))
+                .map(|(round, commitment, creation_time_ns, control_shape)| {
+                    (round, (commitment, creation_time_ns, control_shape))
                 })
                 .collect::<BTreeMap<_, _>>(),
             Err(error) => {
@@ -517,42 +760,65 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
             }
         };
         let durable_round = core.local_carrier_round();
-        for (round, (commitment, creation_time_ns)) in &persisted_local {
-            let Some(recovered) = pending_local.get(round) else {
-                let _ = startup_events
-                    .send(ShadowServiceEventV1::Rejected {
-                        peer: None,
-                        error: ShadowServiceErrorV1::MissingRecoveredLocalHeader(*round)
-                            .to_string(),
+        if mode.is_autonomous() {
+            if let Some((round, _)) =
+                persisted_local
+                    .iter()
+                    .find(|(_, (commitment, _, control_shape))| {
+                        *commitment != crate::crypto::TransactionsCommitment::default()
+                            || !*control_shape
                     })
-                    .await;
-                return;
-            };
-            if recovered.transactions_commitment != *commitment
-                || recovered.creation_time_ns != *creation_time_ns
             {
                 let _ = startup_events
                     .send(ShadowServiceEventV1::Rejected {
                         peer: None,
-                        error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(*round)
+                        error: ShadowServiceErrorV1::AutonomousWalContainsApplicationCarrier(
+                            *round,
+                        )
+                        .to_string(),
+                    })
+                    .await;
+                return;
+            }
+        } else {
+            for (round, (commitment, creation_time_ns, _)) in &persisted_local {
+                let Some(recovered) = pending_local.get(round) else {
+                    let _ = startup_events
+                        .send(ShadowServiceEventV1::Rejected {
+                            peer: None,
+                            error: ShadowServiceErrorV1::MissingRecoveredLocalHeader(*round)
+                                .to_string(),
+                        })
+                        .await;
+                    return;
+                };
+                if recovered.transactions_commitment != *commitment
+                    || recovered.creation_time_ns != *creation_time_ns
+                {
+                    let _ = startup_events
+                        .send(ShadowServiceEventV1::Rejected {
+                            peer: None,
+                            error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(*round)
+                                .to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+            if let Some(round) = pending_local
+                .keys()
+                .copied()
+                .find(|round| *round < durable_round && !persisted_local.contains_key(round))
+            {
+                let _ = startup_events
+                    .send(ShadowServiceEventV1::Rejected {
+                        peer: None,
+                        error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(round)
                             .to_string(),
                     })
                     .await;
                 return;
             }
-        }
-        if let Some(round) = pending_local
-            .keys()
-            .copied()
-            .find(|round| *round < durable_round && !persisted_local.contains_key(round))
-        {
-            let _ = startup_events
-                .send(ShadowServiceEventV1::Rejected {
-                    peer: None,
-                    error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(round).to_string(),
-                })
-                .await;
-            return;
         }
         let reported_shadow_deliveries = match core.delivered_identities() {
             Ok(identities) => identities.into_iter().collect::<BTreeSet<_>>(),
@@ -573,8 +839,10 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
             .collect();
         let comparison_backlog = ShadowComparisonBacklogV1::new(reported_shadow_delivery_slots);
         pending_local.retain(|round, _| *round >= core.local_carrier_round());
+        let sync_round = core.local_carrier_round();
         let state = ShadowServiceStateV1 {
             core,
+            mode,
             own_authority,
             committee_size,
             events: event_tx,
@@ -586,6 +854,14 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
             pending_local,
             pending_recovery: BTreeMap::new(),
             recovery_last_attempt: BTreeMap::new(),
+            sync_last_attempt: BTreeMap::new(),
+            sync_last_served: BTreeMap::new(),
+            sync_round,
+            sync_round_opened_at: Instant::now(),
+            sync_catch_up: false,
+            sync_used_in_open_round: false,
+            retry_notification_pending: actor_retry_notification_pending,
+            heartbeat_notification_pending: actor_heartbeat_notification_pending,
             direct_deliveries: BTreeSet::new(),
             reported_shadow_deliveries,
             recovered_shadow_deliveries,
@@ -615,6 +891,7 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
             own_authority,
             committee_size,
             input_capacity,
+            mode,
             desired_topology,
             desired_direct_deliveries,
             invalidated_by_overload,
@@ -690,6 +967,7 @@ impl ShadowComparisonBacklogV1 {
 
 struct ShadowServiceStateV1 {
     core: StarfishRbcDagShadowV1,
+    mode: ShadowServiceModeV1,
     own_authority: AuthorityIndex,
     committee_size: usize,
     events: mpsc::Sender<ShadowServiceEventV1>,
@@ -701,6 +979,14 @@ struct ShadowServiceStateV1 {
     pending_local: BTreeMap<RoundNumber, ShadowLocalCarrierV1>,
     pending_recovery: BTreeMap<BlockReference, BTreeSet<AuthorityIndex>>,
     recovery_last_attempt: BTreeMap<(BlockReference, AuthorityIndex), Instant>,
+    sync_last_attempt: BTreeMap<(AuthorityIndex, RoundNumber), Instant>,
+    sync_last_served: BTreeMap<AuthorityIndex, (RoundNumber, Instant)>,
+    sync_round: RoundNumber,
+    sync_round_opened_at: Instant,
+    sync_catch_up: bool,
+    sync_used_in_open_round: bool,
+    retry_notification_pending: Arc<AtomicBool>,
+    heartbeat_notification_pending: Arc<AtomicBool>,
     direct_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
     reported_shadow_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
     recovered_shadow_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
@@ -724,11 +1010,27 @@ impl ShadowServiceStateV1 {
     }
 
     fn emit_comparison_backlog(&self) {
+        if self.mode.is_autonomous() {
+            return;
+        }
         let (unpaired_direct, unpaired_shadow, max_round_lag) = self.comparison_backlog.counts();
         self.emit(ShadowServiceEventV1::ComparisonBacklog {
             unpaired_direct,
             unpaired_shadow,
             max_round_lag,
+        });
+    }
+
+    fn emit_clock_state(&self) {
+        if !self.mode.is_autonomous() {
+            return;
+        }
+        self.emit(ShadowServiceEventV1::ClockState {
+            open_round: self.core.local_carrier_round(),
+            phase_backlog: self.core.pending_phase_backlog_len(),
+            admitted_authors: self.core.current_round_admitted_author_count(),
+            admitted_stake: self.core.current_round_admitted_stake(),
+            buffered_authenticated: self.core.buffered_authenticated_carrier_count(),
         });
     }
 
@@ -751,6 +1053,10 @@ impl ShadowServiceStateV1 {
             }
             self.recovery_last_attempt
                 .retain(|(_, holder), _| holder != peer);
+            self.sync_last_attempt
+                .retain(|(author, _), _| author != peer);
+            self.sync_last_served
+                .retain(|requester, _| requester != peer);
             if state.0 {
                 self.connected.insert(*peer);
                 newly_connected.push(*peer);
@@ -760,10 +1066,17 @@ impl ShadowServiceStateV1 {
         }
         self.observed_topology = desired;
         if !newly_connected.is_empty() {
-            let retransmissions = self.core.retransmissions();
-            for peer in newly_connected {
-                for envelope in &retransmissions {
-                    self.send_envelope(peer, envelope);
+            if self.mode.is_autonomous() {
+                // Autonomous history is synchronized one exact slot at a
+                // time. Replaying the entire retained run on every reconnect
+                // would create an unbounded burst as heartbeats accumulate.
+                self.flush_carrier_sync_requests(self.core.local_carrier_round() > 1);
+            } else {
+                let retransmissions = self.core.retransmissions();
+                for peer in newly_connected {
+                    for envelope in &retransmissions {
+                        self.send_envelope(peer, envelope);
+                    }
                 }
             }
             self.flush_recovery_requests();
@@ -771,6 +1084,9 @@ impl ShadowServiceStateV1 {
     }
 
     fn reconcile_direct_deliveries(&mut self) {
+        if self.mode.is_autonomous() {
+            return;
+        }
         let desired = self.desired_direct_deliveries.lock().clone();
         let newly_observed = desired
             .difference(&self.direct_deliveries)
@@ -845,6 +1161,12 @@ impl ShadowServiceStateV1 {
     }
 
     fn process_effects(&mut self, effects: Vec<ModelEffect>) {
+        let carrier_round_advanced = effects
+            .iter()
+            .any(|effect| matches!(effect, ModelEffect::CarrierRoundAdvanced(_)));
+        if carrier_round_advanced {
+            self.sync_catch_up = std::mem::take(&mut self.sync_used_in_open_round);
+        }
         for effect in effects {
             match effect {
                 ModelEffect::NeedCarrier { target, holders } => {
@@ -858,7 +1180,8 @@ impl ShadowServiceStateV1 {
                 ModelEffect::Delivered(reference) => {
                     self.pending_recovery.remove(&reference);
                 }
-                ModelEffect::PrefixAdvanced { .. } | ModelEffect::CarrierRoundAdvanced(_) => {}
+                ModelEffect::PrefixAdvanced { .. } => {}
+                ModelEffect::CarrierRoundAdvanced(_) => {}
             }
         }
         self.reconcile_pending_recovery();
@@ -867,6 +1190,59 @@ impl ShadowServiceStateV1 {
             self.pending_recovery.len(),
         ));
         self.report_new_shadow_deliveries();
+        self.flush_carrier_sync_requests(false);
+        self.emit_clock_state();
+    }
+
+    fn try_create_autonomous_heartbeat(&mut self) {
+        if !self.mode.is_autonomous() || !self.core.can_create_carrier() {
+            self.emit_clock_state();
+            return;
+        }
+        let creation_time_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(TimestampNs::MAX);
+        let before = self.core.wal_counts();
+        match self.core.create_local_control_heartbeat(creation_time_ns) {
+            Ok((envelope, effects)) => {
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: "heartbeat",
+                    outcome: "accepted",
+                });
+                self.report_wal_delta(before);
+                self.broadcast(&envelope);
+                self.process_effects(effects);
+            }
+            Err(ShadowErrorV1::Model(ModelError::LocalRoundNotOpen(_))) => {
+                // The local slot is open syntactically but cannot yet name a
+                // quorum of exact previous-round admitted parents. A later
+                // authenticated ingress or timer tick retries it.
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: "heartbeat",
+                    outcome: "waiting_for_quorum",
+                });
+                self.emit_clock_state();
+            }
+            Err(error) => self.mark_fatal(error),
+        }
+    }
+
+    /// While repairing a lagging clock, fix our next control carrier as soon
+    /// as its exact previous-round quorum is available. Waiting for the
+    /// normal heartbeat interval would cap catch-up at the production rate,
+    /// so a node behind a continuously advancing committee could never close
+    /// the gap. Healthy rounds still remain paced exclusively by the timer.
+    fn drive_autonomous_catch_up(&mut self) {
+        while self.sync_catch_up && self.core.can_create_carrier() && !self.fatal {
+            let round_before = self.core.local_carrier_round();
+            self.try_create_autonomous_heartbeat();
+            if self.core.local_carrier_round() == round_before {
+                break;
+            }
+        }
     }
 
     fn reconcile_pending_recovery(&mut self) {
@@ -1000,6 +1376,231 @@ impl ShadowServiceStateV1 {
         }
     }
 
+    fn flush_carrier_sync_requests(&mut self, force: bool) {
+        if !self.mode.is_autonomous() {
+            return;
+        }
+        let round = self.core.local_carrier_round();
+        let now = Instant::now();
+        if round != self.sync_round {
+            self.sync_round = round;
+            self.sync_round_opened_at = now;
+            self.sync_last_attempt.clear();
+        }
+        self.sync_last_attempt.retain(|(author, attempt_round), _| {
+            *attempt_round == round
+                && self.connected.contains(author)
+                && self.core.admitted_reference(*author, round).is_none()
+        });
+        if !force
+            && !self.sync_catch_up
+            && now.saturating_duration_since(self.sync_round_opened_at)
+                < self.mode.carrier_sync_grace_interval()
+        {
+            return;
+        }
+        let requests = self
+            .connected
+            .iter()
+            .copied()
+            .filter(|author| self.core.admitted_reference(*author, round).is_none())
+            .filter(|author| {
+                self.sync_last_attempt
+                    .get(&(*author, round))
+                    .is_none_or(|last| {
+                        now.saturating_duration_since(*last)
+                            >= SHADOW_CARRIER_SYNC_RETRY_INTERVAL_V1
+                    })
+            })
+            .collect::<Vec<_>>();
+        for author in requests {
+            self.sync_last_attempt.insert((author, round), now);
+            self.emit(ShadowServiceEventV1::Network {
+                recipient: author,
+                message: NetworkMessage::RbcDagShadowCarrierSyncRequest(
+                    RbcDagShadowCarrierSyncRequest { author, round },
+                ),
+            });
+            self.emit(ShadowServiceEventV1::Input {
+                kind: "carrier_sync_request",
+                outcome: "sent",
+            });
+        }
+    }
+
+    fn handle_carrier_sync_request(
+        &mut self,
+        peer: AuthorityIndex,
+        request: RbcDagShadowCarrierSyncRequest,
+    ) {
+        if request.author != self.own_authority {
+            self.reject(
+                Some(peer),
+                ShadowServiceErrorV1::SyncRequestForForeignAuthor {
+                    expected: self.own_authority,
+                    actual: request.author,
+                },
+            );
+            return;
+        }
+        if request.round > self.core.local_carrier_round() {
+            self.emit(ShadowServiceEventV1::Input {
+                kind: "carrier_sync_request",
+                outcome: "future_not_found",
+            });
+            return;
+        }
+        let now = Instant::now();
+        if self.sync_last_served.get(&peer).is_some_and(|(_, last)| {
+            now.saturating_duration_since(*last) < SHADOW_CARRIER_SYNC_RETRY_INTERVAL_V1
+        }) {
+            self.emit(ShadowServiceEventV1::Input {
+                kind: "carrier_sync_request",
+                outcome: "rate_limited",
+            });
+            return;
+        }
+        self.sync_last_served.insert(peer, (request.round, now));
+        let Some(envelope) = self.core.local_outbound_envelope(request.round) else {
+            self.emit(ShadowServiceEventV1::Input {
+                kind: "carrier_sync_request",
+                outcome: "not_found",
+            });
+            return;
+        };
+        self.emit(ShadowServiceEventV1::Network {
+            recipient: peer,
+            message: NetworkMessage::RbcDagShadowCarrierSyncResponse(
+                RbcDagShadowCarrierSyncResponse {
+                    author: request.author,
+                    round: request.round,
+                    canonical_carrier: envelope.canonical_carrier_wire().to_vec(),
+                    authentication_sidecar: envelope.authentication_sidecar().to_vec(),
+                },
+            ),
+        });
+        self.emit(ShadowServiceEventV1::Input {
+            kind: "carrier_sync_request",
+            outcome: "served",
+        });
+    }
+
+    fn handle_carrier_sync_response(
+        &mut self,
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierSyncResponse,
+    ) {
+        let expected = (response.author, response.round);
+        if peer != response.author {
+            self.reject(
+                Some(peer),
+                ShadowServiceErrorV1::UnexpectedSyncResponse {
+                    author: response.author,
+                    round: response.round,
+                },
+            );
+            return;
+        }
+        let (actual_author, actual_round, actual_reference) =
+            match self.core.candidate_slot(&response.canonical_carrier) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    self.reject(Some(peer), error);
+                    return;
+                }
+            };
+        if actual_author != response.author || actual_round != response.round {
+            self.reject(
+                Some(peer),
+                ShadowServiceErrorV1::SyncResponseSlotMismatch {
+                    expected_author: response.author,
+                    expected_round: response.round,
+                    actual_author,
+                    actual_round,
+                },
+            );
+            return;
+        }
+        if response.round < self.core.local_carrier_round()
+            || self
+                .core
+                .admitted_reference(response.author, response.round)
+                .is_some()
+        {
+            self.sync_last_attempt.remove(&expected);
+            self.emit(ShadowServiceEventV1::Input {
+                kind: "carrier_sync_response",
+                outcome: "ignored_already_admitted_or_stale",
+            });
+            return;
+        }
+        if !self.sync_last_attempt.contains_key(&expected) {
+            self.reject(
+                Some(peer),
+                ShadowServiceErrorV1::UnexpectedSyncResponse {
+                    author: response.author,
+                    round: response.round,
+                },
+            );
+            return;
+        }
+        let before = self.core.wal_counts();
+        match self.core.receive_or_retain_from_peer(
+            &response.canonical_carrier,
+            &response.authentication_sidecar,
+            peer,
+        ) {
+            Ok(outcome) => {
+                let outcome_label = match outcome.disposition() {
+                    ShadowIngressDispositionV1::Authenticated => "authenticated",
+                    ShadowIngressDispositionV1::CandidateRetained => "retained_unauthenticated",
+                    ShadowIngressDispositionV1::IgnoredDuplicateConflictOrStale => "ignored",
+                };
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: "carrier_sync_response",
+                    outcome: outcome_label,
+                });
+                if outcome.disposition() == ShadowIngressDispositionV1::Authenticated
+                    && self
+                        .core
+                        .admitted_reference(response.author, response.round)
+                        == Some(actual_reference)
+                {
+                    self.sync_used_in_open_round = true;
+                }
+                self.report_wal_delta(before);
+                self.process_effects(outcome.effects().to_vec());
+                if self
+                    .core
+                    .admitted_reference(response.author, response.round)
+                    .is_some()
+                {
+                    self.sync_last_attempt.remove(&expected);
+                }
+                if self.sync_catch_up {
+                    self.flush_carrier_sync_requests(true);
+                }
+                if outcome.disposition() == ShadowIngressDispositionV1::CandidateRetained {
+                    self.reject(
+                        Some(peer),
+                        ShadowServiceErrorV1::UnauthenticatedCarrierRetained,
+                    );
+                }
+            }
+            Err(error) => {
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: "carrier_sync_response",
+                    outcome: "rejected",
+                });
+                if is_fatal_core_error(&error) {
+                    self.mark_fatal(error);
+                } else {
+                    self.reject(Some(peer), error);
+                }
+            }
+        }
+    }
+
     fn report_new_shadow_deliveries(&mut self) {
         let identities: BTreeSet<_> = match self.core.delivered_identities() {
             Ok(identities) => identities.into_iter().collect(),
@@ -1015,7 +1616,9 @@ impl ShadowServiceStateV1 {
         self.reported_shadow_deliveries = identities;
         for identity in &new_identities {
             let slot = delivery_slot(identity);
-            self.comparison_backlog.observe_epoch_shadow(slot);
+            if !self.mode.is_autonomous() {
+                self.comparison_backlog.observe_epoch_shadow(slot);
+            }
             self.emit(ShadowServiceEventV1::Delivered(*identity));
             self.emit_slot_comparison(slot);
             self.emit_comparison_backlog();
@@ -1023,6 +1626,9 @@ impl ShadowServiceStateV1 {
     }
 
     fn emit_slot_comparison(&mut self, slot: ShadowDeliverySlotV1) {
+        if self.mode.is_autonomous() {
+            return;
+        }
         let direct = self
             .direct_deliveries
             .iter()
@@ -1085,10 +1691,16 @@ fn run_shadow_service(
     state.reconcile_topology();
     state.reconcile_direct_deliveries();
     if !state.observe_external_invalidation() {
-        state.emit(ShadowServiceEventV1::Ready);
+        state.emit(ShadowServiceEventV1::Ready {
+            autonomous_clock: state.mode.is_autonomous(),
+        });
         state.emit_comparison_backlog();
         state.process_effects(open_report.recovery_effects().to_vec());
-        state.retry_pending_local();
+        if state.mode.is_autonomous() {
+            state.emit_clock_state();
+        } else {
+            state.retry_pending_local();
+        }
     }
 
     while !state.fatal {
@@ -1115,6 +1727,15 @@ fn run_shadow_service(
         };
         if state.observe_external_invalidation() {
             break;
+        }
+        match &message {
+            ShadowServiceMessageV1::RetryRecovery => state
+                .retry_notification_pending
+                .store(false, Ordering::Release),
+            ShadowServiceMessageV1::HeartbeatTick => state
+                .heartbeat_notification_pending
+                .store(false, Ordering::Release),
+            _ => {}
         }
         match message {
             ShadowServiceMessageV1::LocalCarrier(local) => {
@@ -1190,6 +1811,17 @@ fn run_shadow_service(
                     state.reject(Some(peer), error);
                     continue;
                 }
+                if state
+                    .core
+                    .retained_candidate_wire(response.reference)
+                    .is_some()
+                {
+                    state.emit(ShadowServiceEventV1::Input {
+                        kind: "recovery",
+                        outcome: "ignored_already_retained",
+                    });
+                    continue;
+                }
                 let Some(holders) = state.pending_recovery.get(&response.reference) else {
                     state.reject(
                         Some(peer),
@@ -1238,6 +1870,20 @@ fn run_shadow_service(
                     }
                 }
             }
+            ShadowServiceMessageV1::CarrierSyncRequest { peer, request } => {
+                if let Err(error) = state.validate_peer(peer) {
+                    state.reject(Some(peer), error);
+                    continue;
+                }
+                state.handle_carrier_sync_request(peer, request);
+            }
+            ShadowServiceMessageV1::CarrierSyncResponse { peer, response } => {
+                if let Err(error) = state.validate_peer(peer) {
+                    state.reject(Some(peer), error);
+                    continue;
+                }
+                state.handle_carrier_sync_response(peer, response);
+            }
             ShadowServiceMessageV1::DirectDeliveriesChanged => {
                 state.reconcile_direct_deliveries();
             }
@@ -1246,11 +1892,15 @@ fn run_shadow_service(
                 state.reconcile_topology();
                 state.reconcile_pending_recovery();
                 state.flush_recovery_requests();
+                state.flush_carrier_sync_requests(false);
             }
+            ShadowServiceMessageV1::HeartbeatTick => state.try_create_autonomous_heartbeat(),
             ShadowServiceMessageV1::Shutdown(_) => unreachable!("shutdown handled before dispatch"),
         }
         state.reconcile_topology();
         state.reconcile_direct_deliveries();
+        state.drive_autonomous_catch_up();
+        state.flush_carrier_sync_requests(false);
     }
     let events = state.events.clone();
     if let Err(error) = state.core.shutdown() {
@@ -1279,13 +1929,19 @@ fn authentication_sidecar_size(scheme: BlockAuthenticationScheme, committee_size
         }
 }
 
-fn shadow_input_capacity(committee_size: usize) -> Result<usize, ShadowServiceErrorV1> {
-    let committee_burst = committee_size
-        .saturating_sub(1)
+fn shadow_input_capacity(
+    committee_size: usize,
+    mode: ShadowServiceModeV1,
+) -> Result<usize, ShadowServiceErrorV1> {
+    let peer_count = committee_size.saturating_sub(1);
+    let peer_burst_factor = if mode.is_autonomous() { 3 } else { 1 };
+    let committee_burst = peer_count
+        .saturating_mul(peer_burst_factor)
         .saturating_add(SHADOW_SERVICE_CONTROL_RESERVE_V1);
     if committee_burst > SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1 {
         return Err(ShadowServiceErrorV1::CommitteeBurstTooLarge {
             committee_size,
+            required_capacity: committee_burst,
             maximum_capacity: SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1,
         });
     }
@@ -1349,7 +2005,11 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
-            let committee = Committee::new_test(vec![1; N]);
+            Self::new_with_n(N)
+        }
+
+        fn new_with_n(n: usize) -> Self {
+            let committee = Committee::new_test(vec![1; n]);
             let committee = RbcDagCommitteeContextV1::new(Arc::clone(&committee)).unwrap();
             let context = RbcDagContextV1::new_with_committee(
                 RbcDagProtocolInstanceId::new([0xD7; 32]).unwrap(),
@@ -1357,14 +2017,14 @@ mod tests {
                 BlockAuthenticationScheme::MacVector,
             );
             let directory = tempfile::tempdir().unwrap();
-            let paths = (0..N)
+            let paths = (0..n)
                 .map(|authority| directory.path().join(format!("shadow-{authority}.wal")))
                 .collect();
             Self {
                 _directory: directory,
                 committee,
                 context,
-                keyrings: mac_keyrings_for_test(N),
+                keyrings: mac_keyrings_for_test(n),
                 paths,
             }
         }
@@ -1385,6 +2045,37 @@ mod tests {
                 self.context,
                 ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
                 recovered,
+            )
+            .unwrap()
+        }
+
+        fn start_autonomous(
+            &self,
+            authority: AuthorityIndex,
+        ) -> (
+            StarfishRbcDagShadowServiceHandleV1,
+            mpsc::Receiver<ShadowServiceEventV1>,
+            JoinHandle<()>,
+        ) {
+            self.start_autonomous_with_interval(authority, Duration::from_secs(60 * 60))
+        }
+
+        fn start_autonomous_with_interval(
+            &self,
+            authority: AuthorityIndex,
+            heartbeat_interval: Duration,
+        ) -> (
+            StarfishRbcDagShadowServiceHandleV1,
+            mpsc::Receiver<ShadowServiceEventV1>,
+            JoinHandle<()>,
+        ) {
+            start_starfish_rbc_dag_autonomous_clock_service_v1(
+                &self.paths[authority as usize],
+                self.committee.clone(),
+                authority,
+                self.context,
+                ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
+                heartbeat_interval,
             )
             .unwrap()
         }
@@ -1422,7 +2113,7 @@ mod tests {
     async fn wait_ready(events: &mut mpsc::Receiver<ShadowServiceEventV1>) {
         loop {
             match next_event(events).await {
-                ShadowServiceEventV1::Ready => return,
+                ShadowServiceEventV1::Ready { .. } => return,
                 ShadowServiceEventV1::Rejected { error, .. } => {
                     panic!("shadow startup failed: {error}")
                 }
@@ -1467,6 +2158,175 @@ mod tests {
         }
     }
 
+    async fn pump_autonomous_until_round(
+        handles: &[StarfishRbcDagShadowServiceHandleV1],
+        events: &mut [mpsc::Receiver<ShadowServiceEventV1>],
+        open_rounds: &mut [RoundNumber],
+        deliveries: &mut [usize],
+        sync_requests: &mut usize,
+        target_open_round: RoundNumber,
+    ) {
+        timeout(EVENT_TIMEOUT, async {
+            loop {
+                let mut progressed = false;
+                for sender in 0..events.len() {
+                    while let Ok(event) = events[sender].try_recv() {
+                        progressed = true;
+                        match event {
+                            ShadowServiceEventV1::Network { recipient, message } => {
+                                let recipient = recipient as usize;
+                                match message {
+                                    NetworkMessage::RbcDagShadowCarrier(envelope) => handles
+                                        [recipient]
+                                        .carrier(sender as AuthorityIndex, envelope)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierRequest(reference) => handles
+                                        [recipient]
+                                        .carrier_request(sender as AuthorityIndex, reference)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierResponse(response) => handles
+                                        [recipient]
+                                        .carrier_response(sender as AuthorityIndex, response)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
+                                        *sync_requests = sync_requests.saturating_add(1);
+                                        handles[recipient]
+                                            .carrier_sync_request(
+                                                sender as AuthorityIndex,
+                                                request,
+                                            )
+                                            .unwrap();
+                                    }
+                                    NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => {
+                                        handles[recipient]
+                                            .carrier_sync_response(
+                                                sender as AuthorityIndex,
+                                                response,
+                                            )
+                                            .unwrap();
+                                    }
+                                    unexpected => panic!(
+                                        "autonomous shadow emitted unexpected network message: {unexpected:?}"
+                                    ),
+                                }
+                            }
+                            ShadowServiceEventV1::ClockState { open_round, .. } => {
+                                open_rounds[sender] = open_rounds[sender].max(open_round);
+                            }
+                            ShadowServiceEventV1::Delivered(_) => {
+                                deliveries[sender] = deliveries[sender].saturating_add(1);
+                            }
+                            ShadowServiceEventV1::Rejected { error, .. }
+                                if error.contains("FutureCarrierOutsideBuffer")
+                                    || error.contains("unexpected shadow response") => {}
+                            ShadowServiceEventV1::Rejected { error, .. } => {
+                                panic!("autonomous shadow rejected valid test traffic: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if open_rounds
+                    .iter()
+                    .all(|round| *round >= target_open_round)
+                {
+                    return;
+                }
+                if !progressed {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "autonomous clock did not open round {target_open_round}; open={open_rounds:?}, sync_requests={sync_requests}"
+            )
+        });
+    }
+
+    async fn pump_online_prefix_until_round(
+        handles: &[StarfishRbcDagShadowServiceHandleV1],
+        events: &mut [mpsc::Receiver<ShadowServiceEventV1>],
+        open_rounds: &mut [RoundNumber],
+        online: usize,
+        target_open_round: RoundNumber,
+    ) {
+        timeout(EVENT_TIMEOUT, async {
+            loop {
+                let mut progressed = false;
+                for sender in 0..events.len() {
+                    while let Ok(event) = events[sender].try_recv() {
+                        progressed = true;
+                        match event {
+                            ShadowServiceEventV1::Network { recipient, message }
+                                if sender < online && (recipient as usize) < online =>
+                            {
+                                let recipient = recipient as usize;
+                                match message {
+                                    NetworkMessage::RbcDagShadowCarrier(envelope) => handles
+                                        [recipient]
+                                        .carrier(sender as AuthorityIndex, envelope)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierRequest(reference) => handles
+                                        [recipient]
+                                        .carrier_request(sender as AuthorityIndex, reference)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierResponse(response) => handles
+                                        [recipient]
+                                        .carrier_response(sender as AuthorityIndex, response)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
+                                        handles[recipient]
+                                            .carrier_sync_request(
+                                                sender as AuthorityIndex,
+                                                request,
+                                            )
+                                            .unwrap();
+                                    }
+                                    NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => {
+                                        handles[recipient]
+                                            .carrier_sync_response(
+                                                sender as AuthorityIndex,
+                                                response,
+                                            )
+                                            .unwrap();
+                                    }
+                                    unexpected => panic!(
+                                        "autonomous shadow emitted unexpected network message: {unexpected:?}"
+                                    ),
+                                }
+                            }
+                            ShadowServiceEventV1::Network { .. } => {}
+                            ShadowServiceEventV1::ClockState { open_round, .. } => {
+                                open_rounds[sender] = open_rounds[sender].max(open_round);
+                            }
+                            ShadowServiceEventV1::Rejected { error, .. } => {
+                                panic!("autonomous shadow rejected valid test traffic: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if open_rounds[..online]
+                    .iter()
+                    .all(|round| *round >= target_open_round)
+                {
+                    return;
+                }
+                if !progressed {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("online prefix did not open round {target_open_round}"));
+    }
+
     async fn stop(
         handle: StarfishRbcDagShadowServiceHandleV1,
         events: mpsc::Receiver<ShadowServiceEventV1>,
@@ -1481,7 +2341,9 @@ mod tests {
         loop {
             match next_event(&mut events).await {
                 ShadowServiceEventV1::Rejected { peer: None, error } => return error,
-                ShadowServiceEventV1::Ready => panic!("invalid shadow startup became ready"),
+                ShadowServiceEventV1::Ready { .. } => {
+                    panic!("invalid shadow startup became ready")
+                }
                 _ => {}
             }
         }
@@ -1584,6 +2446,350 @@ mod tests {
         stop(handle, events, task).await;
     }
 
+    async fn assert_autonomous_zero_load_progress(n: usize) {
+        let harness = Harness::new_with_n(n);
+        let mut handles = Vec::new();
+        let mut events = Vec::new();
+        let mut tasks = Vec::new();
+        for authority in 0..n as AuthorityIndex {
+            let (handle, mut node_events, task) = harness.start_autonomous(authority);
+            loop {
+                match next_event(&mut node_events).await {
+                    ShadowServiceEventV1::Ready { autonomous_clock } => {
+                        assert!(autonomous_clock);
+                        break;
+                    }
+                    ShadowServiceEventV1::Rejected { error, .. } => {
+                        panic!("autonomous shadow startup failed: {error}")
+                    }
+                    _ => {}
+                }
+            }
+            handles.push(handle);
+            events.push(node_events);
+            tasks.push(task);
+        }
+
+        let mut open_rounds = vec![1; n];
+        let mut deliveries = vec![0; n];
+        let mut sync_requests = 0;
+        for (authority, handle) in handles.iter().enumerate() {
+            for peer in 0..n {
+                if peer != authority {
+                    handle.peer_connected(peer as AuthorityIndex).unwrap();
+                }
+            }
+        }
+        for fixed_round in 1..=6 {
+            for handle in &handles {
+                handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+            }
+            pump_autonomous_until_round(
+                &handles,
+                &mut events,
+                &mut open_rounds,
+                &mut deliveries,
+                &mut sync_requests,
+                fixed_round + 1,
+            )
+            .await;
+        }
+
+        assert!(
+            deliveries.iter().all(|count| *count > 0),
+            "every node must RBC-deliver mature heartbeat carriers: {deliveries:?}"
+        );
+        assert!(open_rounds.iter().all(|round| *round >= 7));
+        assert_eq!(
+            sync_requests, 0,
+            "healthy proactive rounds must not trigger repair polling"
+        );
+
+        drop(events);
+        for handle in &handles {
+            handle.shutdown().await.unwrap();
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_node_autonomous_zero_load_clock_delivers_mature_heartbeats() {
+        assert_autonomous_zero_load_progress(4).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn seven_node_autonomous_zero_load_clock_delivers_mature_heartbeats() {
+        assert_autonomous_zero_load_progress(7).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn autonomous_exact_slot_sync_is_bounded_and_late_response_is_idempotent() {
+        let harness = Harness::new();
+        let heartbeat_interval = Duration::from_millis(250);
+        let (author, mut author_events, author_task) =
+            harness.start_autonomous_with_interval(0, heartbeat_interval);
+        let (receiver, mut receiver_events, receiver_task) =
+            harness.start_autonomous_with_interval(1, heartbeat_interval);
+        loop {
+            if let ShadowServiceEventV1::Ready { autonomous_clock } =
+                next_event(&mut author_events).await
+            {
+                assert!(autonomous_clock);
+                break;
+            }
+        }
+        loop {
+            if let ShadowServiceEventV1::Ready { autonomous_clock } =
+                next_event(&mut receiver_events).await
+            {
+                assert!(autonomous_clock);
+                break;
+            }
+        }
+
+        author.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+        let proactive = next_carrier(&mut author_events, 1).await;
+        receiver.peer_connected(0).unwrap();
+        tokio::time::sleep(SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1).await;
+
+        let request = loop {
+            if let ShadowServiceEventV1::Network {
+                recipient: 0,
+                message: NetworkMessage::RbcDagShadowCarrierSyncRequest(request),
+            } = next_event(&mut receiver_events).await
+            {
+                break request;
+            }
+        };
+        assert_eq!((request.author, request.round), (0, 1));
+        author.carrier_sync_request(1, request).unwrap();
+        let response = loop {
+            if let ShadowServiceEventV1::Network {
+                recipient: 1,
+                message: NetworkMessage::RbcDagShadowCarrierSyncResponse(response),
+            } = next_event(&mut author_events).await
+            {
+                break response;
+            }
+        };
+        assert_eq!(response.canonical_carrier, proactive.canonical_carrier);
+        assert_eq!(
+            response.authentication_sidecar,
+            proactive.authentication_sidecar
+        );
+        receiver.carrier_sync_response(0, response.clone()).unwrap();
+        loop {
+            match next_event(&mut receiver_events).await {
+                ShadowServiceEventV1::Input {
+                    kind: "carrier_sync_response",
+                    outcome: "authenticated",
+                } => break,
+                ShadowServiceEventV1::Rejected { error, .. } => {
+                    panic!("valid exact-slot response was rejected: {error}")
+                }
+                _ => {}
+            }
+        }
+
+        // A proactive/response race can leave an authenticated response in
+        // flight after the slot was admitted. It is an idempotent replay, not
+        // peer misbehavior and not a benchmark-invalidating error.
+        receiver.carrier_sync_response(0, response).unwrap();
+        loop {
+            match next_event(&mut receiver_events).await {
+                ShadowServiceEventV1::Input {
+                    kind: "carrier_sync_response",
+                    outcome: "ignored_already_admitted_or_stale",
+                } => break,
+                ShadowServiceEventV1::Rejected { error, .. } => {
+                    panic!("late exact-slot response was not idempotent: {error}")
+                }
+                _ => {}
+            }
+        }
+
+        // One requester cannot amplify repeated reads of a retained large
+        // carrier faster than the bounded synchronization interval.
+        author.carrier_sync_request(1, request).unwrap();
+        loop {
+            if let ShadowServiceEventV1::Input {
+                kind: "carrier_sync_request",
+                outcome: "rate_limited",
+            } = next_event(&mut author_events).await
+            {
+                break;
+            }
+        }
+
+        stop(author, author_events, author_task).await;
+        stop(receiver, receiver_events, receiver_task).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn autonomous_exact_sync_closes_a_multi_round_gap() {
+        let harness = Harness::new();
+        let mut handles = Vec::new();
+        let mut events = Vec::new();
+        let mut tasks = Vec::new();
+        for authority in 0..N as AuthorityIndex {
+            let (handle, mut node_events, task) = harness.start_autonomous(authority);
+            wait_ready(&mut node_events).await;
+            handles.push(handle);
+            events.push(node_events);
+            tasks.push(task);
+        }
+
+        // Establish round one for all validators, then let a quorum advance
+        // while authority 3 is offline and receives none of the proactive
+        // carriers. Starting the gap at round two makes reconnect request
+        // exact repair immediately; the one-hour normal heartbeat still
+        // cannot help with the later repaired rounds.
+        for (authority, handle) in handles.iter().enumerate() {
+            for peer in 0..N {
+                if peer != authority {
+                    handle.peer_connected(peer as AuthorityIndex).unwrap();
+                }
+            }
+        }
+        let mut open_rounds = vec![1; N];
+        let mut deliveries = vec![0; N];
+        let mut sync_requests = 0;
+        for handle in &handles {
+            handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+        }
+        pump_autonomous_until_round(
+            &handles,
+            &mut events,
+            &mut open_rounds,
+            &mut deliveries,
+            &mut sync_requests,
+            2,
+        )
+        .await;
+        for authority in 0..3 {
+            handles[authority].peer_disconnected(3).unwrap();
+            handles[3]
+                .peer_disconnected(authority as AuthorityIndex)
+                .unwrap();
+        }
+        for fixed_round in 2..=8 {
+            for handle in &handles[..3] {
+                handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+            }
+            pump_online_prefix_until_round(
+                &handles,
+                &mut events,
+                &mut open_rounds,
+                3,
+                fixed_round + 1,
+            )
+            .await;
+        }
+        assert_eq!(open_rounds[3], 2);
+        assert!(open_rounds[..3].iter().all(|round| *round >= 9));
+
+        // Reconnect, fix the lagging node's first local slot, and let the
+        // healthy quorum open one more round. Exact responses then drive an
+        // immediate local heartbeat per repaired round; the one-hour normal
+        // timer cannot be responsible for convergence.
+        for (authority, handle) in handles.iter().enumerate() {
+            for peer in 0..N {
+                if peer != authority {
+                    handle.peer_connected(peer as AuthorityIndex).unwrap();
+                }
+            }
+        }
+        handles[3]
+            .send(ShadowServiceMessageV1::HeartbeatTick)
+            .unwrap();
+        for handle in &handles[..3] {
+            handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+        }
+
+        let sync_requests_before_catch_up = sync_requests;
+        pump_autonomous_until_round(
+            &handles,
+            &mut events,
+            &mut open_rounds,
+            &mut deliveries,
+            &mut sync_requests,
+            10,
+        )
+        .await;
+        assert!(
+            sync_requests > sync_requests_before_catch_up,
+            "catch-up must use exact-slot repair"
+        );
+        assert!(open_rounds.iter().all(|round| *round >= 10));
+
+        drop(events);
+        for handle in &handles {
+            handle.shutdown().await.unwrap();
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn autonomous_wal_restart_serves_the_exact_persisted_heartbeat() {
+        let harness = Harness::new();
+        let (handle, mut events, task) = harness.start_autonomous(0);
+        loop {
+            if let ShadowServiceEventV1::Ready { autonomous_clock } = next_event(&mut events).await
+            {
+                assert!(autonomous_clock);
+                break;
+            }
+        }
+        handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
+        let original = next_carrier(&mut events, 1).await;
+        stop(handle, events, task).await;
+
+        let (restarted, mut restarted_events, restarted_task) = harness.start_autonomous(0);
+        let mut replayed = false;
+        loop {
+            match next_event(&mut restarted_events).await {
+                ShadowServiceEventV1::Recovered { batches, .. } => replayed = batches > 0,
+                ShadowServiceEventV1::Ready { autonomous_clock } => {
+                    assert!(autonomous_clock);
+                    break;
+                }
+                ShadowServiceEventV1::Rejected { error, .. } => {
+                    panic!("autonomous WAL restart failed: {error}")
+                }
+                _ => {}
+            }
+        }
+        assert!(replayed);
+        restarted
+            .carrier_sync_request(
+                1,
+                RbcDagShadowCarrierSyncRequest {
+                    author: 0,
+                    round: 1,
+                },
+            )
+            .unwrap();
+        loop {
+            if let ShadowServiceEventV1::Network {
+                recipient: 1,
+                message: NetworkMessage::RbcDagShadowCarrierSyncResponse(response),
+            } = next_event(&mut restarted_events).await
+            {
+                assert_eq!(response.canonical_carrier, original.canonical_carrier);
+                assert_eq!(
+                    response.authentication_sidecar,
+                    original.authentication_sidecar
+                );
+                break;
+            }
+        }
+        stop(restarted, restarted_events, restarted_task).await;
+    }
+
     fn phase_carrier(
         author: AuthorityIndex,
         statement: RbcPhaseStatementV1,
@@ -1634,7 +2840,7 @@ mod tests {
         loop {
             match next_event(&mut restarted_events).await {
                 ShadowServiceEventV1::Recovered { batches, .. } => replayed = batches > 0,
-                ShadowServiceEventV1::Ready => break,
+                ShadowServiceEventV1::Ready { .. } => break,
                 ShadowServiceEventV1::Rejected { error, .. } => {
                     panic!("valid shadow restart failed: {error}")
                 }
@@ -1911,6 +3117,27 @@ mod tests {
         };
         assert_eq!(identity.author, 2);
         assert_eq!(identity.round, 1);
+        handle
+            .carrier_response(
+                1,
+                RbcDagShadowCarrierResponse {
+                    reference: target.reference(),
+                    canonical_carrier: target.canonical_wire_bytes().unwrap(),
+                },
+            )
+            .unwrap();
+        loop {
+            match next_event(&mut events).await {
+                ShadowServiceEventV1::Input {
+                    kind: "recovery",
+                    outcome: "ignored_already_retained",
+                } => break,
+                ShadowServiceEventV1::Rejected { error, .. } => {
+                    panic!("late exact recovery response was not idempotent: {error}")
+                }
+                _ => {}
+            }
+        }
         handle.direct_delivered(identity).unwrap();
         loop {
             if let ShadowServiceEventV1::Comparison(comparison) = next_event(&mut events).await {
@@ -1943,10 +3170,11 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_input_reports_overload_but_shutdown_waits_for_capacity() {
-        let input_capacity = shadow_input_capacity(N).unwrap();
+        let input_capacity = shadow_input_capacity(N, ShadowServiceModeV1::DirectMirror).unwrap();
         let (sender, mut receiver) = mpsc::channel(input_capacity);
         let handle = StarfishRbcDagShadowServiceHandleV1 {
             sender,
+            mode: ShadowServiceModeV1::DirectMirror,
             max_sidecar_size: 3 + N * MAC_TAG_SIZE,
             own_authority: 0,
             committee_size: N,
@@ -1996,6 +3224,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let oversized = StarfishRbcDagShadowServiceHandleV1 {
             sender,
+            mode: ShadowServiceModeV1::DirectMirror,
             max_sidecar_size: 3 + N * MAC_TAG_SIZE,
             own_authority: 0,
             committee_size: N,
@@ -2022,12 +3251,14 @@ mod tests {
     #[tokio::test]
     async fn sixty_validator_burst_fits_before_the_actor_drains() {
         const LARGE_N: usize = 60;
-        let input_capacity = shadow_input_capacity(LARGE_N).unwrap();
+        let input_capacity =
+            shadow_input_capacity(LARGE_N, ShadowServiceModeV1::DirectMirror).unwrap();
         assert_eq!(input_capacity, SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1);
         let (sender, _receiver) = mpsc::channel(input_capacity);
         let invalidated = Arc::new(Mutex::new(None));
         let handle = StarfishRbcDagShadowServiceHandleV1 {
             sender,
+            mode: ShadowServiceModeV1::DirectMirror,
             max_sidecar_size: 3 + LARGE_N * MAC_TAG_SIZE,
             own_authority: 0,
             committee_size: LARGE_N,
@@ -2052,8 +3283,24 @@ mod tests {
         }
         assert_eq!(*invalidated.lock(), None);
         assert!(matches!(
-            shadow_input_capacity(LARGE_N + 1),
+            shadow_input_capacity(LARGE_N + 1, ShadowServiceModeV1::DirectMirror),
             Err(ShadowServiceErrorV1::CommitteeBurstTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn autonomous_burst_budget_accepts_twenty_and_rejects_twenty_one() {
+        let mode = ShadowServiceModeV1::AutonomousClock {
+            heartbeat_interval: Duration::from_millis(250),
+        };
+        assert_eq!(shadow_input_capacity(20, mode).unwrap(), 64);
+        assert!(matches!(
+            shadow_input_capacity(21, mode),
+            Err(ShadowServiceErrorV1::CommitteeBurstTooLarge {
+                committee_size: 21,
+                required_capacity: 65,
+                maximum_capacity: 64,
+            })
         ));
     }
 
