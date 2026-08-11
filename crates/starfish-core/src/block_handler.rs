@@ -261,30 +261,23 @@ impl RealCommitHandler {
         let pending = committed.into_iter().skip(ready_count).collect();
         (resulted_committed, pending)
     }
-}
 
-impl CommitObserver for RealCommitHandler {
-    fn handle_commit(
+    fn record_commit_metadata<'a>(
         &mut self,
-        dag_state: &DagState,
-        committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
-    ) -> Vec<CommittedSubDag> {
-        let mut committed = self
-            .commit_interpreter
-            .handle_commit(dag_state, committed_leaders);
+        committed: impl IntoIterator<Item = &'a CommittedSubDag>,
+    ) {
         let current_timestamp = runtime::timestamp_utc();
         let metrics_active = self
             .metrics
             .metrics_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        for commit in &committed {
-            self.committed_leaders.push(commit.0.anchor);
+        for commit in committed {
+            self.committed_leaders.push(commit.anchor);
             self.committed_count += 1;
 
-            // Chain rolling commit digest: hash(prev_digest || anchor.digest)
             let mut hasher = blake3::Hasher::new();
             hasher.update(&self.commit_digest);
-            hasher.update(commit.0.anchor.digest.as_ref());
+            hasher.update(commit.anchor.digest.as_ref());
             self.commit_digest = *hasher.finalize().as_bytes();
 
             let commit_index = self.committed_count;
@@ -296,13 +289,12 @@ impl CommitObserver for RealCommitHandler {
                 self.metrics.commit_digest.set(digest_short as i64);
             }
 
-            for block in &commit.0.blocks {
-                let gap = commit.0.anchor.round.saturating_sub(block.round());
+            for block in &commit.blocks {
+                let gap = commit.anchor.round.saturating_sub(block.round());
                 self.metrics.commit_gap.observe(gap as f64);
 
                 let block_creation_time = block.meta_creation_time();
                 let block_latency = current_timestamp.saturating_sub(block_creation_time);
-
                 if block_creation_time.is_zero() || block_latency.as_secs() > 60 {
                     tracing::debug!(
                         "Latency of block {} is too large, \
@@ -325,16 +317,9 @@ impl CommitObserver for RealCommitHandler {
                     .committed_blocks
                     .with_label_values(&[&block.authority().to_string()])
                     .inc();
-
                 tracing::debug!("Latency of block {} is computed", block.reference());
             }
 
-            // Tick the validator's `benchmark_duration` Prometheus counter,
-            // but only inside the active window. The orchestrator uses this
-            // counter as the timestamp on every scrape, which then becomes
-            // the denominator of the TPS rate. Anchor it to
-            // `active_start_micros` so warmup and wind-down seconds do not
-            // dilute the steady-state rate.
             if metrics_active {
                 let active_start_micros = self
                     .metrics
@@ -349,6 +334,19 @@ impl CommitObserver for RealCommitHandler {
                 }
             }
         }
+    }
+}
+
+impl CommitObserver for RealCommitHandler {
+    fn handle_commit(
+        &mut self,
+        dag_state: &DagState,
+        committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
+    ) -> Vec<CommittedSubDag> {
+        let mut committed = self
+            .commit_interpreter
+            .handle_commit(dag_state, committed_leaders);
+        self.record_commit_metadata(committed.iter().map(|commit| &commit.0));
         if dag_state.consensus_protocol == ConsensusProtocol::StarfishBls {
             let mut pending = dag_state.read_pending_not_certified();
             pending.append(&mut committed);
@@ -368,6 +366,39 @@ impl CommitObserver for RealCommitHandler {
             .commit_availability_gap
             .set((self.committed_count - self.sequenced_commit_count) as i64);
         resulted_committed
+    }
+
+    fn handle_rbc_dag_commit(
+        &mut self,
+        dag_state: &DagState,
+        anchor: BlockReference,
+        applications: &[BlockReference],
+    ) -> Vec<CommittedSubDag> {
+        let blocks = applications
+            .iter()
+            .map(|reference| {
+                let block = dag_state
+                    .get_storage_block(*reference)
+                    .unwrap_or_else(|| panic!("committed RBC-DAG application {reference} missing"));
+                assert!(
+                    dag_state.is_data_available(reference),
+                    "committed RBC-DAG application {reference} is unavailable"
+                );
+                block
+            })
+            .collect::<Vec<_>>();
+        let commit = CommittedSubDag::new(anchor, blocks);
+        self.record_commit_metadata(std::iter::once(&commit));
+        for block in &commit.blocks {
+            if block.round() > 0 {
+                self.transaction_observer(block.clone());
+            }
+        }
+        self.sequenced_commit_count += 1;
+        self.metrics
+            .commit_availability_gap
+            .set((self.committed_count - self.sequenced_commit_count) as i64);
+        vec![commit]
     }
 
     fn recover_committed(

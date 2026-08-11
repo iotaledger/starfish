@@ -20,6 +20,7 @@ use crate::{
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
     starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader},
+    starfish_rbc_dag_shadow::CommittedFrontierDeltaV1,
     starfish_rbc_dag_shadow_service::StarfishRbcDagShadowServiceHandleV1,
     starfish_rbc_service::{RbcLocalHeader, RbcServiceHandle},
     types::{
@@ -69,6 +70,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
     starfish_rbc_service: Option<RbcServiceHandle>,
     starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
+    rbc_dag_frontier_authority: bool,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -83,6 +85,13 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
+    fn handle_rbc_dag_commit(
+        &mut self,
+        dag_state: &DagState,
+        anchor: BlockReference,
+        applications: &[BlockReference],
+    ) -> Vec<CommittedSubDag>;
+
     fn recover_committed(
         &mut self,
         committed: AHashSet<BlockReference>,
@@ -94,7 +103,7 @@ pub trait CommitObserver: Send + Sync {
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn new(
-        core: Core<H>,
+        mut core: Core<H>,
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
@@ -102,7 +111,11 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
         starfish_rbc_service: Option<RbcServiceHandle>,
         starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
+        rbc_dag_frontier_authority: bool,
     ) -> Self {
+        if rbc_dag_frontier_authority {
+            core.enable_rbc_dag_application_production();
+        }
         let committee_size = core.committee().len();
         let own_stake = core
             .committee()
@@ -123,6 +136,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             sailfish_tx,
             starfish_rbc_service,
             starfish_rbc_dag_shadow_service,
+            rbc_dag_frontier_authority,
         }
     }
 
@@ -237,6 +251,28 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             self.try_new_block(BlockCreationReason::CertificateEvent);
             self.try_new_commit();
         }
+    }
+
+    /// Sequence one exact deterministic carrier-frontier delta. In M7 this is
+    /// the sole application-ordering authority; the legacy Starfish committer
+    /// remains disabled in this mode.
+    pub fn apply_starfish_rbc_dag_frontier(&mut self, delta: CommittedFrontierDeltaV1) {
+        assert!(
+            self.rbc_dag_frontier_authority,
+            "RBC-DAG frontier output requires the explicit authority mode"
+        );
+        let applications = delta
+            .applications
+            .iter()
+            .map(RbcCanonicalHeader::reference)
+            .collect::<Vec<_>>();
+        let committed = self.commit_observer.handle_rbc_dag_commit(
+            self.core.dag_state(),
+            delta.anchor.carrier(),
+            &applications,
+        );
+        self.core.handle_rbc_dag_committed_delta(committed);
+        self.try_new_block(BlockCreationReason::PostCommit);
     }
 
     /// Store a Sailfish++ timeout certificate in DagState and retry block
@@ -477,6 +513,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     pub fn try_new_commit(&mut self) {
+        if self.rbc_dag_frontier_authority {
+            return;
+        }
         let (newly_committed, any_decided) = self.core.try_commit();
         let utc_now = timestamp_utc();
         if !newly_committed.is_empty() {
@@ -559,6 +598,15 @@ mod tests {
             &mut self,
             _dag_state: &DagState,
             _committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
+
+        fn handle_rbc_dag_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _anchor: BlockReference,
+            _applications: &[BlockReference],
         ) -> Vec<CommittedSubDag> {
             Vec::new()
         }
@@ -665,6 +713,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);
@@ -764,6 +813,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);

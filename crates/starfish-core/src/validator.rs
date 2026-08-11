@@ -355,7 +355,14 @@ mod smoke_tests {
         let route = prometheus::METRICS_ROUTE;
         let res = reqwest::get(format! {"http://{address}{route}"}).await?;
         let string = res.text().await?;
-        let commit = string.contains("committed_leaders_total");
+        let commit = string.lines().any(|line| {
+            line.starts_with("commit_index")
+                && line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .is_some_and(|value| value > 0.0)
+        });
         Ok(commit)
     }
 
@@ -577,12 +584,38 @@ mod smoke_tests {
         let timeout_multiplier = if consensus == "starfish-rbc" { 20 } else { 5 };
         let timeout = config::param_defaults::default_leader_timeout() * timeout_multiplier;
 
-        tokio::select! {
-            _ = await_for_commits(addresses) => (),
-            _ = time::sleep(timeout) => panic!(
-                "[{consensus}] Failed to gather commits \
-                within a few timeouts"
-            ),
+        if tokio::time::timeout(timeout, await_for_commits(addresses))
+            .await
+            .is_err()
+        {
+            let state = validators
+                .iter()
+                .map(|validator| {
+                    let metrics = validator.metrics();
+                    (
+                        metrics.commit_index.get(),
+                        metrics.starfish_rbc_dag_shadow_carrier_round.get(),
+                        metrics.starfish_rbc_dag_projected_vertices_total.get(),
+                        metrics
+                            .starfish_rbc_dag_projection_decisions_total
+                            .with_label_values(&["direct_commit"])
+                            .get(),
+                        metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "committed"])
+                            .get(),
+                        metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "application"])
+                            .get(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "[{consensus}] Failed to gather commits within a few timeouts; \
+                 per-node (commit index, carrier round, projected, direct commits, frontiers, \
+                 frontier applications)={state:?}"
+            );
         }
 
         if autonomous_clock {
@@ -617,7 +650,17 @@ mod smoke_tests {
                                     .starfish_rbc_dag_shadow_inputs_total
                                     .with_label_values(&["delivery", "embedded_application"])
                                     .get()
-                                    > 0)
+                                    > 0
+                                    && metrics
+                                        .starfish_rbc_dag_shadow_inputs_total
+                                        .with_label_values(&["frontier", "committed"])
+                                        .get()
+                                        > 0
+                                    && metrics
+                                        .starfish_rbc_dag_shadow_inputs_total
+                                        .with_label_values(&["frontier", "application"])
+                                        .get()
+                                        > 0)
                             && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
                     }) {
                         break;

@@ -19,7 +19,7 @@ use std::{
 
 use crate::{
     committee::Committee,
-    crypto::Blake3Hasher,
+    crypto::{Blake3Hasher, TransactionsCommitment},
     types::{AuthorityIndex, BlockReference, RoundNumber, Stake},
 };
 
@@ -277,14 +277,14 @@ struct CarrierRecord {
 }
 
 impl CarrierRecord {
-    fn new(carrier: CandidateCarrierV1) -> Self {
+    fn new(carrier: CandidateCarrierV1, data_available: bool) -> Self {
         Self {
             carrier,
             authenticated: false,
             admitted: false,
             phase_batch_cursor: 0,
             delivered: false,
-            data_available: false,
+            data_available,
             prefix_closed: false,
         }
     }
@@ -343,6 +343,7 @@ pub struct RbcDagModel {
     committee_id: RbcDagCommitteeId,
     context: RbcDagContextV1,
     own_authority: AuthorityIndex,
+    intrinsic_empty_data_available: bool,
     revision: u64,
     lineage: ModelLineage,
     local_carrier_round: RoundNumber,
@@ -383,6 +384,7 @@ impl RbcDagModel {
             committee_id,
             context,
             own_authority,
+            intrinsic_empty_data_available: false,
             revision: 0,
             lineage: [0; 32],
             local_carrier_round: 1,
@@ -397,6 +399,18 @@ impl RbcDagModel {
             prefix_tips,
             included: BTreeSet::new(),
         })
+    }
+
+    /// Enable the runtime rule that a carrier with the canonical empty
+    /// transaction commitment needs no external reconstruction oracle. The
+    /// generic M2 model leaves this disabled so tests can control DA
+    /// independently of carrier contents.
+    pub fn enable_intrinsic_empty_data_availability(&mut self) {
+        assert!(
+            self.carriers.is_empty(),
+            "intrinsic availability mode must be fixed before ingress"
+        );
+        self.intrinsic_empty_data_available = true;
     }
 
     pub fn own_authority(&self) -> AuthorityIndex {
@@ -459,6 +473,20 @@ impl RbcDagModel {
     /// [`Self::commit_plan`] instead.
     pub fn apply_input(&mut self, input: ModelInputRecord) -> Result<Vec<ModelEffect>, ModelError> {
         self.apply_input_traced(input).map(|log| log.effects())
+    }
+
+    /// Apply a transition before any of its effects are externally exposed.
+    /// The durable actor uses this fail-stop path to avoid cloning the entire
+    /// retained reducer history for every carrier. If persistence of the
+    /// returned trace fails, the caller must poison and terminate the actor;
+    /// it must never publish the returned effects.
+    pub(crate) fn apply_input_unpublished(
+        &mut self,
+        input: ModelInputRecord,
+    ) -> Result<(Vec<ModelTraceEvent>, Vec<ModelEffect>), ModelError> {
+        let log = self.apply_input_traced(input)?;
+        let effects = log.effects();
+        Ok((log.trace, effects))
     }
 
     /// Deterministically reconstruct a model by replaying the original typed
@@ -780,9 +808,11 @@ impl RbcDagModel {
         log: &mut TransitionLog,
     ) {
         let reference = carrier.reference();
+        let intrinsic_data_available = self.intrinsic_empty_data_available
+            && carrier.header().transactions_commitment() == TransactionsCommitment::default();
         self.carriers
             .entry(reference)
-            .or_insert_with(|| CarrierRecord::new(carrier));
+            .or_insert_with(|| CarrierRecord::new(carrier, intrinsic_data_available));
 
         // Canonical content can satisfy a previously latched recovery even if
         // the receiver-specific authenticator is invalid.
@@ -2534,7 +2564,7 @@ mod tests {
             let reference = carrier.reference();
             model
                 .carriers
-                .insert(reference, CarrierRecord::new(carrier));
+                .insert(reference, CarrierRecord::new(carrier, false));
             let mut candidate_state = RbcCandidateState::default();
             candidate_state.readies.extend([1, 2]);
             let mut slot = RbcSlotState::default();

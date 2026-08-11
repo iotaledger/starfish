@@ -1983,6 +1983,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             } else {
                 (None, None, None)
             };
+        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
         let syncer = Syncer::new(
             core,
             NetworkSyncSignals {
@@ -1995,6 +1996,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             sf_msg_tx.clone(),
             starfish_rbc_service.clone(),
             starfish_rbc_dag_shadow_service.clone(),
+            embedded_rbc_authority,
         );
         let initial_round = syncer.core().next_block_round();
         let syncer = CoreThreadDispatcher::start(syncer);
@@ -2212,7 +2214,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             })
         });
 
-        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
         let embedded_rbc_committee_id = embedded_rbc_authority.then(|| {
             RbcCommitteeId::derive(&inner.committee)
                 .expect("validated direct RBC committee must retain a stable identifier")
@@ -2289,12 +2290,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                     embedded_rbc_committee_id
                                         .expect("embedded authority must cache its committee ID"),
                                 ) {
-                                    Ok(header) => {
-                                        event_inner
-                                            .syncer
-                                            .apply_starfish_rbc_deliveries(vec![header])
-                                            .await;
-                                    }
+                                    Ok(_) => {}
                                     Err(error) => {
                                         shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                                         tracing::error!(
@@ -2304,6 +2300,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                         );
                                     }
                                 }
+                            }
+                        }
+                        ShadowServiceEventV1::FrontierCommitted(delta) => {
+                            if embedded_rbc_authority {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "committed"])
+                                    .inc();
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "carrier"])
+                                    .inc_by(delta.carriers.len() as u64);
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "application"])
+                                    .inc_by(delta.applications.len() as u64);
+                                event_inner
+                                    .syncer
+                                    .apply_starfish_rbc_dag_frontier(delta)
+                                    .await;
                             }
                         }
                         ShadowServiceEventV1::VertexProjected(reference) => {

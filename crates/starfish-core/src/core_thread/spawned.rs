@@ -14,6 +14,7 @@ use crate::{
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
     starfish_rbc::PinnedRbcHeader,
+    starfish_rbc_dag_shadow::CommittedFrontierDeltaV1,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, BlockReference, ProvableShard, ReconstructedTransactionData, RoundNumber,
@@ -71,6 +72,8 @@ enum CoreThreadCommand {
     ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
     /// Apply locally delivered Starfish-RBC headers on the core thread.
     ApplyStarfishRbcDeliveries(Vec<PinnedRbcHeader>, oneshot::Sender<()>),
+    /// Commit one deterministic clean carrier-frontier application delta.
+    ApplyStarfishRbcDagFrontier(CommittedFrontierDeltaV1, oneshot::Sender<()>),
     /// Store a Sailfish++ timeout certificate in DagState.
     ApplyTimeoutCert(SailfishTimeoutCert, oneshot::Sender<()>),
     /// Store a Sailfish++ no-vote certificate in DagState.
@@ -206,6 +209,15 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.send(CoreThreadCommand::ApplyStarfishRbcDeliveries(
             delivered_headers,
             sender,
+        ))
+        .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    pub(crate) async fn apply_starfish_rbc_dag_frontier(&self, delta: CommittedFrontierDeltaV1) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplyStarfishRbcDagFrontier(
+            delta, sender,
         ))
         .await;
         receiver.await.expect("core thread is not expected to stop");
@@ -402,6 +414,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                     self.syncer.apply_starfish_rbc_deliveries(delivered_headers);
                     sender.send(()).ok();
                 }
+                CoreThreadCommand::ApplyStarfishRbcDagFrontier(delta, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_starfish_rbc_dag_frontier"])
+                        .inc();
+                    self.syncer.apply_starfish_rbc_dag_frontier(delta);
+                    sender.send(()).ok();
+                }
                 CoreThreadCommand::ApplyTimeoutCert(cert, sender) => {
                     metrics
                         .core_thread_tasks_total
@@ -466,6 +486,15 @@ mod tests {
             Vec::new()
         }
 
+        fn handle_rbc_dag_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _anchor: BlockReference,
+            _applications: &[BlockReference],
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
+
         fn recover_committed(
             &mut self,
             _committed: AHashSet<BlockReference>,
@@ -513,6 +542,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         CoreThreadDispatcher::start(syncer)
     }

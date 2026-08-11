@@ -695,6 +695,38 @@ impl MeasurementsCollection {
                 .is_some_and(|(last, first)| last > first)
     }
 
+    fn count_bucket_sum_increased(
+        &self,
+        label: &str,
+        scraper_id: ScraperId,
+        buckets: &[&str],
+    ) -> bool {
+        let Some(series) = self.active_window_series(label, scraper_id) else {
+            return false;
+        };
+        let bucket_is_monotonic = buckets.iter().all(|bucket| {
+            series.windows(2).all(|window| {
+                window[1].count_buckets.get(*bucket).copied().unwrap_or(0)
+                    >= window[0].count_buckets.get(*bucket).copied().unwrap_or(0)
+            })
+        });
+        let totals = series
+            .iter()
+            .map(|measurement| {
+                buckets.iter().fold(0usize, |total, bucket| {
+                    total.saturating_add(
+                        measurement.count_buckets.get(*bucket).copied().unwrap_or(0),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        bucket_is_monotonic
+            && totals
+                .last()
+                .zip(totals.first())
+                .is_some_and(|(last, first)| last > first)
+    }
+
     fn count_bucket_is_always_zero(
         &self,
         label: &str,
@@ -986,6 +1018,10 @@ impl MeasurementsCollection {
                 .parameters
                 .node_parameters
                 .starfish_rbc_dag_autonomous_clock;
+        let embedded_rbc_authority = self
+            .parameters
+            .node_parameters
+            .starfish_rbc_dag_embedded_rbc_authority;
         let shadow_comparison_enabled = shadow_enabled && !shadow_autonomous_clock_enabled;
         let shadow_valid_scrapers = self
             .data
@@ -1145,60 +1181,75 @@ impl MeasurementsCollection {
             .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
         let autonomous_buffered_bound = STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR
             .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
-        let every_autonomous_scraper_has_progress =
-            shadow_autonomous_clock_valid_scrapers
-                .iter()
-                .all(|scraper_id| {
-                    self.count_bucket_increased(
+        let every_autonomous_scraper_has_progress = shadow_autonomous_clock_valid_scrapers
+            .iter()
+            .all(|scraper_id| {
+                self.count_bucket_sum_increased(
+                    "starfish_rbc_dag_shadow_inputs_total",
+                    *scraper_id,
+                    &["heartbeat,accepted", "application_carrier,accepted"],
+                ) && self.count_bucket_increased(
+                    "starfish_rbc_dag_shadow_inputs_total",
+                    *scraper_id,
+                    "delivery,shadow",
+                ) && self.scalar_counter_increased(
+                    "starfish_rbc_dag_shadow_wal_appended_batches_total",
+                    *scraper_id,
+                ) && self.scalar_counter_increased(
+                    "starfish_rbc_dag_shadow_wal_appended_records_total",
+                    *scraper_id,
+                ) && self.scalar_counter_increased(
+                    "starfish_rbc_dag_projected_vertices_total",
+                    *scraper_id,
+                ) && self.count_bucket_increased(
+                    "starfish_rbc_dag_projection_decisions_total",
+                    *scraper_id,
+                    "direct_commit",
+                ) && (!embedded_rbc_authority
+                    || self.count_bucket_increased(
                         "starfish_rbc_dag_shadow_inputs_total",
                         *scraper_id,
-                        "heartbeat,accepted",
+                        "frontier,committed",
                     ) && self.count_bucket_increased(
                         "starfish_rbc_dag_shadow_inputs_total",
                         *scraper_id,
-                        "delivery,shadow",
-                    ) && self.scalar_counter_increased(
-                        "starfish_rbc_dag_shadow_wal_appended_batches_total",
-                        *scraper_id,
-                    ) && self.scalar_counter_increased(
-                        "starfish_rbc_dag_shadow_wal_appended_records_total",
-                        *scraper_id,
-                    ) && self.scalar_counter_increased(
-                        "starfish_rbc_dag_projected_vertices_total",
-                        *scraper_id,
-                    ) && self.count_bucket_increased(
-                        "starfish_rbc_dag_projection_decisions_total",
-                        *scraper_id,
-                        "direct_commit",
-                    ) && self.scalar_gauge_increased(
+                        "frontier,application",
+                    ))
+                    && self.scalar_gauge_increased(
                         "starfish_rbc_dag_shadow_carrier_round",
                         *scraper_id,
-                    ) && self.latest_scalar_greater_than(
+                    )
+                    && self.latest_scalar_greater_than(
                         "starfish_rbc_dag_shadow_carrier_round",
                         *scraper_id,
                         1.0,
-                    ) && self.latest_scalar_equals(
+                    )
+                    && self.latest_scalar_equals(
                         "starfish_rbc_dag_shadow_pending_recovery",
                         *scraper_id,
                         0.0,
-                    ) && self.gauge_always_at_most(
+                    )
+                    && self.gauge_always_at_most(
                         "starfish_rbc_dag_shadow_phase_backlog",
                         *scraper_id,
                         autonomous_phase_backlog_bound as f64,
-                    ) && self.gauge_always_at_most(
+                    )
+                    && self.gauge_always_at_most(
                         "starfish_rbc_dag_shadow_admitted_authors",
                         *scraper_id,
                         self.parameters.nodes as f64,
-                    ) && self.gauge_always_at_most(
+                    )
+                    && self.gauge_always_at_most(
                         "starfish_rbc_dag_shadow_admitted_stake",
                         *scraper_id,
                         f64::MAX,
-                    ) && self.gauge_always_at_most(
+                    )
+                    && self.gauge_always_at_most(
                         "starfish_rbc_dag_shadow_buffered_authenticated",
                         *scraper_id,
                         autonomous_buffered_bound as f64,
                     )
-                });
+            });
         let shadow_autonomous_clock_valid = shadow_autonomous_clock_enabled
             && expected_shadow_nodes != 0
             && shadow_autonomous_clock_valid_nodes == expected_shadow_nodes
@@ -1601,10 +1652,15 @@ mod test {
             Measurement {
                 timestamp,
                 count_buckets: HashMap::from([
-                    ("heartbeat,accepted".to_owned(), wal_durable_records),
+                    (
+                        "application_carrier,accepted".to_owned(),
+                        wal_durable_records,
+                    ),
                     ("delivery,shadow".to_owned(), wal_durable_records),
+                    ("frontier,committed".to_owned(), wal_durable_records),
+                    ("frontier,application".to_owned(), wal_durable_records),
                 ]),
-                count: wal_durable_records.saturating_mul(2),
+                count: wal_durable_records.saturating_mul(4),
                 ..Measurement::default()
             },
         );

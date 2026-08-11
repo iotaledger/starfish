@@ -72,6 +72,10 @@ pub struct Core<H: BlockHandler> {
     recovered_committed_leaders_count: Option<usize>,
     committer: UniversalCommitter,
     pub(crate) encoder: Encoder,
+    /// M7 application-production mode: direct Starfish headers are payload
+    /// descriptors only. Their dirty/clean DAG is no longer a consensus or
+    /// output authority, so raw threshold-clock progress may produce them.
+    rbc_dag_application_production: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +203,7 @@ impl<H: BlockHandler> Core<H> {
             recovered_committed_leaders_count: Some(committed_leaders_count),
             committer,
             encoder,
+            rbc_dag_application_production: false,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -489,7 +494,11 @@ impl<H: BlockHandler> Core<H> {
             .utilization_timer
             .utilization_timer("Core::try_new_block");
 
-        let proposal_round = self.dag_state.proposal_round();
+        let proposal_round = if self.rbc_dag_application_production {
+            self.dag_state.threshold_clock_round()
+        } else {
+            self.dag_state.proposal_round()
+        };
         tracing::debug!(
             "Attempt to construct block in round {} (proposal round {}). Current pending: {:?}",
             clock_round,
@@ -506,7 +515,8 @@ impl<H: BlockHandler> Core<H> {
         let protocol = self.dag_state.consensus_protocol;
 
         // Dual-DAG protocols: require clean parent quorum before creating a block.
-        if protocol.uses_dual_dag()
+        if !self.rbc_dag_application_production
+            && protocol.uses_dual_dag()
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
@@ -523,7 +533,8 @@ impl<H: BlockHandler> Core<H> {
         // Starfish-RBC that local header is dirty until the local RBC instance
         // delivers it; another clean quorum must not let us smuggle this dirty
         // mandatory parent into a proposal.
-        if protocol.is_starfish_rbc()
+        if !self.rbc_dag_application_production
+            && protocol.is_starfish_rbc()
             && clock_round > 1
             && self
                 .last_own_block
@@ -602,7 +613,8 @@ impl<H: BlockHandler> Core<H> {
                 clock_round
             );
         }
-        if protocol.uses_dual_dag()
+        if !self.rbc_dag_application_production
+            && protocol.uses_dual_dag()
             && clock_round > 1
             && block_references.is_empty()
             && !allows_minimal_refs
@@ -764,7 +776,9 @@ impl<H: BlockHandler> Core<H> {
         // otherwise a dirty child can suppress one of its clean parents and
         // then be filtered itself, shrinking the usable clean frontier.
         let (compression_candidates, deferred_dirty_refs): (Vec<_>, Vec<_>) =
-            if self.dag_state.consensus_protocol.is_starfish_rbc() {
+            if self.dag_state.consensus_protocol.is_starfish_rbc()
+                && !self.rbc_dag_application_production
+            {
                 pending_refs.into_iter().partition(|reference| {
                     reference.round == 0 || self.dag_state.has_clean_vertex(reference)
                 })
@@ -779,7 +793,8 @@ impl<H: BlockHandler> Core<H> {
             self.compress_pending_block_references(&compression_candidates, block_round);
 
         // Dual-DAG protocols: filter parents to only include clean blocks.
-        if self.dag_state.consensus_protocol.uses_dual_dag() {
+        if self.dag_state.consensus_protocol.uses_dual_dag() && !self.rbc_dag_application_production
+        {
             let before = block_references.clone();
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
             let filtered_out_refs: Vec<_> = before
@@ -803,6 +818,7 @@ impl<H: BlockHandler> Core<H> {
         let is_compressed_non_leader = self.dag_state.consensus_protocol.uses_compressed_refs()
             && self.committee.elect_leader(block_round) != self.authority;
         if self.dag_state.consensus_protocol.uses_dual_dag()
+            && !self.rbc_dag_application_production
             && block_round > 1
             && !is_compressed_non_leader
         {
@@ -1486,6 +1502,9 @@ impl<H: BlockHandler> Core<H> {
         connected_authorities: &AHashSet<AuthorityIndex>,
         relaxed: bool,
     ) -> bool {
+        if self.rbc_dag_application_production {
+            return quorum_round > 0 && self.dag_state.threshold_clock_round() >= quorum_round;
+        }
         if quorum_round == 0 || self.dag_state.proposal_round() < quorum_round {
             return false;
         }
@@ -1541,6 +1560,39 @@ impl<H: BlockHandler> Core<H> {
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
         self.flush_pending_clean_refs();
+    }
+
+    /// Persist an M7 frontier delta without feeding the obsolete Starfish
+    /// clean-DAG commit/proposal watermarks back into block production.
+    pub fn handle_rbc_dag_committed_delta(&mut self, committed: Vec<CommittedSubDag>) {
+        let _timer = self
+            .metrics
+            .utilization_timer
+            .utilization_timer("Core::handle_rbc_dag_committed_delta");
+        let mut commit_data = Vec::with_capacity(committed.len());
+        for commit in &committed {
+            self.dag_state.update_last_committed_rounds(commit);
+            commit_data.push(CommitData::new(
+                commit,
+                self.dag_state.last_committed_rounds(),
+            ));
+        }
+        let store_start = std::time::Instant::now();
+        self.store
+            .store_commits(commit_data)
+            .expect("Store RBC-DAG frontier commits should not fail");
+        self.metrics
+            .store_commits_latency_us
+            .inc_by(store_start.elapsed().as_micros() as u64);
+        self.metrics.store_commits_count.inc();
+    }
+
+    pub(crate) fn enable_rbc_dag_application_production(&mut self) {
+        assert!(
+            self.dag_state.consensus_protocol.is_starfish_rbc(),
+            "RBC-DAG application production requires Starfish-RBC payload headers"
+        );
+        self.rbc_dag_application_production = true;
     }
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
@@ -1859,6 +1911,63 @@ mod tests {
         assert!(core.pending.iter().any(|pending| {
             matches!(pending, MetaTransaction::Include(reference) if *reference == dirty_ref)
         }));
+    }
+
+    #[test]
+    fn rbc_dag_application_production_does_not_wait_for_legacy_clean_delivery() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+        core.enable_rbc_dag_application_production();
+
+        let own_round_one = core
+            .try_new_block("new_blocks")
+            .expect("round-one application header should be creatable");
+        let peers = [1, 2]
+            .into_iter()
+            .map(|peer| make_starfish_rbc_round_1_block(&committee, peer))
+            .collect::<Vec<_>>();
+        core.add_headers(peers, DataSource::BlockBundleStreamingHeader);
+
+        assert_eq!(core.dag_state().threshold_clock_round(), 2);
+        assert!(!core.dag_state().has_clean_vertex(own_round_one.reference()));
+        let round_two = core
+            .try_new_block("new_blocks")
+            .expect("RBC-DAG application production must follow the raw threshold clock");
+        assert_eq!(round_two.round(), 2);
+        assert!(
+            round_two
+                .block_references()
+                .contains(own_round_one.reference())
+        );
     }
 
     #[test]
