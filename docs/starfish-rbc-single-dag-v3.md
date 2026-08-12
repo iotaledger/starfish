@@ -120,8 +120,9 @@ with MAC authentication and the fixed 50 ms V3 round limiter:
 | `starfish-rbc-single-dag` | zero | 498.3 ms | 1,000 | 0.79 MB/s |
 | `starfish-rbc-single-dag` | AWS table | 1,285.7 ms | 1,000 | 0.61 MB/s |
 | V3 + flagged ECHO-QC | AWS table | 961.0 ms | 1,000 | 0.61 MB/s |
+| V3 + flagged ECHO-QC, n=40 | AWS table | 977.35 ms | 1,000 | 3.04 MB/s |
 | `starfish-mac` lower bound | AWS table | 610.0 ms | 1,000 | 0.61 MB/s |
 
 All exact offered transactions committed during the bounded drain. These are
 single-machine research measurements, not production claims. In particular,
-the 961 ms row carries the ECHO-QC totality limitation above.
+both ECHO-QC rows carry the totality limitation above.
