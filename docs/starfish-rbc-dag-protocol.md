@@ -715,6 +715,13 @@ view is never a no-vote. `NoVote` is explicit, authenticated, immutable, and slo
 An honest validator persists its leader-choice lock before exposing the carrier that contains it;
 it cannot emit `NoVote` and later vote for a late leader in the same logical voting slot.
 
+Decision planning follows the existing Starfish newest-to-oldest rule. For an undecided slot, the
+deciding anchor is the first committed leader in the already-decided later sequence at least three
+rounds ahead. Final skips are traversed, but an intervening undecided slot is a hard barrier; a
+validator must not scan past it to whichever later direct certificate happens to be visible first.
+Only the longest finalized prefix is published. Direct versus indirect evidence may be observed at
+different times, but it cannot change the committed-leader sequence.
+
 Skipping a Byzantine leader role discards only that optional consensus value. It does not discard
 the enclosing application carrier. If that carrier later becomes part of a closed prefix, a later
 committed frontier orders its payload.
@@ -726,9 +733,9 @@ acknowledgment references; it enters only through the typed Core materialization
 
 ## 12. Frontier-delta linearization
 
-Let `F_k` be the effective frontier carried by committed anchor `A_k`, `J_k` the cumulative joined
-committed frontier, and `Closure(F)` the union of the exact per-author self-chain prefixes named by
-`F`. Maintain:
+Let `A_k` be the `k`th committed leader in the finalized leader sequence, whether directly or
+indirectly committed, `F_k` its effective frontier, `J_k` the cumulative joined committed frontier,
+and `Closure(F)` the union of the exact per-author self-chain prefixes named by `F`. Maintain:
 
 ```text
 J_0   = [None; committee_size]
@@ -741,6 +748,12 @@ concurrent committed anchors and prevents a later partial frontier from erasing 
 component already committed. Before outputting `Delta`, a validator requires every exact carrier
 to be authoritatively delivered and every application member to pass the concrete Core DA gate.
 Exact carrier recovery and the dedicated verified-payload path supply missing material.
+
+Frontiers are applied strictly in increasing finalized-leader order. A later leader used to decide
+an older slot is planning evidence only until every older slot has resolved; its frontier is not
+applied ahead of an indirectly committed older leader. Thus different projection arrival orders
+may classify a leader as direct or indirect at different times, but produce the same ordered anchor
+and frontier-delta sequence.
 
 All validators deterministically order the same delta by
 `(carrier_round, author, content_digest)`. Because a closed author prefix advances by exactly one
@@ -945,6 +958,8 @@ The executable model and composed runtime tests should cover at minimum:
 - an authoritatively delivered Byzantine carrier above an unavailable self-chain gap;
 - conflicting Byzantine consensus vertices in one logical slot;
 - explicit vote/no-vote conflicts and direct plus indirect commit/skip;
+- different projection arrival orders where a later direct certificate precedes an earlier
+  indirect anchor, with byte-identical committed-leader and cumulative frontier-delta sequences;
 - frontier fork, regression, and strong-parent dominance rejection;
 - concurrent committed anchors producing the same cumulative joined frontier and byte-identical
   output deltas without regression;

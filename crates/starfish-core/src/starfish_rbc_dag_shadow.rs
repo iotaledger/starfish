@@ -10,7 +10,7 @@
 //! only after that complete batch has reached durable storage.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     path::Path,
@@ -1870,71 +1870,75 @@ impl StarfishRbcDagShadowV1 {
 
     fn drive_ordered_committer(&mut self, highest_round: RoundNumber) -> Result<(), ShadowErrorV1> {
         let decidable_round = highest_round.saturating_sub(2);
-        loop {
-            while self.next_undecided_consensus_round <= decidable_round
-                && self.has_projection_decision(
-                    self.projection
-                        .leader_slot(self.next_undecided_consensus_round),
-                )
-            {
-                self.next_undecided_consensus_round =
-                    self.next_undecided_consensus_round.saturating_add(1);
-            }
-            if self.next_undecided_consensus_round > decidable_round {
-                return Ok(());
-            }
-            let round = self.next_undecided_consensus_round;
+        if self.next_undecided_consensus_round > decidable_round {
+            return Ok(());
+        }
+
+        // Plan from newest to oldest, as the universal Starfish committer
+        // does. An indirect decision may use only the first committed leader
+        // in this already-decided suffix; a still-undecided intervening slot
+        // is a hard barrier. This makes anchor selection independent of which
+        // later direct certificate happened to arrive first locally.
+        let mut planned = VecDeque::new();
+        for round in (self.next_undecided_consensus_round..=decidable_round).rev() {
             let slot = self.projection.leader_slot(round);
-            let Ok(decision) = self.projection.direct_decision(slot) else {
-                return Ok(());
-            };
-            match decision {
-                ProjectionDecisionV1::DirectCommit { leader } => {
-                    self.commit_projected_anchor(leader)?;
-                    self.record_projection_decision(decision);
-                    self.next_undecided_consensus_round = round.saturating_add(1);
-                }
-                ProjectionDecisionV1::DirectSkip { .. } => {
-                    self.record_projection_decision(decision);
-                    self.next_undecided_consensus_round = round.saturating_add(1);
-                }
+            let direct = self.projection.direct_decision(slot)?;
+            let decision = match direct {
                 ProjectionDecisionV1::Undecided { .. } => {
-                    let first_anchor_round = round.saturating_add(3);
-                    let later_anchor =
-                        (first_anchor_round..=decidable_round).find_map(|candidate| {
-                            let candidate_slot = self.projection.leader_slot(candidate);
-                            match self.projection.direct_decision(candidate_slot).ok()? {
-                                ProjectionDecisionV1::DirectCommit { leader } => Some(leader),
-                                ProjectionDecisionV1::DirectSkip { .. }
-                                | ProjectionDecisionV1::IndirectCommit { .. }
-                                | ProjectionDecisionV1::IndirectSkip { .. }
-                                | ProjectionDecisionV1::Undecided { .. } => None,
+                    let minimum_anchor_round = round.saturating_add(3);
+                    let mut anchor = None;
+                    for later in planned.iter().filter(|later| {
+                        projection_decision_slot(**later).round >= minimum_anchor_round
+                    }) {
+                        match later {
+                            ProjectionDecisionV1::DirectCommit { leader }
+                            | ProjectionDecisionV1::IndirectCommit { leader, .. } => {
+                                anchor = Some(*leader);
+                                break;
                             }
-                        });
-                    let Some(anchor) = later_anchor else {
-                        return Ok(());
+                            ProjectionDecisionV1::DirectSkip { .. }
+                            | ProjectionDecisionV1::IndirectSkip { .. } => {}
+                            ProjectionDecisionV1::Undecided { .. } => break,
+                        }
+                    }
+                    let Some(anchor) = anchor else {
+                        planned.push_front(direct);
+                        continue;
                     };
-                    self.commit_projected_anchor(anchor)?;
-                    let indirect = self
-                        .projection
-                        .indirect_decision(slot, anchor)
-                        .expect("a clean committed later anchor must decide the older slot");
-                    self.record_projection_decision(indirect);
-                    self.record_projection_decision(ProjectionDecisionV1::DirectCommit {
-                        leader: anchor,
-                    });
-                    self.next_undecided_consensus_round = round.saturating_add(1);
+                    self.projection.indirect_decision(slot, anchor)?
                 }
+                ProjectionDecisionV1::DirectCommit { .. }
+                | ProjectionDecisionV1::DirectSkip { .. } => direct,
                 ProjectionDecisionV1::IndirectCommit { .. }
                 | ProjectionDecisionV1::IndirectSkip { .. } => {
                     unreachable!("direct decision returned an indirect result")
                 }
-            }
+            };
+            planned.push_front(decision);
         }
-    }
 
-    fn has_projection_decision(&self, slot: LeaderSlotV1) -> bool {
-        self.projected_decision_slots.contains(&slot)
+        // Emit only the longest finalized prefix. Every committed leader,
+        // including an indirectly committed one, contributes its frontier at
+        // its exact position in that agreed leader order. Later deciding
+        // anchors are therefore never applied ahead of older leaders.
+        for decision in planned {
+            if matches!(decision, ProjectionDecisionV1::Undecided { .. }) {
+                break;
+            }
+            match decision {
+                ProjectionDecisionV1::DirectCommit { leader }
+                | ProjectionDecisionV1::IndirectCommit { leader, .. } => {
+                    self.commit_projected_anchor(leader)?;
+                }
+                ProjectionDecisionV1::DirectSkip { .. }
+                | ProjectionDecisionV1::IndirectSkip { .. } => {}
+                ProjectionDecisionV1::Undecided { .. } => unreachable!("handled above"),
+            }
+            let round = projection_decision_slot(decision).round;
+            self.record_projection_decision(decision);
+            self.next_undecided_consensus_round = round.saturating_add(1);
+        }
+        Ok(())
     }
 
     fn record_projection_decision(&mut self, decision: ProjectionDecisionV1) {
@@ -3534,6 +3538,220 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn ordered_committer_vertex(
+        author: AuthorityIndex,
+        consensus_round: RoundNumber,
+        variant: u8,
+    ) -> ConsensusVertexReference {
+        let marker = (consensus_round as u8)
+            .wrapping_mul(17)
+            .wrapping_add(author as u8)
+            .wrapping_add(variant.wrapping_mul(71));
+        ConsensusVertexReference::new(
+            BlockReference {
+                authority: author,
+                round: 100 + consensus_round * 2 + RoundNumber::from(variant),
+                digest: BlockDigest::from([marker; 32]),
+            },
+            consensus_round,
+        )
+    }
+
+    fn quorum_authors_including(
+        committee: &RbcDagCommitteeContextV1,
+        required: AuthorityIndex,
+    ) -> Vec<AuthorityIndex> {
+        std::iter::once(required)
+            .chain(
+                committee
+                    .committee()
+                    .authorities()
+                    .filter(|author| *author != required),
+            )
+            .take(3)
+            .collect()
+    }
+
+    fn inject_ordered_committer_fixture(
+        node: &mut StarfishRbcDagShadowV1,
+        include_early_direct_anchor: bool,
+    ) -> [ConsensusVertexReference; 3] {
+        let committee = node.committee.clone();
+        let leader_author = |round: RoundNumber| committee.committee().elect_leader(round);
+        let no_vote = |round: RoundNumber| LeaderChoiceV1::NoVote {
+            leader_author: leader_author(round - 1),
+            leader_round: round - 1,
+        };
+        let older = ordered_committer_vertex(leader_author(1), 1, 0);
+        node.projection
+            .inject_projected_for_test(older, Vec::new(), no_vote(1));
+
+        // Q voters make the round-one leader certifiable, but only one
+        // round-three vertex initially carries that certificate. Direct
+        // commit is therefore unavailable while indirect commit is possible.
+        let round_two = (0..N as AuthorityIndex)
+            .map(|author| ordered_committer_vertex(author, 2, 0))
+            .collect::<Vec<_>>();
+        for (author, reference) in round_two.iter().copied().enumerate() {
+            let choice = if author < 3 {
+                LeaderChoiceV1::Vote { leader: older }
+            } else {
+                no_vote(2)
+            };
+            node.projection
+                .inject_projected_for_test(reference, vec![older], choice);
+        }
+
+        let round_three = (0..3 as AuthorityIndex)
+            .map(|author| ordered_committer_vertex(author, 3, 0))
+            .collect::<Vec<_>>();
+        let round_three_parents = [
+            round_two[..3].to_vec(),
+            vec![round_two[0], round_two[1], round_two[3]],
+            vec![round_two[1], round_two[2], round_two[3]],
+        ];
+        for (reference, parents) in round_three.iter().copied().zip(round_three_parents) {
+            node.projection
+                .inject_projected_for_test(reference, parents, no_vote(3));
+        }
+
+        // The first later leader is reachable from the single certificate.
+        // It is initially only indirectly committed by the still-later
+        // leader, which is the case the old direct-only anchor scan skipped.
+        let first_anchor = ordered_committer_vertex(leader_author(4), 4, 0);
+        let round_four_authors = quorum_authors_including(&committee, first_anchor.author());
+        let mut round_four = Vec::new();
+        for author in round_four_authors {
+            let reference = if author == first_anchor.author() {
+                first_anchor
+            } else {
+                ordered_committer_vertex(author, 4, 0)
+            };
+            node.projection
+                .inject_projected_for_test(reference, round_three.clone(), no_vote(4));
+            round_four.push(reference);
+        }
+
+        let round_five = (0..N as AuthorityIndex)
+            .map(|author| ordered_committer_vertex(author, 5, 0))
+            .collect::<Vec<_>>();
+        for (author, reference) in round_five.iter().copied().enumerate() {
+            let choice = if author < 3 {
+                LeaderChoiceV1::Vote {
+                    leader: first_anchor,
+                }
+            } else {
+                no_vote(5)
+            };
+            node.projection
+                .inject_projected_for_test(reference, round_four.clone(), choice);
+        }
+
+        let round_six = (0..3 as AuthorityIndex)
+            .map(|author| ordered_committer_vertex(author, 6, 0))
+            .collect::<Vec<_>>();
+        let round_six_parents = [
+            round_five[..3].to_vec(),
+            vec![round_five[0], round_five[1], round_five[3]],
+            vec![round_five[1], round_five[2], round_five[3]],
+        ];
+        for (reference, parents) in round_six.iter().copied().zip(round_six_parents) {
+            node.projection
+                .inject_projected_for_test(reference, parents, no_vote(6));
+        }
+        if include_early_direct_anchor {
+            // One Byzantine author supplies a conflicting certifier while the
+            // unused fourth author supplies another. Together with author 0,
+            // direct evidence for the round-four leader reaches Q.
+            for (author, variant) in [(1, 1), (3, 0)] {
+                node.projection.inject_projected_for_test(
+                    ordered_committer_vertex(author, 6, variant),
+                    round_five[..3].to_vec(),
+                    no_vote(6),
+                );
+            }
+        }
+
+        let later_anchor = ordered_committer_vertex(leader_author(7), 7, 0);
+        let round_seven_authors = quorum_authors_including(&committee, later_anchor.author());
+        let mut round_seven = Vec::new();
+        for author in round_seven_authors {
+            let reference = if author == later_anchor.author() {
+                later_anchor
+            } else {
+                ordered_committer_vertex(author, 7, 0)
+            };
+            node.projection
+                .inject_projected_for_test(reference, round_six.clone(), no_vote(7));
+            round_seven.push(reference);
+        }
+        let round_eight = (0..3 as AuthorityIndex)
+            .map(|author| ordered_committer_vertex(author, 8, 0))
+            .collect::<Vec<_>>();
+        for reference in &round_eight {
+            node.projection.inject_projected_for_test(
+                *reference,
+                round_seven.clone(),
+                LeaderChoiceV1::Vote {
+                    leader: later_anchor,
+                },
+            );
+        }
+        for author in 0..3 as AuthorityIndex {
+            node.projection.inject_projected_for_test(
+                ordered_committer_vertex(author, 9, 0),
+                round_eight.clone(),
+                no_vote(9),
+            );
+        }
+        [older, first_anchor, later_anchor]
+    }
+
+    #[test]
+    fn ordered_committer_is_deterministic_across_direct_anchor_arrival_orders() {
+        let mut network = TestNetwork::new();
+        let expected = inject_ordered_committer_fixture(&mut network.nodes[0], false);
+        assert_eq!(
+            inject_ordered_committer_fixture(&mut network.nodes[1], true),
+            expected
+        );
+
+        network.nodes[0].drive_ordered_committer(9).unwrap();
+        network.nodes[1].drive_ordered_committer(9).unwrap();
+
+        let delayed_decisions = network.nodes[0].drain_projection_decisions();
+        let eager_decisions = network.nodes[1].drain_projection_decisions();
+        assert!(
+            delayed_decisions.contains(&ProjectionDecisionV1::IndirectCommit {
+                leader: expected[1],
+                anchor: expected[2],
+            })
+        );
+        assert!(
+            eager_decisions.contains(&ProjectionDecisionV1::DirectCommit {
+                leader: expected[1],
+            })
+        );
+
+        let delayed_output = network.nodes[0].drain_committed_frontiers();
+        let eager_output = network.nodes[1].drain_committed_frontiers();
+        assert_eq!(delayed_output, eager_output);
+        assert_eq!(
+            delayed_output
+                .iter()
+                .map(|delta| delta.anchor)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            delayed_output
+                .iter()
+                .map(|delta| delta.output_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]

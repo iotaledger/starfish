@@ -115,7 +115,6 @@ pub enum CertifiedProjectionError {
     InvalidLeaderSlot(LeaderSlotV1),
     MultipleCertifiedLeaderValues(LeaderSlotV1),
     ConflictingDirectDecision(LeaderSlotV1),
-    AnchorNotCommitted(ConsensusVertexReference),
     AnchorTooEarly {
         slot: LeaderSlotV1,
         anchor: ConsensusVertexReference,
@@ -659,16 +658,22 @@ impl CertifiedProjectionModel {
         Ok(joined)
     }
 
-    /// Decide an older leader from a later committed anchor. A reachable
-    /// certifying-round vertex with a QC yields commit; absence yields skip.
+    /// Decide an older leader from a later projected anchor selected by the
+    /// ordered committer. A reachable certifying-round vertex with a QC yields
+    /// commit; absence yields skip.
+    ///
+    /// The anchor's frontier is deliberately not required to have been
+    /// applied yet. The committer first derives the finalized leader sequence
+    /// from newest to oldest, then applies committed frontiers in the opposite
+    /// (oldest-to-newest) order.
     pub fn indirect_decision(
         &self,
         slot: LeaderSlotV1,
         anchor: ConsensusVertexReference,
     ) -> Result<ProjectionDecisionV1, CertifiedProjectionError> {
         self.validate_leader_slot(slot)?;
-        if !self.committed_anchors.contains(&anchor) {
-            return Err(CertifiedProjectionError::AnchorNotCommitted(anchor));
+        if !self.vertices.contains_key(&anchor) {
+            return Err(CertifiedProjectionError::MissingStrongParent(anchor));
         }
         let minimum_anchor_round = slot.round.saturating_add(3);
         if anchor.consensus_round() < minimum_anchor_round {
@@ -2767,9 +2772,8 @@ mod tests {
     }
 
     #[test]
-    fn later_committed_anchor_drives_indirect_commit_or_skip() {
-        let (mut commit_model, slot, leader, commit_anchor) = indirect_graph(true);
-        commit_model.record_committed_anchor(commit_anchor).unwrap();
+    fn later_selected_anchor_drives_indirect_commit_or_skip_before_frontier_application() {
+        let (commit_model, slot, leader, commit_anchor) = indirect_graph(true);
         assert_eq!(
             commit_model.indirect_decision(slot, commit_anchor).unwrap(),
             ProjectionDecisionV1::IndirectCommit {
@@ -2778,8 +2782,7 @@ mod tests {
             }
         );
 
-        let (mut skip_model, slot, _, skip_anchor) = indirect_graph(false);
-        skip_model.record_committed_anchor(skip_anchor).unwrap();
+        let (skip_model, slot, _, skip_anchor) = indirect_graph(false);
         assert_eq!(
             skip_model.indirect_decision(slot, skip_anchor).unwrap(),
             ProjectionDecisionV1::IndirectSkip {
