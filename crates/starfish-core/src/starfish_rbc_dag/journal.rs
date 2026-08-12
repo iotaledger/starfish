@@ -8,7 +8,12 @@
 //! decoding. Callers validate canonical bytes before journaling them; the
 //! reducer pins the exact byte strings and rejects any later alternative.
 
-use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use crate::types::{AuthorityIndex, BlockReference, RoundNumber};
 
@@ -107,6 +112,8 @@ impl DurableOutboundCarrierV1 {
 pub enum PhaseKindV1 {
     Echo,
     Ready,
+    Vote,
+    Ack,
 }
 
 /// Durable result of processing one entry in an enclosing phase batch.
@@ -122,6 +129,8 @@ impl PhaseKindV1 {
         match statement {
             RbcPhaseStatementV1::Echo { .. } => Self::Echo,
             RbcPhaseStatementV1::Ready { .. } => Self::Ready,
+            RbcPhaseStatementV1::Vote { .. } => Self::Vote,
+            RbcPhaseStatementV1::Ack { .. } => Self::Ack,
         }
     }
 }
@@ -174,6 +183,20 @@ pub enum JournalEventV1 {
         context: RbcDagContextV1,
         target: BlockReference,
     },
+    LockVote {
+        context: RbcDagContextV1,
+        target: BlockReference,
+    },
+    LockAck {
+        context: RbcDagContextV1,
+        target: BlockReference,
+    },
+    /// The sender-honest or optimistic-ECHO fast-delivery predicate became
+    /// slot-global before the slower Q-READY certificate.
+    LockOptimisticDelivery {
+        context: RbcDagContextV1,
+        target: BlockReference,
+    },
     LockDelivery {
         context: RbcDagContextV1,
         target: BlockReference,
@@ -223,6 +246,9 @@ impl JournalEventV1 {
             | Self::LockEcho { context, .. }
             | Self::LockAdmission { context, .. }
             | Self::LockReady { context, .. }
+            | Self::LockVote { context, .. }
+            | Self::LockAck { context, .. }
+            | Self::LockOptimisticDelivery { context, .. }
             | Self::LockDelivery { context, .. }
             | Self::LockConsensusSlot { context, .. }
             | Self::LockLeaderChoice { context, .. }
@@ -277,11 +303,18 @@ pub struct JournalSnapshotV1 {
     context: RbcDagContextV1,
     own_authority: AuthorityIndex,
     ingress: Vec<AuthenticatedIngressRecordV1>,
+    /// Derived exact index over `ingress`. This is intentionally absent from
+    /// the durable format: replay reconstructs it while preserving the
+    /// ordered ingress records above.
+    authenticated_ingress_references: BTreeSet<BlockReference>,
     retained_carriers: BTreeMap<BlockReference, RetainedCarrierV1>,
     own_carriers: BTreeMap<RoundNumber, BlockReference>,
     admission_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
     echo_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
     ready_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
+    vote_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
+    ack_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
+    optimistic_delivery_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
     delivery_locks: BTreeMap<RbcSlotKeyV1, BlockReference>,
     consensus_slots: BTreeMap<RoundNumber, BlockReference>,
     leader_choices: BTreeMap<RoundNumber, LeaderChoiceV1>,
@@ -297,11 +330,15 @@ impl JournalSnapshotV1 {
             context,
             own_authority,
             ingress: Vec::new(),
+            authenticated_ingress_references: BTreeSet::new(),
             retained_carriers: BTreeMap::new(),
             own_carriers: BTreeMap::new(),
             admission_locks: BTreeMap::new(),
             echo_locks: BTreeMap::new(),
             ready_locks: BTreeMap::new(),
+            vote_locks: BTreeMap::new(),
+            ack_locks: BTreeMap::new(),
+            optimistic_delivery_locks: BTreeMap::new(),
             delivery_locks: BTreeMap::new(),
             consensus_slots: BTreeMap::new(),
             leader_choices: BTreeMap::new(),
@@ -350,8 +387,20 @@ impl JournalSnapshotV1 {
         self.ready_locks.get(&slot).copied()
     }
 
+    pub fn vote_lock(&self, slot: RbcSlotKeyV1) -> Option<BlockReference> {
+        self.vote_locks.get(&slot).copied()
+    }
+
+    pub fn ack_lock(&self, slot: RbcSlotKeyV1) -> Option<BlockReference> {
+        self.ack_locks.get(&slot).copied()
+    }
+
     pub fn delivery_lock(&self, slot: RbcSlotKeyV1) -> Option<BlockReference> {
         self.delivery_locks.get(&slot).copied()
+    }
+
+    pub fn optimistic_delivery_lock(&self, slot: RbcSlotKeyV1) -> Option<BlockReference> {
+        self.optimistic_delivery_locks.get(&slot).copied()
     }
 
     pub fn consensus_slot(&self, round: RoundNumber) -> Option<BlockReference> {
@@ -414,10 +463,40 @@ impl JournalSnapshotV1 {
             JournalEventV1::LockAdmission { target, .. } => self.lock_admission(*target),
             JournalEventV1::LockEcho { target, .. } => self.lock_echo(*target),
             JournalEventV1::LockReady { target, .. } => self.lock_ready(*target),
+            JournalEventV1::LockVote { target, .. } => self.lock_vote(*target),
+            JournalEventV1::LockAck { target, .. } => self.lock_ack(*target),
+            JournalEventV1::LockOptimisticDelivery { target, .. } => {
+                self.ensure_retained(*target)?;
+                let slot = RbcSlotKeyV1::of(*target);
+                if self
+                    .delivery_lock(slot)
+                    .is_some_and(|certified| certified != *target)
+                {
+                    return Err(JournalErrorV1::ConflictingPhaseLock {
+                        kind: LockKindV1::OptimisticDelivery,
+                        slot,
+                    });
+                }
+                Self::lock_candidate(
+                    &mut self.optimistic_delivery_locks,
+                    *target,
+                    LockKindV1::OptimisticDelivery,
+                )
+            }
             JournalEventV1::LockDelivery { target, .. } => {
                 self.ensure_retained(*target)?;
-                if self.ready_lock(RbcSlotKeyV1::of(*target)) != Some(*target) {
+                let slot = RbcSlotKeyV1::of(*target);
+                if self.ready_lock(slot) != Some(*target) {
                     return Err(JournalErrorV1::DeliveryWithoutMatchingReady(*target));
+                }
+                if self
+                    .optimistic_delivery_lock(slot)
+                    .is_some_and(|delivered| delivered != *target)
+                {
+                    return Err(JournalErrorV1::ConflictingPhaseLock {
+                        kind: LockKindV1::Delivery,
+                        slot,
+                    });
                 }
                 Self::lock_candidate(&mut self.delivery_locks, *target, LockKindV1::Delivery)
             }
@@ -483,6 +562,7 @@ impl JournalSnapshotV1 {
             canonical_carrier_wire,
             authentication_sidecar,
         });
+        self.authenticated_ingress_references.insert(reference);
         Ok(())
     }
 
@@ -518,11 +598,7 @@ impl JournalSnapshotV1 {
     }
 
     fn lock_admission(&mut self, target: BlockReference) -> Result<(), JournalErrorV1> {
-        let authenticated_ingress = self
-            .ingress
-            .iter()
-            .any(|ingress| ingress.reference == target);
-        if !authenticated_ingress {
+        if !self.authenticated_ingress_references.contains(&target) {
             return Err(JournalErrorV1::AdmissionWithoutAuthenticatedIngress(target));
         }
         Self::lock_candidate(&mut self.admission_locks, target, LockKindV1::Admission)
@@ -531,6 +607,16 @@ impl JournalSnapshotV1 {
     fn lock_ready(&mut self, target: BlockReference) -> Result<(), JournalErrorV1> {
         self.ensure_retained(target)?;
         Self::lock_candidate(&mut self.ready_locks, target, LockKindV1::Ready)
+    }
+
+    fn lock_vote(&mut self, target: BlockReference) -> Result<(), JournalErrorV1> {
+        self.ensure_retained(target)?;
+        Self::lock_candidate(&mut self.vote_locks, target, LockKindV1::Vote)
+    }
+
+    fn lock_ack(&mut self, target: BlockReference) -> Result<(), JournalErrorV1> {
+        self.ensure_retained(target)?;
+        Self::lock_candidate(&mut self.ack_locks, target, LockKindV1::Ack)
     }
 
     fn ensure_retained(&self, reference: BlockReference) -> Result<(), JournalErrorV1> {
@@ -740,14 +826,17 @@ impl JournalSnapshotV1 {
             return Err(JournalErrorV1::OutboundSidecarNotPersisted(reference));
         }
         let candidate = outbound.candidate.clone();
-        if self.echo_lock(RbcSlotKeyV1::of(reference)) != Some(reference) {
-            return Err(JournalErrorV1::OutboundEchoNotLocked(reference));
-        }
+        // The target author is excluded from ECHO/VOTE/ACK in the optimistic
+        // RBC. `FixOwnCarrier` is the durable authority lock for exposing its
+        // own exact carrier; only phase statements carried inside it require
+        // their corresponding local locks below.
         for statement in candidate.header().phase_batch() {
             let target = statement.target();
             let lock = match statement {
                 RbcPhaseStatementV1::Echo { .. } => self.echo_lock(RbcSlotKeyV1::of(target)),
                 RbcPhaseStatementV1::Ready { .. } => self.ready_lock(RbcSlotKeyV1::of(target)),
+                RbcPhaseStatementV1::Vote { .. } => self.vote_lock(RbcSlotKeyV1::of(target)),
+                RbcPhaseStatementV1::Ack { .. } => self.ack_lock(RbcSlotKeyV1::of(target)),
             };
             if lock != Some(target) {
                 return Err(JournalErrorV1::OutboundPhaseNotLocked(*statement));
@@ -807,6 +896,7 @@ impl JournalSnapshotV1 {
         let outer_slot = RbcSlotKeyV1::of(outer);
         let authorized = self.own_carrier(outer.round) == Some(outer)
             || self.admission_lock(outer_slot) == Some(outer)
+            || self.optimistic_delivery_lock(outer_slot) == Some(outer)
             || self.delivery_lock(outer_slot) == Some(outer);
         if !authorized {
             return Err(JournalErrorV1::OuterCarrierNotAdmittedOrDelivered(outer));
@@ -838,6 +928,8 @@ impl JournalSnapshotV1 {
             let lock = match statement {
                 RbcPhaseStatementV1::Echo { .. } => self.echo_lock(RbcSlotKeyV1::of(target)),
                 RbcPhaseStatementV1::Ready { .. } => self.ready_lock(RbcSlotKeyV1::of(target)),
+                RbcPhaseStatementV1::Vote { .. } => self.vote_lock(RbcSlotKeyV1::of(target)),
+                RbcPhaseStatementV1::Ack { .. } => self.ack_lock(RbcSlotKeyV1::of(target)),
             };
             if lock != Some(target) {
                 return Err(JournalErrorV1::OwnPhaseWithoutDurableLock(statement));
@@ -921,6 +1013,9 @@ pub enum LockKindV1 {
     Admission,
     Echo,
     Ready,
+    Vote,
+    Ack,
+    OptimisticDelivery,
     Delivery,
 }
 
@@ -970,7 +1065,6 @@ pub enum JournalErrorV1 {
     OutboundSidecarNotPersisted(BlockReference),
     OutboundAuthenticationContextMismatch,
     OutboundAuthenticationCandidateMismatch(BlockReference),
-    OutboundEchoNotLocked(BlockReference),
     OutboundPhaseNotLocked(RbcPhaseStatementV1),
     OutboundConsensusSlotNotLocked {
         consensus_round: RoundNumber,
@@ -1394,6 +1488,26 @@ mod tests {
             .unwrap();
     }
 
+    fn assert_authenticated_ingress_index_matches_scan(snapshot: &JournalSnapshotV1) {
+        let scanned = snapshot
+            .authenticated_ingress()
+            .iter()
+            .map(AuthenticatedIngressRecordV1::reference)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(snapshot.authenticated_ingress_references, scanned);
+        for reference in scanned {
+            assert_eq!(
+                snapshot
+                    .authenticated_ingress_references
+                    .contains(&reference),
+                snapshot
+                    .authenticated_ingress()
+                    .iter()
+                    .any(|record| record.reference() == reference)
+            );
+        }
+    }
+
     fn admit_candidate(journal: &mut WriteAheadJournalV1, candidate: &CandidateCarrierV1) {
         authenticate_candidate(journal, candidate);
         journal
@@ -1607,6 +1721,211 @@ mod tests {
                 actual: 2
             })
         ));
+    }
+
+    #[test]
+    fn authenticated_ingress_index_matches_scan_after_live_failures_and_duplicates() {
+        let mut journal = journal();
+        let candidate = candidate(0, 1, 0x22, Vec::new(), None);
+        let reference = candidate.reference();
+
+        assert_eq!(
+            journal
+                .append(JournalEventV1::AuthenticatedIngress {
+                    context: journal.context,
+                    sequence: 0,
+                    authenticated: authenticated_with_marker(&candidate, 1, 0xA2),
+                    provenance: IngressProvenanceV1::Relayed { peer: 2 },
+                })
+                .unwrap_err(),
+            JournalErrorV1::AuthenticatedIngressContextMismatch
+        );
+        assert_authenticated_ingress_index_matches_scan(journal.snapshot());
+        assert!(
+            !journal
+                .snapshot()
+                .authenticated_ingress_references
+                .contains(&reference)
+        );
+
+        let authenticated = authenticated(&candidate, 1);
+        journal
+            .record_authenticated_ingress(
+                authenticated.clone(),
+                IngressProvenanceV1::Relayed { peer: 2 },
+            )
+            .unwrap();
+        journal
+            .record_authenticated_ingress(authenticated, IngressProvenanceV1::Relayed { peer: 3 })
+            .unwrap();
+
+        assert_eq!(journal.snapshot().authenticated_ingress().len(), 2);
+        assert_eq!(journal.snapshot().authenticated_ingress_references.len(), 1);
+        assert_authenticated_ingress_index_matches_scan(journal.snapshot());
+    }
+
+    #[test]
+    fn authenticated_ingress_index_reconstructs_a_long_ordered_sequence() {
+        const REPEATED_INGRESS: usize = 512;
+        const UNIQUE_INGRESS: usize = 16;
+
+        let context = context(0xA1);
+        let mut durable_events = Vec::with_capacity(REPEATED_INGRESS + UNIQUE_INGRESS);
+        let mut ordered_references = Vec::with_capacity(REPEATED_INGRESS + UNIQUE_INGRESS);
+        let mut unique_references = Vec::with_capacity(UNIQUE_INGRESS);
+        let first_candidate = candidate(0, 1, 0x26, Vec::new(), None);
+        let first_reference = first_candidate.reference();
+        let first_authenticated = authenticated(&first_candidate, 1);
+        unique_references.push(first_reference);
+        for index in 0..REPEATED_INGRESS {
+            ordered_references.push(first_reference);
+            durable_events.push(JournalEventV1::AuthenticatedIngress {
+                context,
+                sequence: durable_events.len() as u64,
+                authenticated: first_authenticated.clone(),
+                provenance: IngressProvenanceV1::Relayed {
+                    peer: if index % 2 == 0 { 2 } else { 3 },
+                },
+            });
+        }
+        for index in 1..UNIQUE_INGRESS {
+            let candidate = candidate(
+                0,
+                RoundNumber::try_from(index + 1).unwrap(),
+                (index as u8).wrapping_mul(37),
+                Vec::new(),
+                None,
+            );
+            let reference = candidate.reference();
+            let authenticated = authenticated(&candidate, 1);
+            unique_references.push(reference);
+            ordered_references.push(reference);
+            durable_events.push(JournalEventV1::AuthenticatedIngress {
+                context,
+                sequence: durable_events.len() as u64,
+                authenticated,
+                provenance: IngressProvenanceV1::Relayed { peer: 2 },
+            });
+        }
+
+        let ingress_events = durable_events.clone();
+        let mut journal =
+            WriteAheadJournalV1::from_durable_events(context, 1, durable_events).unwrap();
+        assert_eq!(journal.durable_events(), ingress_events);
+        assert_eq!(
+            journal
+                .snapshot()
+                .authenticated_ingress()
+                .iter()
+                .map(AuthenticatedIngressRecordV1::reference)
+                .collect::<Vec<_>>(),
+            ordered_references
+        );
+        assert_eq!(
+            journal.snapshot().authenticated_ingress_references.len(),
+            UNIQUE_INGRESS
+        );
+        assert_authenticated_ingress_index_matches_scan(journal.snapshot());
+
+        for target in [
+            unique_references[0],
+            unique_references[UNIQUE_INGRESS / 2],
+            unique_references[UNIQUE_INGRESS - 1],
+        ] {
+            journal
+                .append(JournalEventV1::LockAdmission { context, target })
+                .unwrap();
+        }
+
+        let reopened = journal.restart().unwrap().restart().unwrap();
+        assert_authenticated_ingress_index_matches_scan(reopened.snapshot());
+        assert_eq!(reopened.snapshot(), journal.snapshot());
+    }
+
+    #[test]
+    fn authenticated_ingress_index_preserves_admission_conflicts_across_reopen() {
+        let mut journal = journal();
+        let first_candidate = candidate(0, 7, 0x23, Vec::new(), None);
+        let conflicting_candidate = candidate(0, 7, 0x24, Vec::new(), None);
+        let absent_candidate = candidate(2, 9, 0x25, Vec::new(), None);
+        let first = first_candidate.reference();
+        let conflicting = conflicting_candidate.reference();
+        let absent = absent_candidate.reference();
+        let slot = RbcSlotKeyV1::of(first);
+
+        authenticate_candidate(&mut journal, &first_candidate);
+        authenticate_candidate(&mut journal, &conflicting_candidate);
+        assert_authenticated_ingress_index_matches_scan(journal.snapshot());
+        assert!(
+            journal
+                .snapshot()
+                .authenticated_ingress_references
+                .contains(&first)
+        );
+        assert!(
+            journal
+                .snapshot()
+                .authenticated_ingress_references
+                .contains(&conflicting)
+        );
+        assert!(
+            !journal
+                .snapshot()
+                .authenticated_ingress_references
+                .contains(&absent)
+        );
+
+        journal
+            .append(JournalEventV1::LockAdmission {
+                context: journal.context,
+                target: first,
+            })
+            .unwrap();
+        assert_eq!(
+            journal
+                .append(JournalEventV1::LockAdmission {
+                    context: journal.context,
+                    target: conflicting,
+                })
+                .unwrap_err(),
+            JournalErrorV1::ConflictingPhaseLock {
+                kind: LockKindV1::Admission,
+                slot,
+            }
+        );
+        assert_eq!(
+            journal
+                .append(JournalEventV1::LockAdmission {
+                    context: journal.context,
+                    target: absent,
+                })
+                .unwrap_err(),
+            JournalErrorV1::AdmissionWithoutAuthenticatedIngress(absent)
+        );
+
+        let mut reopened = journal.restart().unwrap();
+        assert_authenticated_ingress_index_matches_scan(reopened.snapshot());
+        assert_eq!(
+            reopened
+                .append(JournalEventV1::LockAdmission {
+                    context: reopened.context,
+                    target: conflicting,
+                })
+                .unwrap_err(),
+            JournalErrorV1::ConflictingPhaseLock {
+                kind: LockKindV1::Admission,
+                slot,
+            }
+        );
+        assert_eq!(
+            reopened
+                .append(JournalEventV1::LockAdmission {
+                    context: reopened.context,
+                    target: absent,
+                })
+                .unwrap_err(),
+            JournalErrorV1::AdmissionWithoutAuthenticatedIngress(absent)
+        );
     }
 
     #[test]
@@ -1825,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn only_admitted_conflict_processes_until_the_other_is_delivered() {
+    fn optimistic_delivery_authorizes_unadmitted_outer_batch_and_survives_q_ready() {
         let mut journal = journal();
         let first_statement = RbcPhaseStatementV1::Echo {
             target: reference(0, 1, 0x63),
@@ -1878,13 +2197,7 @@ mod tests {
         );
 
         journal
-            .append(JournalEventV1::LockReady {
-                context: journal.context,
-                target: second,
-            })
-            .unwrap();
-        journal
-            .append(JournalEventV1::LockDelivery {
+            .append(JournalEventV1::LockOptimisticDelivery {
                 context: journal.context,
                 target: second,
             })
@@ -1906,6 +2219,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(journal.snapshot().phase_batch_cursor(second), 1);
+        assert_eq!(
+            journal
+                .restart()
+                .unwrap()
+                .snapshot()
+                .optimistic_delivery_lock(RbcSlotKeyV1::of(second)),
+            Some(second)
+        );
+
+        // The independent fallback certificate remains durable and may
+        // arrive after the fast-delivery latch without changing its value.
+        journal
+            .append(JournalEventV1::LockReady {
+                context: journal.context,
+                target: second,
+            })
+            .unwrap();
+        journal
+            .append(JournalEventV1::LockDelivery {
+                context: journal.context,
+                target: second,
+            })
+            .unwrap();
+        assert_eq!(
+            journal.snapshot().delivery_lock(RbcSlotKeyV1::of(second)),
+            Some(second)
+        );
     }
 
     #[test]
@@ -2088,6 +2428,192 @@ mod tests {
     }
 
     #[test]
+    fn vote_and_ack_local_locks_are_phase_separate_slot_global_and_restart_safe() {
+        let mut journal = journal();
+        let first_candidate = candidate(0, 1, 0xA4, Vec::new(), None);
+        let second_candidate = candidate(0, 1, 0xA5, Vec::new(), None);
+        let first = first_candidate.reference();
+        let second = second_candidate.reference();
+        let slot = RbcSlotKeyV1::of(first);
+
+        assert_eq!(
+            journal
+                .append(JournalEventV1::LockVote {
+                    context: journal.context,
+                    target: first,
+                })
+                .unwrap_err(),
+            JournalErrorV1::CarrierContentNotRetained(first)
+        );
+        assert_eq!(
+            journal
+                .append(JournalEventV1::LockAck {
+                    context: journal.context,
+                    target: second,
+                })
+                .unwrap_err(),
+            JournalErrorV1::CarrierContentNotRetained(second)
+        );
+
+        retain_candidate(&mut journal, &first_candidate);
+        retain_candidate(&mut journal, &second_candidate);
+        journal
+            .append(JournalEventV1::LockVote {
+                context: journal.context,
+                target: first,
+            })
+            .unwrap();
+        // ACK has its own local phase namespace; it need not match the local
+        // VOTE when independently sufficient evidence selects another value.
+        journal
+            .append(JournalEventV1::LockAck {
+                context: journal.context,
+                target: second,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            journal.append(JournalEventV1::LockVote {
+                context: journal.context,
+                target: second,
+            }),
+            Err(JournalErrorV1::ConflictingPhaseLock {
+                kind: LockKindV1::Vote,
+                slot: conflict_slot,
+            }) if conflict_slot == slot
+        ));
+        assert!(matches!(
+            journal.append(JournalEventV1::LockAck {
+                context: journal.context,
+                target: first,
+            }),
+            Err(JournalErrorV1::ConflictingPhaseLock {
+                kind: LockKindV1::Ack,
+                slot: conflict_slot,
+            }) if conflict_slot == slot
+        ));
+
+        let restarted = journal.restart().unwrap().restart().unwrap();
+        assert_eq!(restarted.snapshot().vote_lock(slot), Some(first));
+        assert_eq!(restarted.snapshot().ack_lock(slot), Some(second));
+    }
+
+    #[test]
+    fn vote_and_ack_batches_durably_classify_counted_replay_and_equivocation() {
+        let mut journal = journal();
+        let first = reference(0, 1, 0xA6);
+        let second = reference(0, 1, 0xA7);
+        let first_batch = [
+            RbcPhaseStatementV1::Vote { target: first },
+            RbcPhaseStatementV1::Ack { target: first },
+        ];
+        let replay_batch = first_batch;
+        let conflicting_batch = [
+            RbcPhaseStatementV1::Vote { target: second },
+            RbcPhaseStatementV1::Ack { target: second },
+        ];
+        let first_outer_candidate = candidate(2, 2, 0xA8, first_batch.to_vec(), None);
+        let replay_outer_candidate = candidate(2, 3, 0xA9, replay_batch.to_vec(), None);
+        let conflicting_outer_candidate = candidate(2, 4, 0xAA, conflicting_batch.to_vec(), None);
+        let first_outer = first_outer_candidate.reference();
+        let replay_outer = replay_outer_candidate.reference();
+        let conflicting_outer = conflicting_outer_candidate.reference();
+        admit_candidate(&mut journal, &first_outer_candidate);
+        admit_candidate(&mut journal, &replay_outer_candidate);
+        admit_candidate(&mut journal, &conflicting_outer_candidate);
+
+        // The journal binds each event to the exact candidate batch position;
+        // a valid statement from the wrong position cannot be applied.
+        assert_eq!(
+            journal
+                .append(JournalEventV1::ApplyPhaseStatement {
+                    context: journal.context,
+                    outer: first_outer,
+                    index: 0,
+                    sender: 2,
+                    statement: first_batch[1],
+                })
+                .unwrap_err(),
+            JournalErrorV1::PhaseBatchEntryMismatch {
+                outer: first_outer,
+                index: 0,
+            }
+        );
+
+        let apply_batch = |outer, statements: [RbcPhaseStatementV1; 2], context| {
+            vec![
+                JournalEventV1::ApplyPhaseStatement {
+                    context,
+                    outer,
+                    index: 0,
+                    sender: 2,
+                    statement: statements[0],
+                },
+                JournalEventV1::AdvancePhaseBatchCursor {
+                    context,
+                    outer,
+                    index: 0,
+                },
+                JournalEventV1::ApplyPhaseStatement {
+                    context,
+                    outer,
+                    index: 1,
+                    sender: 2,
+                    statement: statements[1],
+                },
+                JournalEventV1::AdvancePhaseBatchCursor {
+                    context,
+                    outer,
+                    index: 1,
+                },
+            ]
+        };
+        for (outer, statements) in [
+            (first_outer, first_batch),
+            (replay_outer, replay_batch),
+            (conflicting_outer, conflicting_batch),
+        ] {
+            let batch = journal
+                .validate_batch(apply_batch(outer, statements, journal.context))
+                .unwrap();
+            journal.commit_validated_batch(batch).unwrap();
+        }
+
+        for index in 0..2 {
+            assert_eq!(
+                journal
+                    .snapshot()
+                    .phase_statement_outcome(first_outer, index),
+                Some(AppliedPhaseOutcomeV1::Counted)
+            );
+            assert_eq!(
+                journal
+                    .snapshot()
+                    .phase_statement_outcome(replay_outer, index),
+                Some(AppliedPhaseOutcomeV1::IgnoredReplay)
+            );
+            assert_eq!(
+                journal
+                    .snapshot()
+                    .phase_statement_outcome(conflicting_outer, index),
+                Some(AppliedPhaseOutcomeV1::IgnoredEquivocation)
+            );
+        }
+        assert_eq!(journal.snapshot().phase_batch_cursor(first_outer), 2);
+        assert_eq!(journal.snapshot().phase_batch_cursor(replay_outer), 2);
+        assert_eq!(journal.snapshot().phase_batch_cursor(conflicting_outer), 2);
+
+        let restarted = journal.restart().unwrap();
+        assert_eq!(restarted.snapshot(), journal.snapshot());
+        assert_eq!(
+            restarted
+                .snapshot()
+                .phase_statement_outcome(conflicting_outer, 1),
+            Some(AppliedPhaseOutcomeV1::IgnoredEquivocation)
+        );
+    }
+
+    #[test]
     fn replay_is_idempotent_and_foreign_namespace_fails_closed() {
         let mut journal = journal();
         let own_candidate = candidate(1, 1, 0xB1, Vec::new(), None);
@@ -2225,6 +2751,90 @@ mod tests {
             })
             .unwrap();
         journal.append(expose).unwrap();
+    }
+
+    #[test]
+    fn outbound_exposure_waits_for_vote_and_ack_locks_in_exact_batch_order() {
+        let mut journal = journal();
+        let vote_target_candidate = candidate(0, 1, 0xB8, Vec::new(), None);
+        let ack_target_candidate = candidate(2, 1, 0xB9, Vec::new(), None);
+        let vote = RbcPhaseStatementV1::Vote {
+            target: vote_target_candidate.reference(),
+        };
+        let ack = RbcPhaseStatementV1::Ack {
+            target: ack_target_candidate.reference(),
+        };
+        let own_candidate = candidate(1, 2, 0xBA, vec![vote, ack], None);
+        let own = own_candidate.reference();
+        retain_candidate(&mut journal, &vote_target_candidate);
+        retain_candidate(&mut journal, &ack_target_candidate);
+        prepare_outbound_for_exposure(&mut journal, &own_candidate);
+        let expose = JournalEventV1::ExposeOutbound {
+            context: journal.context,
+            reference: own,
+        };
+
+        assert_eq!(
+            journal.append(expose.clone()).unwrap_err(),
+            JournalErrorV1::OutboundPhaseNotLocked(vote)
+        );
+        let apply_vote = JournalEventV1::ApplyPhaseStatement {
+            context: journal.context,
+            outer: own,
+            index: 0,
+            sender: 1,
+            statement: vote,
+        };
+        assert_eq!(
+            journal.append(apply_vote.clone()).unwrap_err(),
+            JournalErrorV1::OwnPhaseWithoutDurableLock(vote)
+        );
+        journal
+            .append(JournalEventV1::LockVote {
+                context: journal.context,
+                target: vote.target(),
+            })
+            .unwrap();
+        journal.append(apply_vote).unwrap();
+        journal
+            .append(JournalEventV1::AdvancePhaseBatchCursor {
+                context: journal.context,
+                outer: own,
+                index: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            journal.append(expose.clone()).unwrap_err(),
+            JournalErrorV1::OutboundPhaseNotLocked(ack)
+        );
+        let apply_ack = JournalEventV1::ApplyPhaseStatement {
+            context: journal.context,
+            outer: own,
+            index: 1,
+            sender: 1,
+            statement: ack,
+        };
+        assert_eq!(
+            journal.append(apply_ack.clone()).unwrap_err(),
+            JournalErrorV1::OwnPhaseWithoutDurableLock(ack)
+        );
+        journal
+            .append(JournalEventV1::LockAck {
+                context: journal.context,
+                target: ack.target(),
+            })
+            .unwrap();
+        journal.append(apply_ack).unwrap();
+        journal
+            .append(JournalEventV1::AdvancePhaseBatchCursor {
+                context: journal.context,
+                outer: own,
+                index: 1,
+            })
+            .unwrap();
+        journal.append(expose).unwrap();
+        assert!(journal.snapshot().outbound(own).unwrap().exposed());
+        assert_eq!(journal.snapshot().phase_batch_cursor(own), 2);
     }
 
     #[test]

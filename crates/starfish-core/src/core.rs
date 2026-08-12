@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{mem, sync::Arc};
+use std::{fmt, mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
@@ -31,8 +31,10 @@ use crate::{
     encoder::ShardEncoder,
     metrics::{Metrics, UtilizationTimerVecExt},
     runtime::timestamp_utc,
+    starfish_rbc_dag::ConsensusVertexReference,
+    starfish_rbc_dag_shadow::RbcDagFrontierRecoveryCursorV1,
     state::RecoveredState,
-    store::Store,
+    store::{RbcDagFrontierReceipt, Store},
     types::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
         BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
@@ -76,6 +78,103 @@ pub struct Core<H: BlockHandler> {
     /// descriptors only. Their dirty/clean DAG is no longer a consensus or
     /// output authority, so raw threshold-clock progress may produce them.
     rbc_dag_application_production: bool,
+    /// Latest atomically persisted authoritative carrier-frontier cursor.
+    /// Loaded before the shadow actor opens and advanced only after the
+    /// commit/receipt storage batch succeeds.
+    latest_rbc_dag_frontier_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
+}
+
+#[derive(Debug)]
+pub(crate) enum RbcDagFrontierApplyError {
+    StaleSequence {
+        current_sequence: RoundNumber,
+        actual_sequence: RoundNumber,
+    },
+    SequenceGap {
+        expected_sequence: RoundNumber,
+        actual_sequence: RoundNumber,
+    },
+    ConflictingAnchor {
+        output_sequence: RoundNumber,
+        expected: BlockReference,
+        actual: BlockReference,
+    },
+    ConflictingApplications {
+        output_sequence: RoundNumber,
+        anchor: BlockReference,
+        expected: Vec<BlockReference>,
+        actual: Vec<BlockReference>,
+    },
+    ReusedAnchor {
+        anchor: BlockReference,
+        previous_sequence: RoundNumber,
+        actual_sequence: RoundNumber,
+    },
+    MissingApplication(BlockReference),
+    UnavailableApplication(BlockReference),
+}
+
+impl fmt::Display for RbcDagFrontierApplyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StaleSequence {
+                current_sequence,
+                actual_sequence,
+            } => write!(
+                formatter,
+                "stale RBC-DAG frontier output sequence {actual_sequence}; durable sequence is {current_sequence}"
+            ),
+            Self::SequenceGap {
+                expected_sequence,
+                actual_sequence,
+            } => write!(
+                formatter,
+                "RBC-DAG frontier output sequence gap: expected {expected_sequence}, got {actual_sequence}"
+            ),
+            Self::ConflictingAnchor {
+                output_sequence,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "conflicting RBC-DAG frontier anchor at output sequence {output_sequence}: durable {expected}, actual {actual}"
+            ),
+            Self::ReusedAnchor {
+                anchor,
+                previous_sequence,
+                actual_sequence,
+            } => write!(
+                formatter,
+                "RBC-DAG carrier anchor {anchor} was reused at output sequence {actual_sequence} after durable sequence {previous_sequence}"
+            ),
+            Self::ConflictingApplications {
+                output_sequence,
+                anchor,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "conflicting RBC-DAG frontier applications at output sequence {output_sequence} for anchor {anchor}: durable {expected:?}, actual {actual:?}"
+            ),
+            Self::MissingApplication(reference) => {
+                write!(
+                    formatter,
+                    "committed RBC-DAG application {reference} is missing"
+                )
+            }
+            Self::UnavailableApplication(reference) => write!(
+                formatter,
+                "committed RBC-DAG application {reference} is unavailable"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RbcDagFrontierApplyError {}
+
+pub(crate) enum RbcDagFrontierApplyOutcome {
+    Applied(Vec<CommittedSubDag>),
+    ExactReplay,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +202,40 @@ impl<H: BlockHandler> Core<H> {
             committed_blocks,
             committed_leaders_count,
         } = recovered;
+
+        let latest_rbc_dag_frontier_receipt = store
+            .read_latest_rbc_dag_frontier_receipt()
+            .expect("Failed to read the latest RBC-DAG frontier receipt");
+        let latest_rbc_dag_frontier_cursor = latest_rbc_dag_frontier_receipt.map(|receipt| {
+            assert!(
+                dag_state.consensus_protocol.is_starfish_rbc(),
+                "an RBC-DAG frontier receipt cannot be recovered under a non-RBC protocol"
+            );
+            dag_state.restore_rbc_dag_committed_rounds(&receipt.committed_rounds);
+            let application_references = store
+                .get_commit(&receipt.carrier_anchor)
+                .expect("Failed to read the RBC-DAG frontier application commit")
+                .map(|commit| {
+                    assert!(
+                        !commit.sub_dag.is_empty(),
+                        "a present RBC-DAG frontier application commit must not be empty; control-only frontiers are represented by absence"
+                    );
+                    assert_eq!(
+                        commit.leader, receipt.carrier_anchor,
+                        "RBC-DAG frontier application commit must be keyed by its carrier anchor"
+                    );
+                    assert_eq!(
+                        commit.committed_rounds, receipt.committed_rounds,
+                        "RBC-DAG frontier application commit watermarks must match its atomic receipt"
+                    );
+                    commit.sub_dag
+                })
+                .unwrap_or_default();
+            RbcDagFrontierRecoveryCursorV1 {
+                receipt,
+                application_references,
+            }
+        });
 
         // Use genesis blocks cached in DagState (already inserted into DAG on
         // clean start by DagState::open()). Threshold clock is also initialized
@@ -204,6 +337,7 @@ impl<H: BlockHandler> Core<H> {
             committer,
             encoder,
             rbc_dag_application_production: false,
+            latest_rbc_dag_frontier_cursor,
         };
 
         if !unprocessed_blocks.is_empty() {
@@ -1562,29 +1696,128 @@ impl<H: BlockHandler> Core<H> {
         self.flush_pending_clean_refs();
     }
 
-    /// Persist an M7 frontier delta without feeding the obsolete Starfish
-    /// clean-DAG commit/proposal watermarks back into block production.
-    pub fn handle_rbc_dag_committed_delta(&mut self, committed: Vec<CommittedSubDag>) {
+    /// Atomically persist one authoritative RBC-DAG frontier and its optional
+    /// application commit. Classification against the in-memory durable
+    /// cursor happens before application materialization or observer effects.
+    pub(crate) fn handle_rbc_dag_committed_delta(
+        &mut self,
+        output_sequence: RoundNumber,
+        anchor: ConsensusVertexReference,
+        applications: &[BlockReference],
+    ) -> Result<RbcDagFrontierApplyOutcome, RbcDagFrontierApplyError> {
         let _timer = self
             .metrics
             .utilization_timer
             .utilization_timer("Core::handle_rbc_dag_committed_delta");
-        let mut commit_data = Vec::with_capacity(committed.len());
-        for commit in &committed {
-            self.dag_state.update_last_committed_rounds(commit);
-            commit_data.push(CommitData::new(
-                commit,
-                self.dag_state.last_committed_rounds(),
-            ));
+
+        if let Some(current) = &self.latest_rbc_dag_frontier_cursor {
+            if output_sequence < current.receipt.output_sequence {
+                return Err(RbcDagFrontierApplyError::StaleSequence {
+                    current_sequence: current.receipt.output_sequence,
+                    actual_sequence: output_sequence,
+                });
+            }
+            if output_sequence == current.receipt.output_sequence {
+                if anchor.carrier() == current.receipt.carrier_anchor {
+                    if applications == current.application_references {
+                        return Ok(RbcDagFrontierApplyOutcome::ExactReplay);
+                    }
+                    return Err(RbcDagFrontierApplyError::ConflictingApplications {
+                        output_sequence,
+                        anchor: anchor.carrier(),
+                        expected: current.application_references.clone(),
+                        actual: applications.to_vec(),
+                    });
+                }
+                return Err(RbcDagFrontierApplyError::ConflictingAnchor {
+                    output_sequence,
+                    expected: current.receipt.carrier_anchor,
+                    actual: anchor.carrier(),
+                });
+            }
+            if anchor.carrier() == current.receipt.carrier_anchor {
+                return Err(RbcDagFrontierApplyError::ReusedAnchor {
+                    anchor: anchor.carrier(),
+                    previous_sequence: current.receipt.output_sequence,
+                    actual_sequence: output_sequence,
+                });
+            }
+            let expected_sequence = current.receipt.output_sequence.checked_add(1).ok_or(
+                RbcDagFrontierApplyError::SequenceGap {
+                    expected_sequence: RoundNumber::MAX,
+                    actual_sequence: output_sequence,
+                },
+            )?;
+            if output_sequence != expected_sequence {
+                return Err(RbcDagFrontierApplyError::SequenceGap {
+                    expected_sequence,
+                    actual_sequence: output_sequence,
+                });
+            }
+        } else if output_sequence != 1 {
+            return Err(RbcDagFrontierApplyError::SequenceGap {
+                expected_sequence: 1,
+                actual_sequence: output_sequence,
+            });
         }
+
+        let blocks = applications
+            .iter()
+            .map(|reference| {
+                let block = self
+                    .dag_state
+                    .get_storage_block(*reference)
+                    .ok_or(RbcDagFrontierApplyError::MissingApplication(*reference))?;
+                if !self.dag_state.is_data_available(reference) {
+                    return Err(RbcDagFrontierApplyError::UnavailableApplication(*reference));
+                }
+                Ok(block)
+            })
+            .collect::<Result<Vec<_>, RbcDagFrontierApplyError>>()?;
+        let committed = CommittedSubDag::new(anchor.carrier(), blocks);
+        self.dag_state.update_last_committed_rounds(&committed);
+        let committed_rounds = self.dag_state.last_committed_rounds();
+        let receipt = RbcDagFrontierReceipt {
+            carrier_anchor: anchor.carrier(),
+            output_sequence,
+            committed_rounds: committed_rounds.clone(),
+        };
+        // A control-only frontier has no application CommitData, but the
+        // receipt still advances atomically through the same storage API.
+        let commit_data = (!applications.is_empty())
+            .then(|| CommitData::new(&committed, committed_rounds))
+            .into_iter()
+            .collect();
         let store_start = std::time::Instant::now();
         self.store
-            .store_commits(commit_data)
+            .store_commits_with_rbc_dag_receipt(commit_data, receipt.clone())
             .expect("Store RBC-DAG frontier commits should not fail");
         self.metrics
             .store_commits_latency_us
             .inc_by(store_start.elapsed().as_micros() as u64);
         self.metrics.store_commits_count.inc();
+        self.latest_rbc_dag_frontier_cursor = Some(RbcDagFrontierRecoveryCursorV1 {
+            receipt,
+            application_references: applications.to_vec(),
+        });
+        Ok(RbcDagFrontierApplyOutcome::Applied(vec![committed]))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn latest_rbc_dag_frontier_receipt(&self) -> Option<RbcDagFrontierReceipt> {
+        self.latest_rbc_dag_frontier_cursor
+            .as_ref()
+            .map(|cursor| cursor.receipt.clone())
+    }
+
+    /// Return the exact runtime recovery cursor before Core is moved into its
+    /// dispatcher. The durable receipt intentionally remains compact; exact
+    /// application references are reconstructed from the atomic CommitData
+    /// stored under the carrier anchor.
+    pub(crate) fn rbc_dag_frontier_recovery_cursor(
+        &self,
+    ) -> Option<RbcDagFrontierRecoveryCursorV1> {
+        self.latest_rbc_dag_frontier_cursor.clone()
     }
 
     pub(crate) fn enable_rbc_dag_application_production(&mut self) {
@@ -1597,16 +1830,41 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn write_commits(&mut self, _commits: &[CommitData]) {}
 
-    pub fn take_recovered_committed(&mut self) -> (AHashSet<BlockReference>, usize) {
-        let committed_blocks = self
+    pub fn take_recovered_committed(
+        &mut self,
+        rbc_dag_frontier_authority: bool,
+    ) -> (AHashSet<BlockReference>, usize) {
+        let legacy_committed_blocks = self
             .recovered_committed_blocks
             .take()
             .expect("take_recovered_committed called twice");
-        let committed_leaders_count = self
+        let legacy_committed_leaders_count = self
             .recovered_committed_leaders_count
             .take()
             .expect("take_recovered_committed called twice");
-        (committed_blocks, committed_leaders_count)
+        if !rbc_dag_frontier_authority {
+            return (legacy_committed_blocks, legacy_committed_leaders_count);
+        }
+
+        assert!(
+            self.dag_state.consensus_protocol.is_starfish_rbc(),
+            "embedded RBC-DAG observer recovery requires the Starfish-RBC protocol"
+        );
+        // Carrier-keyed CommitData is intentionally not discoverable through
+        // DagState's Core-block scan, and the latest application CommitData
+        // contains only one frontier delta. Exactly-once is owned by the
+        // durable receipt plus the authoritative WAL; the observer needs only
+        // its monotone output count in this mode and never runs the legacy
+        // Linearizer.
+        let committed_frontier_count = self
+            .latest_rbc_dag_frontier_cursor
+            .as_ref()
+            .map(|cursor| {
+                usize::try_from(cursor.receipt.output_sequence)
+                    .expect("RBC-DAG output sequence must fit usize")
+            })
+            .unwrap_or_default();
+        (AHashSet::new(), committed_frontier_count)
     }
 
     pub fn dag_state(&self) -> &DagState {
@@ -1666,10 +1924,13 @@ mod tests {
         bls_certificate_aggregator::CertificateEvent,
         config::{DisseminationMode, NodePrivateConfig, StorageBackend},
         crypto::{self, BlsSigner, Signer},
-        dag_state::{DagState, DataSource},
+        dag_state::{CommitData, DagState, DataSource},
         data::Data,
         metrics::Metrics,
-        types::{AuthoritySet, BlockReference, BlsAggregateCertificate, VerifiedBlock},
+        types::{
+            AuthoritySet, BlockReference, BlsAggregateCertificate, Transaction, TransactionData,
+            VerifiedBlock,
+        },
     };
 
     struct NoopBlockHandler;
@@ -1768,6 +2029,14 @@ mod tests {
         );
         block.preserialize();
         Data::new(block)
+    }
+
+    fn rbc_application_is_materialized<H: BlockHandler>(
+        core: &Core<H>,
+        reference: BlockReference,
+    ) -> bool {
+        core.dag_state().get_storage_block(reference).is_some()
+            && core.dag_state().is_data_available(&reference)
     }
 
     fn make_test_round_certificate(
@@ -1968,6 +2237,441 @@ mod tests {
                 .block_references()
                 .contains(own_round_one.reference())
         );
+    }
+
+    #[test]
+    fn rbc_dag_control_frontier_cursor_reopens_and_binds_exact_empty_output() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let open = || {
+            DagState::open(
+                authority,
+                dir.path(),
+                metrics.clone(),
+                committee.clone(),
+                "honest".to_string(),
+                "starfish-rbc".to_string(),
+                &StorageBackend::Rocksdb,
+                false,
+                DisseminationMode::ProtocolDefault,
+            )
+        };
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            NodePrivateConfig::new_for_tests(authority),
+            metrics.clone(),
+            open(),
+            None,
+        );
+        let anchor = ConsensusVertexReference::new(BlockReference::new_test(2, 20), 7);
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[]),
+            Ok(RbcDagFrontierApplyOutcome::Applied(_))
+        ));
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[]),
+            Ok(RbcDagFrontierApplyOutcome::ExactReplay)
+        ));
+        let unexpected = BlockReference::new_test(1, 3);
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[unexpected]),
+            Err(RbcDagFrontierApplyError::ConflictingApplications {
+                output_sequence: 1,
+                expected,
+                actual,
+                ..
+            }) if expected.is_empty() && actual == vec![unexpected]
+        ));
+        drop(core);
+
+        let (mut reopened, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            NodePrivateConfig::new_for_tests(authority),
+            metrics.clone(),
+            open(),
+            None,
+        );
+        let cursor = reopened
+            .rbc_dag_frontier_recovery_cursor()
+            .expect("control-only receipt must reopen as an exact cursor");
+        assert_eq!(cursor.receipt.carrier_anchor, anchor.carrier());
+        assert_eq!(cursor.receipt.output_sequence, 1);
+        assert!(cursor.application_references.is_empty());
+        assert!(matches!(
+            reopened.handle_rbc_dag_committed_delta(1, anchor, &[]),
+            Ok(RbcDagFrontierApplyOutcome::ExactReplay)
+        ));
+    }
+
+    #[test]
+    fn rbc_dag_application_frontier_cursor_reconstructs_exact_references() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let open = || {
+            DagState::open(
+                authority,
+                dir.path(),
+                metrics.clone(),
+                committee.clone(),
+                "honest".to_string(),
+                "starfish-rbc".to_string(),
+                &StorageBackend::Rocksdb,
+                false,
+                DisseminationMode::ProtocolDefault,
+            )
+        };
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            NodePrivateConfig::new_for_tests(authority),
+            metrics.clone(),
+            open(),
+            None,
+        );
+        let application = make_starfish_rbc_round_1_block(&committee, 1);
+        let application_reference = *application.reference();
+        core.add_blocks(vec![(application, None)], DataSource::BlockBundleStreaming);
+        assert!(core.dag_state().is_data_available(&application_reference));
+        let anchor = ConsensusVertexReference::new(BlockReference::new_test(3, 30), 9);
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[application_reference]),
+            Ok(RbcDagFrontierApplyOutcome::Applied(_))
+        ));
+        drop(core);
+
+        let (mut reopened, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            NodePrivateConfig::new_for_tests(authority),
+            metrics.clone(),
+            open(),
+            None,
+        );
+        let cursor = reopened
+            .rbc_dag_frontier_recovery_cursor()
+            .expect("application frontier receipt must reopen with exact references");
+        assert_eq!(cursor.application_references, vec![application_reference]);
+        assert!(matches!(
+            reopened.handle_rbc_dag_committed_delta(1, anchor, &[application_reference]),
+            Ok(RbcDagFrontierApplyOutcome::ExactReplay)
+        ));
+        assert!(matches!(
+            reopened.handle_rbc_dag_committed_delta(1, anchor, &[]),
+            Err(RbcDagFrontierApplyError::ConflictingApplications { .. })
+        ));
+    }
+
+    #[test]
+    fn rbc_dag_frontier_sequence_accepts_regressing_anchor_round_and_rejects_gaps() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee,
+            NodePrivateConfig::new_for_tests(authority),
+            metrics,
+            recovered,
+            None,
+        );
+        let later_certifier = ConsensusVertexReference::new(BlockReference::new_test(2, 50), 8);
+        let older_leader = ConsensusVertexReference::new(BlockReference::new_test(1, 40), 3);
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, later_certifier, &[]),
+            Ok(RbcDagFrontierApplyOutcome::Applied(_))
+        ));
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(3, older_leader, &[]),
+            Err(RbcDagFrontierApplyError::SequenceGap {
+                expected_sequence: 2,
+                actual_sequence: 3
+            })
+        ));
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(2, older_leader, &[]),
+            Ok(RbcDagFrontierApplyOutcome::Applied(_))
+        ));
+        let receipt = core.latest_rbc_dag_frontier_receipt().unwrap();
+        assert_eq!(receipt.output_sequence, 2);
+        assert_eq!(receipt.carrier_anchor, older_leader.carrier());
+        let (legacy_refs, observer_count) = core.take_recovered_committed(true);
+        assert!(legacy_refs.is_empty());
+        assert_eq!(observer_count, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "a present RBC-DAG frontier application commit must not be empty")]
+    fn rbc_dag_frontier_reopen_rejects_present_empty_commit_data() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let anchor = BlockReference::new_test(2, 7);
+        let receipt = RbcDagFrontierReceipt {
+            carrier_anchor: anchor,
+            output_sequence: 1,
+            committed_rounds: vec![0; committee.len()],
+        };
+        recovered
+            .store
+            .store_commits_with_rbc_dag_receipt(Vec::new(), receipt.clone())
+            .unwrap();
+        recovered
+            .store
+            .store_commits(vec![CommitData {
+                leader: anchor,
+                sub_dag: Vec::new(),
+                committed_rounds: receipt.committed_rounds,
+            }])
+            .unwrap();
+
+        let _ = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee,
+            NodePrivateConfig::new_for_tests(authority),
+            metrics,
+            recovered,
+            None,
+        );
+    }
+
+    #[test]
+    fn rbc_dag_frontier_rejects_missing_or_unavailable_applications_without_advancing_receipt() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+        let anchor = ConsensusVertexReference::new(BlockReference::new_test(authority, 1), 1);
+        let missing = BlockReference::new_test(1, 7);
+
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[missing]),
+            Err(RbcDagFrontierApplyError::MissingApplication(reference)) if reference == missing
+        ));
+        assert!(core.latest_rbc_dag_frontier_receipt().is_none());
+
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![9; 64]))];
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let encoded = encoder.encode_transactions(
+            &transactions,
+            committee.info_length(),
+            committee.len() - committee.info_length(),
+        );
+        let mut unavailable = VerifiedBlock::new_starfish_rbc(
+            1,
+            1,
+            committee
+                .authorities()
+                .map(|parent| BlockReference::new_test(parent, 0))
+                .collect(),
+            Vec::new(),
+            1,
+            Vec::new(),
+            Some(encoded),
+        );
+        unavailable.preserialize();
+        let unavailable = Data::new(unavailable);
+        let unavailable_reference = *unavailable.reference();
+        let (processed, missing_parents, processed_references, _) =
+            core.add_headers(vec![unavailable], DataSource::BlockBundleStreamingHeader);
+        assert!(processed);
+        assert!(missing_parents.is_empty());
+        assert!(processed_references.contains(&unavailable_reference));
+        assert!(!core.dag_state().is_data_available(&unavailable_reference));
+
+        assert!(matches!(
+            core.handle_rbc_dag_committed_delta(1, anchor, &[unavailable_reference]),
+            Err(RbcDagFrontierApplyError::UnavailableApplication(reference))
+                if reference == unavailable_reference
+        ));
+        assert!(core.latest_rbc_dag_frontier_receipt().is_none());
+    }
+
+    #[test]
+    fn buffered_payload_materializes_only_after_missing_header_parents_arrive() {
+        let authority = 0;
+        let committee = Committee::new_for_benchmarks(4);
+        let registry = Registry::new();
+        let (metrics, _reporter) = Metrics::new(
+            &registry,
+            Some(committee.as_ref()),
+            Some("starfish-rbc"),
+            None,
+        );
+        let dir = TempDir::new().unwrap();
+        let recovered = DagState::open(
+            authority,
+            dir.path(),
+            metrics.clone(),
+            committee.clone(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+            &StorageBackend::Rocksdb,
+            false,
+            DisseminationMode::ProtocolDefault,
+        );
+        let private_config = NodePrivateConfig::new_for_tests(authority);
+        let (mut core, _) = Core::open(
+            NoopBlockHandler,
+            authority,
+            committee.clone(),
+            private_config,
+            metrics,
+            recovered,
+            None,
+        );
+
+        let parents = [1, 2, 3]
+            .into_iter()
+            .map(|peer| make_starfish_rbc_round_1_block(&committee, peer))
+            .collect::<Vec<_>>();
+        let parent_references = parents
+            .iter()
+            .map(|parent| *parent.reference())
+            .collect::<Vec<_>>();
+        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 64]))];
+        let mut encoder = Encoder::new(2, 4, 2).unwrap();
+        let encoded = encoder.encode_transactions(
+            &transactions,
+            committee.info_length(),
+            committee.len() - committee.info_length(),
+        );
+        let mut child = VerifiedBlock::new_starfish_rbc(
+            1,
+            2,
+            parent_references.clone(),
+            Vec::new(),
+            2,
+            Vec::new(),
+            Some(encoded.clone()),
+        );
+        child.preserialize();
+        let child = Data::new(child);
+        let child_reference = *child.reference();
+
+        let mut transaction_data = TransactionData::new(transactions);
+        transaction_data.preserialize();
+        let (commitment, proof) =
+            crypto::TransactionsCommitment::new_from_encoded_transactions(&encoded, 0);
+        let mut shard_data = ProvableShard::new(encoded[0].clone(), 0, proof, commitment);
+        shard_data.preserialize();
+
+        // Payload-first arrival is buffered because no dependency-closed
+        // DagState block exists. It must not be treated as availability.
+        core.add_transaction_data(
+            vec![ReconstructedTransactionData {
+                block_reference: child_reference,
+                transaction_data,
+                shard_data,
+            }],
+            DataSource::StarfishRbcPayload,
+        );
+        assert_eq!(core.pending_reconstructed_data.len(), 1);
+        assert!(!rbc_application_is_materialized(&core, child_reference));
+
+        let (processed, missing, processed_references, _) =
+            core.add_headers(vec![child], DataSource::BlockBundleStreamingHeader);
+        assert!(!processed);
+        assert!(!missing.is_empty());
+        assert!(!processed_references.contains(&child_reference));
+        assert!(!rbc_application_is_materialized(&core, child_reference));
+
+        // Adding the parents activates the pending child and atomically
+        // attaches the buffered payload. HeaderStaged must use this returned
+        // processed-reference set to emit the delayed availability signal.
+        let (processed, missing, processed_references, _) =
+            core.add_headers(parents, DataSource::BlockBundleStreamingHeader);
+        assert!(processed);
+        assert!(missing.is_empty());
+        assert!(processed_references.contains(&child_reference));
+        assert!(core.pending_reconstructed_data.is_empty());
+        assert!(rbc_application_is_materialized(&core, child_reference));
     }
 
     #[test]

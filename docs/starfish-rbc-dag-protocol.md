@@ -1,27 +1,25 @@
 # Starfish-RBC-DAG protocol design
 
-Status: milestone-seven committed-frontier output prototype; end-to-end safety/liveness proof,
-proof-safe retirement, and full validator recovery remain incomplete
+Status: standalone MAC-vector RBC-DAG prototype with authoritative optimistic delivery and
+committed-frontier output; the end-to-end proof, proof-safe retirement, checkpoint transfer, and
+full validator recovery remain incomplete
 
-The provisional CLI name for the eventual protocol is `starfish-rbc-dag`. That selector is not
-implemented. The staged prototype runs under `starfish-rbc`: direct-header comparison uses
-`--starfish-rbc-dag-shadow`, the independent carrier clock adds
-`--starfish-rbc-dag-autonomous-clock`, and milestone five makes embedded carrier ECHO/READY the
-only application-header certification authority with
-`--starfish-rbc-dag-embedded-rbc-authority`. Direct INIT still transports the application payload,
-but direct ECHO, READY, and delivery are suppressed in that mode. Performance experiments may add
-`--starfish-rbc-dag-shadow-buffered-wal`; that profile is explicitly not crash-safe. Autonomous
-carriers now create durably locked logical consensus vertices and the clean projection produces
-Starfish commit/skip decisions. In embedded-authority mode, committed projected anchors now release
-deterministic exact carrier-frontier deltas and the legacy Starfish committer is disabled. The
-eventual protocol is new, not a transport option or a version-two alias for `starfish-rbc`.
+The provisional CLI name for the eventual protocol is `starfish-rbc-dag`; that selector is not yet
+implemented. The prototype runs under `starfish-rbc`: direct-header comparison uses
+`--starfish-rbc-dag-shadow`, and standalone authority additionally enables
+`--starfish-rbc-dag-autonomous-clock --starfish-rbc-dag-embedded-rbc-authority`. In standalone
+mode the direct Starfish-RBC service is not started. Direct INIT, direct phase messages, direct
+header pull, generic block batches, legacy missing-parent pull, and legacy transaction-data pull
+have no certification, consensus, ordering, or output authority. Canonical application headers are
+inside carriers; optional application bytes use the carrier envelope or the dedicated RBC-DAG
+payload request/response path. Committed projected anchors release cumulative exact
+carrier-frontier deltas, and those deltas are the sole application-ordering/output authority.
 
-The implemented [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains the conservative
-baseline: it sends Bracha INIT/ECHO/READY as direct network messages, advances Starfish only through
-RBC-delivered dependency-closed headers, and sends one initial MAC tag to each recipient. This
-document instead specifies an optimistic carrier DAG that embeds the reliable-broadcast transcript,
-uses a complete committee-sized MAC vector on every MAC-authenticated carrier, and separates fast
-carrier pacing from certified consensus ordering.
+The implemented direct [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains a separate
+historical baseline: it sends INIT/ECHO/READY as direct messages and advances Starfish only through
+its direct delivery path. This document specifies the standalone optimistic carrier DAG, its
+four-phase weighted ECHO/VOTE/ACK/READY broadcast, its complete committee-sized MAC-vector
+sidecar, and the separation between fast carrier pacing and logical consensus ordering.
 
 The two designs may share canonicalization, cryptography, storage, and benchmark code, but they are
 not wire-compatible and do not have the same proof obligations. Nothing in this document changes
@@ -33,9 +31,10 @@ The objective is to recover the pipelining of an uncertified Starfish DAG withou
 optimistically received Byzantine blocks to affect safety:
 
 - a fast physical carrier DAG advances on a quorum of locally authenticated carriers;
-- every application carrier is also the value of a Bracha reliable-broadcast instance;
-- later carriers batch ECHO and READY statements for earlier carriers;
-- only RBC-delivered, data-available information enters the logical consensus projection; and
+- every carrier is the exact value of a weighted reliable-broadcast slot;
+- later carriers batch ECHO, VOTE, ACK, and READY statements for earlier carriers;
+- only authoritatively delivered, data-available exact prefixes enter the logical consensus
+  projection; and
 - committed consensus frontiers eventually order every honest on-prefix application carrier.
 
 The initial research mode sends the complete ordered MAC vector with every carrier. The vector is
@@ -43,50 +42,33 @@ an authentication sidecar and is not part of the carrier digest. Ed25519, ML-DSA
 remain selectable outer-authentication baselines; changing that selector does not change the
 embedded RBC or consensus rules.
 
-This is a proposed composition. The reliable-broadcast thresholds are standard, and the Starfish
-commit rules already exist. Milestone two provides a canonical codec plus deterministic
-carrier/RBC, certified-projection, decision, and crash-journal models. Milestone three adds an
-opt-in persisted shadow actor, full-vector carrier transport, recovery messages, and paired
-direct/shadow delivery observations. Milestone four adds an independently authenticated autonomous
-heartbeat namespace, sequential `Q`-admitted carrier clock, bounded future buffering, exact-slot
-synchronization, and clock-state metrics. Milestone five adds a version-two application carrier
-containing the exact canonical application header, durable application-origin reconciliation,
-immediate application/phase scheduling, and an opt-in authority boundary that prevents direct
-ECHO/READY from certifying a header. Idle control heartbeats use the same resolved leader timeout as
-the Starfish pacemaker (600 ms for Push/Starfish-RBC by default); application carriers and their
-encodable ECHO/READY follow-ups are event-driven and do not wait for that timeout. Milestone six
-adds independently numbered consensus vertices, quorum strong parents, objective Vote/NoVote
-choices, exact contiguous delivery frontiers, durable local consensus locks, and a live committer
-that consumes only RBC-delivered, data-available projected vertices. Milestone seven persists and
-reconstructs the corresponding anchor/frontier state, applies exact closed-prefix deltas, and makes
-those deltas the sole application output authority.
+The implemented composition includes the canonical codec, deterministic four-phase reducer,
+durable proof-critical journal, autonomous carrier clock, exact carrier recovery, optimistic and
+certification latches, consensus projection, and cumulative committed-frontier output. Idle control
+heartbeats use the resolved Starfish leader timeout (600 ms for Push/Starfish-RBC by default), but
+application carriers and encodable phase follow-ups are event-driven. The V4 authoritative mode
+promotes the proved `O`-ECHO predicate to delivery authority; `Q` READY remains a distinct slower
+certification fact rather than a prerequisite for fast projection.
 
-The current authoritative mode changes header certification and application ordering. Direct INIT
-is still the application-payload transport and is not a certification vote. Direct ECHO/READY and
-the legacy Starfish committer cannot certify or output applications in this mode; only the
-carrier-DAG projection's committed frontier deltas can do so.
+Standalone authority is an end-to-end boundary. The direct Starfish-RBC actor is absent, generic
+block dissemination and legacy pull messages are rejected or ignored, and the legacy Starfish
+committer is disabled. Only durably authoritatively delivered carrier content, the typed
+verified-payload ingress, projected consensus decisions, and committed frontier deltas can affect
+application output.
 
-Shadow restart coverage is deliberately scoped to reopening the actor and its WAL: mirror mode
-requires an identical recovered direct-header history, control-only autonomous history reopens
-without direct headers, and autonomous application origins must match recovered direct history.
-Every mode serves byte-identical exact-slot responses. This is not a full validator crash-recovery
-claim. The authoritative direct
-`starfish-rbc` baseline does not yet durably record its remote-slot
-ECHO/READY choices, delivery locks, or retained phase evidence. Restarting that baseline after it
-has proposed a non-genesis block can therefore forget proof-critical choices and leave the newest
-recovered own header dirty. Full validator restart remains fail-stop until those direct-RBC locks
-are persisted and replayed; replaying only the observational shadow WAL cannot repair or safely
-substitute for them.
+Restart coverage is deliberately scoped. The actor WAL replays retained exact content, ordered
+ingress, local ECHO/VOTE/ACK/READY locks, delivery/promise locks, local outbound bytes, consensus
+choices, projection state, and committed frontiers. Exact-slot responses are byte-identical when
+the requested locally authored outbound carrier remains retained. This is not yet a full validator
+crash-recovery, checkpoint-transfer, proof-safe retirement, or arbitrary late-node catch-up claim.
 
-That isolation is logical, not physical: shadow frames share the validator's existing TCP
-connections, outbound queues, bandwidth, and CPU process with direct RBC, so enabling the shadow
-can perturb authoritative timing even though no shadow result is consumed by consensus. Version
-one has no feature handshake. Every validator in a shadow run must use a binary that understands
-the append-only shadow wire variants and the flag must be deployed committee-wide; an older peer
-will reject an unknown bincode variant and may close the shared connection. Mixed-version or
-partially enabled runs are not valid comparisons. Mirror and autonomous carriers derive distinct
-authentication protocol instances so they cannot cross-admit, but this fail-closed boundary is not
-a substitute for capability negotiation.
+The carrier plane shares the validator's existing TCP connections, outbound queues, bandwidth, and
+CPU process. There is no feature handshake, so every validator in a run must understand the
+append-only carrier messages and enable a homogeneous configuration. Mirror and autonomous modes
+derive distinct authentication protocol instances. The authoritative durable path additionally
+uses the V4 autonomous WAL filename and `SRD5` raw-record magic, preventing older promise semantics
+or record layouts from being silently replayed as the current protocol. These fail-closed
+namespaces are not a substitute for deployment negotiation.
 
 Shadow shutdown is bounded so an observational WAL failure cannot indefinitely block validator
 shutdown. If that timeout fires, the blocking worker may still hold the shadow WAL's single-writer
@@ -104,19 +86,17 @@ separately and makes no crash-safety claim. This removes the known persistence o
 without changing the protocol reducer. The runtime also uses a fixed unsolicited-retention window
 only as a benchmark resource guard; that window is not a safe asynchronous pruning rule. Until the
 composition and resource bounds are completed, `starfish-rbc-dag` remains an experimental
-shadow/reference implementation rather than a proven signature-free Starfish variant.
+reference implementation rather than a proven signature-free Starfish variant.
 
-The milestone-two model accepts `DataAvailable` as a trusted input from the existing verified
-Reed-Solomon/reconstruction layer. It models the resulting prefix and ordering transitions, but not
-payload reconstruction or the runtime transition from delivered acknowledgments to that input.
-
-Transaction bytes remain outside header RBC. The existing Reed-Solomon dissemination,
-acknowledgment, reconstruction, and transaction-commitment checks remain responsible for data
-availability.
+Application bytes remain outside canonical carrier identity. The optional proactive bytes and
+dedicated payload responses are untrusted transport until the sole verifier checks them against the
+canonical application header and transaction commitment. The actor receives `DataAvailable` only
+after Core has materialized the concrete block and its existing availability predicate succeeds;
+neither carrier delivery nor a raw payload response may bypass that application DA gate.
 
 ## 2. Model and notation
 
-Version one assumes:
+The current prototype assumes:
 
 - one static, ordered, stake-weighted committee for a run;
 - Byzantine stake strictly below one third of total stake;
@@ -126,22 +106,36 @@ Version one assumes:
 - no committee reconfiguration; and
 - no state retirement until a safe recovery watermark is proved.
 
-For total committee stake `W`, use the repository's integer thresholds:
+For one target slot, let `W` be total committee stake and `a` the target author's stake. The
+implementation derives all weighted thresholds with checked integer arithmetic:
 
 ```text
-Q = floor(2W / 3) + 1
-V = floor(W / 3) + 1
+F = floor((W - 1) / 3)       maximum Byzantine stake under faults < W/3
+V = F + 1                    READY validity/amplification threshold
+Q = W - F                    READY certification and carrier quorum threshold
+
+U = W - a                    stake outside the target author
+b = F - a                    residual Byzantine non-author stake, when a <= F
+M = floor(U / 2) + 1         strict non-author majority
+C = floor((U + b) / 2) + 1  convergence threshold
+O = M + b                    authoritative optimistic ECHO threshold
 ```
 
-For equal stake and `n = 3f + 1`, these are `Q = 2f + 1` and `V = f + 1`.
+`M`, `C`, and `O` apply when `a <= F`, so the target author may be Byzantine. ECHO, VOTE, and ACK
+stake exclude that author. If `a > F`, the global fault bound makes the target author honest; the
+receiver-specific authenticator on exact content is then an immediate authoritative-delivery
+predicate, and the locally fixed high-stake author seeds READY for the independent certificate
+path. READY always counts the whole committee. For equal stake and `n = 3f + 1`, `Q = 2f + 1` and
+`V = f + 1`.
 
 Two independent round numbers are used:
 
 - `carrier_round` belongs to the fast physical DAG and advances from authenticated admission;
-- `consensus_round` belongs to the certified logical Starfish projection.
+- `consensus_round` belongs to the authoritative logical Starfish projection.
 
 There is no fixed mapping between them. Carrier rounds may run ahead while a consensus vertex is
-waiting for RBC delivery, data availability, a leader decision, or certified strong parents.
+waiting for authoritative carrier delivery, application data availability, a leader decision, or
+eligible strong parents.
 
 ## 3. One physical DAG, two logical projections
 
@@ -153,24 +147,26 @@ The same stored objects have two disjoint interpretations:
 1. **Optimistic carrier projection.** Authenticated carriers and their weak parent references pace
    carrier creation and transport RBC statements. This projection is allowed to differ temporarily
    between honest validators.
-2. **Certified consensus projection.** Eligible consensus vertices, immutable strong parents, and
-   certified delivery frontiers drive Starfish voting, certification, skip/commit decisions, and
-   linearization. Honest validators eventually agree on this projection.
+2. **Authoritative consensus projection.** Authoritatively delivered and data-available consensus
+   vertices, immutable strong parents, and exact delivery frontiers drive Starfish voting,
+   certification, skip/commit decisions, and linearization. The `O` fast-delivery rule may admit a
+   vertex before its independent `Q`-READY certificate; honest validators eventually agree on the
+   safe projection.
 
 Weak carrier edges never become strong/order edges, even if their targets later deliver. A node
 must not construct its own filtered consensus parent set from an optimistic carrier after the fact:
 that would make the authenticated content have different consensus meaning at different nodes.
 
 This separation prevents a Byzantine carrier from poisoning an honest carrier. A quorum-sized weak
-parent set can contain up to `f` selectively disseminated or invented Byzantine references. Waiting
-for all such references to become RBC-delivered would make the honest child permanently unusable.
+parent set can contain selectively disseminated or invented Byzantine references. Waiting for all
+such references to become authoritatively delivered would make the honest child permanently unusable.
 Weak edges are therefore permanently nonblocking and nonordering. Only the explicitly encoded
-strong parents and certified frontier constrain consensus.
+strong parents and the authoritative exact frontier constrain consensus.
 
 ## 4. Canonical objects
 
-The milestone-two codec implements the following logical types. Field widths, enum codes, maximum
-lengths, and golden bytes are frozen before runtime integration.
+The canonical codec implements the following logical types. Field widths, enum codes, maximum
+lengths, and golden bytes are part of the implemented runtime contract.
 
 ```rust
 struct CarrierHeaderV1 {
@@ -182,6 +178,7 @@ struct CarrierHeaderV1 {
     weak_parents: Vec<BlockReference>,
 
     transactions_commitment: TransactionsCommitment,
+    application_header: Option<RbcCanonicalHeader>,
     data_acknowledgments: Vec<BlockReference>,
     phase_batch: Vec<RbcPhaseStatementV1>,
     consensus_vertex: Option<ConsensusVertexV1>,
@@ -191,6 +188,8 @@ struct CarrierHeaderV1 {
 enum RbcPhaseStatementV1 {
     Echo { target: BlockReference },
     Ready { target: BlockReference },
+    Vote { target: BlockReference },
+    Ack { target: BlockReference },
 }
 
 struct ConsensusVertexV1 {
@@ -212,8 +211,10 @@ enum LeaderChoiceV1 {
 ```
 
 The author of an embedded phase statement or consensus vertex is the author of its enclosing
-carrier. An outer authenticator therefore authenticates the whole batch without a separate tag or
-signature per statement.
+carrier. An outer authenticator therefore authenticates the ordered batch without a separate tag
+or signature per statement. `application_header = None` is a control-only V1 carrier;
+`Some(exact_header)` selects the V2 identity/wire grammar and binds the complete canonical
+application header into the carrier digest.
 
 For non-genesis carrier round `r`:
 
@@ -234,17 +235,16 @@ virtual. Every embedded consensus vertex has a positive consensus round and an e
 choice. These conventions avoid making genesis a second, partially authenticated wire format.
 
 Weak references are syntax and pacing declarations, not availability assertions. Their target
-headers need not be present to authenticate, admit, process, or RBC-deliver the enclosing carrier.
+headers need not be present to authenticate, admit, process, or authoritatively deliver the
+enclosing carrier.
 
 Acknowledgments have one canonical logical order: first the unique maximal suffix shared with
 `[own_prev] || weak_parents`, then all remaining acknowledgments in their original relative order.
 The content digest commits to this expanded, suffix-first sequence, while the wire codec stores the
 shared suffix as an intersection index and retains the order-significant extras. Non-canonical wire
-aliases and duplicate acknowledgments are rejected. An honest author creates an acknowledgment
-only after the exact target is locally RBC-delivered and its transaction data reconstructs to the
-committed root. The acknowledgment becomes usable as data-availability evidence only after its
-enclosing carrier is also locally RBC-delivered; an optimistically admitted Byzantine carrier
-cannot create inconsistent availability facts at different validators.
+aliases and duplicate acknowledgments are rejected. The current standalone runtime emits this
+field empty. In particular, a carrier acknowledgment is not an application-DA oracle and cannot
+bypass the concrete Core gate described below.
 
 `delivery_frontier` has exactly one indexed entry per committee authority. `None` denotes that
 authority's fixed genesis/empty prefix. A `Some(reference)` entry must name the same authority as
@@ -269,24 +269,24 @@ phase batch and optional consensus vertex. It excludes:
 - recovery or transport metadata.
 
 The byte grammar uses a one-byte format version, fixed field markers, big-endian fixed-width
-integers, and explicit vector lengths. It does not add a `starfish:block-ref:v2` string to the block
-identity. The format byte and unambiguous grammar distinguish this carrier layout; changing the
-layout requires a new version and new golden vectors. The canonical identity codec is handwritten;
+integers, and explicit vector lengths. It does not add a mutable string domain to the block
+identity. Control-only carriers retain the frozen V1 content/wire versions (`01`/`81`); a carrier
+with an exact application header uses V2 (`02`/`82`). The canonical identity codec is handwritten;
 serde or bincode framing is never hashed.
 
-Milestone two freezes the version-one identity grammar as follows. `Ref` is
-`author:u16 || carrier_round:u32 || digest:[u8;32]`; every integer is big-endian and every vector
-count is `u16`.
+`Ref` is `author:u16 || carrier_round:u32 || digest:[u8;32]`; every integer is big-endian and every
+vector count is `u16`. The expanded identity grammar is:
 
 ```text
-00 01
+00 version                            // 01 control-only, 02 with application header
 01 author:u16
 02 carrier_round:u32
 03 own_prev:Ref
 04 weak_count:u16 weak:Ref[]
 05 transactions_commitment:[u8;32]
+0A canonical_application_header      // present exactly for version 02
 06 acknowledgment_count:u16 expanded_acknowledgments:Ref[]
-07 phase_count:u16 (phase:u8 target:Ref)[]       // ECHO=0, READY=1
+07 phase_count:u16 (phase:u8 target:Ref)[]       // ECHO=0, READY=1, VOTE=2, ACK=3
 08 consensus_present:u8 [ConsensusVertexV1]
 09 creation_time_ns:u64
 ```
@@ -297,13 +297,13 @@ frontier entries use `0=None` and `1=Some(Ref)`; leader choices use `1=Vote` and
 reserved for virtual genesis and is rejected on the wire). The canonical transport codec replaces
 the expanded acknowledgment field with `intersection_start:u16 || extra_count:u16 || extras`, where
 the intersection is the unique maximal suffix of `[own_prev] || weak_parents`. Decoding expands and
-recompresses this field and rejects aliases. To keep the two byte grammars self-describing, this
-compressed transport form starts with `00 81`; only expanded identity content starts with `00 01`.
+recompresses this field and rejects aliases. The compressed transport versions set the high bit:
+`81` for control-only V1 and `82` for application-bearing V2.
 
-Version one caps canonical carrier content at 4 MiB, weak and strong parents at the committee size,
+The codec caps canonical carrier content at 4 MiB, weak and strong parents at the committee size,
 the frontier at exactly the committee size when projected, and encoded phase batches at
-`min(4n, 2048)`. The `4n` bound gives two times the expected `2n` steady-state phase arrival rate;
-the scheduler still needs the fair-prefix and active-window rules described in Section 8.3.
+`min(6n, 2048)`. Six entries per authority leave bounded spillover above the four-phase steady-state
+arrival rate; the scheduler limitations are described in Section 8.3.
 
 Consensus vertices are referenced by their exact enclosing `BlockReference` plus their declared
 `consensus_round`. Because there is at most one consensus vertex per carrier, that pair identifies
@@ -331,7 +331,7 @@ In MAC mode, author `A` computes entry `q` for recipient `Q_q` over a fixed-widt
 binds at least:
 
 ```text
-STARFISH_RBC_DAG_V1
+STARFISH_RBC_DAG_V2
 carrier-authentication kind and scheme
 protocol_instance
 committee_id
@@ -341,9 +341,9 @@ carrier_round
 canonical carrier content digest
 ```
 
-The full vector accompanies every normally disseminated MAC carrier in version one, including
-relayed carriers. A receiver verifies only the entry at its own committee index. It neither verifies
-nor vouches for the remaining entries.
+The full vector accompanies every normally disseminated MAC carrier in the current prototype,
+including relayed carriers. A receiver verifies only the entry at its own committee index. It
+neither verifies nor vouches for the remaining entries.
 
 A carrier received directly from its author and the same carrier received through a relay are both
 authentication-eligible when the local entry verifies. This is receiver-specific transferable
@@ -353,13 +353,14 @@ signature and provides no non-repudiation.
 The vector is deliberately not an RBC value and has no consistency invariant. A Byzantine author
 may attach different vectors to the same content reference, including a vector with a valid tag for
 one recipient and garbage for another. Correctness therefore depends only on the local entry and on
-the embedded Bracha protocol, never on agreement about the vector bytes.
+the embedded four-phase protocol, never on agreement about the vector bytes.
 
 Each node persists one exact vector variant with its carrier for restart and relay. The preference
 order is locally generated, directly author-received, then first relayed variant with a valid local
-entry. Version one does not merge unverified entries from different vectors. Header recovery after
-authenticated quorum phase evidence may return canonical content without a vector; that recovery
-can unblock RBC delivery but does not create optimistic carrier admission.
+entry. The implementation does not merge unverified entries from different vectors. Exact carrier
+recovery after phase evidence may return canonical content without a vector; that recovery can
+unblock phase progress, authoritative delivery, and READY certification, but it does not create
+authenticated carrier admission or fast-clock stake.
 
 Public-signature modes use the same context-bound carrier statement without a recipient field and
 the same embedded RBC/consensus logic. They exist for controlled performance comparison, not as
@@ -379,14 +380,23 @@ Authenticated
 CarrierAdmitted
     Candidate && Authenticated && accepted by the carrier admission window
 
-Delivered
-    local Bracha instance reached Q READY and pinned matching canonical content
+AuthoritativeDelivered
+    exact content is locally fixed, authenticated from a necessarily honest author, supported by
+    O author-excluding ECHO stake, or certified by Q READY
+
+ReadyCertified
+    Q READY stake names the exact retained content; recorded independently even if fast delivery
+    happened earlier
+
+DataAvailable
+    control-only carrier, or Core has materialized the exact application block and verified its
+    committed payload
 
 PrefixClosed
-    Delivered && DataAvailable && exact own_prev prefix is closed
+    AuthoritativeDelivered && DataAvailable && exact own_prev prefix is closed
 
 VertexProjected (orthogonal to the carrier lifecycle)
-    this carrier's optional consensus vertex is eligible in the certified projection
+    this carrier's optional consensus vertex is eligible in the authoritative projection
 
 Included
     a committed Starfish anchor frontier names this carrier in its deterministic delta
@@ -395,9 +405,11 @@ Ordered
     the complete included delta is available and the carrier has been deterministically output
 ```
 
-`Candidate` alone permits bounded staging and digest-based recovery. `CarrierAdmitted` permits
-immediate phase-batch processing and fast-pacemaker counting. `Delivered` permits phase replay even
-at a node whose author MAC entry was poisoned. `PrefixClosed` permits frontier inclusion.
+`Candidate` alone permits bounded staging and exact-reference recovery. `CarrierAdmitted` permits
+immediate phase-batch processing and fast-pacemaker counting. `AuthoritativeDelivered` permits
+phase replay even at a node whose author MAC entry was poisoned. `ReadyCertified` is useful audit
+and fallback evidence but is not a second output gate after a valid fast delivery.
+`PrefixClosed` permits frontier inclusion.
 `VertexProjected` alone permits the optional vertex to supply Starfish
 vote/certifier/leader evidence. It is not a later state of every carrier: a carrier with no eligible
 optional vertex may still become prefix-closed, included by another anchor's frontier, and ordered.
@@ -409,17 +421,17 @@ unauthenticated candidate advance the fast clock.
 | Consumer | Required local authority |
 |---|---|
 | Header retention/recovery | `Candidate` |
-| Process embedded RBC statements | `CarrierAdmitted`, or `Delivered` for replay |
+| Process embedded RBC statements | `CarrierAdmitted`, or `AuthoritativeDelivered` for replay |
 | Fast carrier clock | `CarrierAdmitted` |
-| Transaction/shard synchronization | `Candidate` |
-| Count a data-availability acknowledgment | `Delivered` enclosing carrier |
+| Exact carrier recovery | requested `Candidate` whose bytes recompute the target reference |
+| Accept application payload | carrier-authorized header plus commitment-verified bytes |
+| Application data-availability fact | concrete, data-available Core block only |
 | Delivery frontier | `PrefixClosed` target carrier |
 | Starfish QC, skip, and anchor commit | `VertexProjected` consensus vertex |
-| Application payload output | `Included` delta, with every member delivered/data-available |
+| Application payload output | cumulative `Included` delta, with every member authoritatively delivered and application-data-available |
 
-The initial implementation should keep fast-pacemaker counting exactly at `CarrierAdmitted`; using
-`Delivered` as an additional stronger pacing input can be added only if the executable model shows
-that it cannot change the sequential slot accounting.
+Fast-pacemaker counting is exactly `CarrierAdmitted`. Authoritative delivery is intentionally not a
+second pacing input because it would change the sequential per-author slot accounting.
 
 ## 7. Fast carrier pacemaker
 
@@ -434,23 +446,28 @@ author, but each author contributes stake once. A validator advances from carrie
 1. its own carrier at round `r` has been fixed and persisted; and
 2. it has admitted distinct-author carrier stake `Q` at round `r`.
 
-Future carriers are bounded and buffered; they do not skip missing local rounds. The next local
-carrier records the selected quorum as `{ own_prev } union weak_parents`. A missing weak-parent body
-never blocks the next carrier or any later consensus action.
+The executable prototype admits authenticated carriers at most two rounds ahead of the local open
+round and retains canonical unsolicited carrier content up to 64 rounds ahead. Authenticated
+retained carriers may later be promoted sequentially; candidate-only content retains no admission
+authority.
+Farther unsolicited values are discarded by the benchmark resource guard. Buffered carriers never
+skip missing local rounds. These values are engineering bounds, not a proof-safe asynchronous
+retirement rule. The next local carrier records the selected quorum as
+`{ own_prev } union weak_parents`; a missing weak-parent body never blocks later action.
 
 This clock replaces the current `starfish-rbc` rule that requires a quorum of RBC-clean previous
 round headers before proposal. It does not make admitted carriers consensus votes. Leader/vote/skip
 waiting conditions move to the independent consensus projection and cannot block the creation of a
-carrier needed to transport ECHO or READY.
+carrier needed to transport ECHO, VOTE, ACK, or READY.
 
 Honest validators emit empty control heartbeats when they have no application transactions.
-Without heartbeats, low load can stop the ECHO/READY waves and violate RBC liveness. Every carrier,
+Without heartbeats, low load can stop the four-phase waves and violate RBC liveness. Every carrier,
 including an empty heartbeat, is itself an RBC value and has an authenticator sidecar.
 
 The first prototype retains the current run's carrier/RBC state and rate-limits carrier creation.
 A production design needs a proved runahead and backpressure rule. A hard carrier/consensus skew cap
 must not suppress control heartbeats, because those heartbeats may be exactly what allows the
-certified frontier to catch up.
+authoritative projection and committed frontier to catch up.
 
 ## 8. Embedded all-carrier reliable broadcast
 
@@ -461,89 +478,106 @@ RbcSlot = (protocol_instance, committee_id, carrier_author, carrier_round)
 RbcValue = BlockReference
 ```
 
-Authenticating the carrier is INIT for that value. The local author records its own ECHO when it
-atomically fixes and persists the carrier. An honest non-author that first admits a value queues one
-ECHO for that slot.
+Receiver authentication is the admission capability for that exact value. A non-author that first
+admits a value durably locks and queues ECHO. The target author never contributes ECHO, VOTE, or ACK
+stake, and target-authored statements in those phases are ignored. Locally fixing a carrier is an
+authoritative delivery predicate for its creator, but it does not manufacture author stake in an
+author-excluding certificate.
 
-INIT is not silently counted as the author's ECHO at remote validators. The author's recorded local
-ECHO is queued into a later carrier like every other phase action; it counts locally immediately and
-remotely only after the enclosing carrier is admitted or delivered. This preserves the standard
-quorum accounting without excluding the broadcaster's stake.
+For a potentially Byzantine target (`a <= F`), the reducer applies these weighted transitions:
 
-Local phase actions are inserted into the next possible carrier's `phase_batch`. The enclosing
-carrier's authentication makes its author the phase sender. For each target slot:
+```text
+admit exact content                          -> ECHO
+ECHO stake >= M                             -> VOTE
+ECHO stake >= C or VOTE stake >= C          -> ACK
+ACK stake >= C or READY stake >= V          -> READY
+ECHO stake >= O                             -> authoritative optimistic delivery
+READY stake >= Q                            -> independent READY certification
+```
 
-- an authority emits at most one ECHO;
-- an authority emits at most one READY;
-- ECHO and READY choices may differ;
-- `Q` ECHO stake creates a READY obligation;
-- `V` READY stake creates a READY obligation; and
-- `Q` READY stake plus pinned matching content locally delivers the exact carrier.
+ECHO, VOTE, and ACK use distinct-author stake outside the target author; READY uses the full
+committee. VOTE does not require local carrier admission, only the latched ECHO evidence and exact
+retained target content. ACK may arise from `C` ECHO or `C` VOTE and does not require the node to
+have sent VOTE. READY may arise from `C` ACK or the standard `V` READY amplification path. Local
+phase evidence counts immediately after its durable lock, before later carrier dissemination.
 
-A READY obligation is not yet a local READY. If the target content is absent, the validator first
-recovers it from authenticated ECHO/READY authors, validates the exact reference, and durably pins
-it. Only then does it persist the slot-global READY lock, count its local READY, and enqueue the
-statement. Consequently every honest READY author is a real content holder. A quorum trigger remains
-latched while recovery is pending.
+If `a > F`, the target author is necessarily honest. A valid receiver-bound authenticator on the
+exact author value is therefore an immediate authoritative delivery predicate. The locally fixed
+high-stake author also seeds READY; because its stake is at least `V`, the ordinary amplification
+and `Q` certification path still completes independently.
 
-Local ECHO and READY count toward their thresholds before network dissemination. Evidence is
-tracked per candidate, while local send and delivery locks are slot-global. Each remote authority
-contributes stake at most once per phase and target slot; exact replay is idempotent and a later
-equivocation is ignored before allocating another candidate.
+Reaching `O` is authoritative delivery, not a speculative hint. The reducer pins the exact carrier,
+advances its delivered prefix when the DA and predecessor conditions hold, and may use its optional
+vertex in the authoritative projection. `Q` READY records the slower certificate even if the same
+value already delivered through the fast predicate. A certificate reached first also satisfies the
+delivery predicate. No threshold over a bare digest can expose a phase or deliver a placeholder.
+
+For every local slot, ECHO, VOTE, ACK, READY, delivery, and READY certification each lock at most
+one target; different phases may safely name different targets. For every remote sender, the node
+also records at most one target per phase and slot. Exact replay is idempotent, and a later
+same-sender equivocation is ignored before it can add stake or allocate a second phase choice.
 
 ### 8.1 Processing rule
 
-After canonical validation and outer authentication, a receiver processes the phase batch in its
-canonical encoded order immediately. It must not wait for the enclosing carrier itself to be RBC
-delivered, data-available, dependency-closed, or projected. Waiting would create a recursion: a
-carrier's controls are required to deliver earlier carriers, while those earlier deliveries may be
-required to create the next consensus vertex.
+After canonical validation and admission of the outer authenticator, a receiver processes the
+phase batch in canonical encoded order immediately. An authenticated carrier beyond the two-round
+admission window is retained but neither contributes pacemaker stake nor creates ECHO; its batch
+gains authority only after sequential promotion or an independent authoritative-delivery predicate.
+A retained candidate alone has no phase authority. Once authorized, processing does not wait for
+the enclosing carrier's READY certificate, application DA, prefix closure, or projection. Waiting
+would create a recursion because its controls are needed to deliver earlier carriers.
 
 If the local carrier authenticator is missing or invalid, its phase batch is not processed on
-candidate receipt. If that exact outer carrier later becomes locally RBC-delivered, the stored batch
-may be replayed under the local delivery capability. Thus poisoned vector entries delay optimistic
-admission but cannot permanently suppress controls selected by RBC.
+candidate receipt. If that exact outer carrier later becomes authoritatively delivered, the stored
+batch is replayed under that delivery capability. Thus poisoned vector entries delay optimistic
+admission but cannot permanently suppress controls selected by the four-phase protocol. Direct
+phase messages are never an alternative authority source.
 
 Phase targets are strictly older carrier rounds, making a single carrier's replay acyclic. Local
 arrival order between different authenticated carriers is still observable and can affect which
-Byzantine equivocation encounters a slot-global guard first. Recovery must replay the persisted
-ingress journal, never reconstruct choices by sorting carriers after a restart.
+Byzantine equivocation encounters a slot-global guard first. The ordered journal persists each
+batch entry and its replay cursor; recovery must replay that order, never reconstruct choices by
+sorting carriers after a restart.
 
 ### 8.2 Header recovery
 
-An honest ECHO or READY author must retain the target carrier content. A validator that observes a
-threshold before receiving the target requests it from several recorded phase authors. Recovery
-content is accepted only when canonical validation recomputes the requested reference.
+An honest ECHO, VOTE, ACK, or READY author retains the exact target carrier content before exposing
+that phase. A validator may therefore latch threshold evidence before it has the bytes, record the
+union of phase senders as candidate holders, and request the target from those holders. Recovery
+content is accepted only when canonical decoding recomputes the requested `BlockReference` and the
+context/committee checks succeed. Retention precedes any new local phase lock.
 
-Recovery request/response remains an out-of-band data-transfer optimization in the first
-prototype. It is not quorum testimony and does not change the on-DAG phase transcript. A `Q` ECHO
-set contains honest holders, and a `V` READY set contains at least one honest holder, so retrying
-authenticated holders eventually obtains the value after GST.
+Recovery request/response is out-of-band byte transfer, not quorum testimony, admission, or a new
+phase. A valid response can satisfy an already allocated evidence obligation but cannot create one.
+The prototype retries recorded holders after GST. Its separate carrier catch-up mechanism requests
+one exact `(author, round)` at a time and serves only retained locally authored outbound bytes; it
+does not transfer ranges, certificates, checkpoints, committed observer history, or arbitrary late
+state.
 
 ### 8.3 Batching and fairness
 
 Phase batches are bounded. The encoded order is preserved and processed as an authenticated log;
 two different orders intentionally identify different carriers. A deterministic fair queue must
 prevent Byzantine traffic for one slot
-from starving honest ECHO/READY actions for other slots. In steady state, one authority can owe one
-ECHO and one READY for each of `n` previous-round carriers, so `2n` is the expected arrival rate and
-not a safe capacity. The executable model retains an unbounded pending FIFO and drains the first
-`4n` statements eligible for the carrier being built (capped by the version-one codec limit of
+from starving honest ECHO/VOTE/ACK/READY actions for other slots. In steady state, one authority can
+owe up to four actions for each of `n` previous carriers. The executable model retains an unbounded
+pending FIFO and drains the first `6n` statements eligible for the carrier being built (capped at
 2,048 statements). A temporarily ineligible future-round statement remains in its stable queue
 position but does not block older eligible work behind it. This exercises backlog, runahead, and
 batching without pretending to solve adversarial fairness. A bounded runtime must use a fair
-per-slot scheduler, reserve strictly more than `2n` statements per carrier, and enforce an
+per-slot scheduler, reserve spillover above the four-phase arrival rate, and enforce an
 active-slot window so delayed work drains instead of remaining at permanent saturation.
 
-## 9. Certified consensus vertices
+## 9. Authoritative consensus vertices
 
 A carrier contains zero or one `ConsensusVertexV1`. The carrier remains valid and pace-eligible if
-the optional vertex is malformed relative to local certified state; only the optional vertex is
-excluded from the consensus projection.
+the optional vertex is malformed relative to authoritative projection state; only the optional
+vertex is excluded from the consensus projection.
 
 A consensus vertex authored by `A` at consensus round `c > 0` is eligible only when:
 
-1. its enclosing carrier is locally RBC-delivered;
+1. its enclosing carrier is authoritatively delivered by a local-fixed, honest-author,
+   `O`-ECHO, or `Q`-READY predicate;
 2. its enclosing carrier's transaction data is available and it closes `A`'s carrier prefix as
    defined in Section 10;
 3. its strong parents name distinct-author eligible consensus vertices at exactly `c - 1` whose
@@ -569,7 +603,8 @@ strong parents block only this optional vertex. They never block the enclosing c
 batch, the fast clock, or later honest RBC progress.
 
 The consensus pacemaker preserves Starfish's separate advance and creation conditions, evaluated
-only over eligible consensus vertices:
+only over eligible consensus vertices. A `Q`-READY certificate is not additionally required after
+an authoritative optimistic delivery:
 
 - **A1:** advance from `c - 1` to `c` after eligible distinct-author stake `Q` at `c - 1`;
 - **A2:** do not advance until the local consensus vertex at `c - 1` has been fixed;
@@ -607,7 +642,8 @@ choice—must resolve Byzantine conflicts.
 
 ## 10. Closed delivery prefixes and frontiers
 
-RBC delivery alone is not a compact availability proof for a Byzantine author's later carrier. A
+Authoritative carrier delivery alone is not application data availability and is not a compact
+availability proof for a Byzantine author's later carrier. A
 Byzantine author may deliver round `r` with an `own_prev` that names an unavailable fork at
 `r - 1`. Therefore a frontier component is a contiguous exact prefix, not simply the highest
 delivered round.
@@ -615,8 +651,9 @@ delivered round.
 For authority `A`, begin at its fixed genesis/empty prefix. A carrier `(A, r, R)` extends the local
 closed prefix only when:
 
-- `R` is locally RBC-delivered;
-- its transaction data satisfies the existing Starfish availability predicate;
+- `R` is authoritatively delivered;
+- for an application carrier, Core has materialized the exact application block and its committed
+  transaction data satisfies the existing Starfish availability predicate;
 - `r` is exactly one more than the current prefix round; and
 - `R.own_prev` equals the exact current prefix tip.
 
@@ -633,23 +670,24 @@ ensures that committed frontiers never regress or switch Byzantine forks.
 
 The containing carrier cannot name itself in its encoded frontier. For an eligible consensus
 vertex, its declared author component must equal its carrier's `own_prev` prefix tip. Once the
-enclosing carrier is delivered and data-available, its **effective frontier** replaces that one
-component with the enclosing carrier. This makes a committed anchor's own application payload
-eligible without waiting for a later anchor while preserving exact prefix continuity.
+enclosing carrier is authoritatively delivered and data-available, its **effective frontier**
+replaces that one component with the enclosing carrier. This makes a committed anchor's own
+application payload eligible without waiting for a later anchor while preserving exact prefix
+continuity.
 
 The liveness target is deliberately precise:
 
-> Every honest carrier that RBC-delivers and becomes data-available eventually appears in a
+> Every honest carrier that authoritatively delivers and becomes data-available eventually appears in a
 > committed effective-frontier delta.
 
 No guarantee is made for a malformed or permanently off-prefix Byzantine carrier. Guaranteeing all
-RBC-delivered Byzantine forks would require an antichain or sparse exception structure rather than
-one compact prefix tip per authority.
+authoritatively delivered Byzantine forks would require an antichain or sparse exception structure
+rather than one compact prefix tip per authority.
 
 ## 11. Starfish certification, commit, and skip
 
 Starfish's logical leader schedule and commit rules run over eligible consensus vertices only.
-Carrier admission, weak parents, phase targets, candidate headers, and merely delivered carriers
+Carrier admission, weak parents, phase targets, candidate headers, and merely retained carriers
 cannot act as voters, certifiers, leaders, non-votes, or reachability evidence.
 
 For a scheduled leader slot at consensus round `c`, every eligible voter publishes one immutable
@@ -681,33 +719,35 @@ Skipping a Byzantine leader role discards only that optional consensus value. It
 the enclosing application carrier. If that carrier later becomes part of a closed prefix, a later
 committed frontier orders its payload.
 
-Every consensus consumer in the current Starfish committer must be audited for the new type
-boundary: voter caches, leader support, potential certificates, direct/indirect decisions,
-reachability, and the linearizer must reject non-projected carrier facts. Data-availability
-acknowledgments are the deliberate exception: they become usable when their enclosing carrier is
-RBC-delivered, which breaks a projection/availability circularity while still excluding merely
-optimistic evidence.
+Every consensus consumer enforces this type boundary: voter caches, leader support, potential
+certificates, direct/indirect decisions, reachability, and the linearizer reject non-projected
+carrier facts. Application data availability is not inferred from this projection or from carrier
+acknowledgment references; it enters only through the typed Core materialization callback.
 
 ## 12. Frontier-delta linearization
 
-Let `F_k` be the effective frontier carried by committed anchor `A_k`, and let `Closure(F_k)` be the
-union of the exact per-author self-chain prefixes named by `F_k`. Maintain:
+Let `F_k` be the effective frontier carried by committed anchor `A_k`, `J_k` the cumulative joined
+committed frontier, and `Closure(F)` the union of the exact per-author self-chain prefixes named by
+`F`. Maintain:
 
 ```text
-C_0   = fixed genesis carriers
-C_k   = C_(k-1) union Closure(F_k)
-Delta = C_k \ C_(k-1)
+J_0   = [None; committee_size]
+J_k   = componentwise_exact_join(J_(k-1), F_k)
+Delta = Closure(J_k) \ Closure(J_(k-1))
 ```
 
-Before outputting `Delta`, a validator waits until every exact member is locally RBC-delivered and
-data-available. RBC totality and erasure-coded recovery supply missing content for honest committed
-frontiers.
+The join compares exact self-chain lineage, not round numbers. It accumulates advances from
+concurrent committed anchors and prevents a later partial frontier from erasing or regressing a
+component already committed. Before outputting `Delta`, a validator requires every exact carrier
+to be authoritatively delivered and every application member to pass the concrete Core DA gate.
+Exact carrier recovery and the dedicated verified-payload path supply missing material.
 
 All validators deterministically order the same delta by
 `(carrier_round, author, content_digest)`. Because a closed author prefix advances by exactly one
 carrier round, this key already preserves mandatory `own_prev` order.
 
-Weak parents, strong consensus edges, optional-vertex projection time, ECHO/READY target references,
+Weak parents, strong consensus edges, optional-vertex projection time,
+ECHO/VOTE/ACK/READY target references,
 recovery provenance, and MAC-vector variants never constrain application payload ordering. Strong
 edges order consensus decisions and dominate frontiers, but a late-projecting optional vertex must
 not retroactively add an edge between payloads already output. This fixed ordering also ensures that
@@ -719,15 +759,18 @@ design removes.
 In an all-honest synchronous interval, batching can realize this conceptual schedule:
 
 ```text
-t = 0       carrier k contains a new application header (RBC INIT)
-t = delta   carrier k+1 contains ECHOs for k
-t = 2delta  carrier k+2 contains READYs for k
-t = 3delta  carrier k is RBC-delivered; a later carrier may project new consensus work
+t = 0       carrier k authenticates an exact application header; non-authors lock ECHO
+t = delta   ECHO stake reaches O: authoritative delivery; VOTE/ACK obligations are queued
+t = 2delta  ACK stake reaches C: READY is queued
+t = 3delta  READY stake reaches Q: the independent certificate is recorded
 ```
 
-The embedded design does not make Bracha RBC require fewer communication delays than the direct
-baseline. Its performance hypothesis is that carrier batching reduces frames, scheduling work, and
-duplicated control metadata while the fast carrier clock overlaps certification with dissemination.
+The `O` fast path deliberately makes authoritative delivery available after the ECHO wave instead
+of waiting for the READY certificate. The VOTE/ACK/READY path remains necessary for convergence,
+totality, and independent certification under adverse schedules. For `a > F`, receiver-authenticated
+exact content takes the honest-author fast branch even before the ECHO threshold. Application
+output still waits for DA, logical consensus, and the cumulative committed frontier, so the RBC
+delivery schedule is not itself a transaction-latency claim.
 
 Implementation ordering is latency-critical. On carrier ingress, authenticate, apply its phase
 batch, execute newly enabled delivery/prefix/projection transitions, and only then decide what the
@@ -746,8 +789,8 @@ An authoritative implementation must persist proof-critical choices before expos
 1. journal typed authenticated inbound provenance, exact bytes, and its local ingress sequence;
 2. before fixing a local slot, construct and persist the typed candidate plus its exact canonical
    carrier bytes and reference;
-3. persist local ECHO, READY, explicit leader-choice, delivery, carrier-slot, and consensus-slot
-   locks that match that retained candidate (recovered content is likewise retained before READY);
+3. persist local ECHO, VOTE, ACK, READY, delivery-promise, READY-certificate, explicit
+   leader-choice, carrier-slot, and consensus-slot locks that match retained exact content;
 4. persist the exact authentication sidecar and an outbound-exposure marker, and only then send the
    carrier; and
 5. after restart, replay the journal in recorded order and retransmit the identical carrier and
@@ -760,35 +803,45 @@ until every lock encoded by that carrier is durable.
 
 Every persisted slot, candidate, lifecycle predicate, journal entry, and outbound-carrier key is
 namespaced by both `protocol_instance` and `committee_id`; storage from another run or committee
-cannot satisfy a local lock or quorum.
+cannot satisfy a local lock or quorum. The current authoritative storage path is additionally
+separated as autonomous WAL V4, and raw journal records start with `SRD5`. V4 prevents traces from
+the older planning-only promise semantics from being reinterpreted as authoritative fast delivery;
+`SRD5` prevents older record layouts from decoding as the current ECHO/VOTE/ACK/READY journal.
 
 Hash-sorting recovered carriers is not a valid reconstruction rule. Byzantine equivocation can make
 arrival order determine which value a local slot-global guard selects, and a different restart order
 could make one honest authority appear to send conflicting phases.
 
-The proof model retains all proof-critical carrier, phase, prefix, and consensus state for the run.
-The milestone-three shadow bounds newly arriving unsolicited content to a fixed recent-round
-window solely to keep a faulty peer from growing an observational benchmark process without limit.
-This is not a protocol-safe retirement rule: an honest INIT may be delayed longer than that under
-asynchrony. Recovery of an exact already-requested value is exempt. Before authoritative garbage
-collection is enabled, the design needs a common certified or committed retirement watermark that
-preserves:
+The Core store has a bounded latest-frontier receipt shape and can atomically persist an application
+commit with that receipt, but that alone is not a complete actor-to-Core recovery handshake. Until
+startup re-emits exactly the actor-WAL frontier suffix newer than Core's durable cursor, applies it
+before the `Ready`/application-production barrier, and rejects a cursor the actor cannot reconcile,
+a crash between actor durability and Core application remains a fail-stop boundary. Actor replay
+must not be described as exactly-once output without that composed contract.
 
-- pending Bracha totality and header recovery;
+The proof model retains all proof-critical carrier, phase, prefix, and consensus state for the run.
+The executable runtime admits at lookahead `2` and bounds newly arriving unsolicited content at
+lookahead `64` solely to keep a faulty or descheduled peer from growing the benchmark process
+without limit. This is not a protocol-safe retirement rule: an honest carrier may be delayed more
+than 64 rounds under asynchrony. Recovery of an exact already-requested value is exempt. Before
+authoritative garbage collection is enabled, the design needs a common certified or committed
+retirement watermark that preserves:
+
+- pending four-phase totality and exact-content recovery;
 - exact self-prefix expansion from the last committed frontier;
 - committed-anchor reconstruction for a late validator; and
 - deterministic replay of local locks.
 
 Resource bounds still required before authoritative deployment include a proof-safe future and
-retirement window, per-peer candidate caps, a fair phase backlog, a rate-limited control heartbeat,
-a bounded payload runahead policy, and checkpointed disk-backed recovery. Shadow input and output
-channels are bounded and shed observational work instead of backpressuring direct consensus, but
-the reference reducer's retained history and per-transition validation are not yet bounded-runtime
-architecture. Resource exhaustion is excluded from the initial proof model and must be measured in
-the prototype. Any run in which work is shed is invalid for direct/shadow comparison;
+retirement window, per-peer candidate caps, a fair bounded phase backlog, bounded peer/network
+bridges, a rate-limited control heartbeat, a bounded payload runahead policy, and checkpointed
+disk-backed recovery. The actor's primary ingress is bounded, but not every bridge, per-peer outbox,
+or retained reducer collection is yet bounded end to end. Resource exhaustion is excluded from the
+initial proof model and must be measured in the prototype. Any run in which work is shed is invalid
+for direct/shadow comparison;
 `starfish_rbc_dag_shadow_comparison_valid` must remain `1` for the entire measured interval. A live
 pipeline does not have equal cumulative direct and shadow delivery counters at an arbitrary
-instant: embedded ECHO/READY normally leaves a short shadow tail. Benchmark verification therefore
+instant: the embedded four-phase protocol normally leaves a short shadow tail. Benchmark verification therefore
 requires monotone nonzero direct, shadow, and paired-match progress, no conflict outcome, and bounds
 both the current unpaired slots (`<= 4n` per validator) and the oldest unpaired round lag against the
 newest current-process observation (`<= 4`). These are empirical benchmark coverage guards, not
@@ -803,8 +856,10 @@ at most 60 validators. Autonomous mode budgets a simultaneous carrier, exact-slo
 exact-slot response per peer plus five control inputs and accepts at most 20 validators. Larger runs
 are rejected rather than silently producing incomplete evidence. Timer notifications are coalesced,
 healthy proactive rounds receive a repair grace period, and exact synchronization is rate-limited
-per peer. Requested historical slots remain recoverable beyond the benchmark-only unsolicited
-retention window.
+per peer. Exact synchronization transfers only one requested `(author, round)` and only from the
+author's retained local outbound map. It has no range response, certified checkpoint, observer
+history, or bounded-suffix state-transfer protocol; a sufficiently late or fresh node cannot be
+reconstructed by this mechanism alone.
 
 Autonomous benchmark validity is separate from delivery comparison validity.
 `starfish_rbc_dag_shadow_clock_valid` must remain `1`, the appended-WAL and local-carrier counters
@@ -821,35 +876,42 @@ The design is not complete until at least the following claims are proved or fal
 1. **Receiver-authentication integrity.** An honest receiver admits a carrier attributed to an
    honest author only if that author created the public proof or the receiver's MAC entry. A MAC is
    not public non-repudiation, and a Byzantine endpoint knows its own pairwise key.
-2. **RBC agreement and integrity.** Slot-global ECHO/READY locks, quorum intersection, and exact
-   value binding prevent two conflicting carrier values from being delivered by honest validators.
-3. **RBC totality.** If one honest validator delivers a value, heartbeats, READY amplification, and
-   holder recovery cause every honest validator eventually to deliver the same value.
-4. **Optimistic isolation.** Carrier admission can change only fast pacing and RBC processing; it
-   cannot alter a QC, leader decision, skip, commit, acknowledgment certificate, or output order.
-5. **Weak-edge non-poisoning.** A missing or equivocating weak parent cannot block delivery,
+2. **Four-phase agreement and integrity.** Target-author exclusion, the `M/C/O/V/Q` intersections,
+   slot-global ECHO/VOTE/ACK/READY locks, per-sender phase locks, and exact value binding prevent
+   conflicting authoritative deliveries at honest validators.
+3. **Fast-predicate safety.** `a > F` really implies an honest author, and an `O = M + b` ECHO set
+   contains enough honest non-author support to make the value unique and force the fallback to
+   converge on it.
+4. **RBC totality and certification.** If one honest validator authoritatively delivers a value,
+   VOTE/ACK convergence, READY amplification, heartbeats, and exact holder recovery cause every
+   honest validator to deliver it and eventually record the same `Q`-READY certificate.
+5. **Admission isolation.** Mere authentication/admission can change fast pacing and phase replay,
+   but cannot alter a QC, leader decision, skip, commit, or output. Only a proved authoritative
+   delivery predicate plus prefix/DA/projection gates crosses that boundary.
+6. **Weak-edge non-poisoning.** A missing or equivocating weak parent cannot block delivery,
    projection of unrelated honest vertices, or application ordering.
-6. **Consensus-slot uniqueness.** Honest validators create/vote once per
+7. **Consensus-slot uniqueness.** Honest validators create/vote once per
    `(author, consensus_round)`, and Byzantine conflicts cannot both acquire honest quorum support.
-7. **Prefix comparability.** Every accepted frontier component is an exact extension of its strong
-   ancestors and of every earlier committed component.
-8. **Projection safety.** Erasing weak edges and optional consensus metadata that is not
+8. **Prefix and join comparability.** Every accepted frontier component is an exact extension of
+   its strong ancestors, and every cumulative committed join is monotone on exact lineage.
+9. **Projection safety.** Erasing weak edges and optional consensus metadata that is not
    `VertexProjected` leaves a valid execution of the Starfish commit/skip rules over immutable
    strong edges; it does not erase otherwise orderable carrier payloads.
-9. **Deterministic ordering.** Equal committed anchors imply equal frontier closures, deltas, and
-   transaction order at all honest validators.
-10. **Data availability.** No carrier enters an output delta until its committed transaction root
-    can be reconstructed and verified.
+10. **Deterministic ordering.** Equal committed-anchor histories imply equal cumulative frontier
+    joins, closures, deltas, and transaction order at all honest validators.
+11. **Data availability.** No application enters an output delta until Core contains the concrete
+    block and its committed transaction root has been reconstructed and verified.
 
 ## 16. Liveness obligations
 
 Under partial synchrony and fair processing, the design must establish:
 
-1. `Q` honest authors continually create authenticated carriers after GST, so the sequential fast
-   clock advances without Byzantine participation.
-2. Empty heartbeat carriers drain every honest ECHO/READY backlog even when application load is
+1. Honest authors of aggregate stake at least `Q` continually create authenticated carriers after
+   GST, so the sequential fast clock advances without Byzantine participation.
+2. Empty heartbeat carriers drain every honest ECHO/VOTE/ACK/READY backlog even when application load is
    zero.
-3. Every honest carrier is RBC-delivered at every honest validator.
+3. Every honest carrier is authoritatively delivered and eventually `Q`-READY certified at every
+   honest validator.
 4. Existing Starfish data availability eventually closes every honest author's exact carrier
    prefix.
 5. Honest consensus vertices with quorum strong parents continue to appear despite arbitrary
@@ -857,46 +919,56 @@ Under partial synchrony and fair processing, the design must establish:
 6. The projected Starfish pacemaker eventually commits infinitely many honest anchors.
 7. Honest frontier construction is fair: every newly closed honest carrier prefix is eventually
    included in a committed frontier.
-8. Waiting for a committed delta cannot block forever because every named exact carrier is already
-   RBC-delivered and data-available by frontier eligibility.
+8. Waiting for a committed delta cannot block forever for honest applications because every named
+   exact carrier is already authoritatively delivered and the concrete application DA condition is
+   part of frontier eligibility.
 
 The guaranteed payload-liveness statement covers every honest on-prefix carrier. Selectively
 disseminated, malformed, or off-prefix Byzantine carriers may be ignored.
 
 ## 17. Required executable tests
 
-Milestone two begins with an isolated deterministic model, not production network wiring. At
-minimum it must cover:
+The executable model and composed runtime tests should cover at minimum:
 
 - `n = 4, f = 1` and `n = 7, f = 2` all-honest progress;
-- split Byzantine INIT values and receiver-selective poisoned vector entries;
+- split Byzantine author values and receiver-selective poisoned vector entries;
 - valid relayed local MAC entries and invalid vector variants;
-- ECHO/READY equivocation, replay, reordering, and evidence-before-header recovery;
+- weighted and unequal-stake `F/a/U/b/M/C/O/V/Q` threshold goldens, including `a > F`;
+- ECHO/VOTE/ACK/READY local locks, per-sender replay/equivocation, ordered batch replay, and restart;
+- `M` ECHO to VOTE, `C` ECHO-or-VOTE to ACK, `C` ACK to READY, `O` authoritative delivery, and
+  independent `Q`-READY certification;
+- evidence-before-content recovery from phase holders, including VOTE/ACK without local admission;
 - zero application load with heartbeat-only RBC completion;
-- future carriers that cannot jump the local sequential clock;
+- two-round admission, 64-round authenticated retention, and future carriers that cannot jump the
+  local sequential clock;
 - `f` permanently missing weak parents without blocking honest carrier or consensus progress;
-- a delivered Byzantine carrier above an unavailable self-chain gap;
+- an authoritatively delivered Byzantine carrier above an unavailable self-chain gap;
 - conflicting Byzantine consensus vertices in one logical slot;
 - explicit vote/no-vote conflicts and direct plus indirect commit/skip;
 - frontier fork, regression, and strong-parent dominance rejection;
-- equal committed anchors producing byte-identical output deltas;
-- delayed data availability followed by eventual prefix inclusion;
+- concurrent committed anchors producing the same cumulative joined frontier and byte-identical
+  output deltas without regression;
+- delayed concrete Core data availability followed by eventual prefix inclusion, with raw payload
+  receipt unable to bypass the gate;
 - crash points before and after each persisted lock and outbound-carrier write; and
-- persisted shadow-actor restart with byte-identical retransmission against an identical recovered
-  direct-header history, bounded overload, poisoned-tag candidate retention, exact recovery, and
-  paired delivery observations against the current direct RBC kernel. Full validator restart is
-  excluded until the authoritative direct-RBC locks are durable; and
+- crash points before and after Core frontier application, including atomic receipt/commit,
+  exact-replay idempotence, conflicting/stale cursor rejection, suffix replay before `Ready`, and
+  explicit failure of the buffered-WAL crash-safety case; and
+- persisted actor restart with byte-identical local retransmission, poisoned-tag candidate
+  retention, exact recovery, and no phase/output exposure before its matching durable locks; and
 - autonomous actor progress at `n = 4` and `n = 7`, no steady-state repair polling on healthy
   proactive rounds, exact-slot synchronization with idempotent late responses and per-peer rate
   limiting, multi-round convergence after a validator falls behind, control-only WAL reopen,
-  distinct authentication namespace, and an integration check that direct Starfish-RBC continues
-  committing while the observational carrier clock advances; and
-- composed frontier-authority runs in which every exact application header is embedded-RBC
+  distinct authentication namespace, V4/`SRD5` stale-trace rejection, and bounded exact-slot sync
+  that does not pretend to be checkpoint transfer; and
+- composed frontier-authority runs in which every exact application header is authoritatively
   delivered, all honest nodes release the same deterministic application order without duplicates,
-  the legacy committer is disabled, and the frontier/application/WAL progress gates remain valid.
+  the direct INIT/phase/batch/pull paths and legacy committer have no authority, and the
+  frontier/application/WAL progress gates remain valid.
 
 Property tests should mutate every canonical field and verify carrier-reference binding, while
-golden tests freeze the version-one encoding and flat vector length.
+golden tests freeze the V1 control and V2 application encodings, append-only phase codes, and flat
+vector length.
 
 ## 18. Complexity and benchmark plan
 
@@ -909,7 +981,7 @@ The first fair benchmark matrix includes:
 - Sailfish++ as a certified signature-free comparison.
 
 Hold committee, load, transaction size, topology, latency injection, dissemination fanout, duration,
-timeouts, and build constant. Report carrier/INIT, vector, ECHO, READY, recovery, transaction/shard,
+timeouts, and build constant. Report carrier, vector, ECHO, VOTE, ACK, READY, recovery, payload,
 and synchronization bytes separately. Also report authentication CPU, fast-admission-to-delivery
 latency, carrier/consensus round skew, prefix lag, commit latency, throughput, and peak retained
 state.
@@ -917,20 +989,20 @@ state.
 Batching can reduce the number of separately scheduled RBC control messages, but it does not remove
 their logical quorum evidence. Full-vector all-to-all transport sends `n` tags in each of `n - 1`
 copies per carrier, so it is not expected to improve author egress until a tree or bounded-fanout
-transport is added. Shadow mode also sends both direct and embedded transcripts. The default
-crash-safe reference profile fsyncs each accepted transition and validates through a clone-based
-reducer; it is a correctness/replay instrument, not a protocol-performance result. The explicit
-buffered-WAL profile keeps the exact framed event path but syncs only on clean shutdown and therefore
-cannot be used for crash-safety claims. Benchmark output reports appended and durable WAL work
-separately. The clone-based reducer remains intentionally unoptimized until measurement shows it
-matters.
+transport is added. Comparison mode sends both direct and embedded transcripts; standalone mode
+does not. The default crash-safe reference profile applies preflighted transitions in place but
+fsyncs every accepted transition and still performs synchronous reducer/storage work, so it is a
+correctness/replay instrument rather than a fair latency profile. The explicit buffered-WAL profile
+keeps the exact framed event path but syncs only on clean shutdown and therefore cannot support
+crash-safety claims. Benchmark output reports appended and durable WAL work separately.
 
 A matched 10-validator local sequence on 2026-08-11 used a full 60-second active transaction
 window, the AWS RTT emulator, nominal 1,000 tx/s load, MAC authentication, and the buffered
 benchmark WAL. Milestone-five idle carriers use the same resolved 600 ms Push leader timeout as
 Starfish-RBC; application and encodable phase carriers are immediate. The harness waits through
 generator warmup, snapshots cumulative counters at the active boundary, and drains final latency
-samples.
+samples. The table and milestone narrative below predate the current four-phase V4 authority model
+and remain historical evidence rather than a current-protocol result.
 
 | Profile | Verdict | TPS | Block latency | E2E latency | Outbound |
 |---|---:|---:|---:|---:|---:|
@@ -974,50 +1046,36 @@ toward the roughly 600 ms unsafe Starfish-MAC reference without weakening RBC or
 
 ## 19. Contained implementation milestones
 
-Every milestone is committed separately.
+The historical milestones produced the current bounded prototype:
 
-1. **Protocol specification (this document):** lock the two clocks, lifecycle, full-vector sidecar,
-   embedded Bracha transitions, certified prefix/frontier, commit/skip boundary, proof obligations,
-   and experiment plan. No protocol code or CLI selector is added.
-2. **Canonical codec and executable model (implemented):** isolated carrier, phase, consensus,
-   frontier, and sidecar types; golden encodings; pure carrier/RBC, projection/decision, and durable
-   journal models; and deterministic adversarial simulations. No network or existing consensus path
-   changes.
-3. **Persisted shadow carrier path (implemented, opt-in):** build and store carriers alongside the
-   current direct `starfish-rbc` service, cache the validated committee/domain identity rather than
-   re-hashing all public keys per carrier, journal ingress and local locks, and compare embedded
-   versus direct RBC delivery through current-process paired observations. Direct RBC remains
-   authoritative; shadow results never affect proposals or commits. The reference WAL/reducer is a
-   correctness instrument, not yet an interpretable protocol-performance path.
-4. **Optimistic carrier clock (implemented, opt-in control shadow):** run a separately namespaced,
-   control-only heartbeat carrier plane with the distinct authenticated-admission latch, sequential
-   quorum clock, bounded future buffer, exact-slot synchronization, durable restart, and clock
-   validity metrics while consensus still uses the current direct baseline.
-5. **Authoritative embedded RBC (implemented, opt-in):** encode exact canonical application headers
-   in version-two carriers, durably reconcile their origins, schedule application/phase carriers
-   immediately, and remove direct ECHO/READY/delivery authority. Direct INIT remains payload
-   transport; composed tests assert zero direct ECHO/READY traffic and positive embedded delivery.
-6. **Certified consensus projection (implemented):** add optional independently numbered consensus
-   vertices, quorum strong parents, explicit timeout-bound leader choices, contiguous exact
-   delivery frontiers, durable slot/choice locks, and a live clean-only direct committer. Malformed
-   optional vertices do not poison their enclosing carrier.
-7. **Frontier linearizer and recovery (implemented within the actor's fail-stop scope):** commit
-   deterministic frontier deltas, reconstruct prefixes, decisions, and anchors from the ordered
-   WAL, disable the legacy application committer, and output exact application references once.
-   Full-validator crash recovery and proof-safe late-node state transfer remain deferred because
-   the direct payload-transport baseline does not yet persist its own proof-critical RBC state.
-8. **Benchmarks:** compare the complete protocol with direct `starfish-rbc`, unsafe `starfish-mac`,
-   signature Starfish variants, and Sailfish++ before attempting tree dissemination.
-9. **Tree dissemination:** distribute vector sub-bundles with redundant routing and a direct timeout
-   fallback; do not change RBC or consensus semantics.
+1. **Canonical carrier plane (implemented):** V1 control and V2 application carrier identities,
+   full-vector sidecars, two independent clocks, ordered phase batches, exact recovery, and
+   deterministic codec/model/journal tests.
+2. **Weighted optimistic RBC (implemented):** author-excluding ECHO/VOTE/ACK thresholds, READY
+   fallback/certification, the high-stake honest-author branch, `O` authoritative delivery, and
+   durable slot-global locks for every phase.
+3. **Standalone authority boundary (implemented, opt-in):** carriers and the dedicated verified
+   application-payload path are the only ingress authority. The direct INIT/phase/header service,
+   generic batch/pull path, and legacy application committer are absent or rejected.
+4. **Logical consensus and output (implemented):** independently numbered vertices, quorum strong
+   parents, explicit Vote/NoVote choices, exact prefixes, authoritative projection, Starfish
+   commit/skip, cumulative joined committed frontiers, and deterministic application deltas.
+5. **Durable actor replay (implemented within the documented scope):** V4/`SRD5` WAL replay restores
+   retained content, phase/delivery/consensus locks, locally authored outbound bytes, and projection
+   state. This is not a claim of full validator restart or general late-node state transfer.
+6. **Remaining production work:** complete the end-to-end proof; bound every queue and retained
+   collection; add proof-safe checkpoints, state transfer, retirement, and graceful shutdown; then
+   compare latency with direct `starfish-rbc`, unsafe `starfish-mac`, signature variants, and
+   Sailfish++ before attempting tree dissemination.
 
 ## 20. Decisions intentionally deferred
 
-The following values are not safe to guess in the documentation milestone and must be resolved by
-the executable model or measured prototype:
+The following production choices remain unresolved and must be proved or measured:
 
-- production maximum future-carrier buffer and payload runahead (the executable model deliberately
-  uses admission lookahead `2` and hard buffer lookahead `4` only as test parameters);
+- production maximum future-carrier buffer and payload runahead (the executable prototype keeps
+  admission lookahead `2`, retains at most `64` future rounds for temporarily descheduled peers,
+  and discards farther unsolicited carriers before admission/retention; these are benchmark resource
+  parameters rather than protocol safety constants);
 - whether the shared Starfish leader-timeout policy needs a separately proved adaptive low-load
   rule; the prototype intentionally does not introduce a second heartbeat timeout;
 - a safe state-retirement, garbage-collection, and late-catch-up watermark;
@@ -1025,6 +1083,7 @@ the executable model or measured prototype:
 - quantitative shadow-promotion thresholds and acceptable latency/bandwidth regression; and
 - the tree topology, redundancy, and fallback timers.
 
-Mixed `starfish-rbc`, `starfish-rbc-dag`, and version-one/version-two deployments must be rejected
-by protocol-instance negotiation. The provisional `starfish-rbc-dag` selector is added only after
-the codec/model milestone establishes a distinct stable version.
+Mixed direct/standalone or incompatible carrier/WAL deployments must be rejected. The current code
+has fail-closed protocol/storage namespaces but no feature handshake, so homogeneous configuration
+is an operational precondition. A dedicated `starfish-rbc-dag` selector should be added only with
+explicit capability/version negotiation.

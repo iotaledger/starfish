@@ -84,6 +84,14 @@ pub enum DataSource {
     RoundGapResponse,
     /// Transaction data co-carried by the direct Starfish-RBC INIT.
     StarfishRbcPayload,
+    /// Header authorized by an authenticated or delivered RBC-DAG carrier.
+    /// This is an internal provenance label; authorization is carried by the
+    /// dedicated core-thread command, never by the peer-controlled wire enum.
+    StarfishRbcDagAuthorizedHeader,
+    /// Payload verified against an RBC-DAG-authorized header commitment.
+    /// Like the header label, this is accepted only through the dedicated
+    /// core-thread command.
+    StarfishRbcDagAuthorizedPayload,
 }
 
 impl DataSource {
@@ -99,6 +107,8 @@ impl DataSource {
             Self::UnprovableCertificateResponse => "unprovable_certificate_response",
             Self::RoundGapResponse => "round_gap_response",
             Self::StarfishRbcPayload => "starfish_rbc_payload",
+            Self::StarfishRbcDagAuthorizedHeader => "starfish_rbc_dag_authorized_header",
+            Self::StarfishRbcDagAuthorizedPayload => "starfish_rbc_dag_authorized_payload",
         }
     }
 }
@@ -2532,6 +2542,33 @@ impl DagState {
     /// Returns a snapshot of the per-authority last committed rounds.
     pub fn last_committed_rounds(&self) -> Vec<RoundNumber> {
         self.dag_state_inner.read().last_committed_rounds.clone()
+    }
+
+    /// Restore the exact durable RBC-DAG application watermark before the
+    /// authoritative carrier actor is opened. The receipt is the only commit
+    /// record for a control-only frontier, so ordinary application-commit
+    /// recovery cannot reconstruct this vector on its own.
+    pub(crate) fn restore_rbc_dag_committed_rounds(&self, committed_rounds: &[RoundNumber]) {
+        let mut inner = self.dag_state_inner.write();
+        assert_eq!(
+            committed_rounds.len(),
+            inner.committee_size,
+            "RBC-DAG frontier receipt watermark length must match the committee"
+        );
+        for (authority, (recovered, durable)) in inner
+            .last_committed_rounds
+            .iter()
+            .zip(committed_rounds)
+            .enumerate()
+        {
+            assert!(
+                durable >= recovered,
+                "RBC-DAG frontier receipt regresses recovered authority {authority}: durable {durable}, recovered {recovered}"
+            );
+        }
+        inner
+            .last_committed_rounds
+            .clone_from_slice(committed_rounds);
     }
 
     pub fn cleanup(&self) {

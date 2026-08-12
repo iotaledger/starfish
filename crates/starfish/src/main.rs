@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::BTreeSet,
     fs,
-    net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
+    net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -16,20 +17,28 @@ use std::{
 
 use clap::Parser;
 use eyre::{Context, Result};
+use futures::future::try_join_all;
 use prettytable::format;
 use starfish_core::{
-    ByzantineStrategy,
     committee::Committee,
     config::{
         DisseminationMode, ImportExport, NodeParameters, NodePrivateConfig, NodePublicConfig,
         Parameters, StorageBackend, TransactionMode,
     },
-    metrics::Metrics,
+    metrics::{
+        AutonomousClockBenchmarkSnapshot, BenchmarkGeneratorState, BenchmarkTransactionWindow,
+        LocalBenchmarkTransactionOutcome, Metrics,
+    },
     types::AuthorityIndex,
-    validator::Validator,
+    validator::{Validator, ValidatorStartOptions},
 };
-use tokio::time::Instant;
+use tokio::{sync::watch, time::Instant};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt};
+
+// Network workers bind active sockets at `listener_port * 10`. Keep those
+// derived ports below the conventional Linux ephemeral range so repeated
+// local experiments cannot collide with an unrelated outbound connection.
+const LOCAL_BENCHMARK_MAX_ACTIVE_BIND_PORT: u16 = 32_767;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -202,6 +211,11 @@ enum Operation {
         starfish_rbc_dag_shadow_buffered_wal: bool,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
+        /// Add an offset to the local benchmark's fixed network and metrics
+        /// ports. This is useful for isolated repeated experiments and avoids
+        /// silently sharing `SO_REUSEPORT` listeners with a stale run.
+        #[clap(long, value_name = "INT", default_value_t = 0)]
+        port_offset: u16,
         /// Dissemination mode override:
         /// protocol-default | pull | push-causal | push-useful
         #[clap(long, value_name = "STRING")]
@@ -315,6 +329,7 @@ async fn main() -> Result<()> {
             starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_shadow_buffered_wal,
             duration_secs,
+            port_offset,
             dissemination_mode,
         } => {
             let mut node_parameters = NodeParameters::default_with_latency(mimic_extra_latency);
@@ -344,6 +359,7 @@ async fn main() -> Result<()> {
                 node_parameters,
                 consensus_protocol,
                 duration_secs,
+                port_offset,
             )
             .await?;
         }
@@ -411,14 +427,116 @@ fn benchmark_genesis(
     Ok(())
 }
 
+fn local_benchmark_private_configs(
+    base_dir: &Path,
+    committee_size: usize,
+) -> Vec<NodePrivateConfig> {
+    NodePrivateConfig::new_for_benchmarks(base_dir, committee_size)
+        .into_iter()
+        .enumerate()
+        .map(|(authority, mut private_config)| {
+            private_config.storage_path = base_dir.join(format!("node-{authority}")).join(
+                NodePrivateConfig::default_storage_path(authority as AuthorityIndex),
+            );
+            private_config
+        })
+        .collect()
+}
+
+async fn stop_local_benchmark_validators(validators: Vec<Validator>) {
+    let mut stops = tokio::task::JoinSet::new();
+    for validator in validators {
+        stops.spawn(validator.stop());
+    }
+    while let Some(result) = stops.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!("Validator shutdown task failed: {error}");
+        }
+    }
+}
+
+fn local_benchmark_topology_ready(
+    metrics: &[Arc<Metrics>],
+    expected_peer_subscriptions: i64,
+) -> Result<bool> {
+    local_benchmark_topology_state(
+        metrics.iter().map(|metrics| {
+            (
+                metrics.metrics_active.load(Ordering::Relaxed),
+                metrics.subscribed_to_peers.get(),
+                metrics.subscribed_by_peers.get(),
+            )
+        }),
+        expected_peer_subscriptions,
+    )
+}
+
+fn local_benchmark_topology_state(
+    states: impl IntoIterator<Item = (bool, i64, i64)>,
+    expected_peer_subscriptions: i64,
+) -> Result<bool> {
+    let states = states.into_iter().collect::<Vec<_>>();
+    eyre::ensure!(
+        !states.iter().any(|(active, _, _)| *active),
+        "A transaction generator opened before the complete peer subscription mesh"
+    );
+    Ok(states.iter().all(|(_, subscribed_to, subscribed_by)| {
+        *subscribed_to == expected_peer_subscriptions
+            && *subscribed_by == expected_peer_subscriptions
+    }))
+}
+
+/// Assign the configured aggregate transaction load exclusively to honest
+/// validators. Byzantine validators exercise protocol behavior only: making
+/// their deliberately withheld/dropped transactions part of the mandatory
+/// drain target would conflate adversarial dissemination with lost honest
+/// work. The remainder is distributed deterministically by authority order so
+/// the per-validator rates sum to the exact requested aggregate load.
+fn local_benchmark_generator_loads(
+    committee_size: usize,
+    aggregate_load: usize,
+    num_byzantine_nodes: usize,
+) -> Result<(BTreeSet<usize>, Vec<usize>)> {
+    let byzantine_authorities = (0..committee_size)
+        .filter(|authority| *authority % 3 == 0 && *authority / 3 < num_byzantine_nodes)
+        .collect::<BTreeSet<_>>();
+    eyre::ensure!(
+        byzantine_authorities.len() == num_byzantine_nodes,
+        "requested {num_byzantine_nodes} Byzantine validators, but the local benchmark layout can place only {} in a committee of {committee_size}",
+        byzantine_authorities.len(),
+    );
+    let honest_count = committee_size.saturating_sub(byzantine_authorities.len());
+    eyre::ensure!(
+        honest_count > 0,
+        "a local benchmark requires at least one honest transaction generator"
+    );
+    let base = aggregate_load / honest_count;
+    let remainder = aggregate_load % honest_count;
+    let mut honest_rank = 0usize;
+    let loads = (0..committee_size)
+        .map(|authority| {
+            if byzantine_authorities.contains(&authority) {
+                0
+            } else {
+                let load = base + usize::from(honest_rank < remainder);
+                honest_rank += 1;
+                load
+            }
+        })
+        .collect::<Vec<_>>();
+    debug_assert_eq!(loads.iter().sum::<usize>(), aggregate_load);
+    Ok((byzantine_authorities, loads))
+}
+
 async fn local_benchmark(
     committee_size: usize,
-    mut load: usize,
+    load: usize,
     num_byzantine_nodes: usize,
     byzantine_strategy: String,
     node_parameters: NodeParameters,
     consensus_protocol: String,
     duration_secs: u64,
+    port_offset: u16,
 ) -> Result<()> {
     eyre::ensure!(
         duration_secs > 0,
@@ -480,34 +598,52 @@ async fn local_benchmark(
         );
     }
     println!("Duration: {duration_secs} seconds");
+    println!("Local port offset: {port_offset}");
     println!("===========================\n");
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
-    load /= committee.len();
-    let mut parameters = Parameters::almost_default(load);
-    parameters.benchmark_duration = Some(Duration::from_secs(duration_secs));
-    // Equivocating Byzantine strategies must not generate transactions.
-    let mut byzantine_parameters = parameters.clone();
-    if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
-        .is_some_and(|s| s.is_equivocating())
-    {
-        byzantine_parameters.load = 0;
+    let (byzantine_authorities, generator_loads) =
+        local_benchmark_generator_loads(committee_size, load, num_byzantine_nodes)?;
+    if !byzantine_authorities.is_empty() {
+        println!(
+            "Byzantine transaction generators: disabled; aggregate load redistributed across {} honest validators",
+            committee_size.saturating_sub(byzantine_authorities.len()),
+        );
     }
+    let mut parameters = Parameters::almost_default(0);
+    parameters.benchmark_duration = Some(Duration::from_secs(duration_secs));
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
+    validate_local_benchmark_port_offset(&public_config, port_offset)?;
+    let public_config = public_config.with_port_offset(port_offset);
+    preflight_local_benchmark_ports(&public_config)?;
     let starfish_rbc_dag_shadow_expected = node_parameters.starfish_rbc_dag_shadow;
     let starfish_rbc_dag_autonomous_clock_expected =
         node_parameters.starfish_rbc_dag_autonomous_clock;
     let starfish_rbc_dag_embedded_rbc_authority_expected =
         node_parameters.starfish_rbc_dag_embedded_rbc_authority;
+    let coordinated_rbc_dag_clock_start = starfish_rbc_dag_autonomous_clock_expected
+        && starfish_rbc_dag_embedded_rbc_authority_expected;
 
     // Create temporary directories for each validator
-    let base_dir = PathBuf::from("local-benchmark");
+    // Isolate storage by the same explicit run namespace as the sockets.
+    // A stale or intentionally concurrent benchmark on another offset must
+    // not keep RocksDB/WAL handles open underneath this run's cleanup.
+    let base_dir = PathBuf::from(format!("local-benchmark-{port_offset}"));
     fs::create_dir_all(&base_dir)?;
+    // Generate the benchmark key material before any validator starts. Doing
+    // this inside the startup loop regenerates the entire committee keyset for
+    // every authority; once the first quorum is live, that CPU work lets its
+    // autonomous clock run far ahead of the validators still being prepared.
+    let private_configs = local_benchmark_private_configs(&base_dir, committee_size);
 
-    let mut handles = Vec::with_capacity(committee_size);
-    let mut abort_handles = Vec::with_capacity(committee_size);
+    let mut validators = Vec::with_capacity(committee_size);
+    let mut metrics_of_all_validators = Vec::with_capacity(committee_size);
     let mut metrics_of_honest_validators = Vec::new();
     let mut reporters_of_honest_validators = Vec::new();
+    // Every local benchmark, not only RBC-DAG, uses one absolute offered-load
+    // window. Production Validator::start remains ungated.
+    let (transaction_generator_start_tx, transaction_generator_start_rx) =
+        watch::channel(None::<BenchmarkTransactionWindow>);
 
     // Create a flag to signal when the benchmark is complete
     let running = Arc::new(AtomicBool::new(true));
@@ -518,7 +654,7 @@ async fn local_benchmark(
     run_with_progress(running.clone(), elapsed_seconds.clone());
 
     // Start all validators
-    for authority in 0..committee_size {
+    for (authority, private_config) in private_configs.into_iter().enumerate() {
         tracing::warn!(
             "Starting node {authority} in local \
             benchmark mode (committee size: {committee_size})"
@@ -535,9 +671,6 @@ async fn local_benchmark(
                 ));
             }
         }
-        let mut private_configs =
-            NodePrivateConfig::new_for_benchmarks(&working_dir, committee_size);
-        let private_config = private_configs.remove(authority);
         match fs::create_dir_all(&private_config.storage_path) {
             Ok(_) => {}
             Err(e) => {
@@ -547,53 +680,49 @@ async fn local_benchmark(
                 ));
             }
         }
-        let is_byzantine = authority.is_multiple_of(3) && authority / 3 < num_byzantine_nodes;
+        let is_byzantine = byzantine_authorities.contains(&authority);
+        let mut generator_parameters = parameters.clone();
+        generator_parameters.load = generator_loads[authority];
+        let start_options = ValidatorStartOptions {
+            rbc_dag_clock_start_paused: coordinated_rbc_dag_clock_start,
+            transaction_generator_start: Some(transaction_generator_start_rx.clone()),
+        };
         let validator = if is_byzantine {
-            Validator::start(
+            Validator::start_with_options(
                 authority as AuthorityIndex,
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                byzantine_parameters.clone(),
+                generator_parameters,
                 byzantine_strategy.clone(),
                 consensus_protocol.clone(),
+                start_options,
             )
             .await?
         } else {
-            Validator::start(
+            Validator::start_with_options(
                 authority as AuthorityIndex,
                 committee.clone(),
                 public_config.clone(),
                 private_config,
-                parameters.clone(),
+                generator_parameters,
                 "honest".to_string(),
                 consensus_protocol.clone(),
+                start_options,
             )
             .await?
         };
         let validator_metrics = validator.metrics();
+        metrics_of_all_validators.push(Arc::clone(&validator_metrics));
         if !is_byzantine {
             metrics_of_honest_validators.push(Arc::clone(&validator_metrics));
             reporters_of_honest_validators.push(validator.reporter())
         }
 
-        // Use the same pattern as the run method
-        let handle = tokio::spawn(async move {
-            let (network_result, _metrics_result) = validator.await_completion().await;
-            if starfish_rbc_dag_autonomous_clock_expected {
-                validator_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
-            } else if starfish_rbc_dag_shadow_expected {
-                validator_metrics
-                    .starfish_rbc_dag_shadow_comparison_valid
-                    .set(0);
-            }
-            network_result
-        });
-        abort_handles.push(handle.abort_handle());
-        handles.push(handle);
+        validators.push(validator);
     }
 
-    if starfish_rbc_dag_shadow_expected {
+    if starfish_rbc_dag_shadow_expected && !coordinated_rbc_dag_clock_start {
         let ready = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if metrics_of_honest_validators.iter().all(|metrics| {
@@ -610,9 +739,8 @@ async fn local_benchmark(
         })
         .await;
         if ready.is_err() {
-            for abort_handle in &abort_handles {
-                abort_handle.abort();
-            }
+            running.store(false, Ordering::SeqCst);
+            stop_local_benchmark_validators(validators).await;
             fs::remove_dir_all(&base_dir)?;
             let mode = if starfish_rbc_dag_autonomous_clock_expected {
                 "autonomous clock"
@@ -625,26 +753,110 @@ async fn local_benchmark(
         }
     }
 
-    // `duration_secs` is an active transaction-submission window, not a
-    // process-lifetime cutoff. Every finite generator holds metrics inactive
-    // through connection warmup, then opens this latch immediately before its
-    // first batch. Start the benchmark only after every honest validator has
-    // crossed that boundary.
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // A ready protocol actor is not yet a ready benchmark network. Require
+    // every honest validator to observe the complete logical subscription
+    // mesh before recording baselines. This fails closed if an earlier core
+    // failure leaves independent TCP workers alive or if startup is only
+    // partially connected.
+    let expected_peer_subscriptions =
+        i64::try_from(committee_size.saturating_sub(1)).unwrap_or(i64::MAX);
+    let topology_ready = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if metrics_of_honest_validators
-                .iter()
-                .all(|metrics| metrics.metrics_active.load(Ordering::Relaxed))
-            {
+            if local_benchmark_topology_ready(
+                &metrics_of_all_validators,
+                expected_peer_subscriptions,
+            )? {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        Ok::<(), eyre::Report>(())
     })
-    .await
-    .wrap_err("transaction generators did not open the active benchmark window")?;
-    println!("Active transaction window started ({duration_secs} seconds)");
+    .await;
+    if !matches!(topology_ready, Ok(Ok(()))) {
+        running.store(false, Ordering::SeqCst);
+        stop_local_benchmark_validators(validators).await;
+        fs::remove_dir_all(&base_dir)?;
+        eyre::bail!(
+            "Local benchmark did not establish the complete {expected_peer_subscriptions}-peer subscription mesh on every honest validator"
+        );
+    }
 
+    if coordinated_rbc_dag_clock_start {
+        let activated = tokio::time::timeout(
+            Duration::from_secs(30),
+            try_join_all(
+                validators
+                    .iter()
+                    .map(Validator::activate_starfish_rbc_dag_clock),
+            ),
+        )
+        .await;
+        if let Ok(Err(error)) = &activated {
+            tracing::error!("Failed to activate a coordinated RBC-DAG clock: {error}");
+        }
+        if !matches!(activated, Ok(Ok(_))) {
+            running.store(false, Ordering::SeqCst);
+            stop_local_benchmark_validators(validators).await;
+            fs::remove_dir_all(&base_dir)?;
+            eyre::bail!(
+                "Local benchmark could not activate every RBC-DAG clock after full topology readiness"
+            );
+        }
+
+        // The service activation acknowledgment only publishes the ordered
+        // ClockActivated event. Wait until each event bridge has processed it,
+        // released the authoritative Core producer, and marked the clock live.
+        let clock_ready = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                local_benchmark_topology_ready(
+                    &metrics_of_all_validators,
+                    expected_peer_subscriptions,
+                )?;
+                if metrics_of_all_validators
+                    .iter()
+                    .all(|metrics| metrics.starfish_rbc_dag_shadow_clock_valid.get() == 1)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok::<(), eyre::Report>(())
+        })
+        .await;
+        if !matches!(clock_ready, Ok(Ok(()))) {
+            running.store(false, Ordering::SeqCst);
+            stop_local_benchmark_validators(validators).await;
+            fs::remove_dir_all(&base_dir)?;
+            eyre::bail!("RBC-DAG clocks did not activate before the transaction window opened");
+        }
+    }
+
+    let generators_waiting = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if metrics_of_all_validators.iter().all(|metrics| {
+                BenchmarkGeneratorState::from_u8(
+                    metrics.benchmark_generator_state.load(Ordering::Acquire),
+                ) == BenchmarkGeneratorState::Waiting
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if generators_waiting.is_err() {
+        running.store(false, Ordering::SeqCst);
+        stop_local_benchmark_validators(validators).await;
+        fs::remove_dir_all(&base_dir)?;
+        eyre::bail!("transaction generators did not reach the coordinated waiting state");
+    }
+
+    // Clear warmup samples and capture every baseline before publishing the
+    // release. No generator can submit before the common absolute start.
+    for reporter in &reporters_of_honest_validators {
+        reporter.reset_for_benchmark_window();
+    }
     let autonomous_clock_baselines = starfish_rbc_dag_autonomous_clock_expected.then(|| {
         metrics_of_honest_validators
             .iter()
@@ -655,59 +867,263 @@ async fn local_benchmark(
         .iter()
         .map(|metrics| metrics.local_benchmark_counter_baseline())
         .collect::<Vec<_>>();
-
-    // Run for specified duration
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {
-            // Signal the progress display to stop
-            running.store(false, Ordering::SeqCst);
-            println!();
-            println!("Benchmark completed after {duration_secs} seconds");
-            // Display metrics
-            Metrics::aggregate_and_display(
-                metrics_of_honest_validators,
-                reporters_of_honest_validators,
-                duration_secs,
-                committee_size,
-                starfish_rbc_dag_shadow_expected,
-                starfish_rbc_dag_autonomous_clock_expected,
-                starfish_rbc_dag_embedded_rbc_authority_expected,
-                autonomous_clock_baselines.clone(),
-                Some(counter_baselines.clone()),
-            );
-
-            // Abort all tasks
-            for abort_handle in abort_handles {
-                abort_handle.abort();
-            }
-
-            // Clean up
-            fs::remove_dir_all(base_dir)?;
-            Ok(())
-        }
-        _ = async {
-            for handle in handles {
-                if let Err(e) = handle.await {
-                    tracing::warn!("Validator terminated with error: {}", e);
-                }
-            }
-        } => {
-            println!("All validators completed before timeout");
-            Metrics::aggregate_and_display(
-                metrics_of_honest_validators,
-                reporters_of_honest_validators,
-                duration_secs,
-                committee_size,
-                starfish_rbc_dag_shadow_expected,
-                starfish_rbc_dag_autonomous_clock_expected,
-                starfish_rbc_dag_embedded_rbc_authority_expected,
-                autonomous_clock_baselines,
-                Some(counter_baselines),
-            );
-            fs::remove_dir_all(base_dir)?;
-            eyre::bail!("All validators completed before the requested benchmark duration")
-        }
+    let sequenced_baselines = metrics_of_honest_validators
+        .iter()
+        .map(|metrics| metrics.sequenced_transactions_total.get())
+        .collect::<Vec<_>>();
+    let cutoff_sequenced_baselines = metrics_of_honest_validators
+        .iter()
+        .map(|metrics| metrics.sequenced_transactions_cutoff_total.get())
+        .collect::<Vec<_>>();
+    let honest_submitted_baselines = metrics_of_honest_validators
+        .iter()
+        .map(|metrics| metrics.submitted_transactions.get())
+        .collect::<Vec<_>>();
+    let window_start = Instant::now() + Duration::from_millis(100);
+    let window_end = window_start
+        .checked_add(Duration::from_secs(duration_secs))
+        .ok_or_else(|| eyre::eyre!("benchmark duration exceeds the monotonic clock range"))?;
+    let transaction_window = BenchmarkTransactionWindow::new(window_start, window_end)
+        .expect("positive local benchmark duration must form a valid window");
+    for metrics in &metrics_of_all_validators {
+        let cutoff_micros = window_end
+            .saturating_duration_since(metrics.validator_start)
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        metrics
+            .benchmark_transaction_cutoff_micros
+            .store(cutoff_micros, Ordering::Release);
     }
+    transaction_generator_start_tx.send_replace(Some(transaction_window));
+    tokio::time::sleep_until(window_start).await;
+
+    let active_window_ready = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let states = metrics_of_all_validators
+                .iter()
+                .map(|metrics| {
+                    BenchmarkGeneratorState::from_u8(
+                        metrics.benchmark_generator_state.load(Ordering::Acquire),
+                    )
+                })
+                .collect::<Vec<_>>();
+            eyre::ensure!(
+                !states.contains(&BenchmarkGeneratorState::Failed),
+                "a transaction generator failed while opening the common window"
+            );
+            if states
+                .iter()
+                .all(|state| *state == BenchmarkGeneratorState::Active)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<(), eyre::Report>(())
+    })
+    .await;
+    if !matches!(active_window_ready, Ok(Ok(()))) {
+        running.store(false, Ordering::SeqCst);
+        stop_local_benchmark_validators(validators).await;
+        fs::remove_dir_all(&base_dir)?;
+        eyre::bail!("transaction generators did not open the common active benchmark window");
+    }
+    println!("Active transaction window started ({duration_secs} seconds)");
+
+    // Run for the requested active duration, but fail if any validator exits.
+    // Keep ownership of the validators so the normal path can use their
+    // graceful shutdown rather than aborting wrapper tasks and leaking socket
+    // workers into subsequent latency experiments.
+    let completed_full_duration = tokio::select! {
+        _ = tokio::time::sleep_until(window_end) => true,
+        _ = async {
+            loop {
+                if validators.iter().any(Validator::is_finished) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        } => false,
+    };
+
+    // Close protocol/window metrics at the exact common cutoff even if a
+    // delayed generator task still has a scheduled pre-end batch to publish.
+    for metrics in &metrics_of_all_validators {
+        metrics.metrics_active.store(false, Ordering::Release);
+    }
+    let autonomous_clock_cutoffs: Option<Vec<AutonomousClockBenchmarkSnapshot>> =
+        starfish_rbc_dag_autonomous_clock_expected.then(|| {
+            metrics_of_honest_validators
+                .iter()
+                .map(|metrics| metrics.autonomous_clock_benchmark_snapshot())
+                .collect()
+        });
+    let counter_cutoffs = metrics_of_honest_validators
+        .iter()
+        .map(|metrics| metrics.local_benchmark_counter_baseline())
+        .collect::<Vec<_>>();
+    let cutoff_committed_transactions = metrics_of_honest_validators
+        .iter()
+        .zip(&cutoff_sequenced_baselines)
+        .map(|(metrics, baseline)| {
+            metrics
+                .sequenced_transactions_cutoff_total
+                .get()
+                .saturating_sub(*baseline)
+        })
+        .sum::<u64>()
+        / metrics_of_honest_validators.len() as u64;
+
+    let drain_started = Instant::now();
+    let generators_finished = completed_full_duration
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let states = metrics_of_all_validators
+                        .iter()
+                        .map(|metrics| {
+                            BenchmarkGeneratorState::from_u8(
+                                metrics.benchmark_generator_state.load(Ordering::Acquire),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    eyre::ensure!(
+                        !states.contains(&BenchmarkGeneratorState::Failed),
+                        "a transaction generator failed during the active window"
+                    );
+                    if states
+                        .iter()
+                        .all(|state| *state == BenchmarkGeneratorState::Finished)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Ok::<(), eyre::Report>(())
+            })
+            .await,
+            Ok(Ok(()))
+        );
+
+    // Byzantine generators have zero configured load, and offered work is
+    // defined explicitly from honest generators so adversarial strategies can
+    // neither inflate nor make the mandatory drain target unattainable.
+    let offered_transactions = metrics_of_honest_validators
+        .iter()
+        .zip(&honest_submitted_baselines)
+        .map(|(metrics, baseline)| {
+            metrics
+                .submitted_transactions
+                .get()
+                .saturating_sub(*baseline)
+        })
+        .sum::<u64>();
+    let pipeline_observed_through_target = |metrics: &Metrics, sequenced_baseline: u64| {
+        !starfish_rbc_dag_embedded_rbc_authority_expected
+            || offered_transactions == 0
+            || metrics.starfish_rbc_dag_frontier_applied_sequenced_transactions()
+                >= sequenced_baseline.saturating_add(offered_transactions)
+    };
+    let drain_complete = generators_finished
+        && tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if metrics_of_honest_validators
+                    .iter()
+                    .zip(&sequenced_baselines)
+                    .all(|(metrics, baseline)| {
+                        let sequenced = metrics
+                            .sequenced_transactions_total
+                            .get()
+                            .saturating_sub(*baseline);
+                        sequenced >= offered_transactions
+                            && pipeline_observed_through_target(metrics, *baseline)
+                    })
+                {
+                    break;
+                }
+                if validators.iter().any(Validator::is_finished) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+        && metrics_of_honest_validators
+            .iter()
+            .zip(&sequenced_baselines)
+            .all(|(metrics, baseline)| {
+                metrics
+                    .sequenced_transactions_total
+                    .get()
+                    .saturating_sub(*baseline)
+                    == offered_transactions
+            })
+        && metrics_of_honest_validators
+            .iter()
+            .zip(&sequenced_baselines)
+            .all(|(metrics, baseline)| pipeline_observed_through_target(metrics, *baseline));
+    let drain_elapsed = drain_started.elapsed();
+    for metrics in &metrics_of_all_validators {
+        metrics
+            .transaction_metrics_active
+            .store(false, Ordering::Release);
+    }
+    let eventual_committed_transactions = metrics_of_honest_validators
+        .iter()
+        .zip(&sequenced_baselines)
+        .map(|(metrics, baseline)| {
+            metrics
+                .sequenced_transactions_total
+                .get()
+                .saturating_sub(*baseline)
+        })
+        .sum::<u64>()
+        / metrics_of_honest_validators.len() as u64;
+    let transaction_outcome = LocalBenchmarkTransactionOutcome {
+        offered_transactions,
+        cutoff_committed_transactions,
+        eventual_committed_transactions,
+        drain_elapsed,
+        drain_complete,
+    };
+
+    running.store(false, Ordering::SeqCst);
+    println!();
+    if completed_full_duration {
+        println!("Benchmark completed after {duration_secs} seconds");
+    } else {
+        println!("A validator completed before timeout");
+    }
+    Metrics::aggregate_and_display(
+        metrics_of_honest_validators,
+        reporters_of_honest_validators,
+        duration_secs,
+        committee_size,
+        starfish_rbc_dag_shadow_expected,
+        starfish_rbc_dag_autonomous_clock_expected,
+        starfish_rbc_dag_embedded_rbc_authority_expected,
+        autonomous_clock_baselines,
+        autonomous_clock_cutoffs,
+        Some(counter_baselines),
+        Some(counter_cutoffs),
+        Some(transaction_outcome),
+    );
+    stop_local_benchmark_validators(validators).await;
+    fs::remove_dir_all(base_dir)?;
+    eyre::ensure!(
+        completed_full_duration,
+        "A validator completed before the requested benchmark duration"
+    );
+    eyre::ensure!(
+        generators_finished,
+        "A transaction generator failed to finish the common active window"
+    );
+    eyre::ensure!(
+        drain_complete,
+        "Active-window transaction drain was incomplete: offered={offered_transactions}, eventual average committed={eventual_committed_transactions}"
+    );
+    Ok(())
 }
 
 /// Boot a single validator node.
@@ -892,6 +1308,58 @@ fn ensure_starfish_rbc_protocol_instance(
     }
 }
 
+fn validate_local_benchmark_port_offset(
+    public_config: &NodePublicConfig,
+    port_offset: u16,
+) -> Result<()> {
+    eyre::ensure!(
+        public_config.all_network_addresses().all(|address| {
+            address
+                .port()
+                .checked_add(port_offset)
+                .is_some_and(|port| port <= LOCAL_BENCHMARK_MAX_ACTIVE_BIND_PORT / 10)
+        }),
+        "local benchmark port offset {port_offset} places a derived active-bind port in the OS ephemeral range; choose a smaller offset"
+    );
+    Ok(())
+}
+
+fn preflight_local_benchmark_ports(public_config: &NodePublicConfig) -> Result<()> {
+    let mut addresses = BTreeSet::new();
+    for address in public_config.all_network_addresses() {
+        addresses.insert(address);
+        let mut active = address;
+        active.set_port(
+            address
+                .port()
+                .checked_mul(10)
+                .expect("validated local benchmark active port"),
+        );
+        addresses.insert(active);
+    }
+    addresses.extend(public_config.all_metric_addresses());
+
+    // The network listeners enable SO_REUSEPORT. A plain bind probe can
+    // therefore succeed even while a stale benchmark is still serving the
+    // same address. Probe for an existing listener first, then reserve every
+    // address for the duration of this check.
+    for address in &addresses {
+        eyre::ensure!(
+            TcpStream::connect_timeout(address, Duration::from_millis(25)).is_err(),
+            "local benchmark port {address} is already served by another process"
+        );
+    }
+
+    let mut reservations = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        reservations.push(
+            TcpListener::bind(address)
+                .wrap_err_with(|| format!("local benchmark port {address} is already in use"))?,
+        );
+    }
+    Ok(())
+}
+
 fn ipv4_add_offset(base: Ipv4Addr, offset: usize) -> Result<Ipv4Addr> {
     let offset = u32::try_from(offset).context("validator count exceeds IPv4 offset range")?;
     let next = u32::from(base)
@@ -949,12 +1417,23 @@ pub fn default_table_format() -> format::TableFormat {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::{
+        net::{IpAddr, Ipv4Addr, TcpListener},
+        path::PathBuf,
+    };
 
     use clap::Parser;
 
-    use super::{Args, Operation, ensure_starfish_rbc_protocol_instance, ipv4_add_offset};
-    use starfish_core::config::NodeParameters;
+    use super::{
+        Args, Operation, ensure_starfish_rbc_protocol_instance, ipv4_add_offset,
+        local_benchmark_generator_loads, local_benchmark_private_configs,
+        local_benchmark_topology_state, preflight_local_benchmark_ports,
+        validate_local_benchmark_port_offset,
+    };
+    use starfish_core::{
+        config::{NodeParameters, NodePrivateConfig, NodePublicConfig},
+        types::AuthorityIndex,
+    };
 
     #[test]
     fn ipv4_add_offset_crosses_octet_boundary() {
@@ -969,6 +1448,22 @@ mod tests {
     fn ipv4_add_offset_errors_on_overflow() {
         let base = Ipv4Addr::new(255, 255, 255, 255);
         assert!(ipv4_add_offset(base, 1).is_err());
+    }
+
+    #[test]
+    fn local_benchmark_disables_byzantine_generators_and_preserves_aggregate_load() {
+        let (byzantine, loads) = local_benchmark_generator_loads(10, 1_003, 2).unwrap();
+
+        assert_eq!(byzantine.into_iter().collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(loads[0], 0);
+        assert_eq!(loads[3], 0);
+        assert_eq!(loads.iter().sum::<usize>(), 1_003);
+        assert_eq!(loads, vec![0, 126, 126, 0, 126, 125, 125, 125, 125, 125]);
+    }
+
+    #[test]
+    fn local_benchmark_rejects_unplaceable_byzantine_count() {
+        assert!(local_benchmark_generator_loads(4, 100, 3).is_err());
     }
 
     #[test]
@@ -1014,6 +1509,8 @@ mod tests {
             "--starfish-rbc-dag-autonomous-clock",
             "--starfish-rbc-dag-embedded-rbc-authority",
             "--starfish-rbc-dag-shadow-buffered-wal",
+            "--port-offset",
+            "2500",
         ])
         .unwrap();
 
@@ -1024,6 +1521,7 @@ mod tests {
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_shadow_buffered_wal,
+            port_offset,
             ..
         } = args.operation
         else {
@@ -1035,6 +1533,7 @@ mod tests {
         assert!(starfish_rbc_dag_autonomous_clock);
         assert!(starfish_rbc_dag_embedded_rbc_authority);
         assert!(starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(port_offset, 2500);
     }
 
     #[test]
@@ -1054,5 +1553,57 @@ mod tests {
         );
         assert!(parameters.starfish_rbc_dag_shadow);
         assert!(parameters.starfish_rbc_dag_autonomous_clock);
+    }
+
+    #[test]
+    fn local_benchmark_port_offset_stays_below_ephemeral_active_ports() {
+        let safe =
+            NodePublicConfig::new_for_benchmarks(vec![IpAddr::V4(Ipv4Addr::LOCALHOST); 10], None);
+        validate_local_benchmark_port_offset(&safe, 200).unwrap();
+
+        let ephemeral =
+            NodePublicConfig::new_for_benchmarks(vec![IpAddr::V4(Ipv4Addr::LOCALHOST); 10], None);
+        assert!(validate_local_benchmark_port_offset(&ephemeral, 3_500).is_err());
+        assert!(validate_local_benchmark_port_offset(&ephemeral, u16::MAX).is_err());
+    }
+
+    #[test]
+    fn local_benchmark_private_configs_preserve_per_authority_storage_layout() {
+        let base_dir = PathBuf::from("local-benchmark-config-test");
+        let committee_size = 4;
+        let private_configs = local_benchmark_private_configs(&base_dir, committee_size);
+
+        assert_eq!(private_configs.len(), committee_size);
+        for (authority, private_config) in private_configs.into_iter().enumerate() {
+            assert_eq!(private_config.mac_keys.len(), committee_size);
+            assert_eq!(
+                private_config.storage_path,
+                base_dir.join(format!("node-{authority}")).join(
+                    NodePrivateConfig::default_storage_path(authority as AuthorityIndex)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn local_benchmark_preflight_rejects_an_existing_listener() {
+        let public_config =
+            NodePublicConfig::new_for_benchmarks(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)], None)
+                .with_port_offset(1_400);
+        let address = public_config.network_address(0).unwrap();
+        let _listener = match TcpListener::bind(address) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind preflight test listener: {error}"),
+        };
+
+        assert!(preflight_local_benchmark_ports(&public_config).is_err());
+    }
+
+    #[test]
+    fn local_benchmark_topology_readiness_fails_closed_before_baselining() {
+        assert!(!local_benchmark_topology_state([(false, 2, 3)], 3).unwrap());
+        assert!(local_benchmark_topology_state([(false, 3, 3)], 3).unwrap());
+        assert!(local_benchmark_topology_state([(true, 3, 3)], 3).is_err());
     }
 }

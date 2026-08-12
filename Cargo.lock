@@ -3584,6 +3584,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "futures",
  "prettytable-rs",
  "starfish-core",
  "tokio",

@@ -48,30 +48,44 @@ acknowledgment references between validators.
 headers. ECHO and READY are recipient-authenticated with pairwise MACs; the author's INIT can use
 Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctness-oriented research
 prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
-**Starfish-RBC-DAG** is a follow-up that pipelines all-carrier RBC through an optimistic carrier DAG
-while keeping certified Starfish consensus and ordering in a separate logical projection. Its
-canonical types, deterministic models, crash journal, comparison shadow, autonomous carrier clock,
-authoritative embedded-RBC path, and certified logical consensus projection are implemented. Run
-the comparison shadow with
-`--consensus starfish-rbc --starfish-rbc-dag-shadow`; add
-`--starfish-rbc-dag-autonomous-clock --starfish-rbc-dag-embedded-rbc-authority` to encode exact
-application headers in version-two carriers and make embedded ECHO/READY/delivery their sole
-certification authority. Direct INIT remains payload transport, but direct ECHO/READY cannot clean
-blocks in that mode. Committed projected anchors now release deterministic carrier-frontier deltas,
-and those deltas are the sole application ordering/output authority; the legacy Starfish committer
-is disabled. Idle carrier heartbeats reuse Starfish's resolved leader timeout (600 ms for
-Starfish-RBC by default); application and encodable phase carriers are emitted immediately.
+**Starfish-RBC-DAG** is the standalone follow-up that carries authentication, reliable-broadcast
+control, application headers, and logical Starfish vertices in one optimistic carrier DAG. Run the
+comparison plane with `--consensus starfish-rbc --starfish-rbc-dag-shadow`; add
+`--starfish-rbc-dag-autonomous-clock --starfish-rbc-dag-embedded-rbc-authority` to make that carrier
+plane the sole reliable-broadcast, consensus, ordering, and output authority. In this mode the direct
+Starfish-RBC service is not started: direct INIT/phase/header-recovery messages, generic block
+batches, and legacy parent/transaction pulls cannot certify or order an application. Application
+bytes travel with the carrier envelope when available, or through the dedicated RBC-DAG payload
+request/response path, and are accepted only after commitment verification.
 
-Autonomous carriers now embed durably locked consensus vertices with quorum strong parents,
-explicit Vote/NoVote choices, and exact delivery frontiers. Only RBC-delivered, data-available,
-prefix-closed vertices enter the projection or its leader decisions. Frontier output retains exact
-application references and is rebuilt from the ordered WAL on actor reopen. Full validator crash
-recovery and proof-safe late-node state transfer remain outside this milestone. Shadow traffic shares the
-validator's network socket and bandwidth, and deployment requires a homogeneous new-binary
-committee. The default WAL is crash-safe but too intrusive for a fair latency experiment;
-`--starfish-rbc-dag-shadow-buffered-wal` preserves the ordered log while syncing only on clean
-shutdown and therefore forfeits crash safety. Full validator crash recovery also remains out of
-scope. See the [protocol design](docs/starfish-rbc-dag-protocol.md).
+The implemented MAC-vector RBC uses four embedded phases. For target-author stake `a` and total
+stake `W`, ECHO, VOTE, and ACK exclude the target author; weighted thresholds `M`, `C`, and `O`
+drive VOTE, ACK/READY convergence, and authoritative optimistic delivery. Reaching `O` ECHO stake
+is sufficient for the fast delivery latch, while `Q = W - floor((W - 1) / 3)` READY stake records a
+separate slower certification latch. If `a > floor((W - 1) / 3)`, the fault model makes the author
+honest and receiver-authenticated exact content can take the fast latch directly. All four phases
+use per-sender and local slot-global locks, and threshold evidence without content triggers exact
+carrier recovery before a local follow-up is exposed. The full definitions and safety boundary are
+in the [protocol design](docs/starfish-rbc-dag-protocol.md).
+
+Autonomous carriers embed durably locked consensus vertices with quorum strong parents, explicit
+Vote/NoVote choices, and exact delivery frontiers. Authoritative delivery alone is not application
+data availability: projection and output wait until Core has materialized the concrete application
+block and its committed payload is available. Each committed anchor is componentwise joined into a
+cumulative committed frontier; only the new exact, data-available prefix delta is released, and
+the legacy Starfish committer is disabled. The prototype admits at most two carrier rounds ahead,
+retains canonical unsolicited carrier content up to 64 rounds ahead, and offers rate-limited
+single-slot exact synchronization rather than checkpoint or proof-safe late-node state transfer.
+Its current authoritative journal uses the V4 autonomous WAL namespace with `SRD5` raw records so
+older traces cannot be reinterpreted under the optimistic-delivery rules.
+
+The default WAL syncs every transition. `--starfish-rbc-dag-shadow-buffered-wal` preserves ordered
+frames but syncs only on clean shutdown and is not crash-safe. Actor replay covers the state
+explicitly documented in the protocol design; full validator crash recovery, bounded checkpoint
+transfer, and proof-safe state retirement are not claimed. Shadow traffic shares the validator's
+network socket and bandwidth, and deployment requires a homogeneous new-binary committee. Idle
+carrier heartbeats reuse Starfish's resolved leader timeout (600 ms for Starfish-RBC by default);
+application and encodable phase carriers are emitted immediately.
 For a direct-header shadow comparison,
 `starfish_rbc_dag_shadow_comparison_valid` must stay at `1`; a value of `0` means the bounded
 observational path was disabled or shed work and the comparison must be discarded. Healthy live
@@ -85,7 +99,8 @@ supports at most 60 validators in mirror mode and 20 in autonomous mode.
 
 A matched 10-validator, 60-second-active-window local run on 2026-08-11 used the AWS RTT emulator,
 nominal 1,000 tx/s load, MAC authentication, the buffered benchmark WAL, and Starfish's shared
-600 ms leader/idle-carrier timeout.
+600 ms leader/idle-carrier timeout. These milestone rows predate the current four-phase V4
+authority model and are retained as historical measurements.
 
 | Profile | Verdict | TPS | Block latency | E2E latency | Outbound BW |
 |---|---:|---:|---:|---:|---:|

@@ -16,10 +16,11 @@ use prettytable::{Table, row};
 use prometheus_parse::Scrape;
 use serde::{Deserialize, Serialize};
 use starfish_core::metrics::{
-    STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR,
     STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR,
     STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG, STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR,
     STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG,
+    starfish_rbc_dag_autonomous_buffered_capacity_bound,
+    starfish_rbc_dag_autonomous_buffered_settled_bound,
 };
 
 use crate::{
@@ -752,6 +753,12 @@ impl MeasurementsCollection {
             .is_some_and(|measurement| measurement.scalar > minimum)
     }
 
+    fn latest_scalar_at_most(&self, label: &str, scraper_id: ScraperId, maximum: f64) -> bool {
+        self.scraper_series(label, scraper_id)
+            .and_then(|series| series.last())
+            .is_some_and(|measurement| measurement.scalar >= 0.0 && measurement.scalar <= maximum)
+    }
+
     fn scalar_gauge_increased(&self, label: &str, scraper_id: ScraperId) -> bool {
         self.active_window_series(label, scraper_id)
             .is_some_and(|series| {
@@ -1179,8 +1186,11 @@ impl MeasurementsCollection {
         };
         let autonomous_phase_backlog_bound = STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR
             .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
-        let autonomous_buffered_bound = STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR
-            .saturating_mul(i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX));
+        let committee_size = i64::try_from(self.parameters.nodes).unwrap_or(i64::MAX);
+        let autonomous_buffered_capacity_bound =
+            starfish_rbc_dag_autonomous_buffered_capacity_bound(committee_size);
+        let autonomous_buffered_settled_bound =
+            starfish_rbc_dag_autonomous_buffered_settled_bound(committee_size);
         let every_autonomous_scraper_has_progress = shadow_autonomous_clock_valid_scrapers
             .iter()
             .all(|scraper_id| {
@@ -1247,7 +1257,12 @@ impl MeasurementsCollection {
                     && self.gauge_always_at_most(
                         "starfish_rbc_dag_shadow_buffered_authenticated",
                         *scraper_id,
-                        autonomous_buffered_bound as f64,
+                        autonomous_buffered_capacity_bound as f64,
+                    )
+                    && self.latest_scalar_at_most(
+                        "starfish_rbc_dag_shadow_buffered_authenticated",
+                        *scraper_id,
+                        autonomous_buffered_settled_bound as f64,
                     )
             });
         let shadow_autonomous_clock_valid = shadow_autonomous_clock_enabled
@@ -1996,10 +2011,13 @@ starfish_rbc_dag_shadow_buffered_authenticated 2
     #[test]
     fn autonomous_clock_has_a_distinct_sticky_summary() {
         let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(2));
-        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 1, 2, 7, 1, 5);
-        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 8, 1, 2, 6, 1, 6);
+        // Catch-up may transiently use most of the 62 retained slots per
+        // remote author. That is safe as long as the final healthy tail
+        // settles to the tighter round-skew-derived bound.
+        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 1, 2, 7, 50, 5);
+        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 8, 1, 2, 6, 60, 6);
         add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 12, 3, 2, 7, 2, 10);
-        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 10, 4, 2, 6, 3, 11);
+        add_autonomous_clock_snapshot(&mut collection, 1, 1.0, 10, 4, 2, 6, 2, 11);
 
         let summary = collection.benchmark_run_summary();
         assert!(!summary.shadow_comparison_enabled);
@@ -2014,7 +2032,7 @@ starfish_rbc_dag_shadow_buffered_authenticated 2
         assert_eq!(summary.shadow_autonomous_clock_admitted_stake_min, 6);
         assert_eq!(
             summary.shadow_autonomous_clock_buffered_authenticated_total,
-            5
+            4
         );
         assert_eq!(summary.shadow_wal_durable_records, 21);
 
@@ -2024,6 +2042,35 @@ starfish_rbc_dag_shadow_buffered_authenticated 2
         let summary = collection.benchmark_run_summary();
         assert_eq!(summary.shadow_autonomous_clock_valid_nodes, 1);
         assert!(!summary.shadow_autonomous_clock_valid);
+    }
+
+    #[test]
+    fn autonomous_clock_buffer_gate_separates_capacity_from_settled_tail() {
+        let mut capacity_overflow =
+            MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(2));
+        add_autonomous_clock_snapshot(&mut capacity_overflow, 0, 1.0, 8, 0, 2, 7, 63, 5);
+        add_autonomous_clock_snapshot(&mut capacity_overflow, 1, 1.0, 8, 0, 2, 7, 0, 5);
+        add_autonomous_clock_snapshot(&mut capacity_overflow, 0, 1.0, 12, 0, 2, 7, 2, 10);
+        add_autonomous_clock_snapshot(&mut capacity_overflow, 1, 1.0, 12, 0, 2, 7, 2, 10);
+        assert!(
+            !capacity_overflow
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid,
+            "one remote author cannot occupy more than the 62-slot retention capacity"
+        );
+
+        let mut unsettled_tail =
+            MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(2));
+        add_autonomous_clock_snapshot(&mut unsettled_tail, 0, 1.0, 8, 0, 2, 7, 50, 5);
+        add_autonomous_clock_snapshot(&mut unsettled_tail, 1, 1.0, 8, 0, 2, 7, 50, 5);
+        add_autonomous_clock_snapshot(&mut unsettled_tail, 0, 1.0, 12, 0, 2, 7, 3, 10);
+        add_autonomous_clock_snapshot(&mut unsettled_tail, 1, 1.0, 12, 0, 2, 7, 2, 10);
+        assert!(
+            !unsettled_tail
+                .benchmark_run_summary()
+                .shadow_autonomous_clock_valid,
+            "a healthy final scrape must settle to two buffered slots per remote author"
+        );
     }
 
     #[test]

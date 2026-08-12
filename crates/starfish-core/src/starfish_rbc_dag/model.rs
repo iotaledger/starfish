@@ -29,11 +29,13 @@ use super::{
     carrier_genesis_reference,
 };
 
-/// Executable-model runahead bound. This is deliberately a model parameter,
-/// not a production protocol constant; the runtime value remains a proof and
-/// benchmarking decision.
+/// Executable-model runahead bounds. Admission stays close to the exact local
+/// clock, while the wider authenticated-retention window lets a temporarily
+/// descheduled validator catch up without forcing the healthy quorum to pace
+/// itself to the slowest peer. These remain prototype resource parameters,
+/// not production protocol constants.
 pub const EXECUTABLE_MODEL_ADMISSION_WINDOW_V1: RoundNumber = 2;
-pub const EXECUTABLE_MODEL_BUFFER_WINDOW_V1: RoundNumber = 4;
+pub const EXECUTABLE_MODEL_BUFFER_WINDOW_V1: RoundNumber = 64;
 
 const MODEL_LINEAGE_DERIVE_CONTEXT: &str = "starfish-rbc-dag-model-lineage-v1";
 type ModelLineage = [u8; 32];
@@ -42,6 +44,23 @@ type ModelLineage = [u8; 32];
 enum IngressAuthentication {
     Authenticated,
     CandidateOnly,
+}
+
+/// Safety basis for the optimistic RBC fast-delivery latch.
+///
+/// The first three predicates are authoritative delivery rules: the sender is
+/// known honest, or the author-excluding optimistic ECHO threshold proves the
+/// value unique and forces the VOTE/ACK/READY fallback to terminate on it.
+/// `Delivered` records the slower `Q`-READY path when no fast predicate fired.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryPromiseBasisV1 {
+    LocalFixed,
+    /// The target author has stake greater than the maximum Byzantine stake,
+    /// so a receiver-authenticated author value cannot equivocate.
+    HonestAuthor,
+    /// The author-excluding optimistic ECHO threshold `O = M + b` was met.
+    OptimisticEcho,
+    Delivered,
 }
 
 /// Observable effects of one deterministic reducer transition.
@@ -54,6 +73,11 @@ pub enum ModelEffect {
     },
     /// The local Bracha instance delivered this exact carrier value.
     Delivered(BlockReference),
+    /// This exact value satisfied an authoritative optimistic-delivery
+    /// predicate. The slower `Delivered` effect still records `Q`-READY
+    /// certification independently. Projection additionally requires DA and
+    /// an exact closed carrier prefix.
+    DeliveryPromised(BlockReference),
     /// One exact author prefix advanced by one carrier.
     PrefixAdvanced {
         authority: AuthorityIndex,
@@ -72,7 +96,8 @@ pub enum ModelEffect {
 pub enum ModelTraceEvent {
     /// The first authenticated value selected for a remote carrier slot.
     AdmissionLocked(BlockReference),
-    /// A locally generated ECHO or READY became slot-global and immutable.
+    /// A locally generated ECHO, VOTE, ACK, or READY became slot-global and
+    /// immutable for its phase.
     LocalPhaseLocked(RbcPhaseStatementV1),
     /// One exact entry of an enclosing carrier's authenticated phase log is
     /// about to be applied. Any lock enabled by that entry follows this event.
@@ -103,6 +128,13 @@ pub enum ModelTraceEvent {
     LeaderChoiceLocked {
         consensus_round: RoundNumber,
         choice: LeaderChoiceV1,
+    },
+    /// One safety-preserving promise predicate became true.
+    /// This lock is emitted at most once for an exact carrier and immediately
+    /// precedes its `DeliveryPromised` effect.
+    DeliveryPromiseLocked {
+        target: BlockReference,
+        basis: DeliveryPromiseBasisV1,
     },
     /// Bracha delivery became slot-global and immutable.
     DeliveryLocked(BlockReference),
@@ -193,6 +225,7 @@ pub struct CarrierLifecycle {
     pub admitted: bool,
     pub phase_batch_processed: bool,
     pub delivered: bool,
+    pub certified_delivered: bool,
     pub data_available: bool,
     pub prefix_closed: bool,
 }
@@ -272,6 +305,7 @@ struct CarrierRecord {
     admitted: bool,
     phase_batch_cursor: usize,
     delivered: bool,
+    certified_delivered: bool,
     data_available: bool,
     prefix_closed: bool,
 }
@@ -284,6 +318,7 @@ impl CarrierRecord {
             admitted: false,
             phase_batch_cursor: 0,
             delivered: false,
+            certified_delivered: false,
             data_available,
             prefix_closed: false,
         }
@@ -296,6 +331,7 @@ impl CarrierRecord {
             phase_batch_processed: self.phase_batch_cursor
                 == self.carrier.header().phase_batch().len(),
             delivered: self.delivered,
+            certified_delivered: self.certified_delivered,
             data_available: self.data_available,
             prefix_closed: self.prefix_closed,
         }
@@ -305,25 +341,35 @@ impl CarrierRecord {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RbcCandidateState {
     echoes: BTreeSet<AuthorityIndex>,
+    votes: BTreeSet<AuthorityIndex>,
+    acks: BTreeSet<AuthorityIndex>,
     readies: BTreeSet<AuthorityIndex>,
-    echo_quorum_observed: bool,
-    ready_validity_observed: bool,
-    ready_quorum_observed: bool,
     requested_holders: BTreeSet<AuthorityIndex>,
 }
 
 impl RbcCandidateState {
     fn holders(&self) -> BTreeSet<AuthorityIndex> {
-        self.echoes.union(&self.readies).copied().collect()
+        self.echoes
+            .iter()
+            .chain(&self.votes)
+            .chain(&self.acks)
+            .chain(&self.readies)
+            .copied()
+            .collect()
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RbcSlotState {
     echoed: Option<BlockReference>,
+    voted: Option<BlockReference>,
+    acked: Option<BlockReference>,
     readied: Option<BlockReference>,
     delivered: Option<BlockReference>,
+    certified_delivered: Option<BlockReference>,
     echo_by_sender: BTreeMap<AuthorityIndex, BlockReference>,
+    vote_by_sender: BTreeMap<AuthorityIndex, BlockReference>,
+    ack_by_sender: BTreeMap<AuthorityIndex, BlockReference>,
     ready_by_sender: BTreeMap<AuthorityIndex, BlockReference>,
     candidates: BTreeMap<BlockReference, RbcCandidateState>,
 }
@@ -331,15 +377,37 @@ struct RbcSlotState {
 #[derive(Clone, Copy)]
 enum RbcAction {
     NeedCarrier,
+    SendVote,
+    SendAck,
     SendReady,
-    Deliver,
+    CertifyDelivery,
     None,
+}
+
+/// Exact integer thresholds for one target-author slot.
+///
+/// `fault = floor((W - 1) / 3)` is the greatest integer Byzantine stake
+/// strictly below one third. ECHO, VOTE, and ACK exclude the target author.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RbcThresholds {
+    fault: Stake,
+    ready_validity: Stake,
+    ready_quorum: Stake,
+    optimistic: Option<OptimisticThresholds>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OptimisticThresholds {
+    vote_from_echo: Stake,
+    converge: Stake,
+    promise_from_echo: Stake,
 }
 
 /// Pure local state machine used by the milestone-two simulations.
 #[derive(Clone)]
 pub struct RbcDagModel {
     committee: Arc<Committee>,
+    total_committee_stake: Stake,
     committee_id: RbcDagCommitteeId,
     context: RbcDagContextV1,
     own_authority: AuthorityIndex,
@@ -355,6 +423,7 @@ pub struct RbcDagModel {
     pending_phases: VecDeque<RbcPhaseStatementV1>,
     pending_phase_set: BTreeSet<RbcPhaseStatementV1>,
     pending_delivered_batch_replays: VecDeque<BlockReference>,
+    delivery_promises: BTreeMap<BlockReference, DeliveryPromiseBasisV1>,
     prefix_tips: Vec<BlockReference>,
     included_frontier: Vec<Option<BlockReference>>,
     included: BTreeSet<BlockReference>,
@@ -374,6 +443,16 @@ impl RbcDagModel {
         if context.committee_id() != committee_id {
             return Err(ModelError::ContextMismatch);
         }
+        let total_committee_stake =
+            committee.authorities().try_fold(0u64, |total, authority| {
+                total
+                    .checked_add(
+                        committee
+                            .get_stake(authority)
+                            .ok_or(ModelError::UnknownAuthority(authority))?,
+                    )
+                    .ok_or(ModelError::InvalidCommittee)
+            })?;
         let prefix_tips = committee
             .authorities()
             .map(carrier_genesis_reference)
@@ -381,6 +460,7 @@ impl RbcDagModel {
         Ok(Self {
             included_frontier: vec![None; committee.len()],
             committee,
+            total_committee_stake,
             committee_id,
             context,
             own_authority,
@@ -396,6 +476,7 @@ impl RbcDagModel {
             pending_phases: VecDeque::new(),
             pending_phase_set: BTreeSet::new(),
             pending_delivered_batch_replays: VecDeque::new(),
+            delivery_promises: BTreeMap::new(),
             prefix_tips,
             included: BTreeSet::new(),
         })
@@ -570,7 +651,7 @@ impl RbcDagModel {
         let limit = self
             .committee
             .len()
-            .saturating_mul(4)
+            .saturating_mul(6)
             .min(MAX_PHASE_STATEMENTS_V1);
         self.pending_phases
             .iter()
@@ -634,7 +715,7 @@ impl RbcDagModel {
 
     /// Fix a locally authored carrier. Its phase batch must be the exact
     /// bounded FIFO prefix returned by [`Self::pending_phase_batch`]; newly
-    /// generated ECHO is left for a later carrier.
+    /// generated phase statements are left for a later carrier.
     pub fn start_local_carrier(
         &mut self,
         authenticated: LocallyAuthenticatedCarrierV1,
@@ -698,8 +779,8 @@ impl RbcDagModel {
             .collect();
         let reference = carrier.reference();
         // Preflight all fallible ingress checks before the proof-critical
-        // write order. The exact local carrier must be fixed before its local
-        // ECHO is authorized or any embedded phase statement is exposed.
+        // write order. The exact local carrier must be fixed before any local
+        // phase statement is authorized or any embedded statement is exposed.
         self.preflight_receive(&carrier)?;
         self.own_fixed.insert(round, reference);
         log.proof(ModelTraceEvent::LocalCarrierFixed(reference));
@@ -713,6 +794,7 @@ impl RbcDagModel {
                 choice: vertex.leader_choice(),
             });
         }
+        self.lock_delivery_promise(reference, DeliveryPromiseBasisV1::LocalFixed, log);
         for statement in &expected_phase_batch {
             self.pending_phase_set.remove(statement);
         }
@@ -831,10 +913,21 @@ impl RbcDagModel {
                     true
                 }
             };
+            if selected && self.target_author_is_honest(reference.authority) {
+                // This capability authenticates the exact target-author bytes
+                // to this receiver. If the author's stake exceeds F, the
+                // fault model itself rules out author equivocation.
+                self.lock_delivery_promise(reference, DeliveryPromiseBasisV1::HonestAuthor, log);
+            }
             if selected && self.in_admission_window(reference.round) {
                 self.promote_authenticated(reference, log);
             }
         }
+        // A locally fixed promise is persisted before the carrier is inserted
+        // above. Activate every already-locked fast-delivery predicate only
+        // after exact content exists, and defer phase-batch replay until the
+        // current reducer input finishes.
+        self.activate_delivery_promise(reference, log);
         self.maybe_advance_fast_clock(log);
         self.drain_delivered_phase_batches(log);
     }
@@ -902,6 +995,33 @@ impl RbcDagModel {
         self.rbc_slots
             .get(&(round, authority))
             .and_then(|slot| slot.delivered)
+    }
+
+    /// Return the exact value that reached the fallback `Q`-READY
+    /// certificate, independently of an earlier optimistic delivery.
+    pub fn certified_delivered(
+        &self,
+        authority: AuthorityIndex,
+        round: RoundNumber,
+    ) -> Option<BlockReference> {
+        self.rbc_slots
+            .get(&(round, authority))
+            .and_then(|slot| slot.certified_delivered)
+    }
+
+    pub fn certified_delivery_count(&self) -> usize {
+        self.rbc_slots
+            .values()
+            .filter(|slot| slot.certified_delivered.is_some())
+            .count()
+    }
+
+    /// Return the first durable fast-delivery basis for this exact carrier.
+    pub fn delivery_promise_basis(
+        &self,
+        reference: &BlockReference,
+    ) -> Option<DeliveryPromiseBasisV1> {
+        self.delivery_promises.get(reference).copied()
     }
 
     pub fn prefix_tip(&self, authority: AuthorityIndex) -> Option<BlockReference> {
@@ -1074,6 +1194,56 @@ impl RbcDagModel {
         })
     }
 
+    fn voters_stake_excluding(
+        &self,
+        voters: &BTreeSet<AuthorityIndex>,
+        excluded: AuthorityIndex,
+    ) -> Stake {
+        voters.iter().fold(0, |stake, authority| {
+            if *authority == excluded {
+                stake
+            } else {
+                stake.saturating_add(self.authority_stake(*authority))
+            }
+        })
+    }
+
+    fn rbc_thresholds(&self, target_author: AuthorityIndex) -> Option<RbcThresholds> {
+        let author_stake = self.committee.get_stake(target_author)?;
+        let fault = self.total_committee_stake.checked_sub(1)? / 3;
+        let ready_validity = fault.checked_add(1)?;
+        let ready_quorum = self.total_committee_stake.checked_sub(fault)?;
+        let optimistic = if author_stake <= fault {
+            let non_author_stake = self.total_committee_stake.checked_sub(author_stake)?;
+            let residual_fault = fault.checked_sub(author_stake)?;
+            let vote_from_echo = non_author_stake.checked_div(2)?.checked_add(1)?;
+            // floor((U + b) / 2) without overflowing the intermediate sum.
+            let converge = (non_author_stake / 2)
+                .checked_add(residual_fault / 2)?
+                .checked_add((non_author_stake % 2 + residual_fault % 2) / 2)?
+                .checked_add(1)?;
+            let promise_from_echo = vote_from_echo.checked_add(residual_fault)?;
+            Some(OptimisticThresholds {
+                vote_from_echo,
+                converge,
+                promise_from_echo,
+            })
+        } else {
+            None
+        };
+        Some(RbcThresholds {
+            fault,
+            ready_validity,
+            ready_quorum,
+            optimistic,
+        })
+    }
+
+    fn target_author_is_honest(&self, target_author: AuthorityIndex) -> bool {
+        self.rbc_thresholds(target_author)
+            .is_some_and(|thresholds| thresholds.optimistic.is_none())
+    }
+
     fn rbc_slot_mut(&mut self, reference: BlockReference) -> &mut RbcSlotState {
         self.rbc_slots
             .entry((reference.round, reference.authority))
@@ -1082,6 +1252,15 @@ impl RbcDagModel {
 
     fn authorize_local_echo(&mut self, reference: BlockReference, log: &mut TransitionLog) {
         let own = self.own_authority;
+        if own == reference.authority {
+            // The target author is excluded from ECHO/VOTE/ACK. A locally
+            // fixed high-stake author instead seeds READY: its stake is at
+            // least F+1, so every correct receiver can safely amplify it.
+            if self.target_author_is_honest(reference.authority) {
+                self.authorize_local_ready(reference, log);
+            }
+            return;
+        }
         let slot = self.rbc_slot_mut(reference);
         if slot.echoed.is_some() {
             return;
@@ -1094,6 +1273,25 @@ impl RbcDagModel {
             .echoes
             .insert(own);
         let statement = RbcPhaseStatementV1::Echo { target: reference };
+        log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
+        self.queue_local_phase(statement);
+        self.drive_rbc(reference, log);
+    }
+
+    fn authorize_local_ready(&mut self, reference: BlockReference, log: &mut TransitionLog) {
+        let own = self.own_authority;
+        let slot = self.rbc_slot_mut(reference);
+        if slot.readied.is_some() {
+            return;
+        }
+        slot.readied = Some(reference);
+        slot.ready_by_sender.insert(own, reference);
+        slot.candidates
+            .entry(reference)
+            .or_default()
+            .readies
+            .insert(own);
+        let statement = RbcPhaseStatementV1::Ready { target: reference };
         log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
         self.queue_local_phase(statement);
         self.drive_rbc(reference, log);
@@ -1176,12 +1374,29 @@ impl RbcDagModel {
             return;
         }
         let target = statement.target();
+        if !self.committee.known_authority(target.authority) || target.round == 0 {
+            return;
+        }
+        if sender == target.authority
+            && matches!(
+                statement,
+                RbcPhaseStatementV1::Echo { .. }
+                    | RbcPhaseStatementV1::Vote { .. }
+                    | RbcPhaseStatementV1::Ack { .. }
+            )
+        {
+            // The broadcaster may equivocate. Its stake is deliberately
+            // excluded from every optimistic certificate phase.
+            return;
+        }
         if sender == self.own_authority {
             let authorized = self
                 .rbc_slots
                 .get(&(target.round, target.authority))
                 .is_some_and(|slot| match statement {
                     RbcPhaseStatementV1::Echo { .. } => slot.echoed == Some(target),
+                    RbcPhaseStatementV1::Vote { .. } => slot.voted == Some(target),
+                    RbcPhaseStatementV1::Ack { .. } => slot.acked == Some(target),
                     RbcPhaseStatementV1::Ready { .. } => slot.readied == Some(target),
                 });
             if !authorized {
@@ -1194,6 +1409,8 @@ impl RbcDagModel {
         let slot = self.rbc_slot_mut(target);
         let senders = match statement {
             RbcPhaseStatementV1::Echo { .. } => &mut slot.echo_by_sender,
+            RbcPhaseStatementV1::Vote { .. } => &mut slot.vote_by_sender,
+            RbcPhaseStatementV1::Ack { .. } => &mut slot.ack_by_sender,
             RbcPhaseStatementV1::Ready { .. } => &mut slot.ready_by_sender,
         };
         match senders.get(&sender) {
@@ -1208,11 +1425,64 @@ impl RbcDagModel {
             RbcPhaseStatementV1::Echo { .. } => {
                 candidate.echoes.insert(sender);
             }
+            RbcPhaseStatementV1::Vote { .. } => {
+                candidate.votes.insert(sender);
+            }
+            RbcPhaseStatementV1::Ack { .. } => {
+                candidate.acks.insert(sender);
+            }
             RbcPhaseStatementV1::Ready { .. } => {
                 candidate.readies.insert(sender);
             }
         }
         self.drive_rbc(target, log);
+    }
+
+    fn lock_delivery_promise(
+        &mut self,
+        target: BlockReference,
+        basis: DeliveryPromiseBasisV1,
+        log: &mut TransitionLog,
+    ) {
+        if self.delivery_promises.contains_key(&target) {
+            return;
+        }
+        if self
+            .rbc_slots
+            .get(&(target.round, target.authority))
+            .and_then(|slot| slot.delivered)
+            .is_some_and(|delivered| delivered != target)
+        {
+            // Integrity is enforced locally even though the optimistic and
+            // fallback quorum proofs already rule out conflicting honest
+            // deliveries.
+            return;
+        }
+        self.delivery_promises.insert(target, basis);
+        log.proof(ModelTraceEvent::DeliveryPromiseLocked { target, basis });
+        log.effect(ModelEffect::DeliveryPromised(target));
+        self.activate_delivery_promise(target, log);
+    }
+
+    fn activate_delivery_promise(&mut self, target: BlockReference, log: &mut TransitionLog) {
+        let Some(basis) = self.delivery_promises.get(&target).copied() else {
+            return;
+        };
+        if basis == DeliveryPromiseBasisV1::Delivered || !self.carriers.contains_key(&target) {
+            return;
+        }
+        let slot = self.rbc_slot_mut(target);
+        match slot.delivered {
+            Some(existing) if existing != target => return,
+            Some(_) => return,
+            None => slot.delivered = Some(target),
+        }
+        self.carriers
+            .get_mut(&target)
+            .expect("fast delivery requires exact canonical carrier content")
+            .delivered = true;
+        self.pending_delivered_batch_replays.push_back(target);
+        self.drive_prefix(target.authority, log);
     }
 
     fn drive_rbc(&mut self, target: BlockReference, log: &mut TransitionLog) {
@@ -1224,34 +1494,57 @@ impl RbcDagModel {
         {
             // Merely staging canonical content is not authenticated RBC
             // evidence. Candidate state is allocated only by a locally
-            // authorized ECHO or an embedded ECHO/READY statement.
+            // authorized phase or an embedded phase statement.
             return;
         }
+        let Some(thresholds) = self.rbc_thresholds(target.authority) else {
+            return;
+        };
         loop {
             let header_available = self.carriers.contains_key(&target);
-            let q = self.committee.quorum_threshold();
-            let v = self.committee.validity_threshold();
+            let (echo_stake, vote_stake, ack_stake, ready_stake) = {
+                let candidate = self
+                    .rbc_slots
+                    .get(&slot_key)
+                    .and_then(|slot| slot.candidates.get(&target))
+                    .expect("the candidate remains allocated");
+                (
+                    self.voters_stake_excluding(&candidate.echoes, target.authority),
+                    self.voters_stake_excluding(&candidate.votes, target.authority),
+                    self.voters_stake_excluding(&candidate.acks, target.authority),
+                    self.voters_stake(&candidate.readies),
+                )
+            };
+            let (vote_trigger, ack_trigger, optimistic_ready_trigger, promise_trigger) = thresholds
+                .optimistic
+                .map_or((false, false, false, false), |optimistic| {
+                    (
+                        echo_stake >= optimistic.vote_from_echo,
+                        echo_stake >= optimistic.converge || vote_stake >= optimistic.converge,
+                        ack_stake >= optimistic.converge,
+                        echo_stake >= optimistic.promise_from_echo,
+                    )
+                });
+            let ready_trigger =
+                optimistic_ready_trigger || ready_stake >= thresholds.ready_validity;
+            let deliver_trigger = ready_stake >= thresholds.ready_quorum;
+            let promise_missing = !self.delivery_promises.contains_key(&target);
+
+            // A promise names exact canonical content, never a digest learned
+            // only from phase evidence.
+            if header_available && promise_missing && promise_trigger {
+                self.lock_delivery_promise(target, DeliveryPromiseBasisV1::OptimisticEcho, log);
+            }
+            let can_send_optimistic_phase = self.own_authority != target.authority;
             let action = {
-                let echo_stake;
-                let ready_stake;
-                {
-                    let slot = self.rbc_slot_mut(target);
-                    let candidate = slot.candidates.entry(target).or_default();
-                    echo_stake = candidate.echoes.clone();
-                    ready_stake = candidate.readies.clone();
-                }
-                let echo_stake = self.voters_stake(&echo_stake);
-                let ready_stake = self.voters_stake(&ready_stake);
                 let slot = self.rbc_slot_mut(target);
                 let candidate = slot.candidates.entry(target).or_default();
-                candidate.echo_quorum_observed |= echo_stake >= q;
-                candidate.ready_validity_observed |= ready_stake >= v;
-                candidate.ready_quorum_observed |= ready_stake >= q;
-                let ready_trigger =
-                    candidate.echo_quorum_observed || candidate.ready_validity_observed;
                 let needs_header = !header_available
-                    && ((slot.readied.is_none() && ready_trigger)
-                        || (slot.delivered.is_none() && candidate.ready_quorum_observed));
+                    && ((slot.voted.is_none() && can_send_optimistic_phase && vote_trigger)
+                        || (slot.acked.is_none() && can_send_optimistic_phase && ack_trigger)
+                        || (slot.readied.is_none() && ready_trigger)
+                        || (slot.certified_delivered.is_none() && deliver_trigger)
+                        || (promise_missing && promise_trigger));
                 if needs_header {
                     let holders = candidate.holders();
                     if holders != candidate.requested_holders {
@@ -1260,13 +1553,23 @@ impl RbcDagModel {
                     } else {
                         RbcAction::None
                     }
+                } else if header_available
+                    && slot.voted.is_none()
+                    && can_send_optimistic_phase
+                    && vote_trigger
+                {
+                    RbcAction::SendVote
+                } else if header_available
+                    && slot.acked.is_none()
+                    && can_send_optimistic_phase
+                    && ack_trigger
+                {
+                    RbcAction::SendAck
                 } else if header_available && slot.readied.is_none() && ready_trigger {
                     RbcAction::SendReady
-                } else if header_available
-                    && slot.delivered.is_none()
-                    && candidate.ready_quorum_observed
+                } else if header_available && slot.certified_delivered.is_none() && deliver_trigger
                 {
-                    RbcAction::Deliver
+                    RbcAction::CertifyDelivery
                 } else {
                     RbcAction::None
                 }
@@ -1285,28 +1588,44 @@ impl RbcDagModel {
                     log.effect(ModelEffect::NeedCarrier { target, holders });
                     break;
                 }
-                RbcAction::SendReady => {
+                RbcAction::SendVote => {
                     let own = self.own_authority;
                     let slot = self.rbc_slot_mut(target);
-                    slot.readied = Some(target);
-                    slot.ready_by_sender.insert(own, target);
-                    slot.candidates
-                        .entry(target)
-                        .or_default()
-                        .readies
-                        .insert(own);
-                    let statement = RbcPhaseStatementV1::Ready { target };
+                    slot.voted = Some(target);
+                    slot.vote_by_sender.insert(own, target);
+                    slot.candidates.entry(target).or_default().votes.insert(own);
+                    let statement = RbcPhaseStatementV1::Vote { target };
                     log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
                     self.queue_local_phase(statement);
                 }
-                RbcAction::Deliver => {
-                    self.rbc_slot_mut(target).delivered = Some(target);
+                RbcAction::SendAck => {
+                    let own = self.own_authority;
+                    let slot = self.rbc_slot_mut(target);
+                    slot.acked = Some(target);
+                    slot.ack_by_sender.insert(own, target);
+                    slot.candidates.entry(target).or_default().acks.insert(own);
+                    let statement = RbcPhaseStatementV1::Ack { target };
+                    log.proof(ModelTraceEvent::LocalPhaseLocked(statement));
+                    self.queue_local_phase(statement);
+                }
+                RbcAction::SendReady => {
+                    self.authorize_local_ready(target, log);
+                }
+                RbcAction::CertifyDelivery => {
+                    let slot = self.rbc_slot_mut(target);
+                    if slot.delivered.is_some_and(|delivered| delivered != target) {
+                        break;
+                    }
+                    slot.delivered = Some(target);
+                    slot.certified_delivered = Some(target);
                     let record = self
                         .carriers
                         .get_mut(&target)
                         .expect("delivery requires exact canonical carrier content");
                     record.delivered = true;
+                    record.certified_delivered = true;
                     log.proof(ModelTraceEvent::DeliveryLocked(target));
+                    self.lock_delivery_promise(target, DeliveryPromiseBasisV1::Delivered, log);
                     log.effect(ModelEffect::Delivered(target));
                     self.pending_delivered_batch_replays.push_back(target);
                     self.drive_prefix(target.authority, log);
@@ -1590,7 +1909,9 @@ mod tests {
             .map(|authority| model(Arc::clone(&committee), authority))
             .collect();
         let mut rounds = Vec::new();
-        for round in 1..=6 {
+        // ECHO, VOTE/ACK, and READY are embedded in later carriers. Seven
+        // carrier rounds make the first four rounds mature end-to-end.
+        for round in 1..=7 {
             rounds.push(run_honest_round(&mut models, round));
         }
         for model in &models {
@@ -1939,6 +2260,7 @@ mod tests {
         assert_eq!(replayed.authenticated_by_slot, live.authenticated_by_slot);
         assert_eq!(replayed.admitted_by_slot, live.admitted_by_slot);
         assert_eq!(replayed.rbc_slots, live.rbc_slots);
+        assert_eq!(replayed.delivery_promises, live.delivery_promises);
         assert_eq!(replayed.pending_phases, live.pending_phases);
         assert_eq!(replayed.pending_phase_set, live.pending_phase_set);
         for reference in references {
@@ -1962,10 +2284,12 @@ mod tests {
         let mut model = model(committee, 0);
         model.local_carrier_round = 4;
         let mut queued = Vec::new();
-        for round in 1..=3 {
+        for round in 1..=2 {
             for author in 0..4 {
                 let target = BlockReference::new_test(author, round);
                 queued.push(RbcPhaseStatementV1::Echo { target });
+                queued.push(RbcPhaseStatementV1::Vote { target });
+                queued.push(RbcPhaseStatementV1::Ack { target });
                 queued.push(RbcPhaseStatementV1::Ready { target });
             }
         }
@@ -1973,8 +2297,8 @@ mod tests {
             model.queue_local_phase(*statement);
         }
 
-        assert_eq!(model.pending_phase_backlog_len(), 24);
-        assert_eq!(model.pending_phase_batch(), queued[..16]);
+        assert_eq!(model.pending_phase_backlog_len(), 32);
+        assert_eq!(model.pending_phase_batch(), queued[..24]);
     }
 
     #[test]
@@ -2051,6 +2375,545 @@ mod tests {
     }
 
     #[test]
+    fn local_fix_fast_delivers_exact_content_once_without_q_ready_certificate() {
+        let committee = committee(4);
+        let model = model(Arc::clone(&committee), 3);
+        let (own_prev, weak_parents) = model.local_parent_set().unwrap();
+        let carrier = candidate(
+            &committee,
+            3,
+            1,
+            own_prev,
+            weak_parents,
+            model.pending_phase_batch(),
+            0xF0,
+        )
+        .unwrap();
+        let target = carrier.reference();
+        let plan = model
+            .plan_input(ModelInputRecord::LocalCarrierFixed(authenticate_local(
+                &committee, &carrier,
+            )))
+            .unwrap();
+
+        let fixed = plan
+            .trace()
+            .iter()
+            .position(|event| *event == ModelTraceEvent::LocalCarrierFixed(target))
+            .unwrap();
+        let promised = plan
+            .trace()
+            .iter()
+            .position(|event| {
+                *event
+                    == ModelTraceEvent::DeliveryPromiseLocked {
+                        target,
+                        basis: DeliveryPromiseBasisV1::LocalFixed,
+                    }
+            })
+            .unwrap();
+        assert!(fixed < promised);
+        assert_eq!(
+            plan.effects()
+                .iter()
+                .filter(|effect| **effect == ModelEffect::DeliveryPromised(target))
+                .count(),
+            1
+        );
+
+        let mut committed = model;
+        committed.commit_plan(plan).unwrap();
+        assert_eq!(
+            committed.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::LocalFixed)
+        );
+        assert_eq!(committed.delivered(3, 1), Some(target));
+        assert_eq!(committed.certified_delivered(3, 1), None);
+        assert!(committed.lifecycle(&target).unwrap().delivered);
+        assert!(!committed.lifecycle(&target).unwrap().certified_delivered);
+        assert!(!committed.lifecycle(&target).unwrap().prefix_closed);
+    }
+
+    #[test]
+    fn weighted_thresholds_follow_the_target_author_formula() {
+        let cases = [
+            (vec![1, 1, 1, 1], 0, (1, 2, 3, Some((2, 2, 2)))),
+            (vec![1, 1, 1, 1, 1, 1, 1], 0, (2, 3, 5, Some((4, 4, 5)))),
+            (vec![2, 1, 1, 1, 1, 1], 0, (2, 3, 5, Some((3, 3, 3)))),
+            (vec![1, 2, 2, 2], 0, (2, 3, 5, Some((4, 4, 5)))),
+            (vec![3, 1, 1, 1], 0, (1, 2, 5, None)),
+        ];
+
+        for (stakes, target_author, (fault, validity, quorum, optimistic)) in cases {
+            let committee = Committee::new_test(stakes);
+            let model = model(committee, target_author);
+            let thresholds = model.rbc_thresholds(target_author).unwrap();
+            assert_eq!(thresholds.fault, fault);
+            assert_eq!(thresholds.ready_validity, validity);
+            assert_eq!(thresholds.ready_quorum, quorum);
+            assert_eq!(
+                thresholds.optimistic.map(|thresholds| (
+                    thresholds.vote_from_echo,
+                    thresholds.converge,
+                    thresholds.promise_from_echo,
+                )),
+                optimistic
+            );
+        }
+    }
+
+    #[test]
+    fn exhaustive_weighted_echo_subsets_promise_exactly_at_o() {
+        for stakes in [
+            vec![1, 1, 1, 1, 1, 1, 1],
+            vec![2, 1, 1, 1, 1, 1],
+            vec![1, 2, 1, 2, 1],
+            vec![2, 3, 1, 1, 1, 1, 1],
+        ] {
+            let committee = Committee::new_test(stakes);
+            let template = model(Arc::clone(&committee), 0);
+            let threshold = template
+                .rbc_thresholds(0)
+                .unwrap()
+                .optimistic
+                .unwrap()
+                .promise_from_echo;
+            let (own_prev, weak) = genesis_parents(&committee, 0);
+            let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0x1A0).unwrap();
+            let target = carrier.reference();
+            let non_authors: Vec<_> = committee
+                .authorities()
+                .filter(|sender| *sender != 0)
+                .collect();
+
+            for mask in 0usize..(1usize << non_authors.len()) {
+                for reverse in [false, true] {
+                    let mut model = model(Arc::clone(&committee), 0);
+                    model.stage_candidate(carrier.clone()).unwrap();
+                    // The author is never counted, even if it embeds an ECHO.
+                    record_phase(&mut model, 0, RbcPhaseStatementV1::Echo { target });
+                    let mut selected: Vec<_> = non_authors
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, sender)| ((mask >> index) & 1 == 1).then_some(*sender))
+                        .collect();
+                    if reverse {
+                        selected.reverse();
+                    }
+                    let mut observed_stake = 0;
+                    for sender in selected {
+                        observed_stake += committee.get_stake(sender).unwrap();
+                        record_phase(&mut model, sender, RbcPhaseStatementV1::Echo { target });
+                        assert_eq!(
+                            model.delivery_promise_basis(&target).is_some(),
+                            observed_stake >= threshold
+                        );
+                    }
+                    assert_eq!(
+                        model.delivery_promise_basis(&target),
+                        (observed_stake >= threshold)
+                            .then_some(DeliveryPromiseBasisV1::OptimisticEcho)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_weighted_optimistic_certificates_intersect_honestly() {
+        for stakes in [
+            vec![1, 1, 1, 1, 1, 1, 1],
+            vec![2, 1, 1, 1, 1, 1],
+            vec![1, 2, 1, 2, 1],
+            vec![2, 3, 1, 1, 1, 1, 1],
+        ] {
+            let committee = Committee::new_test(stakes);
+            let model = model(Arc::clone(&committee), 0);
+            let thresholds = model.rbc_thresholds(0).unwrap();
+            let optimistic = thresholds.optimistic.unwrap();
+            let author_stake = committee.get_stake(0).unwrap();
+            let residual_fault = thresholds.fault - author_stake;
+            let non_authors: Vec<_> = committee
+                .authorities()
+                .filter(|sender| *sender != 0)
+                .collect();
+            let subset_stake = |mask: usize| {
+                non_authors
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| (mask >> index) & 1 == 1)
+                    .map(|(_, sender)| committee.get_stake(*sender).unwrap())
+                    .sum::<Stake>()
+            };
+            let limit = 1usize << non_authors.len();
+            let certificates: Vec<_> = (0..limit)
+                .filter(|mask| subset_stake(*mask) >= optimistic.promise_from_echo)
+                .collect();
+            let byzantine_sets: Vec<_> = (0..limit)
+                .filter(|mask| subset_stake(*mask) <= residual_fault)
+                .collect();
+
+            for first in &certificates {
+                for second in &certificates {
+                    for byzantine in &byzantine_sets {
+                        // Every pair of selective O certificates shares a
+                        // non-author sender outside the remaining Byzantine
+                        // budget. That honest ECHO lock forbids two values.
+                        assert_ne!(first & second & !byzantine, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_four_phase_rules_and_q_ready_delivery_are_exact() {
+        let committee = committee(7);
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0x1A1).unwrap();
+        let target = carrier.reference();
+
+        let mut from_echo = model(Arc::clone(&committee), 6);
+        from_echo.stage_candidate(carrier.clone()).unwrap();
+        for sender in 1..=3 {
+            record_phase(&mut from_echo, sender, RbcPhaseStatementV1::Echo { target });
+        }
+        assert!(from_echo.rbc_slots[&(1, 0)].voted.is_none());
+        assert!(from_echo.rbc_slots[&(1, 0)].acked.is_none());
+        record_phase(&mut from_echo, 4, RbcPhaseStatementV1::Echo { target });
+        assert_eq!(from_echo.rbc_slots[&(1, 0)].voted, Some(target));
+        assert_eq!(from_echo.rbc_slots[&(1, 0)].acked, Some(target));
+        assert_eq!(from_echo.delivery_promise_basis(&target), None);
+        record_phase(&mut from_echo, 5, RbcPhaseStatementV1::Echo { target });
+        assert_eq!(
+            from_echo.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::OptimisticEcho)
+        );
+
+        let mut from_vote = model(Arc::clone(&committee), 6);
+        from_vote.stage_candidate(carrier.clone()).unwrap();
+        for sender in 1..=3 {
+            record_phase(&mut from_vote, sender, RbcPhaseStatementV1::Vote { target });
+        }
+        assert!(from_vote.rbc_slots[&(1, 0)].acked.is_none());
+        record_phase(&mut from_vote, 4, RbcPhaseStatementV1::Vote { target });
+        assert_eq!(from_vote.rbc_slots[&(1, 0)].acked, Some(target));
+
+        let mut from_ack = model(Arc::clone(&committee), 6);
+        from_ack.stage_candidate(carrier.clone()).unwrap();
+        for sender in 1..=3 {
+            record_phase(&mut from_ack, sender, RbcPhaseStatementV1::Ack { target });
+        }
+        assert!(from_ack.rbc_slots[&(1, 0)].readied.is_none());
+        record_phase(&mut from_ack, 4, RbcPhaseStatementV1::Ack { target });
+        assert_eq!(from_ack.rbc_slots[&(1, 0)].readied, Some(target));
+
+        let mut from_ready = model(Arc::clone(&committee), 0);
+        from_ready.stage_candidate(carrier).unwrap();
+        for sender in 1..=2 {
+            record_phase(
+                &mut from_ready,
+                sender,
+                RbcPhaseStatementV1::Ready { target },
+            );
+        }
+        assert!(from_ready.rbc_slots[&(1, 0)].readied.is_none());
+        assert_eq!(from_ready.delivered(0, 1), None);
+        record_phase(&mut from_ready, 3, RbcPhaseStatementV1::Ready { target });
+        assert_eq!(from_ready.rbc_slots[&(1, 0)].readied, Some(target));
+        // Three remote READYs plus the local READY have stake four, below Q=5.
+        assert_eq!(from_ready.delivered(0, 1), None);
+        record_phase(&mut from_ready, 4, RbcPhaseStatementV1::Ready { target });
+        assert_eq!(from_ready.delivered(0, 1), Some(target));
+    }
+
+    #[test]
+    fn missing_content_blocks_every_phase_and_requests_all_phase_holders() {
+        let committee = committee(7);
+        let mut model = model(Arc::clone(&committee), 6);
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0x1A2).unwrap();
+        let target = carrier.reference();
+
+        for sender in 1..=4 {
+            record_phase(&mut model, sender, RbcPhaseStatementV1::Echo { target });
+        }
+        record_phase(&mut model, 5, RbcPhaseStatementV1::Vote { target });
+        record_phase(&mut model, 5, RbcPhaseStatementV1::Ack { target });
+        let effects = record_phase(&mut model, 0, RbcPhaseStatementV1::Ready { target });
+        assert!(matches!(
+            effects.as_slice(),
+            [ModelEffect::NeedCarrier { target: requested, holders }]
+                if *requested == target && holders == &[0, 1, 2, 3, 4, 5]
+        ));
+        let slot = &model.rbc_slots[&(1, 0)];
+        assert!(slot.voted.is_none());
+        assert!(slot.acked.is_none());
+        assert!(slot.readied.is_none());
+        assert!(slot.delivered.is_none());
+        assert_eq!(model.delivery_promise_basis(&target), None);
+
+        model.recover_carrier(carrier).unwrap();
+        let slot = &model.rbc_slots[&(1, 0)];
+        assert_eq!(slot.voted, Some(target));
+        assert_eq!(slot.acked, Some(target));
+    }
+
+    #[test]
+    fn high_stake_honest_author_promises_on_auth_and_seeds_ready_locally() {
+        let committee = Committee::new_test(vec![3, 1, 1, 1]);
+        let mut author = model(Arc::clone(&committee), 0);
+        let (own_prev, weak) = author.local_parent_set().unwrap();
+        let carrier = candidate(
+            &committee,
+            0,
+            1,
+            own_prev,
+            weak,
+            author.pending_phase_batch(),
+            0x1A3,
+        )
+        .unwrap();
+        let target = carrier.reference();
+        let effects = author
+            .start_local_carrier(authenticate_local(&committee, &carrier))
+            .unwrap();
+        assert_eq!(effects, vec![ModelEffect::DeliveryPromised(target)]);
+        assert_eq!(
+            author.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::LocalFixed)
+        );
+        assert_eq!(author.rbc_slots[&(1, 0)].readied, Some(target));
+        assert!(
+            author
+                .pending_phases
+                .contains(&RbcPhaseStatementV1::Ready { target })
+        );
+
+        let mut receiver = model(Arc::clone(&committee), 3);
+        receiver.stage_candidate(carrier.clone()).unwrap();
+        assert_eq!(receiver.delivery_promise_basis(&target), None);
+        let effects = receiver
+            .receive_authenticated(authenticate_for(&committee, &carrier, 3))
+            .unwrap();
+        assert_eq!(effects, vec![ModelEffect::DeliveryPromised(target)]);
+        assert_eq!(
+            receiver.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::HonestAuthor)
+        );
+        assert!(receiver.rbc_slots[&(1, 0)].readied.is_none());
+        assert_eq!(receiver.delivered(0, 1), Some(target));
+        assert_eq!(receiver.certified_delivered(0, 1), None);
+
+        record_phase(&mut receiver, 0, RbcPhaseStatementV1::Ready { target });
+        assert_eq!(receiver.rbc_slots[&(1, 0)].readied, Some(target));
+        assert_eq!(receiver.delivered(0, 1), Some(target));
+        assert_eq!(receiver.certified_delivered(0, 1), None);
+        record_phase(&mut receiver, 1, RbcPhaseStatementV1::Ready { target });
+        assert_eq!(receiver.delivered(0, 1), Some(target));
+        assert_eq!(receiver.certified_delivered(0, 1), Some(target));
+
+        // Even a test-only forged second author capability cannot bypass the
+        // receiver's exact authenticated slot lock.
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let conflicting = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0x1A4).unwrap();
+        let conflicting_ref = conflicting.reference();
+        receiver
+            .receive_authenticated(authenticate_for(&committee, &conflicting, 3))
+            .unwrap();
+        assert_eq!(receiver.delivery_promise_basis(&conflicting_ref), None);
+    }
+
+    #[test]
+    fn raw_q_that_counts_the_target_author_is_not_an_optimistic_promise() {
+        let committee = committee(7);
+        let mut model = model(Arc::clone(&committee), 0);
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0xF1).unwrap();
+        let target = carrier.reference();
+        model.stage_candidate(carrier).unwrap();
+
+        // W=7, F=2, a=1 gives O=5. A raw Q=5 that includes the
+        // equivocating target author contains only four admissible ECHOs.
+        assert!(record_phase(&mut model, 0, RbcPhaseStatementV1::Echo { target }).is_empty());
+        for sender in 1..=4 {
+            assert!(
+                record_phase(&mut model, sender, RbcPhaseStatementV1::Echo { target }).is_empty()
+            );
+        }
+        assert_eq!(model.delivery_promise_basis(&target), None);
+        assert_eq!(model.delivered(0, 1), None);
+
+        let effects = record_phase(&mut model, 5, RbcPhaseStatementV1::Echo { target });
+        assert_eq!(effects, vec![ModelEffect::DeliveryPromised(target)]);
+        assert_eq!(
+            model.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::OptimisticEcho)
+        );
+        assert_eq!(model.delivered(0, 1), Some(target));
+        assert_eq!(model.certified_delivered(0, 1), None);
+
+        // Exact replay and a conflicting later ECHO are both idempotent and
+        // cannot emit a second promise.
+        assert!(record_phase(&mut model, 5, RbcPhaseStatementV1::Echo { target }).is_empty());
+        let mut conflicting = target;
+        conflicting.digest = crate::types::BlockDigest::from([0xF2; 32]);
+        assert!(
+            record_phase(
+                &mut model,
+                5,
+                RbcPhaseStatementV1::Echo {
+                    target: conflicting,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(model.delivery_promises.len(), 1);
+    }
+
+    #[test]
+    fn selective_and_equivocating_echoes_cannot_promise_two_values() {
+        let committee = committee(7);
+        let mut model = model(Arc::clone(&committee), 0);
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let first = candidate(&committee, 0, 1, own_prev, weak.clone(), Vec::new(), 0xF3).unwrap();
+        let conflicting = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0xF4).unwrap();
+        let first_ref = first.reference();
+        let conflicting_ref = conflicting.reference();
+
+        model.stage_candidate(first).unwrap();
+        model.stage_candidate(conflicting).unwrap();
+        for sender in 1..=4 {
+            record_phase(
+                &mut model,
+                sender,
+                RbcPhaseStatementV1::Echo { target: first_ref },
+            );
+        }
+        for sender in 5..=6 {
+            record_phase(
+                &mut model,
+                sender,
+                RbcPhaseStatementV1::Echo {
+                    target: conflicting_ref,
+                },
+            );
+        }
+        // Sender 1 equivocates after locking the first value. The second
+        // statement is ignored slot-globally for ECHO.
+        record_phase(
+            &mut model,
+            1,
+            RbcPhaseStatementV1::Echo {
+                target: conflicting_ref,
+            },
+        );
+
+        assert_eq!(
+            model.rbc_slots.get(&(1, 0)).unwrap().candidates[&first_ref]
+                .echoes
+                .len(),
+            4
+        );
+        assert_eq!(
+            model.rbc_slots[&(1, 0)].candidates[&conflicting_ref]
+                .echoes
+                .len(),
+            2
+        );
+        assert_eq!(model.delivery_promise_basis(&first_ref), None);
+        assert_eq!(model.delivery_promise_basis(&conflicting_ref), None);
+        assert!(model.delivery_promises.is_empty());
+    }
+
+    #[test]
+    fn delivered_fallback_promises_before_the_delivered_effect() {
+        let committee = committee(4);
+        let mut model = model(Arc::clone(&committee), 3);
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0xF5).unwrap();
+        let target = carrier.reference();
+        model.stage_candidate(carrier).unwrap();
+
+        assert!(record_phase(&mut model, 0, RbcPhaseStatementV1::Ready { target }).is_empty());
+        let effects = record_phase(&mut model, 1, RbcPhaseStatementV1::Ready { target });
+        assert_eq!(
+            effects,
+            vec![
+                ModelEffect::DeliveryPromised(target),
+                ModelEffect::Delivered(target),
+            ]
+        );
+        assert_eq!(
+            model.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::Delivered)
+        );
+    }
+
+    #[test]
+    fn promised_effects_and_locks_replay_deterministically_from_typed_inputs() {
+        let committee = committee(4);
+        let context = context(&committee);
+        let mut live = RbcDagModel::new(Arc::clone(&committee), 3, context).unwrap();
+        let (own_prev, weak) = genesis_parents(&committee, 0);
+        let target_carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 0xF6).unwrap();
+        let target = target_carrier.reference();
+        let mut records = vec![ModelInputRecord::AuthenticatedIngress(authenticate_for(
+            &committee,
+            &target_carrier,
+            3,
+        ))];
+
+        for author in 0..3 {
+            let outer = candidate(
+                &committee,
+                author,
+                2,
+                BlockReference::new_test(author, 1),
+                committee
+                    .authorities()
+                    .filter(|other| *other != author)
+                    .take(2)
+                    .map(|other| BlockReference::new_test(other, 1))
+                    .collect(),
+                vec![RbcPhaseStatementV1::Echo { target }],
+                0xF7 + u64::from(author),
+            )
+            .unwrap();
+            records.push(ModelInputRecord::AuthenticatedIngress(authenticate_for(
+                &committee, &outer, 3,
+            )));
+        }
+
+        let mut live_trace = Vec::new();
+        for record in records.iter().cloned() {
+            let plan = live.plan_input(record).unwrap();
+            live_trace.extend_from_slice(plan.trace());
+            live.commit_plan(plan).unwrap();
+        }
+        let (replayed, replay_trace) =
+            RbcDagModel::replay_from_records(committee, 3, context, records).unwrap();
+
+        assert_eq!(replay_trace, live_trace);
+        assert_eq!(replayed.delivery_promises, live.delivery_promises);
+        assert_eq!(
+            replay_trace
+                .iter()
+                .filter(|event| {
+                    **event == ModelTraceEvent::Effect(ModelEffect::DeliveryPromised(target))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            replayed.delivery_promise_basis(&target),
+            Some(DeliveryPromiseBasisV1::OptimisticEcho)
+        );
+        assert_eq!(replayed.delivered(0, 1), Some(target));
+        assert_eq!(replayed.certified_delivered(0, 1), None);
+    }
+
+    #[test]
     fn threshold_before_header_requests_then_recovers_exact_carrier() {
         let committee = committee(4);
         let mut model = model(Arc::clone(&committee), 3);
@@ -2058,7 +2921,6 @@ mod tests {
         let carrier = candidate(&committee, 0, 1, own_prev, weak, Vec::new(), 1).unwrap();
         let target = carrier.reference();
 
-        assert!(record_phase(&mut model, 0, RbcPhaseStatementV1::Echo { target }).is_empty());
         assert!(record_phase(&mut model, 1, RbcPhaseStatementV1::Echo { target }).is_empty());
         assert!(matches!(
             record_phase(
@@ -2068,14 +2930,20 @@ mod tests {
             )
             .as_slice(),
             [ModelEffect::NeedCarrier { target: requested, holders }]
-                if *requested == target && holders == &[0, 1, 2]
+                if *requested == target && holders == &[1, 2]
         ));
 
-        model.recover_carrier(carrier).unwrap();
+        let effects = model.recover_carrier(carrier).unwrap();
+        assert_eq!(effects, vec![ModelEffect::DeliveryPromised(target)]);
         assert!(
             model
                 .pending_phases
-                .contains(&RbcPhaseStatementV1::Ready { target })
+                .contains(&RbcPhaseStatementV1::Vote { target })
+        );
+        assert!(
+            model
+                .pending_phases
+                .contains(&RbcPhaseStatementV1::Ack { target })
         );
         let lifecycle = model.lifecycle(&target).unwrap();
         assert!(!lifecycle.authenticated);
@@ -2220,6 +3088,8 @@ mod tests {
         let target = BlockReference::new_test(0, 1);
 
         assert!(record_phase(&mut model, 3, RbcPhaseStatementV1::Echo { target }).is_empty());
+        assert!(record_phase(&mut model, 3, RbcPhaseStatementV1::Vote { target }).is_empty());
+        assert!(record_phase(&mut model, 3, RbcPhaseStatementV1::Ack { target }).is_empty());
         assert!(record_phase(&mut model, 3, RbcPhaseStatementV1::Ready { target }).is_empty());
         assert!(model.rbc_slots.is_empty());
     }
@@ -2261,8 +3131,8 @@ mod tests {
             [ModelEffect::NeedCarrier { target, .. }] if *target == first
         ));
         let slot = model.rbc_slots.get(&(1, 0)).unwrap();
-        assert_eq!(slot.echo_by_sender.len(), 3);
-        assert_eq!(slot.echo_by_sender[&0], first);
+        assert_eq!(slot.echo_by_sender.len(), 2);
+        assert_eq!(slot.echo_by_sender[&1], first);
         assert!(!slot.candidates.contains_key(&conflicting));
 
         record_phase(&mut model, 0, RbcPhaseStatementV1::Ready { target: first });
@@ -2276,6 +3146,26 @@ mod tests {
         let slot = model.rbc_slots.get(&(1, 0)).unwrap();
         assert_eq!(slot.ready_by_sender[&0], first);
         assert!(!slot.candidates.contains_key(&conflicting));
+
+        for statement in [
+            RbcPhaseStatementV1::Vote { target: first },
+            RbcPhaseStatementV1::Ack { target: first },
+        ] {
+            record_phase(&mut model, 1, statement);
+            let conflicting_statement = match statement {
+                RbcPhaseStatementV1::Vote { .. } => RbcPhaseStatementV1::Vote {
+                    target: conflicting,
+                },
+                RbcPhaseStatementV1::Ack { .. } => RbcPhaseStatementV1::Ack {
+                    target: conflicting,
+                },
+                _ => unreachable!(),
+            };
+            record_phase(&mut model, 1, conflicting_statement);
+        }
+        let slot = model.rbc_slots.get(&(1, 0)).unwrap();
+        assert_eq!(slot.vote_by_sender[&1], first);
+        assert_eq!(slot.ack_by_sender[&1], first);
     }
 
     #[test]
@@ -2409,7 +3299,7 @@ mod tests {
         assert_eq!(receiver.delivered(0, 1), Some(first_ref));
         assert_ne!(receiver.delivered(0, 1), Some(conflicting_ref));
         let slot = receiver.rbc_slots.get(&(1, 0)).unwrap();
-        assert_eq!(slot.echo_by_sender.get(&0), Some(&first_ref));
+        assert_eq!(slot.echo_by_sender.get(&0), None);
         assert!(!slot.candidates.contains_key(&conflicting_ref));
     }
 
@@ -2636,14 +3526,14 @@ mod tests {
         let carrier = candidate(
             &committee,
             1,
-            6,
-            BlockReference::new_test(1, 5),
+            66,
+            BlockReference::new_test(1, 65),
             vec![
-                BlockReference::new_test(0, 5),
-                BlockReference::new_test(2, 5),
+                BlockReference::new_test(0, 65),
+                BlockReference::new_test(2, 65),
             ],
             Vec::new(),
-            60,
+            660,
         )
         .unwrap();
         let reference = carrier.reference();
@@ -2653,12 +3543,53 @@ mod tests {
             model.receive_authenticated(authenticated),
             Err(ModelError::FutureCarrierOutsideBuffer {
                 current: 1,
-                maximum: 5,
-                actual: 6,
+                maximum: 65,
+                actual: 66,
             })
         );
         assert!(model.lifecycle(&reference).is_none());
         assert!(model.authenticated_by_slot.is_empty());
+        assert!(model.rbc_slots.is_empty());
+    }
+
+    #[test]
+    fn carrier_at_the_future_buffer_boundary_is_retained_but_cannot_advance() {
+        let committee = committee(4);
+        let mut model = model(Arc::clone(&committee), 0);
+        let carrier = candidate(
+            &committee,
+            1,
+            65,
+            BlockReference::new_test(1, 64),
+            vec![
+                BlockReference::new_test(0, 64),
+                BlockReference::new_test(2, 64),
+            ],
+            Vec::new(),
+            650,
+        )
+        .unwrap();
+        let reference = carrier.reference();
+
+        assert!(
+            model
+                .receive_authenticated(authenticate_for(&committee, &carrier, 0))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(model.local_carrier_round(), 1);
+        assert_eq!(
+            model.lifecycle(&reference),
+            Some(CarrierLifecycle {
+                authenticated: true,
+                admitted: false,
+                phase_batch_processed: true,
+                delivered: false,
+                certified_delivered: false,
+                data_available: false,
+                prefix_closed: false,
+            })
+        );
         assert!(model.rbc_slots.is_empty());
     }
 

@@ -11,7 +11,7 @@ use std::{
 use ::prometheus::Registry;
 use eyre::{Context, Result, eyre};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     block_handler::{RealBlockHandler, RealCommitHandler},
@@ -19,7 +19,7 @@ use crate::{
     config::{NodePrivateConfig, NodePublicConfig, Parameters},
     core::Core,
     dag_state::{DagState, ProtocolConfig},
-    metrics::{MetricReporter, Metrics},
+    metrics::{BenchmarkTransactionWindow, MetricReporter, Metrics},
     net_sync::NetworkSyncer,
     network::Network,
     prometheus,
@@ -36,6 +36,18 @@ pub struct Validator {
     reporter: Arc<MetricReporter>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ValidatorStartOptions {
+    /// Hold the autonomous RBC-DAG carrier clock until the owner explicitly
+    /// activates it. This is a local-benchmark coordination primitive, not a
+    /// serialized validator configuration or a production liveness gate.
+    pub rbc_dag_clock_start_paused: bool,
+    /// Optional local-benchmark release latch. Finite transaction generators
+    /// begin their common warmup only after every coordinated protocol clock
+    /// has crossed the event-bridge/Core activation barrier.
+    pub transaction_generator_start: Option<watch::Receiver<Option<BenchmarkTransactionWindow>>>,
+}
+
 impl Validator {
     pub async fn start(
         authority: AuthorityIndex,
@@ -45,6 +57,30 @@ impl Validator {
         parameters: Parameters,
         byzantine_strategy: String,
         consensus: String,
+    ) -> Result<Self> {
+        Self::start_with_options(
+            authority,
+            committee,
+            public_config,
+            private_config,
+            parameters,
+            byzantine_strategy,
+            consensus,
+            ValidatorStartOptions::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_options(
+        authority: AuthorityIndex,
+        committee: Arc<Committee>,
+        public_config: NodePublicConfig,
+        private_config: NodePrivateConfig,
+        parameters: Parameters,
+        byzantine_strategy: String,
+        consensus: String,
+        start_options: ValidatorStartOptions,
     ) -> Result<Self> {
         let protocol_config = ProtocolConfig::from_selection(
             &consensus,
@@ -57,6 +93,16 @@ impl Validator {
         {
             return Err(eyre!(
                 "Starfish-RBC-DAG autonomous clock requires the RBC-DAG shadow"
+            ));
+        }
+        if start_options.rbc_dag_clock_start_paused
+            && (!public_config.parameters.starfish_rbc_dag_autonomous_clock
+                || !public_config
+                    .parameters
+                    .starfish_rbc_dag_embedded_rbc_authority)
+        {
+            return Err(eyre!(
+                "A coordinated RBC-DAG clock start requires autonomous embedded authority"
             ));
         }
         if public_config
@@ -207,12 +253,13 @@ impl Validator {
         // Rest of the function remains the same
         let (block_handler, block_sender) = RealBlockHandler::new(&committee);
 
-        TransactionGenerator::start(
+        TransactionGenerator::start_with_gate(
             block_sender,
             authority,
             parameters,
             public_config.clone(),
             metrics.clone(),
+            start_options.transaction_generator_start.clone(),
         );
 
         let commit_handler =
@@ -282,6 +329,7 @@ impl Validator {
             partial_sig_rx,
             bls_cert_aggregator,
             bls_signer_for_service,
+            start_options.rbc_dag_clock_start_paused,
         )
         .await;
 
@@ -303,6 +351,17 @@ impl Validator {
         self.reporter.clone()
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.network_broadcaster.is_finished() || self.metrics_handle.is_finished()
+    }
+
+    pub async fn activate_starfish_rbc_dag_clock(&self) -> Result<()> {
+        self.network_broadcaster
+            .activate_starfish_rbc_dag_clock()
+            .await
+            .map_err(|error| eyre!(error))
+    }
+
     pub async fn await_completion(
         self,
     ) -> (
@@ -316,8 +375,15 @@ impl Validator {
     }
 
     pub async fn stop(self) {
-        self.network_broadcaster.shutdown().await;
-        self.metrics_handle.abort();
+        let Self {
+            network_broadcaster,
+            metrics_handle,
+            metrics: _,
+            reporter: _,
+        } = self;
+        metrics_handle.abort();
+        let _ = metrics_handle.await;
+        network_broadcaster.shutdown().await;
         // Give time for background Worker tasks to detect channel closures and exit,
         // and for TCP sockets to fully release.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -714,29 +780,40 @@ mod smoke_tests {
                     "autonomous mode must not claim direct-round comparison"
                 );
                 if embedded_rbc_authority {
+                    for message_kind in [
+                        "rbc_initial",
+                        "rbc_echo",
+                        "rbc_ready",
+                        "rbc_header_request",
+                        "rbc_header_response",
+                        "batch",
+                        "missing_parents",
+                        "missing_tx_data",
+                    ] {
+                        assert_eq!(
+                            metrics
+                                .network_message_bytes_sent_total
+                                .with_label_values(&[message_kind])
+                                .get(),
+                            0,
+                            "standalone RBC-DAG mode must not send legacy {message_kind} traffic"
+                        );
+                        assert_eq!(
+                            metrics
+                                .network_message_bytes_received_total
+                                .with_label_values(&[message_kind])
+                                .get(),
+                            0,
+                            "standalone RBC-DAG mode must not receive legacy {message_kind} traffic"
+                        );
+                    }
                     assert!(
                         metrics
                             .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_initial"])
+                            .with_label_values(&["rbc_dag_shadow_carrier"])
                             .get()
                             > 0,
-                        "direct INIT remains the application/payload transport"
-                    );
-                    assert_eq!(
-                        metrics
-                            .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_echo"])
-                            .get(),
-                        0,
-                        "direct RBC ECHO must be disabled under embedded authority"
-                    );
-                    assert_eq!(
-                        metrics
-                            .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_ready"])
-                            .get(),
-                        0,
-                        "direct RBC READY must be disabled under embedded authority"
+                        "standalone RBC-DAG carrier transport must be active"
                     );
                 }
             }
