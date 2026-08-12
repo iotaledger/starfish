@@ -205,6 +205,10 @@ enum Operation {
         /// headers. Requires the autonomous RBC-DAG mode.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_embedded_rbc_authority: bool,
+        /// Override only the autonomous RBC-DAG logical C2 fallback timeout.
+        /// The physical carrier heartbeat remains on `leader_timeout`.
+        #[clap(long, value_name = "INT")]
+        starfish_rbc_dag_consensus_timeout_ms: Option<u64>,
         /// Benchmark-only: write ordered shadow-WAL frames but force them to
         /// stable storage only at clean shutdown. This run is not crash-safe.
         #[clap(long, default_value_t = false)]
@@ -327,6 +331,7 @@ async fn main() -> Result<()> {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
+            starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
             duration_secs,
             port_offset,
@@ -343,6 +348,8 @@ async fn main() -> Result<()> {
             node_parameters.starfish_rbc_dag_autonomous_clock = starfish_rbc_dag_autonomous_clock;
             node_parameters.starfish_rbc_dag_embedded_rbc_authority =
                 starfish_rbc_dag_embedded_rbc_authority;
+            node_parameters.starfish_rbc_dag_consensus_timeout =
+                starfish_rbc_dag_consensus_timeout_ms.map(Duration::from_millis);
             node_parameters.starfish_rbc_dag_shadow_buffered_wal =
                 starfish_rbc_dag_shadow_buffered_wal;
             if consensus_protocol == "starfish-rbc" {
@@ -575,6 +582,13 @@ async fn local_benchmark(
         println!(
             "Carrier idle timeout: {} ms (shared Starfish leader pacemaker)",
             node_parameters.leader_timeout.as_millis()
+        );
+        println!(
+            "Logical C2 timeout: {} ms",
+            node_parameters
+                .starfish_rbc_dag_consensus_timeout
+                .unwrap_or(node_parameters.leader_timeout)
+                .as_millis()
         );
     }
     if let Some(latency) = node_parameters.uniform_latency_ms {
@@ -1508,6 +1522,8 @@ mod tests {
             "--starfish-rbc-dag-shadow",
             "--starfish-rbc-dag-autonomous-clock",
             "--starfish-rbc-dag-embedded-rbc-authority",
+            "--starfish-rbc-dag-consensus-timeout-ms",
+            "250",
             "--starfish-rbc-dag-shadow-buffered-wal",
             "--port-offset",
             "2500",
@@ -1520,6 +1536,7 @@ mod tests {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
+            starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
             port_offset,
             ..
@@ -1532,6 +1549,7 @@ mod tests {
         assert!(starfish_rbc_dag_shadow);
         assert!(starfish_rbc_dag_autonomous_clock);
         assert!(starfish_rbc_dag_embedded_rbc_authority);
+        assert_eq!(starfish_rbc_dag_consensus_timeout_ms, Some(250));
         assert!(starfish_rbc_dag_shadow_buffered_wal);
         assert_eq!(port_offset, 2500);
     }

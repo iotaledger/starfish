@@ -3222,6 +3222,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // resolved Starfish leader timeout. Application and
                             // embedded RBC phase carriers remain event-driven.
                             node_parameters.leader_timeout,
+                            node_parameters
+                                .starfish_rbc_dag_consensus_timeout
+                                .unwrap_or(node_parameters.leader_timeout),
                             wal_sync_policy,
                             Arc::clone(&metrics),
                             rbc_dag_frontier_recovery_cursor,

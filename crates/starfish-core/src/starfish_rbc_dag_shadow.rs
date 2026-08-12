@@ -1340,6 +1340,20 @@ impl StarfishRbcDagShadowV1 {
         self.next_local_consensus_round
     }
 
+    /// Whether the currently open logical slot can be fixed through the
+    /// optimistic C1 path using only already-promised projection state. This
+    /// is a pure preview of the same builder used for durable carrier
+    /// creation; callers must recompute when they actually create.
+    pub(crate) fn local_consensus_vertex_c1_ready(&self) -> bool {
+        if self.next_local_consensus_round <= 1 {
+            return false;
+        }
+        let Ok((own_prev, _)) = self.model.local_parent_set() else {
+            return false;
+        };
+        self.build_local_consensus_vertex(own_prev, false).is_some()
+    }
+
     pub(crate) fn projected_consensus_stake(&self, round: RoundNumber) -> Stake {
         self.promised_projection.projected_stake_at_round(round)
     }

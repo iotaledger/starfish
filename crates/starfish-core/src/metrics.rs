@@ -2431,6 +2431,17 @@ impl Metrics {
                         .unwrap_or_default(),
                 )
             ]);
+            table.add_row(row![
+                b->"Logical vertex creation:",
+                format!(
+                    "bootstrap/C1/C2/C3/omitted={}/{}/{}/{}/{}",
+                    shadow_input_count("consensus_vertex", "bootstrap"),
+                    shadow_input_count("consensus_vertex", "c1"),
+                    shadow_input_count("consensus_vertex", "c2"),
+                    shadow_input_count("consensus_vertex", "c3"),
+                    shadow_input_count("consensus_vertex", "omitted"),
+                )
+            ]);
             let stage_latency = RBC_DAG_PIPELINE_LATENCY_STAGES
                 .iter()
                 .map(|stage| {

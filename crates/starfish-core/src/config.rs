@@ -76,6 +76,13 @@ pub struct NodeParameters {
     /// This remains experimental and requires `starfish_rbc_dag_shadow`.
     #[serde(default)]
     pub starfish_rbc_dag_autonomous_clock: bool,
+    /// Optional logical C2 fallback timeout for the autonomous RBC-DAG.
+    /// `None` preserves the historical behavior and reuses `leader_timeout`.
+    /// This is deliberately independent of the physical carrier heartbeat so
+    /// latency experiments can vary consensus fallback without changing the
+    /// proactive push cadence.
+    #[serde(default)]
+    pub starfish_rbc_dag_consensus_timeout: Option<Duration>,
     /// Use embedded carrier ECHO/READY delivery as the certification authority
     /// for Starfish-RBC application headers. Direct RBC retains INIT/payload
     /// transport but its phase messages cannot mark a block clean.
@@ -164,6 +171,7 @@ impl Default for NodeParameters {
             starfish_rbc_protocol_instance: None,
             starfish_rbc_dag_shadow: false,
             starfish_rbc_dag_autonomous_clock: false,
+            starfish_rbc_dag_consensus_timeout: None,
             starfish_rbc_dag_embedded_rbc_authority: false,
             starfish_rbc_dag_shadow_buffered_wal: false,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
@@ -438,6 +446,7 @@ mod tests {
         assert_eq!(parameters.starfish_rbc_protocol_instance, None);
         assert!(!parameters.starfish_rbc_dag_shadow);
         assert!(!parameters.starfish_rbc_dag_autonomous_clock);
+        assert_eq!(parameters.starfish_rbc_dag_consensus_timeout, None);
         assert!(!parameters.starfish_rbc_dag_shadow_buffered_wal);
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
@@ -451,6 +460,7 @@ mod tests {
         );
         assert!(!decoded.starfish_rbc_dag_shadow);
         assert!(!decoded.starfish_rbc_dag_autonomous_clock);
+        assert_eq!(decoded.starfish_rbc_dag_consensus_timeout, None);
         assert!(!decoded.starfish_rbc_dag_shadow_buffered_wal);
     }
 
@@ -460,6 +470,7 @@ mod tests {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
             leader_timeout: Duration::from_millis(125),
+            starfish_rbc_dag_consensus_timeout: Some(Duration::from_millis(75)),
             starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         };
@@ -470,6 +481,10 @@ mod tests {
         assert!(decoded.starfish_rbc_dag_autonomous_clock);
         assert!(decoded.starfish_rbc_dag_shadow_buffered_wal);
         assert_eq!(decoded.leader_timeout, Duration::from_millis(125));
+        assert_eq!(
+            decoded.starfish_rbc_dag_consensus_timeout,
+            Some(Duration::from_millis(75))
+        );
     }
 
     #[test]

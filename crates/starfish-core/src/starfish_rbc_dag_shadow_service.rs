@@ -1004,6 +1004,7 @@ pub(crate) enum ShadowServiceErrorV1 {
         reference: BlockReference,
     },
     InvalidHeartbeatInterval,
+    InvalidConsensusTimeout,
     SyncRequestForForeignAuthor {
         expected: AuthorityIndex,
         actual: AuthorityIndex,
@@ -1115,6 +1116,9 @@ impl fmt::Display for ShadowServiceErrorV1 {
             Self::InvalidHeartbeatInterval => formatter.write_str(
                 "Starfish-RBC-DAG autonomous heartbeat interval must be nonzero",
             ),
+            Self::InvalidConsensusTimeout => formatter.write_str(
+                "Starfish-RBC-DAG logical consensus timeout must be nonzero",
+            ),
             Self::SyncRequestForForeignAuthor { expected, actual } => write!(
                 formatter,
                 "shadow carrier sync request asked authority {expected} to serve authority {actual}"
@@ -1177,6 +1181,7 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::DirectMirror,
+        None,
         wal_sync_policy,
         None,
         None,
@@ -1210,6 +1215,7 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_with_metrics_v1(
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::DirectMirror,
+        None,
         wal_sync_policy,
         Some(metrics),
         None,
@@ -1246,6 +1252,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+        None,
         wal_sync_policy,
         None,
         None,
@@ -1283,6 +1290,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_with_metrics_v1(
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+        None,
         wal_sync_policy,
         Some(metrics),
         None,
@@ -1324,6 +1332,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_paused_with_metric
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+        None,
         wal_sync_policy,
         Some(metrics),
         None,
@@ -1344,6 +1353,7 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
     authorizer: ShadowAuthorizerV1,
     recovered_local_headers: Vec<RbcCanonicalHeader>,
     heartbeat_interval: Duration,
+    consensus_timeout: Duration,
     wal_sync_policy: ShadowWalSyncPolicyV1,
     metrics: Arc<Metrics>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
@@ -1359,6 +1369,9 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
     if heartbeat_interval.is_zero() {
         return Err(ShadowServiceErrorV1::InvalidHeartbeatInterval);
     }
+    if consensus_timeout.is_zero() {
+        return Err(ShadowServiceErrorV1::InvalidConsensusTimeout);
+    }
     start_starfish_rbc_dag_shadow_service_with_mode_v1(
         path,
         committee,
@@ -1367,6 +1380,7 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+        Some(consensus_timeout),
         wal_sync_policy,
         Some(metrics),
         recovery_cursor,
@@ -1448,6 +1462,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     authorizer: ShadowAuthorizerV1,
     recovered_local_headers: Vec<RbcCanonicalHeader>,
     mode: ShadowServiceModeV1,
+    consensus_timeout: Option<Duration>,
     wal_sync_policy: ShadowWalSyncPolicyV1,
     metrics: Option<Arc<Metrics>>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
@@ -1461,6 +1476,9 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     ShadowServiceErrorV1,
 > {
     let committee_size = committee.committee().len();
+    let consensus_timeout = consensus_timeout
+        .or_else(|| mode.heartbeat_interval())
+        .unwrap_or_default();
     let input_capacity = shadow_input_capacity(committee_size, mode)?;
     let max_sidecar_size =
         authentication_sidecar_size(context.authentication_scheme(), committee_size);
@@ -1903,6 +1921,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             sync_max_desired_responses: 0,
             awaiting_application_submission: false,
             consensus_pacemaker,
+            consensus_timeout,
             normal_carrier_min_spacing: mode
                 .heartbeat_interval()
                 .and_then(|interval| interval.checked_div(SHADOW_NORMAL_CARRIER_SPACING_DIVISOR_V1))
@@ -2176,6 +2195,10 @@ struct ShadowServiceStateV1 {
     /// control heartbeat. Maintenance/heartbeat messages bound the wait.
     awaiting_application_submission: bool,
     consensus_pacemaker: ConsensusPacemakerV1,
+    /// Logical C2 fallback deadline. This is independent of the physical
+    /// heartbeat so experiments can vary consensus permission without
+    /// changing proactive carrier push cadence.
+    consensus_timeout: Duration,
     normal_carrier_min_spacing: Duration,
     normal_carrier_next_allowed_at: Option<Instant>,
     normal_carrier_requested: bool,
@@ -3081,9 +3104,10 @@ impl ShadowServiceStateV1 {
         if !self.clock_active {
             return false;
         }
-        let Some(leader_timeout) = self.mode.heartbeat_interval() else {
+        if !self.mode.is_autonomous() {
             return false;
-        };
+        }
+        let leader_timeout = self.consensus_timeout;
         let slot = self.core.next_local_consensus_round();
         let a1_ready = slot == 1
             || self
@@ -3268,6 +3292,9 @@ impl ShadowServiceStateV1 {
             .try_into()
             .unwrap_or(TimestampNs::MAX);
         let before = self.core.wal_counts();
+        let consensus_slot = self.core.next_local_consensus_round();
+        let c1_ready = self.core.local_consensus_vertex_c1_ready();
+        let c3_ready = self.core.has_projected_consensus_quorum(consensus_slot);
         let application_round = self.pending_local.keys().next().copied();
         let application = application_round.and_then(|round| self.pending_local.remove(&round));
         let result = match &application {
@@ -3282,6 +3309,8 @@ impl ShadowServiceStateV1 {
         };
         match result {
             Ok((envelope, effects)) => {
+                let fixed_consensus_vertex =
+                    self.core.next_local_consensus_round() > consensus_slot;
                 self.record_carrier_created(Instant::now());
                 let initial_application_payload = application
                     .as_ref()
@@ -3316,6 +3345,22 @@ impl ShadowServiceStateV1 {
                         "heartbeat"
                     },
                     outcome: "accepted",
+                });
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: "consensus_vertex",
+                    outcome: if !fixed_consensus_vertex {
+                        "omitted"
+                    } else if consensus_slot == 1 {
+                        "bootstrap"
+                    } else if c1_ready {
+                        "c1"
+                    } else if c3_ready {
+                        "c3"
+                    } else if allow_no_vote {
+                        "c2"
+                    } else {
+                        "unexpected"
+                    },
                 });
                 self.report_wal_delta(before);
                 if let Some(reference) = assigned_application {
@@ -4227,6 +4272,12 @@ fn run_shadow_service(
                         }
                         state.report_wal_delta(before);
                         state.process_effects(outcome.effects().to_vec());
+                        // A coalesced producer notification may sit behind
+                        // this ingress in the bounded actor FIFO even though
+                        // its exact application is already present in the
+                        // shared desired map. Reconcile it before phase work
+                        // consumes the carrier round that this ingress opens.
+                        state.reconcile_local_applications();
                         state.retry_pending_local();
                         if future_ignored {
                             state.flush_carrier_sync_requests(true);
@@ -5218,11 +5269,14 @@ mod tests {
             ShadowAuthorizerV1::MacVector(harness.keyrings[0].clone()),
         )
         .unwrap();
-        let leader_timeout = Duration::from_millis(20);
+        let heartbeat_interval = Duration::from_secs(60);
+        let consensus_timeout = Duration::from_millis(20);
         let (mut state, mut event_rx, mut message_rx, _message_tx) =
-            standalone_autonomous_state(core, harness.committee.clone(), leader_timeout);
+            standalone_autonomous_state(core, harness.committee.clone(), heartbeat_interval);
+        state.consensus_timeout = consensus_timeout;
 
         state.refresh_consensus_pacemaker();
+        assert_eq!(state.mode.heartbeat_interval(), Some(heartbeat_interval));
         assert_eq!(state.core.local_carrier_round(), 1);
         let (generation, slot) = match timeout(Duration::from_secs(1), message_rx.recv())
             .await
@@ -5550,6 +5604,7 @@ mod tests {
                 ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
                 Vec::new(),
                 ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
+                None,
                 ShadowWalSyncPolicyV1::EveryBatch,
                 None,
                 None,
@@ -5646,6 +5701,7 @@ mod tests {
             sync_max_desired_responses: 0,
             awaiting_application_submission: false,
             consensus_pacemaker: ConsensusPacemakerV1::new(slot),
+            consensus_timeout: leader_timeout,
             // Existing state-level tests invoke creation synchronously and do
             // not run the service deadline task. Keep their historical
             // immediate behavior unless a pacer test overrides this field.
@@ -8251,6 +8307,93 @@ mod tests {
             round_two.transactions_commitment()
         );
         stop(handle, events, task).await;
+    }
+
+    #[tokio::test]
+    async fn coalesced_application_wins_the_round_opened_by_carrier_ingress() {
+        let harness = Harness::new();
+        let (handle, mut events, task) =
+            harness.start_autonomous_with_interval(0, Duration::from_millis(600));
+        wait_ready(&mut events).await;
+        let (carrier_tx, mut carrier_rx) = mpsc::unbounded_channel();
+        let event_task = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    ShadowServiceEventV1::Network {
+                        recipient: 1,
+                        message: NetworkMessage::RbcDagShadowCarrier(envelope),
+                    } => carrier_tx.send(envelope).unwrap(),
+                    ShadowServiceEventV1::Rejected { error, .. } => {
+                        panic!("coalesced application test rejected input: {error}")
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        handle.local_header(&direct_header(0, 1, 0x71)).unwrap();
+        let first = timeout(EVENT_TIMEOUT, carrier_rx.recv())
+            .await
+            .expect("first local carrier timed out")
+            .expect("carrier collector stopped");
+        let first = CandidateCarrierV1::decode_wire_with_committee(
+            &first.canonical_carrier,
+            &harness.committee,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.header().carrier_round(), 1);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let first_peer = round_one_candidate(1, &harness.committee, 0x72);
+        handle.carrier(1, harness.envelope(&first_peer, 1)).unwrap();
+        let inspection = handle.inspect_carrier_sync().await.unwrap();
+        assert_eq!(inspection.open_round, 1);
+
+        // Model a full/coalesced notification queue: the producer has
+        // published the exact desired application, but its wake is not ahead
+        // of the final quorum carrier in the actor FIFO.
+        let application = RbcCanonicalHeader::try_new(
+            0,
+            2,
+            (0..N as AuthorityIndex)
+                .map(|author| BlockReference::new_test(author, 1))
+                .collect(),
+            Vec::new(),
+            2_073,
+            TransactionsCommitment::from_bytes([0x73; 32]),
+        )
+        .unwrap();
+        handle.desired_local_applications.lock().insert(
+            application.reference().round,
+            ShadowLocalCarrierV1::from_direct_header(&application),
+        );
+        let quorum_peer = round_one_candidate(2, &harness.committee, 0x74);
+        handle
+            .carrier(2, harness.envelope(&quorum_peer, 2))
+            .unwrap();
+        let inspection = handle.inspect_carrier_sync().await.unwrap();
+        assert_eq!(inspection.open_round, 2);
+
+        let second = loop {
+            let envelope = timeout(EVENT_TIMEOUT, carrier_rx.recv())
+                .await
+                .expect("second local carrier timed out")
+                .expect("carrier collector stopped");
+            let candidate = CandidateCarrierV1::decode_wire_with_committee(
+                &envelope.canonical_carrier,
+                &harness.committee,
+                None,
+            )
+            .unwrap();
+            if candidate.header().carrier_round() == 2 {
+                break candidate;
+            }
+        };
+        assert_eq!(second.header().application_header(), Some(&application));
+        handle.shutdown().await.unwrap();
+        task.await.unwrap();
+        event_task.await.unwrap();
     }
 
     #[tokio::test]
