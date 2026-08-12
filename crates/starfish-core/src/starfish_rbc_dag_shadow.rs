@@ -26,8 +26,9 @@ use crate::{
         RbcPhaseStatementV1, carrier_genesis_reference,
         journal::{IngressProvenanceV1, JournalErrorV1, JournalEventV1, WriteAheadJournalV1},
         model::{
-            DeliveryPromiseBasisV1, EXECUTABLE_MODEL_BUFFER_WINDOW_V1, ModelEffect, ModelError,
-            ModelInputRecord, ModelTraceEvent, RbcDagModel,
+            DeliveryPromiseBasisV1, EXECUTABLE_MODEL_ADMISSION_WINDOW_V1,
+            EXECUTABLE_MODEL_BUFFER_WINDOW_V1, ModelEffect, ModelError, ModelInputRecord,
+            ModelTraceEvent, RbcDagModel,
         },
         projection::{
             C1StrongParentWitnessV1, CertifiedProjectionError, CertifiedProjectionModel,
@@ -997,12 +998,34 @@ impl StarfishRbcDagShadowV1 {
     /// window. These are bounded by the reducer's future-carrier window and
     /// become admitted only through sequential clock advancement.
     pub(crate) fn buffered_authenticated_carrier_count(&self) -> usize {
-        self.authenticated_slots
-            .iter()
-            .filter(|((authority, round), reference)| {
-                self.model.admitted_reference(*authority, *round) != Some(**reference)
+        let Some(first_buffered_round) = self
+            .local_carrier_round()
+            .checked_add(EXECUTABLE_MODEL_ADMISSION_WINDOW_V1)
+            .and_then(|round| round.checked_add(1))
+        else {
+            return 0;
+        };
+        let buffered = self
+            .committee
+            .committee()
+            .authorities()
+            .map(|authority| {
+                self.authenticated_slots
+                    .range((authority, first_buffered_round)..=(authority, RoundNumber::MAX))
+                    .count()
             })
-            .count()
+            .sum();
+        debug_assert_eq!(
+            buffered,
+            self.authenticated_slots
+                .iter()
+                .filter(|((authority, round), reference)| {
+                    self.model.admitted_reference(*authority, *round) != Some(**reference)
+                })
+                .count(),
+            "the reducer must admit every authenticated carrier inside its admission window"
+        );
+        buffered
     }
 
     pub(crate) fn drain_projection_decisions(&mut self) -> Vec<ProjectionDecisionV1> {
