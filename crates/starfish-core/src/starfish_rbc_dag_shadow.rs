@@ -1618,11 +1618,85 @@ impl StarfishRbcDagShadowV1 {
         self.apply_requested_recovery(candidate)
     }
 
+    /// Recover an exact phase-evidenced carrier through the ordinary
+    /// receiver-bound authentication predicate. A valid sidecar variant is
+    /// durably recorded as relayed/direct authenticated ingress; an invalid
+    /// variant retains the exact requested content through the existing
+    /// content-only recovery path. MAC failures assign no blame.
+    pub(crate) fn recover_or_admit_from_peer(
+        &mut self,
+        expected_reference: BlockReference,
+        canonical_carrier_wire: &[u8],
+        authentication_sidecar: &[u8],
+        trusted_peer: AuthorityIndex,
+    ) -> Result<ShadowIngressOutcomeV1, ShadowErrorV1> {
+        self.ensure_live()?;
+        if !self.committee.committee().known_authority(trusted_peer) {
+            return Err(ShadowErrorV1::UnknownAuthority(trusted_peer));
+        }
+        if !self.requested_recoveries.contains_key(&expected_reference) {
+            return Err(ShadowErrorV1::UnrequestedRecovery(expected_reference));
+        }
+        let candidate = decode_candidate(
+            canonical_carrier_wire,
+            &self.committee,
+            Some(expected_reference),
+        )?;
+        let provenance = infer_ingress_provenance(trusted_peer, candidate.header().author());
+        validate_provenance(provenance, candidate.header().author(), &self.committee)?;
+
+        match self.authenticate_decoded(candidate.clone(), authentication_sidecar) {
+            Ok(authenticated) => {
+                let (effects, applied) =
+                    self.apply_authenticated_capability(authenticated, provenance)?;
+                if applied {
+                    return Ok(ShadowIngressOutcomeV1::new(
+                        ShadowIngressDispositionV1::Authenticated,
+                        effects,
+                    ));
+                }
+            }
+            Err(ShadowErrorV1::Carrier(_)) | Err(ShadowErrorV1::NonCanonicalAuthentication) => {}
+            Err(error) => return Err(error),
+        }
+
+        let effects = self.apply_requested_recovery(candidate)?;
+        Ok(ShadowIngressOutcomeV1::new(
+            ShadowIngressDispositionV1::CandidateRetained,
+            effects,
+        ))
+    }
+
     pub(crate) fn retained_candidate_wire(&self, reference: BlockReference) -> Option<Vec<u8>> {
         self.journal
             .snapshot()
             .retained_carrier(reference)
             .map(<[u8]>::to_vec)
+    }
+
+    /// Return one exact, durably retained authentication variant for a
+    /// carrier. Locally authored envelopes use the outbound WAL record;
+    /// received envelopes use the first authenticated ingress record, whose
+    /// provenance and bytes replay identically after restart.
+    pub(crate) fn retained_authenticated_envelope(
+        &self,
+        reference: BlockReference,
+    ) -> Option<ShadowOutboundEnvelopeV1> {
+        if reference.authority == self.own_authority {
+            return self
+                .local_outbound_envelope(reference.round)
+                .filter(|envelope| envelope.reference() == reference);
+        }
+        self.journal
+            .snapshot()
+            .authenticated_ingress()
+            .iter()
+            .find(|ingress| ingress.reference() == reference)
+            .map(|ingress| ShadowOutboundEnvelopeV1 {
+                reference,
+                canonical_carrier_wire: ingress.canonical_carrier_wire().to_vec(),
+                authentication_sidecar: ingress.authentication_sidecar().to_vec(),
+            })
     }
 
     /// Decode canonical carrier bytes without mutating the reducer. Sync
@@ -4936,6 +5010,72 @@ mod tests {
             Err(ShadowErrorV1::NonCanonicalProvenance)
         ));
         assert_eq!(network.nodes[0].wal_counts(), (0, 0));
+    }
+
+    #[test]
+    fn relayed_authenticated_envelope_reopens_with_exact_provenance_and_bytes() {
+        let mut network = TestNetwork::new();
+        let candidate = round_one_candidate(1, &network.committee, 0x80);
+        let authentication = network
+            .context
+            .authenticate_with_committee(
+                &candidate,
+                &network.committee,
+                CarrierAuthorizerV1::MacVector {
+                    authority: 1,
+                    keys: &network.keyrings[1],
+                },
+            )
+            .unwrap();
+        let wire = candidate.canonical_wire_bytes().unwrap();
+        let sidecar = authentication.canonical_wire_bytes();
+        network.nodes[0]
+            .receive_authenticated_from_peer(&wire, &sidecar, 2)
+            .unwrap();
+        assert_eq!(
+            network.nodes[0].admitted_reference(1, 1),
+            Some(candidate.reference())
+        );
+        assert_eq!(
+            network.nodes[0].journal.snapshot().authenticated_ingress()[0].provenance(),
+            IngressProvenanceV1::Relayed { peer: 2 }
+        );
+        let retained = network.nodes[0]
+            .retained_authenticated_envelope(candidate.reference())
+            .unwrap();
+        assert_eq!(retained.canonical_carrier_wire(), wire);
+        assert_eq!(retained.authentication_sidecar(), sidecar);
+
+        let node = network.nodes.swap_remove(0);
+        let path = network.path(0);
+        node.shutdown().unwrap();
+        let (reopened, report) = StarfishRbcDagShadowV1::open(
+            path,
+            network.committee.clone(),
+            0,
+            network.context,
+            ShadowAuthorizerV1::MacVector(network.keyrings[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(report.replayed_batches(), 1);
+        assert_eq!(
+            reopened.authenticated_reference(1, 1),
+            Some(candidate.reference())
+        );
+        assert_eq!(
+            reopened.admitted_reference(1, 1),
+            Some(candidate.reference())
+        );
+        assert_eq!(
+            reopened.journal.snapshot().authenticated_ingress()[0].provenance(),
+            IngressProvenanceV1::Relayed { peer: 2 }
+        );
+        let retained = reopened
+            .retained_authenticated_envelope(candidate.reference())
+            .unwrap();
+        assert_eq!(retained.canonical_carrier_wire(), wire);
+        assert_eq!(retained.authentication_sidecar(), sidecar);
+        reopened.shutdown().unwrap();
     }
 
     #[test]

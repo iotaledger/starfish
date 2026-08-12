@@ -36,8 +36,8 @@ use crate::{
     },
     network::{
         NetworkMessage, RbcDagApplicationPayloadResponse, RbcDagShadowCarrier,
-        RbcDagShadowCarrierResponse, RbcDagShadowCarrierSyncRequest,
-        RbcDagShadowCarrierSyncResponse,
+        RbcDagShadowCarrierEnvelopeResponse, RbcDagShadowCarrierResponse,
+        RbcDagShadowCarrierSyncRequest, RbcDagShadowCarrierSyncResponse,
     },
     starfish_rbc::RbcCanonicalHeader,
     starfish_rbc_dag::{
@@ -310,6 +310,10 @@ enum ShadowServiceMessageV1 {
         peer: AuthorityIndex,
         response: RbcDagShadowCarrierResponse,
     },
+    CarrierEnvelopeResponse {
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierEnvelopeResponse,
+    },
     CarrierSyncRequest {
         peer: AuthorityIndex,
         request: RbcDagShadowCarrierSyncRequest,
@@ -538,6 +542,42 @@ impl StarfishRbcDagShadowServiceHandleV1 {
         )?;
         self.send_reliably(ShadowServiceMessageV1::CarrierResponse { peer, response })
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn carrier_envelope_response(
+        &self,
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierEnvelopeResponse,
+    ) -> Result<(), ShadowServiceErrorV1> {
+        self.validate_carrier_envelope_response(&response)?;
+        self.send(ShadowServiceMessageV1::CarrierEnvelopeResponse { peer, response })
+    }
+
+    pub(crate) async fn carrier_envelope_response_reliably(
+        &self,
+        peer: AuthorityIndex,
+        response: RbcDagShadowCarrierEnvelopeResponse,
+    ) -> Result<(), ShadowServiceErrorV1> {
+        self.validate_carrier_envelope_response(&response)?;
+        self.send_reliably(ShadowServiceMessageV1::CarrierEnvelopeResponse { peer, response })
+            .await
+    }
+
+    fn validate_carrier_envelope_response(
+        &self,
+        response: &RbcDagShadowCarrierEnvelopeResponse,
+    ) -> Result<(), ShadowServiceErrorV1> {
+        validate_wire_size(
+            "carrier envelope response",
+            response.canonical_carrier.len(),
+            MAX_CARRIER_CONTENT_SIZE_V1,
+        )?;
+        validate_wire_size(
+            "carrier envelope response authentication sidecar",
+            response.authentication_sidecar.len(),
+            self.max_sidecar_size,
+        )
     }
 
     #[cfg(test)]
@@ -854,6 +894,7 @@ impl ShadowServiceMessageV1 {
             Self::Carrier { .. } => "carrier",
             Self::CarrierRequest { .. } => "carrier_request",
             Self::CarrierResponse { .. } => "carrier_response",
+            Self::CarrierEnvelopeResponse { .. } => "carrier_envelope_response",
             Self::CarrierSyncRequest { .. } => "carrier_sync_request",
             Self::CarrierSyncResponsesChanged => "carrier_sync_responses_changed",
             Self::ApplicationPayloadRequest { .. } => "application_payload_request",
@@ -4307,7 +4348,20 @@ fn run_shadow_service(
                     state.reject(Some(peer), error);
                     continue;
                 }
-                if let Some(canonical_carrier) = state.core.retained_candidate_wire(reference) {
+                if let Some(envelope) = state.core.retained_authenticated_envelope(reference) {
+                    state.emit(ShadowServiceEventV1::Network {
+                        recipient: peer,
+                        message: NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(
+                            RbcDagShadowCarrierEnvelopeResponse {
+                                reference,
+                                canonical_carrier: envelope.canonical_carrier_wire().to_vec(),
+                                authentication_sidecar: envelope.authentication_sidecar().to_vec(),
+                            },
+                        ),
+                    });
+                } else if let Some(canonical_carrier) =
+                    state.core.retained_candidate_wire(reference)
+                {
                     state.emit(ShadowServiceEventV1::Network {
                         recipient: peer,
                         message: NetworkMessage::RbcDagShadowCarrierResponse(
@@ -4376,6 +4430,93 @@ fn run_shadow_service(
                         }
                         state.report_wal_delta(before);
                         state.process_effects(effects);
+                        state.retry_pending_local();
+                    }
+                    Err(error) => {
+                        state.emit(ShadowServiceEventV1::Input {
+                            kind: "recovery",
+                            outcome: "rejected",
+                        });
+                        if is_fatal_core_error(&error) {
+                            state.mark_fatal(error);
+                        } else {
+                            state.reject(Some(peer), error);
+                        }
+                    }
+                }
+            }
+            ShadowServiceMessageV1::CarrierEnvelopeResponse { peer, response } => {
+                if let Err(error) = state.validate_peer(peer) {
+                    state.reject(Some(peer), error);
+                    continue;
+                }
+                if state
+                    .core
+                    .authenticated_reference(response.reference.authority, response.reference.round)
+                    == Some(response.reference)
+                {
+                    state.emit(ShadowServiceEventV1::Input {
+                        kind: "recovery",
+                        outcome: "ignored_already_authenticated",
+                    });
+                    continue;
+                }
+                let Some(holders) = state.pending_recovery.get(&response.reference) else {
+                    state.reject(
+                        Some(peer),
+                        ShadowServiceErrorV1::UnexpectedResponse(response.reference),
+                    );
+                    continue;
+                };
+                if !holders.contains(&peer) {
+                    state.reject(
+                        Some(peer),
+                        ShadowServiceErrorV1::ResponseFromNonHolder {
+                            peer,
+                            reference: response.reference,
+                        },
+                    );
+                    continue;
+                }
+                let before = state.core.wal_counts();
+                match state.core.recover_or_admit_from_peer(
+                    response.reference,
+                    &response.canonical_carrier,
+                    &response.authentication_sidecar,
+                    peer,
+                ) {
+                    Ok(outcome) => {
+                        state.pending_recovery.remove(&response.reference);
+                        state
+                            .recovery_last_attempt
+                            .retain(|(target, _), _| *target != response.reference);
+                        state.emit(ShadowServiceEventV1::Input {
+                            kind: "recovery",
+                            outcome: match outcome.disposition() {
+                                ShadowIngressDispositionV1::Authenticated => {
+                                    "accepted_authenticated"
+                                }
+                                ShadowIngressDispositionV1::CandidateRetained => {
+                                    "accepted_content_only"
+                                }
+                                ShadowIngressDispositionV1::IgnoredDuplicateConflictOrStale => {
+                                    "ignored_duplicate"
+                                }
+                                ShadowIngressDispositionV1::IgnoredFutureOutsideBuffer => {
+                                    "future_ignored"
+                                }
+                            },
+                        });
+                        if let Err(error) = state.observe_carrier_application(
+                            peer,
+                            &response.canonical_carrier,
+                            None,
+                            outcome.disposition(),
+                        ) {
+                            state.reject(Some(peer), error);
+                        }
+                        state.report_wal_delta(before);
+                        state.process_effects(outcome.effects().to_vec());
                         state.retry_pending_local();
                     }
                     Err(error) => {
@@ -5894,6 +6035,12 @@ mod tests {
                                             response,
                                         }
                                     }
+                                    NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(
+                                        response,
+                                    ) => ShadowServiceMessageV1::CarrierEnvelopeResponse {
+                                        peer: sender as AuthorityIndex,
+                                        response,
+                                    },
                                     NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
                                         *sync_requests = sync_requests.saturating_add(1);
                                         ShadowServiceMessageV1::CarrierSyncRequest {
@@ -6051,6 +6198,14 @@ mod tests {
                                     NetworkMessage::RbcDagShadowCarrierResponse(response) => handles
                                         [recipient]
                                         .carrier_response(sender as AuthorityIndex, response)
+                                        .unwrap(),
+                                    NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(
+                                        response,
+                                    ) => handles[recipient]
+                                        .carrier_envelope_response(
+                                            sender as AuthorityIndex,
+                                            response,
+                                        )
                                         .unwrap(),
                                     NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
                                         handles[recipient]
@@ -8177,6 +8332,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relayed_authenticated_candidate_serves_its_exact_persisted_envelope() {
+        let harness = Harness::new();
+        let target = round_one_candidate(0, &harness.committee, 0x22);
+        let envelope = harness.envelope(&target, 0);
+        let (holder, mut events, task) = harness.start(1, Vec::new());
+        wait_ready(&mut events).await;
+        holder.carrier(0, envelope.clone()).unwrap();
+        loop {
+            if let ShadowServiceEventV1::Input {
+                kind: "carrier",
+                outcome: "authenticated",
+            } = next_event(&mut events).await
+            {
+                break;
+            }
+        }
+
+        holder.carrier_request(2, target.reference()).unwrap();
+        loop {
+            if let ShadowServiceEventV1::Network {
+                recipient: 2,
+                message: NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(response),
+            } = next_event(&mut events).await
+            {
+                assert_eq!(response.reference, target.reference());
+                assert_eq!(response.canonical_carrier, envelope.canonical_carrier);
+                assert_eq!(
+                    response.authentication_sidecar,
+                    envelope.authentication_sidecar
+                );
+                break;
+            }
+        }
+        stop(holder, events, task).await;
+    }
+
+    #[tokio::test]
     async fn poisoned_application_payload_waits_for_exact_delivery() {
         let harness = Harness::new();
         let (header, payload) = application_header_and_payload(3, 1, 0xC2, &harness.committee);
@@ -8550,6 +8742,83 @@ mod tests {
             }
         }
         stop(handle, events, task).await;
+    }
+
+    #[tokio::test]
+    async fn vector_bearing_recovery_authenticates_relay_or_falls_back_without_blame() {
+        for poisoned_receiver_entry in [false, true] {
+            let harness = Harness::new();
+            let (handle, mut events, task) = harness.start(3, Vec::new());
+            wait_ready(&mut events).await;
+            handle.peer_connected(0).unwrap();
+            handle.peer_connected(1).unwrap();
+            let target = round_one_candidate(2, &harness.committee, 0x63);
+            for sender in [0, 1] {
+                let outer = phase_carrier(
+                    sender,
+                    RbcPhaseStatementV1::Ready {
+                        target: target.reference(),
+                    },
+                    &harness.committee,
+                );
+                handle
+                    .carrier(sender, harness.envelope(&outer, sender))
+                    .unwrap();
+            }
+            let holder = loop {
+                if let ShadowServiceEventV1::Network {
+                    recipient,
+                    message: NetworkMessage::RbcDagShadowCarrierRequest(reference),
+                } = next_event(&mut events).await
+                {
+                    assert_eq!(reference, target.reference());
+                    break recipient;
+                }
+            };
+            assert!(holder == 0 || holder == 1);
+
+            let envelope = harness.envelope(&target, 2);
+            let mut authentication_sidecar = envelope.authentication_sidecar;
+            if poisoned_receiver_entry {
+                authentication_sidecar[3 + 3 * MAC_TAG_SIZE] ^= 1;
+            }
+            handle
+                .carrier_envelope_response(
+                    holder,
+                    RbcDagShadowCarrierEnvelopeResponse {
+                        reference: target.reference(),
+                        canonical_carrier: envelope.canonical_carrier,
+                        authentication_sidecar,
+                    },
+                )
+                .unwrap();
+
+            let expected_outcome = if poisoned_receiver_entry {
+                "accepted_content_only"
+            } else {
+                "accepted_authenticated"
+            };
+            let mut accepted = false;
+            let mut delivered = false;
+            while !accepted || !delivered {
+                match next_event(&mut events).await {
+                    ShadowServiceEventV1::Input {
+                        kind: "recovery",
+                        outcome,
+                    } if outcome == expected_outcome => accepted = true,
+                    ShadowServiceEventV1::Delivered(identity) => {
+                        assert_eq!(identity.author, 2);
+                        assert_eq!(identity.round, 1);
+                        delivered = true;
+                    }
+                    ShadowServiceEventV1::Rejected { peer, error } => {
+                        panic!("vector-bearing recovery assigned blame to {peer:?}: {error}")
+                    }
+                    _ => {}
+                }
+            }
+            stop(handle, events, task).await;
+        }
     }
 
     #[test]

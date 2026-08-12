@@ -123,6 +123,18 @@ pub struct RbcDagShadowCarrierResponse {
     pub canonical_carrier: Vec<u8>,
 }
 
+/// Canonical carrier content plus one exact authentication-sidecar variant
+/// retained by a phase-evidence holder. The requester recomputes `reference`
+/// and verifies only its receiver-specific entry. A valid entry grants the
+/// same authority as ordinary relayed ingress; an invalid entry falls back to
+/// content-only recovery without blaming the author or holder.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RbcDagShadowCarrierEnvelopeResponse {
+    pub reference: BlockReference,
+    pub canonical_carrier: Vec<u8>,
+    pub authentication_sidecar: Vec<u8>,
+}
+
 /// Request one exact carrier-clock slot from a peer. Keeping synchronization
 /// slot-addressed prevents an untrusted peer from choosing an unbounded range
 /// of history to return.
@@ -279,6 +291,10 @@ pub enum NetworkMessage {
     /// Return commitment-checked transaction data for an authorized embedded
     /// application header. The response is not an author proof.
     RbcDagApplicationPayloadResponse(RbcDagApplicationPayloadResponse),
+    /// Return canonical carrier content with one exact retained
+    /// authentication-sidecar variant. Appended after the frozen V1 message
+    /// family so every preceding bincode enum discriminant remains stable.
+    RbcDagShadowCarrierEnvelopeResponse(RbcDagShadowCarrierEnvelopeResponse),
 }
 
 impl NetworkMessage {
@@ -313,6 +329,9 @@ impl NetworkMessage {
             Self::RbcDagShadowCarrierSyncResponse(_) => "rbc_dag_shadow_carrier_sync_response",
             Self::RbcDagApplicationPayloadRequest(_) => "rbc_dag_application_payload_request",
             Self::RbcDagApplicationPayloadResponse(_) => "rbc_dag_application_payload_response",
+            Self::RbcDagShadowCarrierEnvelopeResponse(_) => {
+                "rbc_dag_shadow_carrier_envelope_response"
+            }
         }
     }
 }
@@ -1944,6 +1963,13 @@ mod tests {
                 reference: block_ref,
                 canonical_carrier: vec![0xA6, 0xA7],
             });
+        let shadow_envelope_response = NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(
+            RbcDagShadowCarrierEnvelopeResponse {
+                reference: block_ref,
+                canonical_carrier: vec![0xB6, 0xB7],
+                authentication_sidecar: vec![0xB8, 0xB9],
+            },
+        );
         let sync_request =
             NetworkMessage::RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest {
                 author: 2,
@@ -1975,6 +2001,11 @@ mod tests {
             (sync_response, 19, "rbc_dag_shadow_carrier_sync_response"),
             (payload_request, 20, "rbc_dag_application_payload_request"),
             (payload_response, 21, "rbc_dag_application_payload_response"),
+            (
+                shadow_envelope_response,
+                22,
+                "rbc_dag_shadow_carrier_envelope_response",
+            ),
         ] {
             assert_eq!(variant_index(&message), expected_index);
             assert_eq!(message.request_type(), expected_kind);

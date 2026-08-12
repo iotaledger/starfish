@@ -358,12 +358,16 @@ may attach different vectors to the same content reference, including a vector w
 one recipient and garbage for another. Correctness therefore depends only on the local entry and on
 the embedded four-phase protocol, never on agreement about the vector bytes.
 
-Each node persists one exact vector variant with its carrier for restart and relay. The preference
-order is locally generated, directly author-received, then first relayed variant with a valid local
-entry. The implementation does not merge unverified entries from different vectors. Exact carrier
-recovery after phase evidence may return canonical content without a vector; that recovery can
-unblock phase progress, authoritative delivery, and READY certification, but it does not create
-authenticated carrier admission or fast-clock stake.
+Each node persists one exact vector variant with an authenticated carrier for restart and relay:
+the locally generated sidecar for its own carrier, otherwise the first inbound variant whose local
+entry verifies. The implementation never replaces that variant by arrival provenance and never
+merges entries from different vectors. Exact carrier recovery after phase evidence prefers a new,
+appended envelope-response message carrying the holder's persisted variant. If the requester's
+local entry verifies, the response follows the ordinary relayed-ingress predicate and may create
+authenticated admission, ECHO, and fast-clock stake. If the entry is absent, malformed, or invalid,
+the same canonical bytes retain the legacy content-only authority and can still unblock phase
+progress, authoritative delivery, and READY certification. The frozen content-only response remains
+accepted for compatibility. A failed MAC check assigns no blame to either carrier author or holder.
 
 Public-signature modes use the same context-bound carrier statement without a recipient field and
 the same embedded RBC/consensus logic. They exist for controlled performance comparison, not as
@@ -550,12 +554,14 @@ union of phase senders as candidate holders, and request the target from those h
 content is accepted only when canonical decoding recomputes the requested `BlockReference` and the
 context/committee checks succeed. Retention precedes any new local phase lock.
 
-Recovery request/response is out-of-band byte transfer, not quorum testimony, admission, or a new
-phase. A valid response can satisfy an already allocated evidence obligation but cannot create one.
-The prototype retries recorded holders after GST. Its separate carrier catch-up mechanism requests
-one exact `(author, round)` at a time and serves only retained locally authored outbound bytes; it
-does not transfer ranges, certificates, checkpoints, committed observer history, or arbitrary late
-state.
+Recovery request/response is out-of-band byte transfer, not quorum testimony or a new phase. A
+response can satisfy only an already allocated evidence obligation and cannot create one. A
+vector-bearing response additionally grants ordinary carrier admission only when the exact
+receiver-specific authenticator verifies under the same committee/context predicate as proactive
+relayed ingress; otherwise it is content-only. The prototype retries recorded holders after GST.
+Its separate carrier catch-up mechanism requests one exact `(author, round)` at a time and serves
+only retained locally authored outbound bytes; it does not transfer ranges, certificates,
+checkpoints, committed observer history, or arbitrary late state.
 
 ### 8.3 Batching and fairness
 
@@ -955,6 +961,9 @@ The executable model and composed runtime tests should cover at minimum:
 - `M` ECHO to VOTE, `C` ECHO-or-VOTE to ACK, `C` ACK to READY, `O` authoritative delivery, and
   independent `Q`-READY certification;
 - evidence-before-content recovery from phase holders, including VOTE/ACK without local admission;
+- vector-bearing phase-holder recovery that grants normal relayed admission only for a valid local
+  authenticator entry, falls back without blame for poisoned variants, preserves the frozen
+  content-only response, and replays the exact relayed provenance and sidecar after restart;
 - zero application load with heartbeat-only RBC completion;
 - independent logical-C2 timeout scheduling without changing the physical heartbeat, plus
   coalesced producer notification ordering in which an already-published application wins a newly
@@ -1003,8 +1012,8 @@ The first fair benchmark matrix includes:
 - Sailfish++ as a certified signature-free comparison.
 
 Hold committee, load, transaction size, topology, latency injection, dissemination fanout, duration,
-timeouts, and build constant. Report carrier, vector, ECHO, VOTE, ACK, READY, recovery, payload,
-and synchronization bytes separately. Also report authentication CPU, fast-admission-to-delivery
+timeouts, and build constant. Report carrier, vector, ECHO, VOTE, ACK, READY, content-only recovery,
+vector-bearing recovery, payload, and synchronization bytes separately. Also report authentication CPU, fast-admission-to-delivery
 latency, carrier/consensus round skew, prefix lag, commit latency, throughput, and peak retained
 state.
 
