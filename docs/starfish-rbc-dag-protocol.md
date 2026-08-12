@@ -714,6 +714,13 @@ The existing Starfish patterns are then evaluated from these explicit choices:
 - `Q` distinct certifier authors provide the direct-commit condition; and
 - a per-candidate quorum of explicit negative choices provides the direct-skip pattern.
 
+This two-level rule is the strict default. The local testbed can explicitly enable
+`--starfish-rbc-dag-vote-qc-fast-path`, which directly commits an exact projected leader after the
+preceding projected vote quorum and therefore skips the second certifier wave. The experiment adds
+no wire messages, retains the ordinary skip and indirect-recovery paths, and is intentionally
+labelled separately because it changes the proof shape described by this section; it is not a
+production-finality claim.
+
 If the leader produces no value, `Q` immutable `NoVote(slot)` choices are a self-contained direct
 skip witness. If a Byzantine leader equivocates, `Vote(L)` is negative evidence for every other
 candidate, and the current Starfish per-candidate evaluator decides whether the collected explicit

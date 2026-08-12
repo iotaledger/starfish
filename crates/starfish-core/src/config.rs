@@ -88,6 +88,12 @@ pub struct NodeParameters {
     /// transport but its phase messages cannot mark a block clean.
     #[serde(default)]
     pub starfish_rbc_dag_embedded_rbc_authority: bool,
+    /// Testbed-only optimistic commit path: finalize an exact projected
+    /// leader after its projected vote quorum, without waiting for the second
+    /// certifier quorum. Disabled by default because this changes the strict
+    /// Starfish finality proof shape.
+    #[serde(default)]
+    pub starfish_rbc_dag_vote_qc_fast_path: bool,
     /// Benchmark-only profile that writes the framed shadow WAL in order but
     /// calls `sync_all` only during clean shutdown. This removes persistence
     /// pressure from latency experiments and deliberately forfeits the
@@ -173,6 +179,7 @@ impl Default for NodeParameters {
             starfish_rbc_dag_autonomous_clock: false,
             starfish_rbc_dag_consensus_timeout: None,
             starfish_rbc_dag_embedded_rbc_authority: false,
+            starfish_rbc_dag_vote_qc_fast_path: false,
             starfish_rbc_dag_shadow_buffered_wal: false,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
@@ -447,6 +454,7 @@ mod tests {
         assert!(!parameters.starfish_rbc_dag_shadow);
         assert!(!parameters.starfish_rbc_dag_autonomous_clock);
         assert_eq!(parameters.starfish_rbc_dag_consensus_timeout, None);
+        assert!(!parameters.starfish_rbc_dag_vote_qc_fast_path);
         assert!(!parameters.starfish_rbc_dag_shadow_buffered_wal);
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
@@ -461,6 +469,7 @@ mod tests {
         assert!(!decoded.starfish_rbc_dag_shadow);
         assert!(!decoded.starfish_rbc_dag_autonomous_clock);
         assert_eq!(decoded.starfish_rbc_dag_consensus_timeout, None);
+        assert!(!decoded.starfish_rbc_dag_vote_qc_fast_path);
         assert!(!decoded.starfish_rbc_dag_shadow_buffered_wal);
     }
 
@@ -471,6 +480,7 @@ mod tests {
             starfish_rbc_dag_autonomous_clock: true,
             leader_timeout: Duration::from_millis(125),
             starfish_rbc_dag_consensus_timeout: Some(Duration::from_millis(75)),
+            starfish_rbc_dag_vote_qc_fast_path: true,
             starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         };
@@ -479,6 +489,7 @@ mod tests {
         let decoded: NodeParameters = serde_yaml::from_str(&yaml).unwrap();
         assert!(decoded.starfish_rbc_dag_shadow);
         assert!(decoded.starfish_rbc_dag_autonomous_clock);
+        assert!(decoded.starfish_rbc_dag_vote_qc_fast_path);
         assert!(decoded.starfish_rbc_dag_shadow_buffered_wal);
         assert_eq!(decoded.leader_timeout, Duration::from_millis(125));
         assert_eq!(

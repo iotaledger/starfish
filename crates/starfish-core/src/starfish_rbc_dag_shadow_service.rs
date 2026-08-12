@@ -1227,6 +1227,7 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
         None,
         None,
         true,
+        false,
     )
 }
 
@@ -1261,6 +1262,7 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_with_metrics_v1(
         Some(metrics),
         None,
         true,
+        false,
     )
 }
 
@@ -1298,6 +1300,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
         None,
         None,
         true,
+        false,
     )
 }
 
@@ -1336,6 +1339,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_with_metrics_v1(
         Some(metrics),
         None,
         true,
+        false,
     )
 }
 
@@ -1378,6 +1382,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_paused_with_metric
         Some(metrics),
         None,
         false,
+        false,
     )
 }
 
@@ -1399,6 +1404,7 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
     metrics: Arc<Metrics>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
     clock_starts_active: bool,
+    vote_qc_fast_path: bool,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -1426,6 +1432,7 @@ pub(crate) fn start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1
         Some(metrics),
         recovery_cursor,
         clock_starts_active,
+        vote_qc_fast_path,
     )
 }
 
@@ -1495,6 +1502,7 @@ fn spawn_consensus_timeout_deadline_task(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     path: impl AsRef<Path>,
     committee: RbcDagCommitteeContextV1,
@@ -1508,6 +1516,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     metrics: Option<Arc<Metrics>>,
     recovery_cursor: Option<RbcDagFrontierRecoveryCursorV1>,
     clock_starts_active: bool,
+    vote_qc_fast_path: bool,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -1689,6 +1698,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
                     authorizer,
                     wal_sync_policy,
                     recovery_cursor,
+                    vote_qc_fast_path,
                 )
             } else {
                 StarfishRbcDagShadowV1::open_with_wal_sync_policy(
@@ -5763,6 +5773,7 @@ mod tests {
                 ShadowWalSyncPolicyV1::EveryBatch,
                 None,
                 None,
+                false,
                 false,
             )
             .unwrap()

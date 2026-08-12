@@ -1156,9 +1156,19 @@ impl CertifiedProjectionModel {
         let Some(projected) = self.vertices.get(&certifier) else {
             return false;
         };
-        let voter_authors: BTreeSet<_> = projected
-            .vertex
-            .strong_parents()
+        self.strong_parents_certify(projected.vertex.strong_parents(), leader)
+    }
+
+    pub(crate) fn leader_values(&self, slot: LeaderSlotV1) -> Vec<ConsensusVertexReference> {
+        self.slot_values(slot.author, slot.round)
+    }
+
+    fn strong_parents_certify(
+        &self,
+        strong_parents: &[ConsensusVertexReference],
+        leader: ConsensusVertexReference,
+    ) -> bool {
+        let voter_authors: BTreeSet<_> = strong_parents
             .iter()
             .filter_map(|parent| {
                 self.vertices.get(parent).and_then(|voter| {

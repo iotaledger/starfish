@@ -3253,6 +3253,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             Arc::clone(&metrics),
                             rbc_dag_frontier_recovery_cursor,
                             !rbc_dag_clock_start_paused,
+                            node_parameters.starfish_rbc_dag_vote_qc_fast_path,
                         )
                     } else {
                         let start = if rbc_dag_clock_start_paused {
