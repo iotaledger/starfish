@@ -1017,6 +1017,11 @@ vector-bearing recovery, payload, and synchronization bytes separately. Also rep
 latency, carrier/consensus round skew, prefix lag, commit latency, throughput, and peak retained
 state.
 
+The benchmark also separates logical-vertex outcomes by enclosing carrier kind. Application and
+control/phase carriers each report bootstrap, C1, C2, C3, or omitted without adding per-slot metric
+labels. This event-local diagnostic distinguishes pre-inclusion scheduling delay from later
+projection/decision latency without changing carrier, journal, or wire bytes.
+
 Batching can reduce the number of separately scheduled RBC control messages, but it does not remove
 their logical quorum evidence. Full-vector all-to-all transport sends `n` tags in each of `n - 1`
 copies per carrier, so it is not expected to improve author egress until a tree or bounded-fanout

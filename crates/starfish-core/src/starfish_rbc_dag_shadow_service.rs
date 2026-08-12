@@ -3387,21 +3387,35 @@ impl ShadowServiceStateV1 {
                     },
                     outcome: "accepted",
                 });
+                let consensus_vertex_outcome = if !fixed_consensus_vertex {
+                    "omitted"
+                } else if consensus_slot == 1 {
+                    "bootstrap"
+                } else if c1_ready {
+                    "c1"
+                } else if c3_ready {
+                    "c3"
+                } else if allow_no_vote {
+                    "c2"
+                } else {
+                    "unexpected"
+                };
                 self.emit(ShadowServiceEventV1::Input {
                     kind: "consensus_vertex",
-                    outcome: if !fixed_consensus_vertex {
-                        "omitted"
-                    } else if consensus_slot == 1 {
-                        "bootstrap"
-                    } else if c1_ready {
-                        "c1"
-                    } else if c3_ready {
-                        "c3"
-                    } else if allow_no_vote {
-                        "c2"
+                    outcome: consensus_vertex_outcome,
+                });
+                // Keep the existing aggregate stable while exposing whether
+                // an available logical vertex was fixed on an application
+                // carrier or spent on a control/phase carrier. This is an
+                // event-local benchmark diagnostic and does not affect the
+                // carrier, journal, or consensus bytes.
+                self.emit(ShadowServiceEventV1::Input {
+                    kind: if application_round.is_some() {
+                        "application_consensus_vertex"
                     } else {
-                        "unexpected"
+                        "control_consensus_vertex"
                     },
+                    outcome: consensus_vertex_outcome,
                 });
                 self.report_wal_delta(before);
                 if let Some(reference) = assigned_application {

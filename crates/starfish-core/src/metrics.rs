@@ -2442,6 +2442,24 @@ impl Metrics {
                     shadow_input_count("consensus_vertex", "omitted"),
                 )
             ]);
+            let consensus_carrier_breakdown = |kind: &str| {
+                format!(
+                    "bootstrap/C1/C2/C3/omitted={}/{}/{}/{}/{}",
+                    shadow_input_count(kind, "bootstrap"),
+                    shadow_input_count(kind, "c1"),
+                    shadow_input_count(kind, "c2"),
+                    shadow_input_count(kind, "c3"),
+                    shadow_input_count(kind, "omitted"),
+                )
+            };
+            table.add_row(row![
+                b->"Logical vertices by carrier kind:",
+                format!(
+                    "application [{}], control/phase [{}]",
+                    consensus_carrier_breakdown("application_consensus_vertex"),
+                    consensus_carrier_breakdown("control_consensus_vertex"),
+                )
+            ]);
             let stage_latency = RBC_DAG_PIPELINE_LATENCY_STAGES
                 .iter()
                 .map(|stage| {
