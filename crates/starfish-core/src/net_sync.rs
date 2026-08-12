@@ -72,7 +72,7 @@ use crate::{
         RbcInitialAuthenticator, RbcPhaseAuthorityV1, RbcServiceEvent, RbcServiceHandle,
         start_starfish_rbc_service_with_phase_authority,
     },
-    syncer::{CommitObserver, Syncer, SyncerSignals},
+    syncer::{CommitObserver, STARFISH_RBC_SINGLE_DAG_ROUND_INTERVAL, Syncer, SyncerSignals},
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
         BlockReference, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
@@ -1963,6 +1963,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 }
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishRbc
+                | ConsensusProtocol::StarfishRbcSingleDag
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::SparseStarfishSpeed => {
@@ -3202,7 +3203,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     initial_authenticator,
                     dag_state.highest_round(),
                     STARFISH_RBC_HEADER_RETRY_INTERVAL,
-                    RbcPhaseAuthorityV1::Direct,
+                    if dag_state.consensus_protocol.is_starfish_rbc_single_dag() {
+                        RbcPhaseAuthorityV1::EmbeddedSingleDag {
+                            echo_qc_fast_path: node_parameters
+                                .starfish_rbc_single_dag_echo_qc_fast_path,
+                        }
+                    } else {
+                        RbcPhaseAuthorityV1::Direct
+                    },
                 )
                 .expect("validated Starfish-RBC configuration must start its service");
                 (Some(service), Some(events), Some(task))
@@ -3552,6 +3560,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             event_inner
                                 .syncer
                                 .apply_starfish_rbc_deliveries(vec![header])
+                                .await;
+                        }
+                        RbcServiceEvent::ReferenceReady(reference) => {
+                            event_inner
+                                .syncer
+                                .apply_starfish_rbc_reference(reference)
                                 .await;
                         }
                         RbcServiceEvent::Rejected { peer, error } => {
@@ -5006,7 +5020,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             for round in armed_round + 1..=current_round {
                 let timer_inner = inner.clone();
                 Handle::current().spawn(async move {
-                    let leader_timeout = timer_inner.leader_timeout;
+                    let leader_timeout = if timer_inner
+                        .dag_state
+                        .consensus_protocol
+                        .is_starfish_rbc_single_dag()
+                    {
+                        STARFISH_RBC_SINGLE_DAG_ROUND_INTERVAL
+                    } else {
+                        timer_inner.leader_timeout
+                    };
                     select! {
                         _sleep = sleep(leader_timeout) => {
                             tracing::debug!("Timeout for proposal round {round}");

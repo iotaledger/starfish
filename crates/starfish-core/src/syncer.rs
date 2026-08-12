@@ -2,7 +2,11 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeSet, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ahash::AHashSet;
 
@@ -41,6 +45,13 @@ pub enum BlockCreationReason {
     PostCommit,
 }
 
+/// Testbed pacing for the V3 single-DAG protocol. Authenticated quorum may
+/// advance the production clock immediately, but an honest authority fixes at
+/// most one ordinary block per interval. This prevents a zero-latency quorum
+/// from becoming a self-sustaining empty-block loop while leaving the existing
+/// leader timeout and all consensus thresholds unchanged.
+pub(crate) const STARFISH_RBC_SINGLE_DAG_ROUND_INTERVAL: Duration = Duration::from_millis(50);
+
 impl BlockCreationReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -60,6 +71,7 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     forced_block_rounds: BTreeSet<RoundNumber>,
     proposal_wait_started_at: Option<Instant>,
     proposal_wait_round: Option<RoundNumber>,
+    single_dag_last_proposal_at: Option<Instant>,
     signals: S,
     commit_observer: C,
     pub(crate) connected_authorities: AHashSet<AuthorityIndex>,
@@ -129,6 +141,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             forced_block_rounds: BTreeSet::new(),
             proposal_wait_started_at: None,
             proposal_wait_round: None,
+            single_dag_last_proposal_at: None,
             signals,
             commit_observer,
             connected_authorities: AHashSet::with_capacity(committee_size),
@@ -386,6 +399,17 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         }
     }
 
+    /// Queue one locally locked RBC statement for the next ordinary
+    /// single-DAG block. The statement changes no delivery state until peers
+    /// authenticate the carrying block.
+    pub fn apply_starfish_rbc_reference(
+        &mut self,
+        reference: crate::types::StarfishRbcReferenceV3,
+    ) {
+        self.core.add_starfish_rbc_reference(reference);
+        self.try_new_block(BlockCreationReason::CertificateEvent);
+    }
+
     /// Sequence one exact deterministic carrier-frontier delta. In M7 this is
     /// the sole application-ordering authority; the legacy Starfish committer
     /// remains disabled in this mode.
@@ -562,6 +586,18 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         } else {
             reason
         };
+        if self
+            .core
+            .dag_state()
+            .consensus_protocol
+            .is_starfish_rbc_single_dag()
+            && !matches!(effective_reason, BlockCreationReason::ForceTimeout)
+            && self.single_dag_last_proposal_at.is_some_and(|created_at| {
+                created_at.elapsed() < STARFISH_RBC_SINGLE_DAG_ROUND_INTERVAL
+            })
+        {
+            return false;
+        }
         self.create_new_block(effective_reason)
     }
 
@@ -572,6 +608,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         tracing::debug!("Attempt to create new block in syncer after one trigger");
         let previous_rounds = self.capture_rounds();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
+            if self
+                .core
+                .dag_state()
+                .consensus_protocol
+                .is_starfish_rbc_single_dag()
+            {
+                self.single_dag_last_proposal_at = Some(Instant::now());
+            }
             if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
                 let canonical = RbcCanonicalHeader::from_block_header(block.header())
                     .expect("locally built Starfish-RBC block must have canonical header content");

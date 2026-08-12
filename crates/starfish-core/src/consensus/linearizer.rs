@@ -398,6 +398,7 @@ impl Linearizer {
                 }
                 ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishRbc
+                | ConsensusProtocol::StarfishRbcSingleDag
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::SparseStarfishSpeed => {
                     self.collect_subdag_acknowledgments(dag_state, leader_block, false)

@@ -94,6 +94,12 @@ pub struct NodeParameters {
     /// Starfish finality proof shape.
     #[serde(default)]
     pub starfish_rbc_dag_vote_qc_fast_path: bool,
+    /// Testbed-only single-DAG RBC path: deliver an exact header after quorum
+    /// ECHO rather than quorum READY. Quorum intersection preserves a unique
+    /// value, but selective Byzantine ECHO withholding can violate totality;
+    /// this must remain an explicit benchmark flag.
+    #[serde(default)]
+    pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
     /// Benchmark-only profile that writes the framed shadow WAL in order but
     /// calls `sync_all` only during clean shutdown. This removes persistence
     /// pressure from latency experiments and deliberately forfeits the
@@ -180,6 +186,7 @@ impl Default for NodeParameters {
             starfish_rbc_dag_consensus_timeout: None,
             starfish_rbc_dag_embedded_rbc_authority: false,
             starfish_rbc_dag_vote_qc_fast_path: false,
+            starfish_rbc_single_dag_echo_qc_fast_path: false,
             starfish_rbc_dag_shadow_buffered_wal: false,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
@@ -455,6 +462,7 @@ mod tests {
         assert!(!parameters.starfish_rbc_dag_autonomous_clock);
         assert_eq!(parameters.starfish_rbc_dag_consensus_timeout, None);
         assert!(!parameters.starfish_rbc_dag_vote_qc_fast_path);
+        assert!(!parameters.starfish_rbc_single_dag_echo_qc_fast_path);
         assert!(!parameters.starfish_rbc_dag_shadow_buffered_wal);
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
@@ -470,6 +478,7 @@ mod tests {
         assert!(!decoded.starfish_rbc_dag_autonomous_clock);
         assert_eq!(decoded.starfish_rbc_dag_consensus_timeout, None);
         assert!(!decoded.starfish_rbc_dag_vote_qc_fast_path);
+        assert!(!decoded.starfish_rbc_single_dag_echo_qc_fast_path);
         assert!(!decoded.starfish_rbc_dag_shadow_buffered_wal);
     }
 

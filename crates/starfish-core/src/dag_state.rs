@@ -135,6 +135,9 @@ pub enum ConsensusProtocol {
     /// Plain Starfish ordering over headers certified by the Starfish-RBC
     /// reliable-broadcast service.
     StarfishRbc,
+    /// One-DAG Starfish-RBC: ordinary Starfish blocks carry typed RBC
+    /// references and retain the same identity from admission through commit.
+    StarfishRbcSingleDag,
     StarfishSpeed,
     StarfishBls,
     SailfishPlusPlus,
@@ -195,6 +198,7 @@ impl ConsensusProtocol {
             "cordial-miners" => Some(ConsensusProtocol::CordialMiners),
             "starfish" => Some(ConsensusProtocol::Starfish),
             "starfish-rbc" => Some(ConsensusProtocol::StarfishRbc),
+            "starfish-rbc-single-dag" => Some(ConsensusProtocol::StarfishRbcSingleDag),
             "starfish-bls" | "starfish-l" => Some(ConsensusProtocol::StarfishBls),
             "starfish-speed" | "starfish-s" => Some(ConsensusProtocol::StarfishSpeed),
             "sailfish++" | "sailfish-pp" => Some(ConsensusProtocol::SailfishPlusPlus),
@@ -212,6 +216,7 @@ impl ConsensusProtocol {
             self,
             ConsensusProtocol::Starfish
                 | ConsensusProtocol::StarfishRbc
+                | ConsensusProtocol::StarfishRbcSingleDag
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::StarfishSpeed
                 | ConsensusProtocol::SparseStarfishSpeed
@@ -223,7 +228,14 @@ impl ConsensusProtocol {
     }
 
     pub fn is_starfish_rbc(self) -> bool {
-        matches!(self, ConsensusProtocol::StarfishRbc)
+        matches!(
+            self,
+            ConsensusProtocol::StarfishRbc | ConsensusProtocol::StarfishRbcSingleDag
+        )
+    }
+
+    pub fn is_starfish_rbc_single_dag(self) -> bool {
+        matches!(self, ConsensusProtocol::StarfishRbcSingleDag)
     }
 
     pub fn is_bluestreak(self) -> bool {
@@ -267,6 +279,7 @@ impl ConsensusProtocol {
             self,
             ConsensusProtocol::SailfishPlusPlus
                 | ConsensusProtocol::StarfishRbc
+                | ConsensusProtocol::StarfishRbcSingleDag
                 | ConsensusProtocol::Bluestreak
                 | ConsensusProtocol::StarfishBls
                 | ConsensusProtocol::MysticetiBls
@@ -293,6 +306,7 @@ impl ConsensusProtocol {
             ConsensusProtocol::CordialMiners => DisseminationMode::PushCausal,
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishRbcSingleDag
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::SparseStarfishSpeed => DisseminationMode::PushUseful,
         }
@@ -945,6 +959,9 @@ impl DagState {
             ConsensusProtocol::Mysticeti => tracing::info!("Starting Mysticeti protocol"),
             ConsensusProtocol::Starfish => tracing::info!("Starting Starfish protocol"),
             ConsensusProtocol::StarfishRbc => tracing::info!("Starting Starfish-RBC protocol"),
+            ConsensusProtocol::StarfishRbcSingleDag => {
+                tracing::info!("Starting single-DAG Starfish-RBC protocol")
+            }
             ConsensusProtocol::StarfishBls => tracing::info!("Starting Starfish-BLS protocol"),
             ConsensusProtocol::StarfishSpeed => tracing::info!("Starting Starfish-Speed protocol"),
             ConsensusProtocol::CordialMiners => tracing::info!("Starting Cordial Miners protocol"),
@@ -1016,7 +1033,9 @@ impl DagState {
     /// round `r - 1`. BLS protocols additionally gate on the highest BLS
     /// round certificate + 1. Other protocols use the raw threshold clock.
     pub fn proposal_round(&self) -> RoundNumber {
-        if !self.consensus_protocol.uses_dual_dag() {
+        if !self.consensus_protocol.uses_dual_dag()
+            || self.consensus_protocol.is_starfish_rbc_single_dag()
+        {
             return self.threshold_clock_round();
         }
 
@@ -1962,7 +1981,9 @@ impl DagState {
         let inner = self.dag_state_inner.read();
         let leader_round = quorum_round - 1;
         let mut blocks = inner.get_blocks_by_round(leader_round);
-        if self.consensus_protocol.is_starfish_rbc() {
+        if self.consensus_protocol.is_starfish_rbc()
+            && !self.consensus_protocol.is_starfish_rbc_single_dag()
+        {
             blocks.retain(|block| {
                 inner.clean_vertices[block.authority() as usize].contains(block.reference())
             });
@@ -2048,6 +2069,7 @@ impl DagState {
         }
 
         if self.consensus_protocol.uses_dual_dag()
+            && !self.consensus_protocol.is_starfish_rbc_single_dag()
             && quorum_round > 1
             && !self.clean_parent_quorum(quorum_round - 1)
         {
@@ -3775,8 +3797,8 @@ mod tests {
         types::{
             AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthentication,
             BlockAuthenticationScheme, BlockAuthorizer, BlockReference, BlsAggregateCertificate,
-            Encoder, ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert, Transaction,
-            TransactionData, VerifiedBlock,
+            Encoder, ProvableShard, RoundNumber, SailfishFields, SailfishNoVoteCert,
+            StarfishRbcFieldsV3, Transaction, TransactionData, VerifiedBlock,
         },
     };
 
@@ -3975,6 +3997,25 @@ mod tests {
             round as u64,
             Vec::new(),
             None,
+        );
+        block.preserialize();
+        Data::new(block)
+    }
+
+    fn make_starfish_rbc_single_dag_block(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        parents: Vec<BlockReference>,
+    ) -> Data<VerifiedBlock> {
+        let mut block = VerifiedBlock::new_starfish_rbc_single_dag(
+            authority,
+            round,
+            parents,
+            Vec::new(),
+            round as u64,
+            Vec::new(),
+            None,
+            StarfishRbcFieldsV3::default(),
         );
         block.preserialize();
         Data::new(block)
@@ -4328,6 +4369,37 @@ mod tests {
             dag_state.round_version(1) > version_before_delivery,
             "clean activation must invalidate consensus round caches"
         );
+    }
+
+    #[test]
+    fn starfish_rbc_single_dag_dirty_quorum_advances_production_not_clean_consensus() {
+        let dag_state = open_test_dag_state_for("starfish-rbc-single-dag", 0);
+        let committee = Committee::new_for_benchmarks(4);
+        let genesis: Vec<_> = (0..4)
+            .map(|auth| BlockReference::new_test(auth, 0))
+            .collect();
+        let round_one: Vec<_> = (0..4)
+            .map(|authority| make_starfish_rbc_single_dag_block(authority, 1, genesis.clone()))
+            .collect();
+        let round_one_refs: Vec<_> = round_one.iter().map(|block| *block.reference()).collect();
+
+        dag_state.insert_general_blocks(round_one, DataSource::BlockBundleStreaming);
+
+        assert_eq!(dag_state.threshold_clock_round(), 2);
+        assert_eq!(dag_state.proposal_round(), 2);
+        assert!(!dag_state.clean_parent_quorum(1));
+        assert!(
+            round_one_refs
+                .iter()
+                .all(|reference| !dag_state.has_clean_vertex(reference))
+        );
+        assert!(dag_state.is_ready_for_new_block(
+            2,
+            &[committee.elect_leader(1)],
+            false,
+            0,
+            committee.as_ref(),
+        ));
     }
 
     #[test]
@@ -5411,6 +5483,11 @@ mod tests {
         );
         assert!(ConsensusProtocol::StarfishRbc.is_starfish_rbc());
         assert!(ConsensusProtocol::StarfishRbc.uses_dual_dag());
+        assert!(ConsensusProtocol::StarfishRbcSingleDag.is_starfish_rbc_single_dag());
+        assert_eq!(
+            ConsensusProtocol::StarfishRbcSingleDag.default_dissemination_mode(),
+            DisseminationMode::PushUseful
+        );
         assert_eq!(
             ConsensusProtocol::StarfishSpeed.default_dissemination_mode(),
             DisseminationMode::PushUseful
@@ -5433,6 +5510,10 @@ mod tests {
             ("cordial-miners", ConsensusProtocol::CordialMiners),
             ("starfish", ConsensusProtocol::Starfish),
             ("starfish-rbc", ConsensusProtocol::StarfishRbc),
+            (
+                "starfish-rbc-single-dag",
+                ConsensusProtocol::StarfishRbcSingleDag,
+            ),
             ("starfish-speed", ConsensusProtocol::StarfishSpeed),
             ("starfish-bls", ConsensusProtocol::StarfishBls),
             ("sailfish-pp", ConsensusProtocol::SailfishPlusPlus),

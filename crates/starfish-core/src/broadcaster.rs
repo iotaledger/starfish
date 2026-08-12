@@ -88,6 +88,7 @@ impl BroadcasterParameters {
             },
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishRbcSingleDag
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::CordialMiners
@@ -381,6 +382,7 @@ where
         match self.inner.dag_state.consensus_protocol {
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishRbcSingleDag
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::SparseStarfishSpeed => {
@@ -939,6 +941,7 @@ fn push_transport_format(consensus_protocol: ConsensusProtocol) -> PushOtherBloc
     match consensus_protocol {
         ConsensusProtocol::Starfish
         | ConsensusProtocol::StarfishRbc
+        | ConsensusProtocol::StarfishRbcSingleDag
         | ConsensusProtocol::StarfishSpeed
         | ConsensusProtocol::StarfishBls
         | ConsensusProtocol::SparseStarfishSpeed => PushOtherBlocksFormat::HeadersAndShards,

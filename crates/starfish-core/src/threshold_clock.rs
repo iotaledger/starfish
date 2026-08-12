@@ -113,6 +113,7 @@ mod tests {
             bls: None,
             sailfish: None,
             unprovable_certificate: None,
+            starfish_rbc_v3: None,
             serialized: None,
         }
     }

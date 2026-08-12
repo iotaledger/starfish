@@ -34,7 +34,8 @@ use crate::{
     },
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthenticationScheme, BlockDigest, BlockReference,
-        RoundNumber, TimestampNs, TransactionData,
+        RoundNumber, StarfishRbcFieldsV3, StarfishRbcReferenceKindV3, StarfishRbcReferenceV3,
+        TimestampNs, TransactionData,
     },
 };
 
@@ -69,6 +70,7 @@ pub(crate) struct RbcLocalHeader {
     pub acknowledgment_references: Vec<BlockReference>,
     pub meta_creation_time_ns: TimestampNs,
     pub transactions_commitment: TransactionsCommitment,
+    pub starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
 }
 
 impl RbcLocalHeader {
@@ -79,6 +81,7 @@ impl RbcLocalHeader {
             acknowledgment_references: header.acknowledgment_references(),
             meta_creation_time_ns: header.meta_creation_time_ns(),
             transactions_commitment: header.transactions_commitment(),
+            starfish_rbc_v3: header.starfish_rbc_v3().cloned(),
         }
     }
 }
@@ -154,6 +157,9 @@ pub(crate) enum RbcServiceEvent {
         transaction_data: Arc<TransactionData>,
     },
     Delivered(PinnedRbcHeader),
+    /// An irrevocable local phase statement waiting to be embedded in the
+    /// next ordinary Starfish block.
+    ReferenceReady(StarfishRbcReferenceV3),
     Rejected {
         peer: Option<AuthorityIndex>,
         error: RbcServiceError,
@@ -202,6 +208,7 @@ pub(crate) struct RbcServiceHandle {
 pub(crate) enum RbcPhaseAuthorityV1 {
     Direct,
     EmbeddedCarrierDag,
+    EmbeddedSingleDag { echo_qc_fast_path: bool },
 }
 
 impl RbcServiceHandle {
@@ -381,13 +388,18 @@ pub(crate) fn start_starfish_rbc_service_with_phase_authority(
     }
     validate_local_authenticator(&committee, own_authority, &initial_authenticator)?;
 
-    let kernel = StarfishRbcKernel::new(
+    let echo_qc_fast_path = match phase_authority {
+        RbcPhaseAuthorityV1::EmbeddedSingleDag { echo_qc_fast_path } => echo_qc_fast_path,
+        RbcPhaseAuthorityV1::Direct | RbcPhaseAuthorityV1::EmbeddedCarrierDag => false,
+    };
+    let kernel = StarfishRbcKernel::new_with_echo_qc_fast_path(
         committee.clone(),
         own_authority,
         protocol_instance,
         initial_authentication,
         mac_keys,
         local_round,
+        echo_qc_fast_path,
     )?;
     let (message_tx, message_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -529,14 +541,25 @@ impl RbcServiceState {
         transaction_data: Option<TransactionData>,
     ) -> Result<RbcCanonicalHeader, RbcServiceError> {
         self.kernel.advance_local_round(header.round)?;
-        let local = self.kernel.start_local_initial_header(
-            header.round,
-            header.block_references,
-            header.acknowledgment_references,
-            header.meta_creation_time_ns,
-            header.transactions_commitment,
-        )?;
+        let local = match header.starfish_rbc_v3 {
+            Some(rbc) => self.kernel.start_local_initial_header_with_fields(
+                header.round,
+                header.block_references,
+                header.acknowledgment_references,
+                header.meta_creation_time_ns,
+                header.transactions_commitment,
+                Some(rbc),
+            ),
+            None => self.kernel.start_local_initial_header(
+                header.round,
+                header.block_references,
+                header.acknowledgment_references,
+                header.meta_creation_time_ns,
+                header.transactions_commitment,
+            ),
+        }?;
         let canonical = local.header().clone();
+        let embedded_references = canonical.starfish_rbc_v3().cloned();
         let transaction_data = transaction_data.map(Arc::new);
         let proposals = self.make_initial_proposals(&local, transaction_data);
         let (pinned, effects) = local.into_parts();
@@ -548,6 +571,7 @@ impl RbcServiceState {
             self.send_network(recipient, NetworkMessage::RbcInitial(proposal));
         }
         self.process_effects(effects);
+        self.process_embedded_references(self.own_authority, embedded_references);
         Ok(canonical)
     }
 
@@ -631,6 +655,7 @@ impl RbcServiceState {
     fn accept_direct_initial(&mut self, peer: AuthorityIndex, proposal: RbcHeaderProposal) {
         let (header, proof, transaction_data) = proposal.into_parts();
         let block_ref = header.reference();
+        let embedded_references = header.starfish_rbc_v3().cloned();
         match self
             .kernel
             .accept_direct_initial_header(peer, header, &proof)
@@ -639,6 +664,7 @@ impl RbcServiceState {
                 let pinned = self.finish_header_staging(block_ref, Some(peer));
                 self.notify_transaction_payload(peer, pinned, transaction_data);
                 self.process_effects(effects);
+                self.process_embedded_references(peer, embedded_references);
             }
             Ok(RbcInitialHeaderOutcome::StagedUnauthenticated { effects, error }) => {
                 let pinned = self.finish_header_staging(block_ref, Some(peer));
@@ -753,6 +779,19 @@ impl RbcServiceState {
                     if self.phase_authority == RbcPhaseAuthorityV1::EmbeddedCarrierDag {
                         continue;
                     }
+                    if matches!(
+                        self.phase_authority,
+                        RbcPhaseAuthorityV1::EmbeddedSingleDag { .. }
+                    ) {
+                        let kind = match phase {
+                            RbcPhase::Echo => StarfishRbcReferenceKindV3::Echo,
+                            RbcPhase::Ready => StarfishRbcReferenceKindV3::Ready,
+                        };
+                        let _ = self.events.send(RbcServiceEvent::ReferenceReady(
+                            StarfishRbcReferenceV3::new(kind, block_ref),
+                        ));
+                        continue;
+                    }
                     self.retained_phases.insert((block_ref, phase));
                     let recipients: Vec<_> = self
                         .committee
@@ -778,6 +817,32 @@ impl RbcServiceState {
                     self.pending_fetches.remove(&header.reference());
                     let _ = self.events.send(RbcServiceEvent::Delivered(header));
                 }
+            }
+        }
+    }
+
+    fn process_embedded_references(
+        &mut self,
+        sender: AuthorityIndex,
+        references: Option<StarfishRbcFieldsV3>,
+    ) {
+        if !matches!(
+            self.phase_authority,
+            RbcPhaseAuthorityV1::EmbeddedSingleDag { .. }
+        ) {
+            return;
+        }
+        let Some(references) = references else {
+            self.reject(
+                Some(sender),
+                RbcServiceError::Kernel(RbcError::InvalidSingleDagEvidence),
+            );
+            return;
+        };
+        for evidence in references.references() {
+            match self.kernel.handle_embedded_reference(sender, *evidence) {
+                Ok(effects) => self.process_effects(effects),
+                Err(error) => self.reject(Some(sender), error.into()),
             }
         }
     }
@@ -934,6 +999,7 @@ mod tests {
             acknowledgment_references: Vec::new(),
             meta_creation_time_ns: 17,
             transactions_commitment: TransactionsCommitment::default(),
+            starfish_rbc_v3: None,
         }
     }
 
@@ -987,6 +1053,29 @@ mod tests {
             1,
             Duration::from_secs(3_600),
             RbcPhaseAuthorityV1::EmbeddedCarrierDag,
+        )
+        .unwrap()
+    }
+
+    fn start_single_dag_service() -> (
+        RbcServiceHandle,
+        mpsc::UnboundedReceiver<RbcServiceEvent>,
+        JoinHandle<()>,
+    ) {
+        let committee = Committee::new_test(vec![1; 4]);
+        let keyrings = mac_keyrings_for_test(4);
+        start_starfish_rbc_service_with_phase_authority(
+            committee,
+            0,
+            instance(),
+            BlockAuthenticationScheme::MacVector,
+            Arc::new(keyrings[0].clone()),
+            RbcInitialAuthenticator::Mac,
+            1,
+            Duration::from_secs(3_600),
+            RbcPhaseAuthorityV1::EmbeddedSingleDag {
+                echo_qc_fast_path: false,
+            },
         )
         .unwrap()
     }
@@ -1092,6 +1181,44 @@ mod tests {
                 .is_err(),
             "direct ECHO/READY or delivery escaped the embedded authority boundary"
         );
+        drop(handle);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_dag_phase_authority_emits_typed_reference_not_phase_message() {
+        let (handle, mut events, task) = start_single_dag_service();
+        let mut header = local_header(1, 4);
+        header.starfish_rbc_v3 = Some(StarfishRbcFieldsV3::default());
+        let canonical = handle.start_local_header(header).await.unwrap();
+        let mut staged = false;
+        let mut initials = 0;
+        let mut references = 0;
+        for _ in 0..5 {
+            match next_event(&mut events).await {
+                RbcServiceEvent::HeaderStaged(header) => {
+                    assert_eq!(header.reference(), canonical.reference());
+                    staged = true;
+                }
+                RbcServiceEvent::Network {
+                    message: NetworkMessage::RbcInitial(_),
+                    ..
+                } => initials += 1,
+                RbcServiceEvent::ReferenceReady(reference) => {
+                    assert_eq!(reference.kind(), StarfishRbcReferenceKindV3::Echo);
+                    assert_eq!(reference.reference(), canonical.reference());
+                    references += 1;
+                }
+                RbcServiceEvent::Network {
+                    message: NetworkMessage::RbcPhase(_),
+                    ..
+                } => panic!("single-DAG mode emitted a standalone phase message"),
+                event => panic!("unexpected single-DAG startup event: {event:?}"),
+            }
+        }
+        assert!(staged);
+        assert_eq!(initials, 3);
+        assert_eq!(references, 1);
         drop(handle);
         task.await.unwrap();
     }

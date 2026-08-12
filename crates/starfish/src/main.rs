@@ -210,6 +210,11 @@ enum Operation {
         /// Requires embedded RBC-DAG authority and changes the finality proof.
         #[clap(long, default_value_t = false)]
         starfish_rbc_dag_vote_qc_fast_path: bool,
+        /// Testbed-only: deliver a single-DAG RBC header after quorum ECHO.
+        /// This preserves uniqueness but not Byzantine selective-withholding
+        /// totality, so it is restricted to finite benchmark runs.
+        #[clap(long, default_value_t = false)]
+        starfish_rbc_single_dag_echo_qc_fast_path: bool,
         /// Override only the autonomous RBC-DAG logical C2 fallback timeout.
         /// The physical carrier heartbeat remains on `leader_timeout`.
         #[clap(long, value_name = "INT")]
@@ -337,6 +342,7 @@ async fn main() -> Result<()> {
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_vote_qc_fast_path,
+            starfish_rbc_single_dag_echo_qc_fast_path,
             starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
             duration_secs,
@@ -355,11 +361,13 @@ async fn main() -> Result<()> {
             node_parameters.starfish_rbc_dag_embedded_rbc_authority =
                 starfish_rbc_dag_embedded_rbc_authority;
             node_parameters.starfish_rbc_dag_vote_qc_fast_path = starfish_rbc_dag_vote_qc_fast_path;
+            node_parameters.starfish_rbc_single_dag_echo_qc_fast_path =
+                starfish_rbc_single_dag_echo_qc_fast_path;
             node_parameters.starfish_rbc_dag_consensus_timeout =
                 starfish_rbc_dag_consensus_timeout_ms.map(Duration::from_millis);
             node_parameters.starfish_rbc_dag_shadow_buffered_wal =
                 starfish_rbc_dag_shadow_buffered_wal;
-            if consensus_protocol == "starfish-rbc" {
+            if is_starfish_rbc_selection(&consensus_protocol) {
                 node_parameters.refresh_starfish_rbc_protocol_instance();
             }
             if let Some(ref mode) = dissemination_mode {
@@ -604,6 +612,11 @@ async fn local_benchmark(
             } else {
                 "disabled (strict two-level Starfish finality)"
             }
+        );
+    }
+    if node_parameters.starfish_rbc_single_dag_echo_qc_fast_path {
+        println!(
+            "Single-DAG ECHO-QC delivery: ENABLED (testbed-only; Byzantine totality not claimed)"
         );
     }
     if let Some(latency) = node_parameters.uniform_latency_ms {
@@ -1330,11 +1343,18 @@ fn ensure_starfish_rbc_protocol_instance(
     consensus_protocol: &str,
     node_parameters: &mut NodeParameters,
 ) {
-    if consensus_protocol == "starfish-rbc"
+    if is_starfish_rbc_selection(consensus_protocol)
         && node_parameters.starfish_rbc_protocol_instance.is_none()
     {
         node_parameters.refresh_starfish_rbc_protocol_instance();
     }
+}
+
+fn is_starfish_rbc_selection(consensus_protocol: &str) -> bool {
+    matches!(
+        consensus_protocol,
+        "starfish-rbc" | "starfish-rbc-single-dag"
+    )
 }
 
 fn validate_local_benchmark_port_offset(
@@ -1538,6 +1558,7 @@ mod tests {
             "--starfish-rbc-dag-autonomous-clock",
             "--starfish-rbc-dag-embedded-rbc-authority",
             "--starfish-rbc-dag-vote-qc-fast-path",
+            "--starfish-rbc-single-dag-echo-qc-fast-path",
             "--starfish-rbc-dag-consensus-timeout-ms",
             "250",
             "--starfish-rbc-dag-shadow-buffered-wal",
@@ -1553,6 +1574,7 @@ mod tests {
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_dag_embedded_rbc_authority,
             starfish_rbc_dag_vote_qc_fast_path,
+            starfish_rbc_single_dag_echo_qc_fast_path,
             starfish_rbc_dag_consensus_timeout_ms,
             starfish_rbc_dag_shadow_buffered_wal,
             port_offset,
@@ -1567,6 +1589,7 @@ mod tests {
         assert!(starfish_rbc_dag_autonomous_clock);
         assert!(starfish_rbc_dag_embedded_rbc_authority);
         assert!(starfish_rbc_dag_vote_qc_fast_path);
+        assert!(starfish_rbc_single_dag_echo_qc_fast_path);
         assert_eq!(starfish_rbc_dag_consensus_timeout_ms, Some(250));
         assert!(starfish_rbc_dag_shadow_buffered_wal);
         assert_eq!(port_offset, 2500);

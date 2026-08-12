@@ -1,5 +1,11 @@
 # Starfish-RBC-DAG protocol design
 
+> **Frozen comparison baseline.** This document specifies the experimental
+> two-plane carrier implementation. New development targets the one-block,
+> one-identity design in `starfish-rbc-single-dag-v3.md`; V1/V2 carrier and
+> projection formats remain available only for compatibility and matched
+> performance comparisons.
+
 Status: standalone MAC-vector RBC-DAG prototype with authoritative optimistic delivery and
 committed-frontier output; the end-to-end proof, proof-safe retirement, checkpoint transfer, and
 full validator recovery remain incomplete

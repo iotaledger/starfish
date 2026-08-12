@@ -20,7 +20,7 @@ use crate::{
     crypto,
     types::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockReference, RoundNumber, Shard,
-        TimestampNs,
+        StarfishRbcFieldsV3, TimestampNs,
     },
 };
 
@@ -274,6 +274,55 @@ impl BlockDigest {
         hasher.update(&meta_creation_time_ns.to_be_bytes());
         hasher.update(&[TRANSACTIONS_COMMITMENT_FIELD]);
         hasher.update(transactions_commitment.as_ref());
+        Self(hasher.finalize().into())
+    }
+
+    /// Canonical identity for a single-DAG Starfish-RBC V3 block.
+    ///
+    /// The existing Starfish fields and the typed RBC references share one
+    /// digest. Authentication therefore binds evidence to the ordinary block
+    /// author without introducing a carrier or projected-vertex identity.
+    pub(crate) fn new_starfish_rbc_single_dag_header(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: &[BlockReference],
+        acknowledgment_references: &[BlockReference],
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+        rbc: &StarfishRbcFieldsV3,
+    ) -> Self {
+        const DOMAIN: &[u8] = b"STARFISH_RBC_SINGLE_DAG_V3";
+
+        fn hash_reference(hasher: &mut Blake3Hasher, block_ref: &BlockReference) {
+            hasher.update(&block_ref.authority.to_be_bytes());
+            hasher.update(&block_ref.round.to_be_bytes());
+            hasher.update(block_ref.digest.as_ref());
+        }
+
+        fn hash_references(hasher: &mut Blake3Hasher, references: &[BlockReference]) {
+            let length =
+                u32::try_from(references.len()).expect("Starfish-RBC reference count exceeds u32");
+            hasher.update(&length.to_be_bytes());
+            for reference in references {
+                hash_reference(hasher, reference);
+            }
+        }
+
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(DOMAIN);
+        hasher.update(&authority.to_be_bytes());
+        hasher.update(&round.to_be_bytes());
+        hash_references(&mut hasher, block_references);
+        hash_references(&mut hasher, acknowledgment_references);
+        hasher.update(&meta_creation_time_ns.to_be_bytes());
+        hasher.update(transactions_commitment.as_ref());
+        let evidence_len =
+            u32::try_from(rbc.references().len()).expect("Starfish-RBC evidence count exceeds u32");
+        hasher.update(&evidence_len.to_be_bytes());
+        for evidence in rbc.references() {
+            hasher.update(&[evidence.kind().tag()]);
+            hash_reference(&mut hasher, &evidence.reference());
+        }
         Self(hasher.finalize().into())
     }
 

@@ -2,7 +2,7 @@
 // Modifications Copyright (c) 2025 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt, mem, sync::Arc};
+use std::{collections::BTreeSet, fmt, mem, sync::Arc};
 
 use ahash::{AHashMap, AHashSet};
 use reed_solomon_simd::ReedSolomonEncoder;
@@ -39,7 +39,7 @@ use crate::{
         AuthorityIndex, AuthoritySet, BaseTransaction, BlockAuthenticationScheme, BlockAuthorizer,
         BlockReference, BlsAggregateCertificate, Encoder, PartialSig, PartialSigKind,
         ProvableShard, ReconstructedTransactionData, RoundNumber, SailfishFields, Shard,
-        VerifiedBlock,
+        StarfishRbcFieldsV3, StarfishRbcReferenceV3, VerifiedBlock,
     },
 };
 
@@ -54,6 +54,9 @@ pub struct Core<H: BlockHandler> {
     block_manager: BlockManager,
     pending: Vec<MetaTransaction>,
     pending_reconstructed_data: AHashMap<BlockReference, ReconstructedTransactionData>,
+    /// Irrevocable local ECHO/READY statements waiting to ride on the next
+    /// ordinary block in the single-DAG protocol.
+    pending_starfish_rbc_references: BTreeSet<StarfishRbcReferenceV3>,
     // For Byzantine node, last_own_block contains a vector of blocks
     last_own_block: Vec<OwnBlockData>,
     block_handler: H,
@@ -319,6 +322,7 @@ impl<H: BlockHandler> Core<H> {
             store,
             pending,
             pending_reconstructed_data: AHashMap::new(),
+            pending_starfish_rbc_references: BTreeSet::new(),
             last_own_block: vec![last_own_block],
             block_handler,
             authority,
@@ -352,6 +356,16 @@ impl<H: BlockHandler> Core<H> {
 
     pub fn get_signer(&self) -> &Signer {
         &self.signer
+    }
+
+    pub(crate) fn add_starfish_rbc_reference(&mut self, reference: StarfishRbcReferenceV3) {
+        assert!(
+            self.dag_state
+                .consensus_protocol
+                .is_starfish_rbc_single_dag(),
+            "embedded RBC references require single-DAG Starfish-RBC"
+        );
+        self.pending_starfish_rbc_references.insert(reference);
     }
 
     pub(crate) fn get_ml_dsa_44_signer(&self) -> &crate::crypto::MlDsa44Signer {
@@ -651,6 +665,7 @@ impl<H: BlockHandler> Core<H> {
         // Dual-DAG protocols: require clean parent quorum before creating a block.
         if !self.rbc_dag_application_production
             && protocol.uses_dual_dag()
+            && !protocol.is_starfish_rbc_single_dag()
             && clock_round > 1
             && !self.dag_state.clean_parent_quorum(clock_round - 1)
         {
@@ -669,6 +684,7 @@ impl<H: BlockHandler> Core<H> {
         // mandatory parent into a proposal.
         if !self.rbc_dag_application_production
             && protocol.is_starfish_rbc()
+            && !protocol.is_starfish_rbc_single_dag()
             && clock_round > 1
             && self
                 .last_own_block
@@ -829,6 +845,20 @@ impl<H: BlockHandler> Core<H> {
         } else {
             None
         };
+        let single_dag_rbc = protocol.is_starfish_rbc_single_dag().then(|| {
+            let maximum = self.committee.len().saturating_mul(6);
+            let references: Vec<_> = self
+                .pending_starfish_rbc_references
+                .iter()
+                .copied()
+                .filter(|evidence| evidence.reference().round <= clock_round)
+                .take(maximum)
+                .collect();
+            for reference in &references {
+                self.pending_starfish_rbc_references.remove(reference);
+            }
+            StarfishRbcFieldsV3::new(references)
+        });
 
         // Create and store blocks
         let mut first_block = None;
@@ -849,6 +879,7 @@ impl<H: BlockHandler> Core<H> {
                 block_id,
                 aggregate_round_sig,
                 certified_leader,
+                single_dag_rbc.as_ref(),
             );
             tracing::debug!("Created block {:?}", block_data);
             if first_block.is_none() {
@@ -911,6 +942,10 @@ impl<H: BlockHandler> Core<H> {
         // then be filtered itself, shrinking the usable clean frontier.
         let (compression_candidates, deferred_dirty_refs): (Vec<_>, Vec<_>) =
             if self.dag_state.consensus_protocol.is_starfish_rbc()
+                && !self
+                    .dag_state
+                    .consensus_protocol
+                    .is_starfish_rbc_single_dag()
                 && !self.rbc_dag_application_production
             {
                 pending_refs.into_iter().partition(|reference| {
@@ -927,7 +962,12 @@ impl<H: BlockHandler> Core<H> {
             self.compress_pending_block_references(&compression_candidates, block_round);
 
         // Dual-DAG protocols: filter parents to only include clean blocks.
-        if self.dag_state.consensus_protocol.uses_dual_dag() && !self.rbc_dag_application_production
+        if self.dag_state.consensus_protocol.uses_dual_dag()
+            && !self
+                .dag_state
+                .consensus_protocol
+                .is_starfish_rbc_single_dag()
+            && !self.rbc_dag_application_production
         {
             let before = block_references.clone();
             block_references.retain(|r| r.round == 0 || self.dag_state.has_clean_vertex(r));
@@ -1113,6 +1153,7 @@ impl<H: BlockHandler> Core<H> {
         block_id_in_round: usize,
         aggregate_round_sig: Option<BlsAggregateCertificate>,
         certified_leader: Option<(BlockReference, BlsAggregateCertificate)>,
+        single_dag_rbc: Option<&StarfishRbcFieldsV3>,
     ) -> Data<VerifiedBlock> {
         let time_ns = timestamp_utc().as_nanos() as u64 + block_id_in_round as u64;
         let own_previous = *self.last_own_block[block_id_in_round].block.reference();
@@ -1209,7 +1250,20 @@ impl<H: BlockHandler> Core<H> {
             None
         };
 
-        let mut block = if protocol == ConsensusProtocol::StarfishRbc {
+        let mut block = if protocol.is_starfish_rbc_single_dag() {
+            VerifiedBlock::new_starfish_rbc_single_dag(
+                self.authority,
+                clock_round,
+                block_references,
+                acknowledgment_references.to_vec(),
+                time_ns,
+                transactions.to_vec(),
+                encoded_transactions.clone(),
+                single_dag_rbc
+                    .cloned()
+                    .expect("single-DAG Starfish-RBC block requires V3 fields"),
+            )
+        } else if protocol == ConsensusProtocol::StarfishRbc {
             VerifiedBlock::new_starfish_rbc(
                 self.authority,
                 clock_round,
@@ -2813,6 +2867,7 @@ mod tests {
             2,
             0,
             Some(make_test_round_certificate(&bls_signers, 1)),
+            None,
             None,
         );
 

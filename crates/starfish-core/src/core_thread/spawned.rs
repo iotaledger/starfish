@@ -81,6 +81,7 @@ enum CoreThreadCommand {
     ApplySailfishCertificates(Vec<BlockReference>, oneshot::Sender<()>),
     /// Apply locally delivered Starfish-RBC headers on the core thread.
     ApplyStarfishRbcDeliveries(Vec<PinnedRbcHeader>, oneshot::Sender<()>),
+    ApplyStarfishRbcReference(crate::types::StarfishRbcReferenceV3, oneshot::Sender<()>),
     /// Commit one deterministic clean carrier-frontier application delta.
     ApplyStarfishRbcDagFrontier(
         CommittedFrontierDeltaV1,
@@ -267,6 +268,18 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         self.send(CoreThreadCommand::ApplyStarfishRbcDeliveries(
             delivered_headers,
             sender,
+        ))
+        .await;
+        receiver.await.expect("core thread is not expected to stop");
+    }
+
+    pub(crate) async fn apply_starfish_rbc_reference(
+        &self,
+        reference: crate::types::StarfishRbcReferenceV3,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        self.send(CoreThreadCommand::ApplyStarfishRbcReference(
+            reference, sender,
         ))
         .await;
         receiver.await.expect("core thread is not expected to stop");
@@ -508,6 +521,14 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["apply_starfish_rbc_deliveries"])
                         .inc();
                     self.syncer.apply_starfish_rbc_deliveries(delivered_headers);
+                    sender.send(()).ok();
+                }
+                CoreThreadCommand::ApplyStarfishRbcReference(reference, sender) => {
+                    metrics
+                        .core_thread_tasks_total
+                        .with_label_values(&["apply_starfish_rbc_reference"])
+                        .inc();
+                    self.syncer.apply_starfish_rbc_reference(reference);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ApplyStarfishRbcDagFrontier(delta, sender) => {

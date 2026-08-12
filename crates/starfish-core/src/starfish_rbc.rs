@@ -21,8 +21,8 @@ use crate::{
     types::{
         AckFields, AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme,
         BlockDigest, BlockHeader, BlockReference, MAX_COMMITTEE_SIZE, RoundNumber, Stake,
-        TimestampNs, TransactionData, VerifiedBlock, compress_acknowledgments,
-        expand_acknowledgments,
+        StarfishRbcFieldsV3, StarfishRbcReferenceKindV3, StarfishRbcReferenceV3, TimestampNs,
+        TransactionData, VerifiedBlock, compress_acknowledgments, expand_acknowledgments,
     },
 };
 
@@ -157,6 +157,8 @@ pub struct RbcCanonicalHeader {
     acknowledgments: RbcAckFields,
     meta_creation_time_ns: TimestampNs,
     transactions_commitment: TransactionsCommitment,
+    #[serde(default)]
+    starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
 }
 
 impl RbcCanonicalHeader {
@@ -167,6 +169,46 @@ impl RbcCanonicalHeader {
         acknowledgment_references: Vec<BlockReference>,
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
+    ) -> Result<Self, RbcError> {
+        Self::try_new_with_fields(
+            authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            transactions_commitment,
+            None,
+        )
+    }
+
+    pub(crate) fn try_new_single_dag(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+        starfish_rbc_v3: StarfishRbcFieldsV3,
+    ) -> Result<Self, RbcError> {
+        Self::try_new_with_fields(
+            authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            transactions_commitment,
+            Some(starfish_rbc_v3),
+        )
+    }
+
+    fn try_new_with_fields(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+        starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
     ) -> Result<Self, RbcError> {
         for (field, count) in [
             ("parent", block_references.len()),
@@ -196,10 +238,17 @@ impl RbcCanonicalHeader {
         let acknowledgments =
             RbcAckFields::from_logical(&block_references, &acknowledgment_references);
         let logical_acknowledgments = acknowledgments.logical(&block_references);
-        let reference = BlockReference {
-            authority,
-            round,
-            digest: BlockDigest::new_starfish_rbc_header(
+        let digest = match starfish_rbc_v3.as_ref() {
+            Some(rbc) => BlockDigest::new_starfish_rbc_single_dag_header(
+                authority,
+                round,
+                &block_references,
+                &logical_acknowledgments,
+                meta_creation_time_ns,
+                transactions_commitment,
+                rbc,
+            ),
+            None => BlockDigest::new_starfish_rbc_header(
                 authority,
                 round,
                 &block_references,
@@ -208,12 +257,18 @@ impl RbcCanonicalHeader {
                 transactions_commitment,
             ),
         };
+        let reference = BlockReference {
+            authority,
+            round,
+            digest,
+        };
         let header = Self {
             reference,
             block_references,
             acknowledgments,
             meta_creation_time_ns,
             transactions_commitment,
+            starfish_rbc_v3,
         };
         if header.encoded_content_size(logical_acknowledgments.len())? > MAX_RBC_HEADER_CONTENT_SIZE
         {
@@ -268,6 +323,14 @@ impl RbcCanonicalHeader {
         }
         let reference_count = parent_count
             .checked_add(logical_acknowledgment_count)
+            .and_then(|count| {
+                count.checked_add(
+                    header
+                        .starfish_rbc_v3
+                        .as_ref()
+                        .map_or(0, |rbc| rbc.references().len()),
+                )
+            })
             .ok_or(RbcError::HeaderContentTooLarge)?;
         let encoded_size = RBC_BLOCK_REFERENCE_SIZE
             .checked_mul(reference_count)
@@ -285,6 +348,7 @@ impl RbcCanonicalHeader {
             },
             meta_creation_time_ns: header.meta_creation_time_ns,
             transactions_commitment,
+            starfish_rbc_v3: header.starfish_rbc_v3.clone(),
         })
     }
 
@@ -313,6 +377,10 @@ impl RbcCanonicalHeader {
 
     pub fn transactions_commitment(&self) -> TransactionsCommitment {
         self.transactions_commitment
+    }
+
+    pub fn starfish_rbc_v3(&self) -> Option<&StarfishRbcFieldsV3> {
+        self.starfish_rbc_v3.as_ref()
     }
 
     /// Validate canonical header content against an already validated static
@@ -384,14 +452,32 @@ impl RbcCanonicalHeader {
             }
         }
 
-        let expected_digest = BlockDigest::new_starfish_rbc_header(
-            block_ref.authority,
-            block_ref.round,
-            &self.block_references,
-            &acknowledgments,
-            self.meta_creation_time_ns,
-            self.transactions_commitment,
-        );
+        if self
+            .starfish_rbc_v3
+            .as_ref()
+            .is_some_and(|rbc| !rbc.validate_for_block(committee, block_ref.round))
+        {
+            return Err(RbcError::InvalidSingleDagEvidence);
+        }
+        let expected_digest = match self.starfish_rbc_v3.as_ref() {
+            Some(rbc) => BlockDigest::new_starfish_rbc_single_dag_header(
+                block_ref.authority,
+                block_ref.round,
+                &self.block_references,
+                &acknowledgments,
+                self.meta_creation_time_ns,
+                self.transactions_commitment,
+                rbc,
+            ),
+            None => BlockDigest::new_starfish_rbc_header(
+                block_ref.authority,
+                block_ref.round,
+                &self.block_references,
+                &acknowledgments,
+                self.meta_creation_time_ns,
+                self.transactions_commitment,
+            ),
+        };
         if expected_digest != block_ref.digest {
             return Err(RbcError::HeaderDigestMismatch {
                 expected: expected_digest,
@@ -417,6 +503,7 @@ impl RbcCanonicalHeader {
                 bls: None,
                 sailfish: None,
                 unprovable_certificate: None,
+                starfish_rbc_v3: self.starfish_rbc_v3.clone(),
                 serialized: None,
             },
             None,
@@ -428,6 +515,13 @@ impl RbcCanonicalHeader {
             .block_references
             .len()
             .checked_add(acknowledgment_count)
+            .and_then(|count| {
+                count.checked_add(
+                    self.starfish_rbc_v3
+                        .as_ref()
+                        .map_or(0, |rbc| rbc.references().len()),
+                )
+            })
             .ok_or(RbcError::HeaderContentTooLarge)?;
         RBC_BLOCK_REFERENCE_SIZE
             .checked_mul(reference_count)
@@ -863,6 +957,7 @@ pub(crate) enum RbcError {
     AcknowledgmentFromFuture(BlockReference),
     DuplicateAcknowledgment(BlockReference),
     InvalidThresholdClock,
+    InvalidSingleDagEvidence,
     HeaderDigestMismatch {
         expected: BlockDigest,
         actual: BlockDigest,
@@ -1000,6 +1095,9 @@ impl fmt::Display for RbcError {
             ),
             Self::InvalidThresholdClock => {
                 f.write_str("Starfish-RBC header does not reference previous-round quorum stake")
+            }
+            Self::InvalidSingleDagEvidence => {
+                f.write_str("Starfish-RBC V3 block carries non-canonical reference evidence")
             }
             Self::HeaderDigestMismatch { expected, actual } => write!(
                 f,
@@ -1168,10 +1266,16 @@ pub(crate) struct StarfishRbcKernel {
     mac_keys: Arc<Vec<MacKey>>,
     local_round: RoundNumber,
     minimum_new_slot_round: RoundNumber,
+    /// Testbed-only optimistic path. A quorum of locked ECHOs proves a unique
+    /// value, but without a portable proof it does not prove that every honest
+    /// node can assemble the same quorum under selective Byzantine
+    /// withholding. Keep disabled for the asynchronous RBC contract.
+    echo_qc_fast_path: bool,
     slots: BTreeMap<RoundNumber, AHashMap<AuthorityIndex, SlotState>>,
 }
 
 impl StarfishRbcKernel {
+    #[allow(dead_code)]
     pub(crate) fn new(
         committee: Arc<Committee>,
         own_authority: AuthorityIndex,
@@ -1179,6 +1283,26 @@ impl StarfishRbcKernel {
         initial_authentication: BlockAuthenticationScheme,
         mac_keys: Arc<Vec<MacKey>>,
         local_round: RoundNumber,
+    ) -> Result<Self, RbcError> {
+        Self::new_with_echo_qc_fast_path(
+            committee,
+            own_authority,
+            protocol_instance,
+            initial_authentication,
+            mac_keys,
+            local_round,
+            false,
+        )
+    }
+
+    pub(crate) fn new_with_echo_qc_fast_path(
+        committee: Arc<Committee>,
+        own_authority: AuthorityIndex,
+        protocol_instance: RbcProtocolInstanceId,
+        initial_authentication: BlockAuthenticationScheme,
+        mac_keys: Arc<Vec<MacKey>>,
+        local_round: RoundNumber,
+        echo_qc_fast_path: bool,
     ) -> Result<Self, RbcError> {
         let context = RbcContext::new(protocol_instance, &committee, initial_authentication)?;
         if !committee.known_authority(own_authority) {
@@ -1197,6 +1321,7 @@ impl StarfishRbcKernel {
             mac_keys,
             local_round,
             minimum_new_slot_round: 1,
+            echo_qc_fast_path,
             slots: BTreeMap::new(),
         })
     }
@@ -1356,14 +1481,44 @@ impl StarfishRbcKernel {
         meta_creation_time_ns: TimestampNs,
         transactions_commitment: TransactionsCommitment,
     ) -> Result<RbcLocalInitial, RbcError> {
-        let canonical = RbcCanonicalHeader::try_new(
-            self.own_authority,
+        self.start_local_initial_header_with_fields(
             round,
             block_references,
             acknowledgment_references,
             meta_creation_time_ns,
             transactions_commitment,
-        )?;
+            None,
+        )
+    }
+
+    pub(crate) fn start_local_initial_header_with_fields(
+        &mut self,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions_commitment: TransactionsCommitment,
+        starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
+    ) -> Result<RbcLocalInitial, RbcError> {
+        let canonical = match starfish_rbc_v3 {
+            Some(rbc) => RbcCanonicalHeader::try_new_single_dag(
+                self.own_authority,
+                round,
+                block_references,
+                acknowledgment_references,
+                meta_creation_time_ns,
+                transactions_commitment,
+                rbc,
+            ),
+            None => RbcCanonicalHeader::try_new(
+                self.own_authority,
+                round,
+                block_references,
+                acknowledgment_references,
+                meta_creation_time_ns,
+                transactions_commitment,
+            ),
+        }?;
         let pinned = self.validate_header_content(canonical)?;
         let eligible = self.local_initial_header(pinned.clone())?;
         let effects = self.accept_initial_header(eligible)?;
@@ -1518,6 +1673,43 @@ impl StarfishRbcKernel {
             }
         }
         Ok(self.drive(message.block_ref))
+    }
+
+    /// Apply a statement authenticated by the ordinary V3 block that carries
+    /// it. The carrying block author is the RBC sender; no standalone phase
+    /// MAC or second network message exists in this path.
+    pub(crate) fn handle_embedded_reference(
+        &mut self,
+        authenticated_sender: AuthorityIndex,
+        evidence: StarfishRbcReferenceV3,
+    ) -> Result<Vec<RbcEffect>, RbcError> {
+        if !self.committee.known_authority(authenticated_sender) {
+            return Err(RbcError::UnknownAuthority(authenticated_sender));
+        }
+        let block_ref = evidence.reference();
+        self.validate_block_ref(&block_ref)?;
+        let phase = match evidence.kind() {
+            StarfishRbcReferenceKindV3::Echo => RbcPhase::Echo,
+            StarfishRbcReferenceKindV3::Ready => RbcPhase::Ready,
+        };
+        let committee = Arc::clone(&self.committee);
+        let slot = self.slot_mut(block_ref);
+        if !slot.record_phase_sender(phase, authenticated_sender, block_ref) {
+            return Ok(Vec::new());
+        }
+        let candidate = slot
+            .candidates
+            .entry(block_ref)
+            .or_insert_with(CandidateState::new);
+        match phase {
+            RbcPhase::Echo => {
+                candidate.echoes.add(authenticated_sender, &committee);
+            }
+            RbcPhase::Ready => {
+                candidate.readies.add(authenticated_sender, &committee);
+            }
+        }
+        Ok(self.drive(block_ref))
     }
 
     /// Materialize one recipient-specific message for an untagged multicast
@@ -1840,6 +2032,7 @@ impl StarfishRbcKernel {
     fn drive(&mut self, block_ref: BlockReference) -> Vec<RbcEffect> {
         let validity_threshold = self.committee.validity_threshold();
         let quorum_threshold = self.committee.quorum_threshold();
+        let echo_qc_fast_path = self.echo_qc_fast_path;
         let mut effects = Vec::new();
 
         loop {
@@ -1866,7 +2059,8 @@ impl StarfishRbcKernel {
                     ProgressAction::SendReady
                 } else if candidate.header.is_some()
                     && can_deliver
-                    && candidate.ready_quorum_observed
+                    && (candidate.ready_quorum_observed
+                        || (echo_qc_fast_path && candidate.echo_quorum_observed))
                 {
                     ProgressAction::Deliver
                 } else {
@@ -2051,6 +2245,7 @@ mod tests {
                 },
                 meta_creation_time_ns: 0,
                 transactions_commitment: TransactionsCommitment::default(),
+                starfish_rbc_v3: None,
             }),
             committee_id: context.committee_id,
         }
@@ -2066,6 +2261,102 @@ mod tests {
             .unwrap(),
             block_ref,
         )
+    }
+
+    #[test]
+    fn embedded_block_references_drive_rbc_without_phase_messages() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = mac_keyrings_for_test(committee.len());
+        let mut receiver = StarfishRbcKernel::new(
+            committee.clone(),
+            0,
+            instance(TEST_INSTANCE_BYTE),
+            BlockAuthenticationScheme::MacVector,
+            Arc::new(keyrings[0].clone()),
+            1,
+        )
+        .unwrap();
+        let target = block(3, 1, 0x71);
+        receiver
+            .note_header_available(pinned_header_for_context(receiver.context, target))
+            .unwrap();
+        receiver.authorize_echo(target).unwrap();
+
+        let echo = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Echo, target);
+        assert!(
+            receiver
+                .handle_embedded_reference(1, echo)
+                .unwrap()
+                .is_empty()
+        );
+        let effects = receiver.handle_embedded_reference(2, echo).unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            RbcEffect::MulticastPhase {
+                phase: RbcPhase::Ready,
+                block_ref,
+            } if *block_ref == target
+        )));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, RbcEffect::Deliver(_)))
+        );
+
+        let ready = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Ready, target);
+        assert!(
+            receiver
+                .handle_embedded_reference(1, ready)
+                .unwrap()
+                .is_empty()
+        );
+        let effects = receiver.handle_embedded_reference(2, ready).unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            RbcEffect::Deliver(header) if header.reference() == target
+        )));
+    }
+
+    #[test]
+    fn flagged_echo_qc_fast_path_delivers_unique_header_without_ready_quorum() {
+        let committee = Committee::new_for_benchmarks(4);
+        let keyrings = mac_keyrings_for_test(committee.len());
+        let mut receiver = StarfishRbcKernel::new_with_echo_qc_fast_path(
+            committee,
+            0,
+            instance(TEST_INSTANCE_BYTE),
+            BlockAuthenticationScheme::MacVector,
+            Arc::new(keyrings[0].clone()),
+            1,
+            true,
+        )
+        .unwrap();
+        let target = block(3, 1, 0x72);
+        receiver
+            .note_header_available(pinned_header_for_context(receiver.context, target))
+            .unwrap();
+        receiver.authorize_echo(target).unwrap();
+
+        let echo = StarfishRbcReferenceV3::new(StarfishRbcReferenceKindV3::Echo, target);
+        assert!(
+            receiver
+                .handle_embedded_reference(1, echo)
+                .unwrap()
+                .is_empty()
+        );
+        let effects = receiver.handle_embedded_reference(2, echo).unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            RbcEffect::MulticastPhase {
+                phase: RbcPhase::Ready,
+                block_ref,
+            } if *block_ref == target
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            RbcEffect::Deliver(header) if header.reference() == target
+        )));
     }
 
     fn valid_canonical_header(
@@ -2108,6 +2399,7 @@ mod tests {
             bls: None,
             sailfish: None,
             unprovable_certificate: None,
+            starfish_rbc_v3: None,
             serialized: None,
         }
     }

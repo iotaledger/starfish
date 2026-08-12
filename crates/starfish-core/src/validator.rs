@@ -150,6 +150,28 @@ impl Validator {
                 "Starfish-RBC-DAG vote-QC fast path is restricted to finite testbed benchmarks"
             ));
         }
+        if public_config
+            .parameters
+            .starfish_rbc_single_dag_echo_qc_fast_path
+            && !protocol_config
+                .consensus_protocol
+                .is_starfish_rbc_single_dag()
+        {
+            return Err(eyre!(
+                "Starfish-RBC single-DAG ECHO-QC fast path requires consensus \
+                 'starfish-rbc-single-dag'"
+            ));
+        }
+        if public_config
+            .parameters
+            .starfish_rbc_single_dag_echo_qc_fast_path
+            && parameters.benchmark_duration.is_none()
+        {
+            return Err(eyre!(
+                "Starfish-RBC single-DAG ECHO-QC fast path is restricted to finite testbed \
+                 benchmarks"
+            ));
+        }
         if public_config.parameters.starfish_rbc_dag_autonomous_clock && !is_starfish_rbc {
             return Err(eyre!(
                 "Starfish-RBC-DAG autonomous clock requires consensus 'starfish-rbc'"

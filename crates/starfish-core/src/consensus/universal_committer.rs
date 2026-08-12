@@ -410,6 +410,7 @@ impl UniversalCommitterBuilder {
             ConsensusProtocol::Mysticeti
             | ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishRbcSingleDag
             | ConsensusProtocol::StarfishSpeed
             | ConsensusProtocol::StarfishBls
             | ConsensusProtocol::MysticetiBls

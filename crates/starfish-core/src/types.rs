@@ -112,6 +112,89 @@ pub struct AckFields {
     pub(crate) extra_references: Vec<BlockReference>,
 }
 
+/// The reliable-broadcast statement carried by an ordinary Starfish block in
+/// the single-DAG protocol. The carrying block's author authentication also
+/// authenticates these references; they deliberately have no second block or
+/// carrier identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum StarfishRbcReferenceKindV3 {
+    Echo,
+    Ready,
+}
+
+impl StarfishRbcReferenceKindV3 {
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::Echo => 0x01,
+            Self::Ready => 0x02,
+        }
+    }
+}
+
+/// One typed RBC reference embedded in a normal Starfish block.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct StarfishRbcReferenceV3 {
+    kind: StarfishRbcReferenceKindV3,
+    reference: BlockReference,
+}
+
+impl StarfishRbcReferenceV3 {
+    pub fn new(kind: StarfishRbcReferenceKindV3, reference: BlockReference) -> Self {
+        Self { kind, reference }
+    }
+
+    pub fn kind(self) -> StarfishRbcReferenceKindV3 {
+        self.kind
+    }
+
+    pub fn reference(self) -> BlockReference {
+        self.reference
+    }
+}
+
+/// Versioned single-DAG Starfish-RBC extension.
+///
+/// `Some(empty)` is meaningful: it identifies a V3 block even when no RBC
+/// statement is ready in that block. References are canonicalized so arrival
+/// order cannot create multiple block identities for the same evidence set.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StarfishRbcFieldsV3 {
+    references: Vec<StarfishRbcReferenceV3>,
+}
+
+impl StarfishRbcFieldsV3 {
+    pub fn new(mut references: Vec<StarfishRbcReferenceV3>) -> Self {
+        references.sort_unstable();
+        references.dedup();
+        Self { references }
+    }
+
+    pub fn references(&self) -> &[StarfishRbcReferenceV3] {
+        &self.references
+    }
+
+    pub(crate) fn validate_for_block(
+        &self,
+        committee: &Committee,
+        block_round: RoundNumber,
+    ) -> bool {
+        if self.references.len() > committee.len().saturating_mul(6) {
+            return false;
+        }
+        if self.references.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return false;
+        }
+        let mut statements = AHashSet::new();
+        self.references.iter().all(|evidence| {
+            let reference = evidence.reference();
+            reference.round > 0
+                && reference.round <= block_round
+                && committee.known_authority(reference.authority)
+                && statements.insert((evidence.kind(), reference.authority, reference.round))
+        })
+    }
+}
+
 /// BLS certificate data (StarfishBls only).
 ///
 /// `certified_leader` pairs the leader ref with an aggregate certificate once
@@ -416,6 +499,10 @@ pub struct BlockHeader {
     ///   Some(empty)`; `false` (standard) means 2f+1 voters reference the
     ///   leader but the strong-vote quorum is mixed.
     pub(crate) unprovable_certificate: Option<(BlockReference, bool)>,
+    /// Single-DAG Starfish-RBC evidence. `None` is the frozen direct-RBC V1
+    /// header; `Some` selects the V3 identity and codec domain.
+    #[serde(default)]
+    pub(crate) starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
 
     // -- Cache (not serialized) -----------------------------------------------
     /// Cached bincode-serialized bytes. Populated by `preserialize()` off the
@@ -466,6 +553,10 @@ impl BlockHeader {
             ack.intersection,
             &ack.extra_references,
         )
+    }
+
+    pub fn starfish_rbc_v3(&self) -> Option<&StarfishRbcFieldsV3> {
+        self.starfish_rbc_v3.as_ref()
     }
 
     pub fn authority(&self) -> AuthorityIndex {
@@ -859,6 +950,55 @@ impl VerifiedBlock {
         transactions: Vec<BaseTransaction>,
         encoded_transactions: Option<Vec<Shard>>,
     ) -> Self {
+        Self::new_starfish_rbc_with_fields(
+            authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            transactions,
+            encoded_transactions,
+            None,
+        )
+    }
+
+    /// Construct one ordinary Starfish block carrying V3 RBC reference
+    /// evidence. This is the single-DAG path: the resulting `BlockReference`
+    /// identifies both the consensus vertex and the RBC proposal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_starfish_rbc_single_dag(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
+        rbc: StarfishRbcFieldsV3,
+    ) -> Self {
+        Self::new_starfish_rbc_with_fields(
+            authority,
+            round,
+            block_references,
+            acknowledgment_references,
+            meta_creation_time_ns,
+            transactions,
+            encoded_transactions,
+            Some(rbc),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_starfish_rbc_with_fields(
+        authority: AuthorityIndex,
+        round: RoundNumber,
+        block_references: Vec<BlockReference>,
+        acknowledgment_references: Vec<BlockReference>,
+        meta_creation_time_ns: TimestampNs,
+        transactions: Vec<BaseTransaction>,
+        encoded_transactions: Option<Vec<Shard>>,
+        starfish_rbc_v3: Option<StarfishRbcFieldsV3>,
+    ) -> Self {
         let transactions_commitment = if let Some(ref encoded) = encoded_transactions {
             TransactionsCommitment::new_from_encoded_transactions(encoded, authority as usize).0
         } else {
@@ -868,14 +1008,25 @@ impl VerifiedBlock {
             compress_acknowledgments(&block_references, &acknowledgment_references);
         let logical_acknowledgments =
             expand_acknowledgments(&block_references, intersection, &extra_references);
-        let digest = BlockDigest::new_starfish_rbc_header(
-            authority,
-            round,
-            &block_references,
-            &logical_acknowledgments,
-            meta_creation_time_ns,
-            transactions_commitment,
-        );
+        let digest = match starfish_rbc_v3.as_ref() {
+            Some(rbc) => BlockDigest::new_starfish_rbc_single_dag_header(
+                authority,
+                round,
+                &block_references,
+                &logical_acknowledgments,
+                meta_creation_time_ns,
+                transactions_commitment,
+                rbc,
+            ),
+            None => BlockDigest::new_starfish_rbc_header(
+                authority,
+                round,
+                &block_references,
+                &logical_acknowledgments,
+                meta_creation_time_ns,
+                transactions_commitment,
+            ),
+        };
         let transaction_data =
             (!transactions.is_empty()).then(|| TransactionData::new(transactions));
         Self {
@@ -897,6 +1048,7 @@ impl VerifiedBlock {
                 bls: None,
                 sailfish: None,
                 unprovable_certificate: None,
+                starfish_rbc_v3,
                 serialized: None,
             },
             transaction_data,
@@ -980,6 +1132,7 @@ impl VerifiedBlock {
             bls: bls.map(Box::new),
             sailfish: sailfish.map(Box::new),
             unprovable_certificate,
+            starfish_rbc_v3: None,
             serialized: None,
         };
 
@@ -1020,6 +1173,7 @@ impl VerifiedBlock {
             bls: None,
             sailfish: None,
             unprovable_certificate: None,
+            starfish_rbc_v3: None,
             serialized: None,
         };
         let mut block = Self {
@@ -1243,6 +1397,7 @@ impl VerifiedBlock {
             bls: bls.map(Box::new),
             sailfish: sailfish.map(Box::new),
             unprovable_certificate,
+            starfish_rbc_v3: None,
             serialized: None,
         };
 
@@ -1724,6 +1879,17 @@ impl VerifiedBlock {
                 round
             );
         }
+        ensure!(
+            consensus_protocol.is_starfish_rbc_single_dag()
+                == self.header.starfish_rbc_v3().is_some(),
+            "Only single-DAG Starfish-RBC blocks may carry V3 RBC reference evidence"
+        );
+        if let Some(rbc) = self.header.starfish_rbc_v3() {
+            ensure!(
+                rbc.validate_for_block(committee, round),
+                "Single-DAG Starfish-RBC evidence is not canonical"
+            );
+        }
         match consensus_protocol {
             ConsensusProtocol::StarfishBls => {
                 ensure!(
@@ -1916,6 +2082,7 @@ impl VerifiedBlock {
             }
             ConsensusProtocol::Starfish
             | ConsensusProtocol::StarfishRbc
+            | ConsensusProtocol::StarfishRbcSingleDag
             | ConsensusProtocol::StarfishSpeed => {
                 ensure!(
                     threshold_clock_valid_block_header(&self.header, committee),
@@ -3186,6 +3353,55 @@ mod tests {
     }
 
     #[test]
+    fn single_dag_rbc_uses_one_versioned_block_identity_and_canonical_evidence() {
+        let committee = Committee::new_for_benchmarks(4);
+        let parents: Vec<_> = committee
+            .authorities()
+            .map(|authority| BlockReference::new_test(authority, 1))
+            .collect();
+        let echo = StarfishRbcReferenceV3::new(
+            StarfishRbcReferenceKindV3::Echo,
+            BlockReference::new_test(3, 1),
+        );
+        let ready = StarfishRbcReferenceV3::new(
+            StarfishRbcReferenceKindV3::Ready,
+            BlockReference::new_test(1, 1),
+        );
+        let v3 = VerifiedBlock::new_starfish_rbc_single_dag(
+            0,
+            2,
+            parents.clone(),
+            Vec::new(),
+            17,
+            Vec::new(),
+            None,
+            StarfishRbcFieldsV3::new(vec![ready, echo]),
+        );
+        let v3_reordered = VerifiedBlock::new_starfish_rbc_single_dag(
+            0,
+            2,
+            parents.clone(),
+            Vec::new(),
+            17,
+            Vec::new(),
+            None,
+            StarfishRbcFieldsV3::new(vec![echo, ready]),
+        );
+        let direct =
+            VerifiedBlock::new_starfish_rbc(0, 2, parents, Vec::new(), 17, Vec::new(), None);
+
+        assert_eq!(v3.reference(), v3_reordered.reference());
+        assert_ne!(v3.reference(), direct.reference());
+        let canonical = RbcCanonicalHeader::from_block_header(v3.header()).unwrap();
+        canonical.validate_for_committee(&committee).unwrap();
+        assert_eq!(canonical.reference(), *v3.reference());
+        assert_eq!(
+            canonical.starfish_rbc_v3().unwrap().references(),
+            &[echo, ready]
+        );
+    }
+
+    #[test]
     fn starfish_rbc_carrier_verification_is_content_only() {
         let committee = Committee::new_for_benchmarks(4);
         let parents: Vec<_> = committee
@@ -3257,6 +3473,7 @@ mod tests {
             bls: None,
             sailfish: None,
             unprovable_certificate: None,
+            starfish_rbc_v3: None,
             serialized: None,
         };
 
