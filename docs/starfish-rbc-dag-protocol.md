@@ -878,12 +878,12 @@ newest current-process observation (`<= 4`). These are empirical benchmark cover
 asynchronous protocol bounds; a run exceeding either guard is discarded rather than treated as
 proof of a protocol failure.
 
-The actor reserves the full hard 64-entry queue so several fan-in bursts can wait behind a slow
+The actor reserves a bounded queue of up to 128 entries so several fan-in bursts can wait behind a slow
 reference transition (including synchronous fsync in the crash-safe profile), capping queued
-maximum-sized carrier bodies at 256 MiB (plus sidecars and allocator overhead). Mirror mode budgets
+maximum-sized carrier bodies at 512 MiB (plus sidecars and allocator overhead). Mirror mode budgets
 one peer fan-in plus five local/control inputs and accepts
-at most 60 validators. Autonomous mode budgets a simultaneous carrier, exact-slot request, and
-exact-slot response per peer plus five control inputs and accepts at most 20 validators. Larger runs
+at most 124 validators. Autonomous mode budgets a simultaneous carrier, exact-slot request, and
+exact-slot response per peer plus five control inputs and accepts at most 42 validators. Larger runs
 are rejected rather than silently producing incomplete evidence. Timer notifications are coalesced,
 healthy proactive rounds receive a repair grace period, and exact synchronization is rate-limited
 per peer. Exact synchronization transfers only one requested `(author, round)` and only from the

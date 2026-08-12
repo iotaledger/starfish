@@ -64,17 +64,18 @@ use crate::{
 
 // A mirror run must absorb one complete committee fan-in plus a small reserve;
 // autonomous repair additionally budgets a simultaneous request and response
-// per peer. At the four-MiB carrier cap, allowing at most 64 queued inputs also
-// caps carrier payload retention at 256 MiB (plus bounded sidecars and
-// allocator overhead). This permits 60 mirror validators or 20 autonomous
-// validators. Larger committees are rejected for this benchmark prototype
+// per peer. At the four-MiB carrier cap, allowing at most 128 queued inputs
+// caps carrier payload retention at 512 MiB (plus bounded sidecars and
+// allocator overhead). This permits 124 mirror validators or 42 autonomous
+// validators, including the 40-validator comparison profile. Larger committees
+// are rejected for this benchmark prototype
 // instead of silently under-sizing the queue and reporting incomparable
 // results.
 // Use the full bounded allowance even for a small committee. A single fan-in
 // reserve is insufficient when several round bursts arrive while the actor is
 // synchronously making the previous transition durable.
 const SHADOW_SERVICE_MIN_INPUT_CAPACITY_V1: usize = 64;
-const SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1: usize = 64;
+const SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1: usize = 128;
 const SHADOW_SERVICE_CONTROL_RESERVE_V1: usize = 5;
 const SHADOW_SERVICE_EVENT_CAPACITY_V1: usize = 16;
 const SHADOW_MAINTENANCE_INTERVAL_V1: Duration = Duration::from_millis(100);
@@ -96,7 +97,10 @@ const SHADOW_CARRIER_SYNC_MIN_GRACE_INTERVAL_V1: Duration = Duration::from_milli
 /// frame ceiling is larger; a dedicated configurable payload limit remains a
 /// deployment-hardening boundary. Keeping only a bounded recent window stops
 /// unsolicited sidecars from turning the actor into an unbounded cache.
-const SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1: usize = SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1;
+// Keep the materialized-payload/quarantine cache at its original independent
+// bound. Raising the actor's message burst allowance for n=40 must not double
+// retained application state as a side effect.
+const SHADOW_APPLICATION_PAYLOAD_CAPACITY_V1: usize = 64;
 const SHADOW_APPLICATION_PAYLOAD_MAX_SIZE_V1: usize = MAX_CARRIER_CONTENT_SIZE_V1;
 const SHADOW_APPLICATION_PAYLOAD_RETRY_INTERVAL_V1: Duration = Duration::from_millis(500);
 /// Bound healthy physical-carrier production independently of actor/network
@@ -8999,8 +9003,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sixty_validator_burst_fits_before_the_actor_drains() {
-        const LARGE_N: usize = 60;
+    async fn maximum_mirror_burst_fits_before_the_actor_drains() {
+        const LARGE_N: usize = 124;
         let input_capacity =
             shadow_input_capacity(LARGE_N, ShadowServiceModeV1::DirectMirror).unwrap();
         assert_eq!(input_capacity, SHADOW_SERVICE_MAX_INPUT_CAPACITY_V1);
@@ -9044,17 +9048,18 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_burst_budget_accepts_twenty_and_rejects_twenty_one() {
+    fn autonomous_burst_budget_accepts_forty_two_and_rejects_forty_three() {
         let mode = ShadowServiceModeV1::AutonomousClock {
             heartbeat_interval: Duration::from_millis(250),
         };
-        assert_eq!(shadow_input_capacity(20, mode).unwrap(), 64);
+        assert_eq!(shadow_input_capacity(40, mode).unwrap(), 122);
+        assert_eq!(shadow_input_capacity(42, mode).unwrap(), 128);
         assert!(matches!(
-            shadow_input_capacity(21, mode),
+            shadow_input_capacity(43, mode),
             Err(ShadowServiceErrorV1::CommitteeBurstTooLarge {
-                committee_size: 21,
-                required_capacity: 65,
-                maximum_capacity: 64,
+                committee_size: 43,
+                required_capacity: 131,
+                maximum_capacity: 128,
             })
         ));
     }
