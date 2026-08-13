@@ -32,9 +32,9 @@ const REAL_BLOCK_HANDLER_TXN_SIZE: usize = 512;
 const REAL_BLOCK_HANDLER_TXN_GEN_STEP: usize = 32;
 const _: () = assert_constants();
 
-#[allow(dead_code, clippy::manual_is_multiple_of)]
+#[allow(dead_code)]
 const fn assert_constants() {
-    if REAL_BLOCK_HANDLER_TXN_SIZE % REAL_BLOCK_HANDLER_TXN_GEN_STEP != 0 {
+    if !REAL_BLOCK_HANDLER_TXN_SIZE.is_multiple_of(REAL_BLOCK_HANDLER_TXN_GEN_STEP) {
         panic!("REAL_BLOCK_HANDLER_TXN_SIZE % REAL_BLOCK_HANDLER_TXN_GEN_STEP != 0")
     }
 }
@@ -121,13 +121,13 @@ impl RealCommitHandler {
     }
 
     fn transaction_observer(&self, block: Data<VerifiedBlock>) {
-        // Transaction observations stay open for the bounded post-submission
-        // drain. No transactions exist before the coordinated start, so this
-        // records exactly the offered window while allowing the harness to
-        // distinguish committed-at-cutoff from eventual committed throughput.
+        // Skip every rate-feeding metric outside the active submission
+        // window. Late commits during warmup or wind-down would otherwise
+        // skew TPS, the cumulative latency distribution, and the bandwidth-
+        // efficiency denominator.
         if !self
             .metrics
-            .transaction_metrics_active
+            .metrics_active
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
@@ -144,15 +144,6 @@ impl RealCommitHandler {
                     .transaction_committed_latency_squared_micros
                     .inc_by(latency.as_micros().pow(2) as u64);
                 self.metrics.sequenced_transactions_total.inc();
-                let cutoff_micros = self
-                    .metrics
-                    .benchmark_transaction_cutoff_micros
-                    .load(std::sync::atomic::Ordering::Acquire);
-                if cutoff_micros > 0
-                    && self.metrics.validator_start.elapsed().as_micros() < cutoff_micros.into()
-                {
-                    self.metrics.sequenced_transactions_cutoff_total.inc();
-                }
                 self.metrics
                     .sequenced_transactions_bytes
                     .inc_by(transaction.as_bytes().len() as u64);
@@ -377,19 +368,37 @@ impl CommitObserver for RealCommitHandler {
         resulted_committed
     }
 
-    fn handle_rbc_dag_commit(&mut self, committed: &[CommittedSubDag]) {
-        self.record_commit_metadata(committed);
-        for commit in committed {
-            for block in &commit.blocks {
-                if block.round() > 0 {
-                    self.transaction_observer(block.clone());
-                }
+    fn handle_rbc_dag_commit(
+        &mut self,
+        dag_state: &DagState,
+        anchor: BlockReference,
+        applications: &[BlockReference],
+    ) -> Vec<CommittedSubDag> {
+        let blocks = applications
+            .iter()
+            .map(|reference| {
+                let block = dag_state
+                    .get_storage_block(*reference)
+                    .unwrap_or_else(|| panic!("committed RBC-DAG application {reference} missing"));
+                assert!(
+                    dag_state.is_data_available(reference),
+                    "committed RBC-DAG application {reference} is unavailable"
+                );
+                block
+            })
+            .collect::<Vec<_>>();
+        let commit = CommittedSubDag::new(anchor, blocks);
+        self.record_commit_metadata(std::iter::once(&commit));
+        for block in &commit.blocks {
+            if block.round() > 0 {
+                self.transaction_observer(block.clone());
             }
         }
-        self.sequenced_commit_count += committed.len();
+        self.sequenced_commit_count += 1;
         self.metrics
             .commit_availability_gap
             .set((self.committed_count - self.sequenced_commit_count) as i64);
+        vec![commit]
     }
 
     fn recover_committed(

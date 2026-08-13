@@ -63,18 +63,14 @@ const OPTION_NONE: u8 = 0;
 const OPTION_SOME: u8 = 1;
 const PHASE_ECHO: u8 = 0;
 const PHASE_READY: u8 = 1;
-// Phase codes are append-only: persisted carrier headers and their digests
-// depend on the original ECHO=0/READY=1 assignments.
-const PHASE_VOTE: u8 = 2;
-const PHASE_ACK: u8 = 3;
 const LEADER_NONE: u8 = 0;
 const LEADER_VOTE: u8 = 1;
 const LEADER_NO_VOTE: u8 = 2;
 const BLOCK_REFERENCE_SIZE: usize = 2 + 4 + 32;
 const PROTOCOL_INSTANCE_SIZE: usize = 32;
 const COMMITTEE_ID_SIZE: usize = 32;
-const AUTHENTICATION_DOMAIN: &[u8; 19] = b"STARFISH_RBC_DAG_V2";
-const COMMITTEE_ID_DERIVE_CONTEXT: &str = "STARFISH_RBC_DAG_V2_COMMITTEE_ID";
+const AUTHENTICATION_DOMAIN: &[u8; 19] = b"STARFISH_RBC_DAG_V1";
+const COMMITTEE_ID_DERIVE_CONTEXT: &str = "STARFISH_RBC_DAG_V1_COMMITTEE_ID";
 const CARRIER_AUTHENTICATION_KIND: u8 = 0;
 const AUTHENTICATION_BASE_SIZE: usize = 123;
 const AUTHENTICATION_MAC_SIZE: usize = AUTHENTICATION_BASE_SIZE + 2;
@@ -88,17 +84,12 @@ std::thread_local! {
 pub enum RbcPhaseStatementV1 {
     Echo { target: BlockReference },
     Ready { target: BlockReference },
-    Vote { target: BlockReference },
-    Ack { target: BlockReference },
 }
 
 impl RbcPhaseStatementV1 {
     pub fn target(self) -> BlockReference {
         match self {
-            Self::Echo { target }
-            | Self::Ready { target }
-            | Self::Vote { target }
-            | Self::Ack { target } => target,
+            Self::Echo { target } | Self::Ready { target } => target,
         }
     }
 
@@ -106,8 +97,6 @@ impl RbcPhaseStatementV1 {
         match self {
             Self::Echo { .. } => PHASE_ECHO,
             Self::Ready { .. } => PHASE_READY,
-            Self::Vote { .. } => PHASE_VOTE,
-            Self::Ack { .. } => PHASE_ACK,
         }
     }
 }
@@ -1708,11 +1697,7 @@ fn validate_outer_header(
         }
     }
 
-    // Four protocol phases plus bounded spillover from prior carrier rounds.
-    // Six entries per authority keeps the honest four-phase fast path away
-    // from the canonical validation boundary without making the wire vector
-    // unbounded.
-    let phase_limit = usize::min(MAX_PHASE_STATEMENTS_V1, committee.len().saturating_mul(6));
+    let phase_limit = usize::min(MAX_PHASE_STATEMENTS_V1, committee.len().saturating_mul(4));
     if header.phase_batch.len() > phase_limit {
         return Err(RbcDagError::VectorTooLong {
             field: "phase statements",
@@ -2072,8 +2057,6 @@ fn decode_header(
         phase_batch.push(match code {
             PHASE_ECHO => RbcPhaseStatementV1::Echo { target },
             PHASE_READY => RbcPhaseStatementV1::Ready { target },
-            PHASE_VOTE => RbcPhaseStatementV1::Vote { target },
-            PHASE_ACK => RbcPhaseStatementV1::Ack { target },
             other => return Err(RbcDagError::InvalidPhase(other)),
         });
     }
@@ -2707,63 +2690,6 @@ mod tests {
     }
 
     #[test]
-    fn vote_and_ack_phase_codes_are_append_only_and_round_trip() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let target = reference(2, 1, 0xA8);
-        assert_eq!(RbcPhaseStatementV1::Echo { target }.code(), 0);
-        assert_eq!(RbcPhaseStatementV1::Ready { target }.code(), 1);
-        assert_eq!(RbcPhaseStatementV1::Vote { target }.code(), 2);
-        assert_eq!(RbcPhaseStatementV1::Ack { target }.code(), 3);
-
-        let mut args = args(&committee, 3, 2);
-        args.phase_batch = vec![
-            RbcPhaseStatementV1::Vote { target },
-            RbcPhaseStatementV1::Ack { target },
-        ];
-        let candidate = CandidateCarrierV1::try_new(args, &committee).unwrap();
-        let content = candidate.canonical_content_bytes().unwrap();
-        let wire = candidate.canonical_wire_bytes().unwrap();
-        assert_eq!(
-            CandidateCarrierV1::decode_content(&content, &committee, Some(candidate.reference()))
-                .unwrap(),
-            candidate
-        );
-        assert_eq!(
-            CandidateCarrierV1::decode_wire(&wire, &committee, Some(candidate.reference()))
-                .unwrap(),
-            candidate
-        );
-    }
-
-    #[test]
-    fn four_phase_batch_accepts_six_entries_per_authority_at_the_boundary() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut args = args(&committee, 3, 8);
-        for round in 1..=6 {
-            let target = reference(0, round, round as u8);
-            args.phase_batch.extend([
-                RbcPhaseStatementV1::Echo { target },
-                RbcPhaseStatementV1::Vote { target },
-                RbcPhaseStatementV1::Ack { target },
-                RbcPhaseStatementV1::Ready { target },
-            ]);
-        }
-        assert_eq!(args.phase_batch.len(), committee.len() * 6);
-        CandidateCarrierV1::try_new(args.clone(), &committee).unwrap();
-
-        args.phase_batch.push(RbcPhaseStatementV1::Echo {
-            target: reference(1, 1, 0xFF),
-        });
-        assert!(matches!(
-            CandidateCarrierV1::try_new(args, &committee),
-            Err(RbcDagError::VectorTooLong {
-                field: "phase statements",
-                count: 25,
-            })
-        ));
-    }
-
-    #[test]
     fn acknowledgment_compression_normalizes_and_rejects_duplicates() {
         let committee = Committee::new_test(vec![1; 4]);
         let base = args(&committee, 3, 2);
@@ -2866,21 +2792,21 @@ mod tests {
         let base = context.public_authentication_statement(candidate.reference());
         assert_eq!(
             hex::encode(context.committee_id().as_bytes()),
-            "82804ac9a25b89ad8098c52ec0ec7cfe4250d23d672a627bdb5795eda8ec4b98"
+            "acfb1f9c45727a7366b83e468926bfa9f577cf308078792da0b415d05ae3df62"
         );
         assert_eq!(
             hex::encode(base),
             concat!(
-                "53544152464953485f5242435f4441475f56320002",
+                "53544152464953485f5242435f4441475f56310002",
                 "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-                "82804ac9a25b89ad8098c52ec0ec7cfe4250d23d672a627bdb5795eda8ec4b98",
+                "acfb1f9c45727a7366b83e468926bfa9f577cf308078792da0b415d05ae3df62",
                 "000300000002",
                 "797b7ffa348c94889c36ea4a0c02070963efe6b7326aaed057f47e825867012f"
             )
         );
         assert_eq!(
             hex::encode(context.public_authentication_digest(candidate.reference())),
-            "79a89fb36b517a157591fa0d44755211c5dfccb604e10d0d52ee921a4e5dae48"
+            "26a0866c9c6938c9158495f23fd22b281db6371461b6aad109ad41329e5fa5c8"
         );
         assert_eq!(&base[..19], AUTHENTICATION_DOMAIN);
         assert_eq!(base[19], CARRIER_AUTHENTICATION_KIND);
@@ -2918,9 +2844,9 @@ mod tests {
         assert_eq!(
             hex::encode(mac_statement),
             concat!(
-                "53544152464953485f5242435f4441475f56320003",
+                "53544152464953485f5242435f4441475f56310003",
                 "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-                "82804ac9a25b89ad8098c52ec0ec7cfe4250d23d672a627bdb5795eda8ec4b98",
+                "acfb1f9c45727a7366b83e468926bfa9f577cf308078792da0b415d05ae3df62",
                 "000300000002",
                 "797b7ffa348c94889c36ea4a0c02070963efe6b7326aaed057f47e825867012f",
                 "0002"
@@ -2930,7 +2856,7 @@ mod tests {
         let tag = key.compute_rbc_tag(&mac_statement);
         assert_eq!(
             hex::encode(tag.as_ref()),
-            "d0beb7274a49c4d1b26f0986a370c3455e04cf899ca2e0d4d1c8ec0707746f35"
+            "118209f3c2c3025918ae7f60fe5a04a94e639cd06d910d89c483035c014fff02"
         );
         for (field, offset) in [
             ("domain", 0),

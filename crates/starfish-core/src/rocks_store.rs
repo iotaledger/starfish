@@ -15,7 +15,7 @@ use crate::{
     crypto::BlockDigest,
     dag_state::CommitData,
     data::Data,
-    store::{RbcDagFrontierReceipt, Store, validate_rbc_dag_frontier_commit_batch},
+    store::Store,
     types::{
         BlockHeader, BlockReference, ProvableShard, RoundNumber, TransactionData, VerifiedBlock,
     },
@@ -28,8 +28,6 @@ const CF_TX_DATA: &str = "tx_data";
 const CF_SHARD_DATA: &str = "shard_data";
 const CF_COMMITS: &str = "commits";
 const CF_DUAL_DAG_CLEAN: &str = "sailfish_certified";
-const CF_RBC_DAG_FRONTIER_RECEIPT: &str = "rbc_dag_frontier_receipt";
-const LATEST_RBC_DAG_FRONTIER_RECEIPT_KEY: &[u8] = b"latest";
 
 pub struct RocksStore {
     db: Arc<DB>,
@@ -146,7 +144,6 @@ impl RocksStore {
             ColumnFamilyDescriptor::new(CF_SHARD_DATA, Self::data_cf_options()),
             ColumnFamilyDescriptor::new(CF_COMMITS, Self::metadata_cf_options()),
             ColumnFamilyDescriptor::new(CF_DUAL_DAG_CLEAN, Self::metadata_cf_options()),
-            ColumnFamilyDescriptor::new(CF_RBC_DAG_FRONTIER_RECEIPT, Self::metadata_cf_options()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(io::Error::other)?;
@@ -410,38 +407,6 @@ impl Store for RocksStore {
             .map_err(io::Error::other)
     }
 
-    fn store_commits_with_rbc_dag_receipt(
-        &self,
-        committed_sub_dags: Vec<CommitData>,
-        receipt: RbcDagFrontierReceipt,
-    ) -> io::Result<()> {
-        validate_rbc_dag_frontier_commit_batch(&committed_sub_dags, &receipt)?;
-        let receipt_bytes = receipt.to_bytes()?;
-
-        let mut wb = rocksdb::WriteBatch::default();
-        let cf_commits = self.cf(CF_COMMITS)?;
-        if committed_sub_dags.is_empty() {
-            let key = serialize(&receipt.carrier_anchor).map_err(io::Error::other)?;
-            wb.delete_cf(&cf_commits, key);
-        } else {
-            let commit_data = &committed_sub_dags[0];
-            let key = serialize(&commit_data.leader).map_err(io::Error::other)?;
-            let value = serialize(commit_data).map_err(io::Error::other)?;
-            wb.put_cf(&cf_commits, key, value);
-        }
-
-        let cf_receipt = self.cf(CF_RBC_DAG_FRONTIER_RECEIPT)?;
-        wb.put_cf(
-            &cf_receipt,
-            LATEST_RBC_DAG_FRONTIER_RECEIPT_KEY,
-            receipt_bytes,
-        );
-
-        self.db
-            .write_opt(wb, &self.write_opts)
-            .map_err(io::Error::other)
-    }
-
     fn get_commit(&self, reference: &BlockReference) -> io::Result<Option<CommitData>> {
         let key = serialize(reference).map_err(io::Error::other)?;
         let cf_commits = self.cf(CF_COMMITS)?;
@@ -454,22 +419,6 @@ impl Store for RocksStore {
                 let commit_data: CommitData = deserialize(&value).map_err(io::Error::other)?;
                 Ok(Some(commit_data))
             }
-            None => Ok(None),
-        }
-    }
-
-    fn read_latest_rbc_dag_frontier_receipt(&self) -> io::Result<Option<RbcDagFrontierReceipt>> {
-        let cf = self.cf(CF_RBC_DAG_FRONTIER_RECEIPT)?;
-        match self
-            .db
-            .get_cf_opt(
-                &cf,
-                LATEST_RBC_DAG_FRONTIER_RECEIPT_KEY,
-                &Self::get_read_opts(),
-            )
-            .map_err(io::Error::other)?
-        {
-            Some(bytes) => RbcDagFrontierReceipt::from_bytes(&bytes).map(Some),
             None => Ok(None),
         }
     }
@@ -645,160 +594,5 @@ impl Store for RocksStore {
         }
 
         Ok(refs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    use super::RocksStore;
-    use crate::{
-        dag_state::CommitData,
-        store::{RbcDagFrontierReceipt, Store},
-        types::{BlockReference, MAX_COMMITTEE_SIZE},
-    };
-
-    fn commit(leader: BlockReference, committed_rounds: Vec<u32>) -> CommitData {
-        CommitData {
-            leader,
-            sub_dag: vec![BlockReference::new_test(1, leader.round)],
-            committed_rounds,
-        }
-    }
-
-    fn assert_commit(store: &impl Store, expected: &CommitData) {
-        let actual = store
-            .get_commit(&expected.leader)
-            .expect("commit read should succeed")
-            .expect("commit should exist");
-        assert_eq!(actual.leader, expected.leader);
-        assert_eq!(actual.sub_dag, expected.sub_dag);
-        assert_eq!(actual.committed_rounds, expected.committed_rounds);
-    }
-
-    #[test]
-    fn rbc_dag_receipt_and_commits_are_atomic_and_latest_is_a_point_value() {
-        let temp_dir = TempDir::new().unwrap();
-        let store = RocksStore::open(temp_dir.path()).unwrap();
-
-        let legacy_leader = BlockReference::new_test(2, 253);
-        let legacy_commit = commit(legacy_leader, vec![253; 4]);
-        store.store_commits(vec![legacy_commit.clone()]).unwrap();
-        assert_commit(&store, &legacy_commit);
-        assert!(
-            store
-                .read_latest_rbc_dag_frontier_receipt()
-                .unwrap()
-                .is_none()
-        );
-
-        // A control-only frontier has no new application commits, but its
-        // durable cursor must still advance.
-        let first_anchor = BlockReference::new_test(7, 255);
-        let first_receipt = RbcDagFrontierReceipt {
-            carrier_anchor: first_anchor,
-            output_sequence: 255,
-            committed_rounds: vec![250, 251, 252, 253],
-        };
-        let stale_first_commit = commit(first_anchor, first_receipt.committed_rounds.clone());
-        store.store_commits(vec![stale_first_commit]).unwrap();
-        assert!(store.get_commit(&first_anchor).unwrap().is_some());
-        store
-            .store_commits_with_rbc_dag_receipt(Vec::new(), first_receipt.clone())
-            .unwrap();
-        assert_eq!(
-            store.read_latest_rbc_dag_frontier_receipt().unwrap(),
-            Some(first_receipt)
-        );
-        assert!(store.get_commit(&first_anchor).unwrap().is_none());
-
-        // The exact application commit is stored under the consensus carrier
-        // anchor so Core can reconstruct the compact receipt's application
-        // references after restart.
-        let second_anchor = BlockReference::new_test(7, 256);
-        let application_commit = commit(second_anchor, vec![255, 256, 255, 256]);
-        let second_receipt = RbcDagFrontierReceipt {
-            carrier_anchor: second_anchor,
-            output_sequence: 256,
-            committed_rounds: vec![255, 256, 255, 256],
-        };
-        store
-            .store_commits_with_rbc_dag_receipt(
-                vec![application_commit.clone()],
-                second_receipt.clone(),
-            )
-            .unwrap();
-        assert_commit(&store, &application_commit);
-        assert_eq!(
-            store.read_latest_rbc_dag_frontier_receipt().unwrap(),
-            Some(second_receipt.clone())
-        );
-
-        // Mismatched/multiple application commits are rejected before either
-        // commit data or the latest receipt can change.
-        let mismatched = commit(BlockReference::new_test(2, 254), vec![255, 256, 255, 256]);
-        let mismatched_watermarks = commit(second_anchor, vec![1; 4]);
-        for invalid in [
-            vec![mismatched],
-            vec![mismatched_watermarks],
-            vec![application_commit.clone(), application_commit.clone()],
-        ] {
-            let error = store
-                .store_commits_with_rbc_dag_receipt(invalid, second_receipt.clone())
-                .unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-            assert_eq!(
-                store.read_latest_rbc_dag_frontier_receipt().unwrap(),
-                Some(second_receipt.clone())
-            );
-        }
-
-        // Reusing the exact anchor for a control-only marker atomically
-        // removes stale application CommitData, preserving absence semantics.
-        let control_receipt = RbcDagFrontierReceipt {
-            carrier_anchor: second_anchor,
-            output_sequence: 257,
-            committed_rounds: second_receipt.committed_rounds.clone(),
-        };
-        store
-            .store_commits_with_rbc_dag_receipt(Vec::new(), control_receipt.clone())
-            .unwrap();
-        assert!(store.get_commit(&second_anchor).unwrap().is_none());
-        assert_eq!(
-            store.read_latest_rbc_dag_frontier_receipt().unwrap(),
-            Some(control_receipt.clone())
-        );
-
-        // Receipt validation happens before the batch is submitted, so an
-        // invalid vector cannot partially write its application commit or
-        // replace the last valid cursor.
-        let rejected_leader = BlockReference::new_test(3, 257);
-        let rejected = commit(rejected_leader, vec![257; 4]);
-        for committed_rounds in [Vec::new(), vec![0; usize::from(MAX_COMMITTEE_SIZE) + 1]] {
-            let invalid = RbcDagFrontierReceipt {
-                carrier_anchor: BlockReference::new_test(7, 257),
-                output_sequence: 258,
-                committed_rounds,
-            };
-            let error = store
-                .store_commits_with_rbc_dag_receipt(vec![rejected.clone()], invalid)
-                .unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        }
-        assert!(store.get_commit(&rejected_leader).unwrap().is_none());
-        assert_eq!(
-            store.read_latest_rbc_dag_frontier_receipt().unwrap(),
-            Some(control_receipt.clone())
-        );
-
-        drop(store);
-        let reopened = RocksStore::open(temp_dir.path()).unwrap();
-        assert_commit(&reopened, &legacy_commit);
-        assert!(reopened.get_commit(&second_anchor).unwrap().is_none());
-        assert_eq!(
-            reopened.read_latest_rbc_dag_frontier_receipt().unwrap(),
-            Some(control_receipt)
-        );
     }
 }

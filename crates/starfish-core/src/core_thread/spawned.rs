@@ -10,11 +10,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     block_handler::BlockHandler,
     bls_certificate_aggregator::CertificateEvent,
-    core::RbcDagFrontierApplyError,
     dag_state::DataSource,
     data::Data,
     metrics::{Metrics, UtilizationTimerExt},
-    starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader},
+    starfish_rbc::PinnedRbcHeader,
     starfish_rbc_dag_shadow::CommittedFrontierDeltaV1,
     syncer::{CommitObserver, Syncer, SyncerSignals},
     types::{
@@ -54,14 +53,6 @@ enum CoreThreadCommand {
         DataSource,
         oneshot::Sender<()>,
     ),
-    /// Header authority established by the single-owner RBC-DAG carrier
-    /// actor. This typed command cannot be forged through `BlockBatch.source`.
-    AddAuthorizedRbcDagHeader(
-        RbcCanonicalHeader,
-        oneshot::Sender<(AHashSet<BlockReference>, Vec<BlockReference>)>,
-    ),
-    /// Payload verified against an RBC-DAG-authorized canonical header.
-    AddAuthorizedRbcDagPayload(ReconstructedTransactionData, oneshot::Sender<()>),
     MissingParentReferences(oneshot::Sender<Vec<BlockReference>>),
     ForceNewBlock(RoundNumber, oneshot::Sender<()>),
     /// Attempt block creation with relaxed readiness checks (StarfishSpeed soft
@@ -83,16 +74,7 @@ enum CoreThreadCommand {
     ApplyStarfishRbcDeliveries(Vec<PinnedRbcHeader>, oneshot::Sender<()>),
     ApplyStarfishRbcReference(crate::types::StarfishRbcReferenceV3, oneshot::Sender<()>),
     /// Commit one deterministic clean carrier-frontier application delta.
-    ApplyStarfishRbcDagFrontier(
-        CommittedFrontierDeltaV1,
-        oneshot::Sender<Result<bool, RbcDagFrontierApplyError>>,
-    ),
-    /// Release production only after the ordered recovery bridge processes
-    /// the service's final startup `Ready` event.
-    ActivateStarfishRbcDagAuthority(oneshot::Sender<()>),
-    /// Release the one-outstanding application-production gate after the
-    /// exact header is durably assigned to a local carrier.
-    ApplyStarfishRbcDagApplicationAssigned(BlockReference, oneshot::Sender<()>),
+    ApplyStarfishRbcDagFrontier(CommittedFrontierDeltaV1, oneshot::Sender<()>),
     /// Store a Sailfish++ timeout certificate in DagState.
     ApplyTimeoutCert(SailfishTimeoutCert, oneshot::Sender<()>),
     /// Store a Sailfish++ no-vote certificate in DagState.
@@ -117,13 +99,9 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         }
     }
 
-    pub fn stop(self) -> thread::Result<Syncer<H, S, C>> {
+    pub fn stop(self) -> Syncer<H, S, C> {
         drop(self.sender);
-        self.join_handle.join()
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.join_handle.is_finished()
+        self.join_handle.join().unwrap()
     }
 
     pub async fn add_blocks(
@@ -163,47 +141,11 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
         receiver.await.expect("core thread is not expected to stop")
     }
 
-    pub(crate) async fn add_authorized_rbc_dag_header(
-        &self,
-        header: RbcCanonicalHeader,
-    ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::AddAuthorizedRbcDagHeader(header, sender))
-            .await;
-        receiver.await.expect("core thread is not expected to stop")
-    }
-
-    pub(crate) async fn add_authorized_rbc_dag_payload(&self, item: ReconstructedTransactionData) {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::AddAuthorizedRbcDagPayload(item, sender))
-            .await;
-        receiver.await.expect("core thread is not expected to stop")
-    }
-
     pub async fn missing_parent_references(&self) -> Vec<BlockReference> {
         let (sender, receiver) = oneshot::channel();
         self.send(CoreThreadCommand::MissingParentReferences(sender))
             .await;
         receiver.await.expect("core thread is not expected to stop")
-    }
-
-    /// Best-effort FIFO barrier used only during shutdown. Unlike normal
-    /// protocol commands, a concurrently panicking core thread is an expected
-    /// failure mode here and must not panic the async cleanup path as well.
-    pub(crate) async fn flush_for_shutdown(&self) -> bool {
-        let (sender, receiver) = oneshot::channel();
-        self.metrics.core_lock_enqueued.inc();
-        self.metrics.core_queue_length.inc();
-        if self
-            .sender
-            .send(CoreThreadCommand::MissingParentReferences(sender))
-            .await
-            .is_err()
-        {
-            self.metrics.core_queue_length.dec();
-            return false;
-        }
-        receiver.await.is_ok()
     }
 
     pub async fn force_commit(&self) {
@@ -294,25 +236,6 @@ impl<H: BlockHandler + 'static, S: SyncerSignals + 'static, C: CommitObserver + 
             delta, sender,
         ))
         .await;
-        receiver.await.expect("core thread is not expected to stop")
-    }
-
-    pub(crate) async fn activate_starfish_rbc_dag_authority(&self) {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::ActivateStarfishRbcDagAuthority(sender))
-            .await;
-        receiver.await.expect("core thread is not expected to stop");
-    }
-
-    pub(crate) async fn apply_starfish_rbc_dag_application_assigned(
-        &self,
-        reference: BlockReference,
-    ) {
-        let (sender, receiver) = oneshot::channel();
-        self.send(CoreThreadCommand::ApplyStarfishRbcDagApplicationAssigned(
-            reference, sender,
-        ))
-        .await;
         receiver.await.expect("core thread is not expected to stop");
     }
 
@@ -398,22 +321,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .with_label_values(&["add_transaction_data"])
                         .inc();
                     self.syncer.add_transaction_data(items, source);
-                    sender.send(()).ok();
-                }
-                CoreThreadCommand::AddAuthorizedRbcDagHeader(header, sender) => {
-                    metrics
-                        .core_thread_tasks_total
-                        .with_label_values(&["add_authorized_rbc_dag_header"])
-                        .inc();
-                    let result = self.syncer.add_authorized_rbc_dag_header(header);
-                    sender.send(result).ok();
-                }
-                CoreThreadCommand::AddAuthorizedRbcDagPayload(item, sender) => {
-                    metrics
-                        .core_thread_tasks_total
-                        .with_label_values(&["add_authorized_rbc_dag_payload"])
-                        .inc();
-                    self.syncer.add_authorized_rbc_dag_payload(item);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::MissingParentReferences(sender) => {
@@ -536,24 +443,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> CoreThread<H, S, C> {
                         .core_thread_tasks_total
                         .with_label_values(&["apply_starfish_rbc_dag_frontier"])
                         .inc();
-                    let result = self.syncer.apply_starfish_rbc_dag_frontier(delta);
-                    sender.send(result).ok();
-                }
-                CoreThreadCommand::ActivateStarfishRbcDagAuthority(sender) => {
-                    metrics
-                        .core_thread_tasks_total
-                        .with_label_values(&["activate_starfish_rbc_dag_authority"])
-                        .inc();
-                    self.syncer.activate_starfish_rbc_dag_authority();
-                    sender.send(()).ok();
-                }
-                CoreThreadCommand::ApplyStarfishRbcDagApplicationAssigned(reference, sender) => {
-                    metrics
-                        .core_thread_tasks_total
-                        .with_label_values(&["apply_starfish_rbc_dag_application_assigned"])
-                        .inc();
-                    self.syncer
-                        .apply_starfish_rbc_dag_application_assigned(reference);
+                    self.syncer.apply_starfish_rbc_dag_frontier(delta);
                     sender.send(()).ok();
                 }
                 CoreThreadCommand::ApplyTimeoutCert(cert, sender) => {
@@ -620,7 +510,14 @@ mod tests {
             Vec::new()
         }
 
-        fn handle_rbc_dag_commit(&mut self, _committed: &[CommittedSubDag]) {}
+        fn handle_rbc_dag_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _anchor: BlockReference,
+            _applications: &[BlockReference],
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
 
         fn recover_committed(
             &mut self,
@@ -731,6 +628,6 @@ mod tests {
         let refs = dispatcher.missing_parent_references().await;
         assert_eq!(refs, vec![missing_earlier, missing_later]);
 
-        assert!(dispatcher.stop().is_ok());
+        dispatcher.stop();
     }
 }

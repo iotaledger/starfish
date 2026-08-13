@@ -17,7 +17,7 @@ use crate::{
     bls_certificate_aggregator::{CertificateEvent, apply_certificate_events},
     bls_service::BlsServiceMessage,
     consensus::{CommitMetastate, linearizer::CommittedSubDag},
-    core::{Core, RbcDagFrontierApplyError, RbcDagFrontierApplyOutcome},
+    core::Core,
     dag_state::{DagState, DataSource},
     data::Data,
     metrics::Metrics,
@@ -83,15 +83,6 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     starfish_rbc_service: Option<RbcServiceHandle>,
     starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
     rbc_dag_frontier_authority: bool,
-    /// Production remains closed until the ordered service event bridge has
-    /// drained startup recovery and persisted every replayed frontier before
-    /// processing `Ready`.
-    rbc_dag_authority_ready: bool,
-    /// Exact locally produced application header waiting for durable carrier
-    /// assignment. Authoritative RBC-DAG mode permits only one outstanding
-    /// application so a fast legacy proposal clock cannot outrun the carrier
-    /// actor or turn a fixed queue size into a protocol parameter.
-    rbc_dag_pending_application: Option<BlockReference>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -106,9 +97,12 @@ pub trait CommitObserver: Send + Sync {
         committed_leaders: Vec<(Data<VerifiedBlock>, Option<CommitMetastate>)>,
     ) -> Vec<CommittedSubDag>;
 
-    /// Observe an RBC-DAG frontier only after Core atomically persisted its
-    /// application commit (if any) and durable frontier receipt.
-    fn handle_rbc_dag_commit(&mut self, committed: &[CommittedSubDag]);
+    fn handle_rbc_dag_commit(
+        &mut self,
+        dag_state: &DagState,
+        anchor: BlockReference,
+        applications: &[BlockReference],
+    ) -> Vec<CommittedSubDag>;
 
     fn recover_committed(
         &mut self,
@@ -121,7 +115,7 @@ pub trait CommitObserver: Send + Sync {
 
 impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     pub fn new(
-        core: Core<H>,
+        mut core: Core<H>,
         signals: S,
         commit_observer: C,
         metrics: Arc<Metrics>,
@@ -131,6 +125,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
         rbc_dag_frontier_authority: bool,
     ) -> Self {
+        if rbc_dag_frontier_authority {
+            core.enable_rbc_dag_application_production();
+        }
         let committee_size = core.committee().len();
         let own_stake = core
             .committee()
@@ -153,8 +150,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             starfish_rbc_service,
             starfish_rbc_dag_shadow_service,
             rbc_dag_frontier_authority,
-            rbc_dag_authority_ready: !rbc_dag_frontier_authority,
-            rbc_dag_pending_application: None,
         }
     }
 
@@ -167,31 +162,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         AHashSet<BlockReference>,
         Vec<BlockReference>,
     ) {
-        if self.rbc_dag_frontier_authority {
-            tracing::warn!(
-                %source,
-                count = blocks.len(),
-                "Rejected generic block ingress while embedded RBC-DAG authority is active"
-            );
-            return (Vec::new(), AHashSet::new(), Vec::new());
-        }
-        self.add_blocks_inner(blocks, source)
-    }
-
-    fn add_blocks_inner(
-        &mut self,
-        blocks: Vec<(Data<VerifiedBlock>, Option<ProvableShard>)>,
-        source: DataSource,
-    ) -> (
-        Vec<BlockReference>,
-        AHashSet<BlockReference>,
-        Vec<BlockReference>,
-    ) {
         let previous_rounds = self.capture_rounds();
-        let mut materialization_candidates = blocks
-            .iter()
-            .map(|(block, _)| *block.reference())
-            .collect::<Vec<_>>();
         // todo: when block is updated we might return false here and it can make
         // committing longer
         let (
@@ -201,8 +172,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             used_additional_blocks,
             processed_blocks,
         ) = self.core.add_blocks(blocks, source);
-        materialization_candidates.extend(processed_blocks.iter().map(|block| *block.reference()));
-        self.notify_materialized_shadow_applications(materialization_candidates);
         if !processed_blocks.is_empty() {
             let block_refs: Vec<_> = processed_blocks.iter().map(|b| *b.reference()).collect();
             self.send_sailfish_message(SailfishServiceMessage::ProcessBlocks(block_refs));
@@ -233,31 +202,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         headers: Vec<Data<VerifiedBlock>>,
         source: DataSource,
     ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        if self.rbc_dag_frontier_authority {
-            tracing::warn!(
-                %source,
-                count = headers.len(),
-                "Rejected generic header ingress while embedded RBC-DAG authority is active"
-            );
-            return (AHashSet::new(), Vec::new());
-        }
-        self.add_headers_inner(headers, source)
-    }
-
-    fn add_headers_inner(
-        &mut self,
-        headers: Vec<Data<VerifiedBlock>>,
-        source: DataSource,
-    ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
         let previous_rounds = self.capture_rounds();
-        let mut materialization_candidates = headers
-            .iter()
-            .map(|header| *header.reference())
-            .collect::<Vec<_>>();
         let (success, missing_parents, processed_refs, processed_blocks) =
             self.core.add_headers(headers, source);
-        materialization_candidates.extend(processed_refs.iter().copied());
-        self.notify_materialized_shadow_applications(materialization_candidates);
         if !processed_blocks.is_empty() {
             // Send blocks to BLS service for verification of embedded BLS fields.
             self.send_bls_message(BlsServiceMessage::ProcessBlocks(processed_blocks.clone()));
@@ -283,89 +230,9 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         items: Vec<ReconstructedTransactionData>,
         source: DataSource,
     ) {
-        if self.rbc_dag_frontier_authority {
-            tracing::warn!(
-                %source,
-                count = items.len(),
-                "Rejected generic transaction-data ingress while embedded RBC-DAG authority is active"
-            );
-            return;
-        }
-        self.add_transaction_data_inner(items, source);
-    }
-
-    fn add_transaction_data_inner(
-        &mut self,
-        items: Vec<ReconstructedTransactionData>,
-        source: DataSource,
-    ) {
-        let references = items
-            .iter()
-            .map(|item| item.block_reference)
-            .collect::<Vec<_>>();
         self.core.add_transaction_data(items, source);
-        self.notify_materialized_shadow_applications(references);
         self.maybe_update_proposal_wait();
         self.try_new_block(BlockCreationReason::TransactionData);
-    }
-
-    /// Materialize one application header whose authority was established by
-    /// the carrier actor. Keeping this as a separate core-thread command makes
-    /// the capability impossible to forge through `BlockBatch::source`.
-    pub(crate) fn add_authorized_rbc_dag_header(
-        &mut self,
-        header: RbcCanonicalHeader,
-    ) -> (AHashSet<BlockReference>, Vec<BlockReference>) {
-        assert!(
-            self.rbc_dag_frontier_authority,
-            "carrier-authorized header ingress requires embedded RBC-DAG authority"
-        );
-        let mut block = header.to_authentication_free_block();
-        block.preserialize();
-        self.add_headers_inner(
-            vec![Data::new(block)],
-            DataSource::StarfishRbcDagAuthorizedHeader,
-        )
-    }
-
-    /// Attach payload data already verified against a carrier-authorized
-    /// canonical header. This cannot be invoked by a peer-controlled source
-    /// discriminator; only the typed core-thread command exposes it.
-    pub(crate) fn add_authorized_rbc_dag_payload(&mut self, item: ReconstructedTransactionData) {
-        assert!(
-            self.rbc_dag_frontier_authority,
-            "carrier-authorized payload ingress requires embedded RBC-DAG authority"
-        );
-        self.add_transaction_data_inner(vec![item], DataSource::StarfishRbcDagAuthorizedPayload);
-    }
-
-    /// Embedded RBC-DAG data availability is proven only by a concrete,
-    /// data-available DagState block. Payloads may arrive before their header
-    /// dependencies and remain buffered in Core; any later add path that
-    /// materializes the block retries this notification using the exact
-    /// processed references returned by Core.
-    fn notify_materialized_shadow_applications(
-        &self,
-        references: impl IntoIterator<Item = BlockReference>,
-    ) {
-        let Some(shadow) = self.starfish_rbc_dag_shadow_service.as_ref() else {
-            return;
-        };
-        for reference in references {
-            if self.core.dag_state().get_storage_block(reference).is_none()
-                || !self.core.dag_state().is_data_available(&reference)
-            {
-                continue;
-            }
-            if let Err(error) = shadow.application_data_available(reference) {
-                self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-                self.metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
-                tracing::warn!(
-                    ?reference,
-                    "Failed to record materialized RBC-DAG application availability: {error}"
-                );
-            }
-        }
     }
 
     /// Called after Sailfish RBC certification events have been applied to
@@ -413,10 +280,7 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// Sequence one exact deterministic carrier-frontier delta. In M7 this is
     /// the sole application-ordering authority; the legacy Starfish committer
     /// remains disabled in this mode.
-    pub fn apply_starfish_rbc_dag_frontier(
-        &mut self,
-        delta: CommittedFrontierDeltaV1,
-    ) -> Result<bool, RbcDagFrontierApplyError> {
+    pub fn apply_starfish_rbc_dag_frontier(&mut self, delta: CommittedFrontierDeltaV1) {
         assert!(
             self.rbc_dag_frontier_authority,
             "RBC-DAG frontier output requires the explicit authority mode"
@@ -426,63 +290,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             .iter()
             .map(RbcCanonicalHeader::reference)
             .collect::<Vec<_>>();
-        match self.core.handle_rbc_dag_committed_delta(
-            delta.output_sequence,
-            delta.anchor,
+        let committed = self.commit_observer.handle_rbc_dag_commit(
+            self.core.dag_state(),
+            delta.anchor.carrier(),
             &applications,
-        )? {
-            RbcDagFrontierApplyOutcome::ExactReplay => Ok(false),
-            RbcDagFrontierApplyOutcome::Applied(committed) => {
-                self.commit_observer.handle_rbc_dag_commit(&committed);
-                self.try_new_block(BlockCreationReason::PostCommit);
-                Ok(true)
-            }
-        }
-    }
-
-    /// Open the authoritative application-production gate only after the
-    /// service bridge observes `Ready`. Because the bridge awaits every prior
-    /// command, this is also a FIFO persistence barrier for recovery output.
-    pub(crate) fn activate_starfish_rbc_dag_authority(&mut self) {
-        assert!(
-            self.rbc_dag_frontier_authority,
-            "only embedded RBC-DAG authority mode has a startup barrier"
         );
-        if self.rbc_dag_authority_ready {
-            return;
-        }
-        self.rbc_dag_authority_ready = true;
-        self.core.enable_rbc_dag_application_production();
-        let initial_round = self.core.next_block_round();
-        self.force_new_block(initial_round);
-    }
-
-    /// Acknowledge that the exact local application header is durably bound
-    /// into a carrier. This releases application production independently of
-    /// later RBC delivery/consensus commitment, preserving the carrier
-    /// pipeline while bounding producer lead to one header.
-    pub fn apply_starfish_rbc_dag_application_assigned(&mut self, reference: BlockReference) {
-        assert!(
-            self.rbc_dag_frontier_authority,
-            "RBC-DAG application assignment requires the explicit authority mode"
-        );
-        let Some(expected) = self.rbc_dag_pending_application else {
-            tracing::debug!(
-                ?reference,
-                "Ignoring stale RBC-DAG application-assignment acknowledgement"
-            );
-            return;
-        };
-        if expected != reference {
-            tracing::debug!(
-                ?expected,
-                ?reference,
-                "Ignoring RBC-DAG application-assignment acknowledgement for a different header"
-            );
-            return;
-        }
-        self.rbc_dag_pending_application = None;
-        self.try_new_block(BlockCreationReason::CertificateEvent);
+        self.core.handle_rbc_dag_committed_delta(committed);
+        self.try_new_block(BlockCreationReason::PostCommit);
     }
 
     /// Store a Sailfish++ timeout certificate in DagState and retry block
@@ -548,9 +362,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     /// round can lag the threshold clock) target the round they can
     /// actually enter.
     pub fn try_new_block_relaxed(&mut self, proposal_round: RoundNumber) -> bool {
-        if !self.rbc_dag_authority_ready || self.rbc_dag_pending_application.is_some() {
-            return false;
-        }
         if self.core.dag_state().proposal_round() != proposal_round {
             return false;
         }
@@ -571,9 +382,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn try_new_block(&mut self, reason: BlockCreationReason) -> bool {
-        if !self.rbc_dag_authority_ready || self.rbc_dag_pending_application.is_some() {
-            return false;
-        }
         self.maybe_update_proposal_wait();
         if !self.core.committee().is_quorum(self.subscriber_stake) {
             return false;
@@ -602,9 +410,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
     }
 
     fn create_new_block(&mut self, reason: BlockCreationReason) -> bool {
-        if self.rbc_dag_pending_application.is_some() {
-            return false;
-        }
         tracing::debug!("Attempt to create new block in syncer after one trigger");
         let previous_rounds = self.capture_rounds();
         if let Some(ref block) = self.core.try_new_block(reason.as_str()) {
@@ -619,18 +424,23 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             if self.core.dag_state().consensus_protocol.is_starfish_rbc() {
                 let canonical = RbcCanonicalHeader::from_block_header(block.header())
                     .expect("locally built Starfish-RBC block must have canonical header content");
-                if self.rbc_dag_frontier_authority {
-                    self.rbc_dag_pending_application = Some(canonical.reference());
-                    let shadow = self
-                        .starfish_rbc_dag_shadow_service
-                        .as_ref()
-                        .expect("embedded RBC-DAG authority must start its carrier service");
-                    if let Err(error) = shadow.local_application(
-                        &canonical,
-                        block.transaction_data().cloned().map(Arc::new),
-                    ) {
+                let selected = self
+                    .starfish_rbc_service
+                    .as_ref()
+                    .expect("Starfish-RBC protocol must start its RBC service")
+                    .start_local_header_with_payload_blocking(
+                        RbcLocalHeader::from_canonical(&canonical),
+                        block.transaction_data().cloned(),
+                    )
+                    .expect("local Starfish-RBC header must be accepted before dissemination");
+                assert_eq!(
+                    selected.reference(),
+                    *block.reference(),
+                    "RBC service selected a different local header reference"
+                );
+                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
+                    if let Err(error) = shadow.local_header(&canonical) {
                         self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-                        self.metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                         self.metrics
                             .starfish_rbc_dag_shadow_inputs_total
                             .with_label_values(&["local", "dropped"])
@@ -638,35 +448,13 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                         tracing::warn!(
                             "Failed to enqueue RBC-DAG application carrier; the research run is invalid: {error}"
                         );
-                    } else {
-                        self.notify_materialized_shadow_applications([canonical.reference()]);
-                    }
-                } else {
-                    let selected = self
-                        .starfish_rbc_service
-                        .as_ref()
-                        .expect("direct Starfish-RBC mode must start its RBC service")
-                        .start_local_header_with_payload_blocking(
-                            RbcLocalHeader::from_canonical(&canonical),
-                            block.transaction_data().cloned(),
-                        )
-                        .expect("local Starfish-RBC header must be accepted before dissemination");
-                    assert_eq!(
-                        selected.reference(),
-                        *block.reference(),
-                        "RBC service selected a different local header reference"
-                    );
-                    if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                        if let Err(error) = shadow.local_header(&canonical) {
-                            self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-                            self.metrics
-                                .starfish_rbc_dag_shadow_inputs_total
-                                .with_label_values(&["local", "dropped"])
-                                .inc();
-                            tracing::warn!("Failed to enqueue RBC-DAG mirror carrier: {error}");
-                        } else {
-                            self.notify_materialized_shadow_applications([canonical.reference()]);
-                        }
+                    } else if let Err(error) =
+                        shadow.application_data_available(canonical.reference())
+                    {
+                        self.metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                        tracing::warn!(
+                            "Failed to record local RBC-DAG application availability: {error}"
+                        );
                     }
                 }
             }
@@ -821,8 +609,6 @@ impl SyncerSignals for bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use prometheus::Registry;
     use tempfile::TempDir;
 
@@ -831,21 +617,10 @@ mod tests {
         block_handler::BlockHandler,
         committee::Committee,
         config::{DisseminationMode, NodePrivateConfig, StorageBackend},
-        crypto::{Signer, TransactionsCommitment, mac_keyrings_for_test},
+        crypto::Signer,
         dag_state::{ConsensusProtocol, DagState},
-        encoder::ShardEncoder,
         metrics::Metrics,
-        starfish_rbc_dag::{
-            RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
-            storage::ShadowWalSyncPolicyV1,
-        },
-        starfish_rbc_dag_shadow::ShadowAuthorizerV1,
-        starfish_rbc_dag_shadow_service::{
-            ShadowServiceEventV1, start_starfish_rbc_dag_autonomous_clock_service_v1,
-        },
-        types::{
-            BaseTransaction, BlockAuthenticationScheme, Encoder, Transaction, TransactionData,
-        },
+        types::BaseTransaction,
     };
 
     #[derive(Default)]
@@ -871,7 +646,14 @@ mod tests {
             Vec::new()
         }
 
-        fn handle_rbc_dag_commit(&mut self, _committed: &[CommittedSubDag]) {}
+        fn handle_rbc_dag_commit(
+            &mut self,
+            _dag_state: &DagState,
+            _anchor: BlockReference,
+            _applications: &[BlockReference],
+        ) -> Vec<CommittedSubDag> {
+            Vec::new()
+        }
 
         fn recover_committed(
             &mut self,
@@ -1112,319 +894,6 @@ mod tests {
         );
         block.preserialize();
         Data::new(block)
-    }
-
-    fn make_starfish_rbc_round_1_application(
-        committee: &Committee,
-        authority: AuthorityIndex,
-        receiver: AuthorityIndex,
-    ) -> (
-        Data<VerifiedBlock>,
-        RbcCanonicalHeader,
-        ReconstructedTransactionData,
-    ) {
-        let payload_byte = u8::try_from(authority).unwrap();
-        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![
-            payload_byte;
-            64
-        ]))];
-        let mut encoder = Encoder::new(2, 4, 2).unwrap();
-        let encoded = encoder.encode_transactions(
-            &transactions,
-            committee.info_length(),
-            committee.len() - committee.info_length(),
-        );
-        let mut block = VerifiedBlock::new_starfish_rbc(
-            authority,
-            1,
-            committee
-                .authorities()
-                .map(|authority| BlockReference::new_test(authority, 0))
-                .collect(),
-            Vec::new(),
-            u64::from(authority) + 1,
-            transactions.clone(),
-            Some(encoded.clone()),
-        );
-        let canonical = RbcCanonicalHeader::from_block_header(block.header()).unwrap();
-        block.preserialize();
-
-        let mut transaction_data = TransactionData::new(transactions);
-        transaction_data.preserialize();
-        let (commitment, proof) =
-            TransactionsCommitment::new_from_encoded_transactions(&encoded, receiver as usize);
-        assert_eq!(commitment, canonical.transactions_commitment());
-        let mut shard_data = ProvableShard::new(
-            encoded[receiver as usize].clone(),
-            receiver as usize,
-            proof,
-            commitment,
-        );
-        shard_data.preserialize();
-        let payload = ReconstructedTransactionData {
-            block_reference: canonical.reference(),
-            transaction_data,
-            shard_data,
-        };
-        (Data::new(block), canonical, payload)
-    }
-
-    fn make_reconstructed_payload(
-        full_block: &Data<VerifiedBlock>,
-        committee: &Committee,
-        receiver: AuthorityIndex,
-    ) -> ReconstructedTransactionData {
-        let transactions = full_block
-            .transaction_data()
-            .expect("test application must carry transaction data")
-            .transactions()
-            .clone();
-        let mut encoder = Encoder::new(2, 4, 2).unwrap();
-        let encoded = encoder.encode_transactions(
-            &transactions,
-            committee.info_length(),
-            committee.len() - committee.info_length(),
-        );
-        let mut transaction_data = TransactionData::new(transactions);
-        transaction_data.preserialize();
-        let (commitment, proof) =
-            TransactionsCommitment::new_from_encoded_transactions(&encoded, receiver as usize);
-        let mut shard_data = ProvableShard::new(
-            encoded[receiver as usize].clone(),
-            receiver as usize,
-            proof,
-            commitment,
-        );
-        shard_data.preserialize();
-        ReconstructedTransactionData {
-            block_reference: *full_block.reference(),
-            transaction_data,
-            shard_data,
-        }
-    }
-
-    async fn wait_for_shadow_ready(events: &mut mpsc::Receiver<ShadowServiceEventV1>) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match events.recv().await {
-                    Some(ShadowServiceEventV1::Ready { autonomous_clock }) => {
-                        assert!(autonomous_clock);
-                        break;
-                    }
-                    Some(_) => {}
-                    None => panic!("autonomous shadow service stopped before Ready"),
-                }
-            }
-        })
-        .await
-        .expect("autonomous shadow service did not become ready");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rbc_dag_gate_and_typed_ingress_are_enforced() {
-        let authority = 0;
-        let committee = Committee::new_for_benchmarks(4);
-        let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(
-            &registry,
-            Some(committee.as_ref()),
-            Some("starfish-rbc"),
-            None,
-        );
-        let dir = TempDir::new().unwrap();
-        let recovered = DagState::open(
-            authority,
-            dir.path(),
-            metrics.clone(),
-            committee.clone(),
-            "honest".to_string(),
-            "starfish-rbc".to_string(),
-            &StorageBackend::Rocksdb,
-            false,
-            DisseminationMode::ProtocolDefault,
-        );
-        let private_config = NodePrivateConfig::new_for_tests(authority);
-        let (core, _) = Core::open(
-            TestBlockHandler,
-            authority,
-            committee.clone(),
-            private_config,
-            metrics.clone(),
-            recovered,
-            None,
-        );
-
-        let shadow_directory = TempDir::new().unwrap();
-        let keyrings = mac_keyrings_for_test(committee.len());
-        let committee_context = RbcDagCommitteeContextV1::new(committee.clone()).unwrap();
-        let context = RbcDagContextV1::new_with_committee(
-            RbcDagProtocolInstanceId::new([0x53; 32]).unwrap(),
-            &committee_context,
-            BlockAuthenticationScheme::MacVector,
-        );
-        let (shadow_service, mut shadow_events, shadow_task) =
-            start_starfish_rbc_dag_autonomous_clock_service_v1(
-                shadow_directory.path().join("standalone.wal"),
-                committee_context,
-                authority,
-                context,
-                ShadowAuthorizerV1::MacVector(keyrings[authority as usize].clone()),
-                Vec::new(),
-                Duration::from_secs(3_600),
-                ShadowWalSyncPolicyV1::EveryBatch,
-            )
-            .unwrap();
-        wait_for_shadow_ready(&mut shadow_events).await;
-        // This unit drives the Syncer boundary directly instead of running the
-        // production event bridge. Keep draining the actor's bounded event
-        // channel so local carrier fanout cannot block the actor (and hence a
-        // later graceful shutdown) behind events this test intentionally does
-        // not consume.
-        let shadow_event_drain =
-            tokio::spawn(async move { while shadow_events.recv().await.is_some() {} });
-
-        let mut syncer = Syncer::new(
-            core,
-            TestSignals::default(),
-            NoopCommitObserver,
-            metrics,
-            None,
-            None,
-            None,
-            Some(shadow_service.clone()),
-            true,
-        );
-        syncer.connected_authorities.extend([1, 2, 3]);
-        syncer.subscribed_by_authorities.extend([1, 2, 3]);
-        syncer.recompute_subscriber_stake();
-
-        // Production is intentionally closed until the ordered service bridge
-        // consumes `Ready`. Exercise that authority barrier before asserting
-        // the one-outstanding application gate.
-        syncer.activate_starfish_rbc_dag_authority();
-        let first = syncer
-            .rbc_dag_pending_application
-            .expect("round-one application must wait for carrier assignment");
-        assert_eq!(first.round, 1);
-        assert_eq!(syncer.core.last_proposed(), 1);
-        assert_eq!(syncer.signals.new_block_ready_count, 1);
-        assert!(!shadow_task.is_finished());
-
-        // Peer-controlled generic ingress cannot materialize authentication-
-        // free applications in standalone mode.
-        let (full_one, canonical_one, payload_one) =
-            make_starfish_rbc_round_1_application(&committee, 1, authority);
-        let reference_one = canonical_one.reference();
-        let mut header_one = canonical_one.to_authentication_free_block();
-        header_one.preserialize();
-        let generic_headers = syncer.add_headers(
-            vec![Data::new(header_one)],
-            DataSource::BlockBundleStreamingHeader,
-        );
-        assert!(generic_headers.0.is_empty());
-        assert!(generic_headers.1.is_empty());
-        assert!(
-            syncer
-                .core
-                .dag_state()
-                .get_storage_block(reference_one)
-                .is_none()
-        );
-
-        let (full_two, canonical_two, _) =
-            make_starfish_rbc_round_1_application(&committee, 2, authority);
-        let reference_two = canonical_two.reference();
-        let generic_blocks =
-            syncer.add_blocks(vec![(full_two, None)], DataSource::BlockBundleStreaming);
-        assert!(generic_blocks.0.is_empty());
-        assert!(generic_blocks.1.is_empty());
-        assert!(generic_blocks.2.is_empty());
-        assert!(
-            syncer
-                .core
-                .dag_state()
-                .get_storage_block(reference_two)
-                .is_none()
-        );
-
-        // The actor-only typed header command admits the exact canonical
-        // application, while the generic payload command remains closed.
-        let (missing_one, _) = syncer.add_authorized_rbc_dag_header(canonical_one);
-        assert!(missing_one.is_empty());
-        assert!(
-            syncer
-                .core
-                .dag_state()
-                .get_storage_block(reference_one)
-                .is_some()
-        );
-        assert!(!syncer.core.dag_state().is_data_available(&reference_one));
-
-        syncer.add_transaction_data(
-            vec![payload_one],
-            DataSource::StarfishRbcDagAuthorizedPayload,
-        );
-        assert!(!syncer.core.dag_state().is_data_available(&reference_one));
-
-        syncer.add_authorized_rbc_dag_payload(make_reconstructed_payload(
-            &full_one, &committee, authority,
-        ));
-        assert!(syncer.core.dag_state().is_data_available(&reference_one));
-
-        let (missing_two, _) = syncer.add_authorized_rbc_dag_header(canonical_two);
-        assert!(missing_two.is_empty());
-        assert!(
-            syncer
-                .core
-                .dag_state()
-                .get_storage_block(reference_two)
-                .is_some()
-        );
-
-        // Even after a typed header quorum advances the application clock,
-        // all creation triggers remain closed while the first header is pending.
-        assert_eq!(syncer.core.dag_state().threshold_clock_round(), 2);
-        assert!(!syncer.try_new_block(BlockCreationReason::NewHeaders));
-        assert_eq!(syncer.core.last_proposed(), 1);
-        assert_eq!(syncer.rbc_dag_pending_application, Some(first));
-
-        let wrong = BlockReference::new_test(3, first.round);
-        syncer.apply_starfish_rbc_dag_application_assigned(wrong);
-        assert_eq!(syncer.rbc_dag_pending_application, Some(first));
-        assert_eq!(syncer.core.last_proposed(), 1);
-
-        // The exact acknowledgement releases one proposal attempt. That
-        // attempt creates round two and immediately closes the gate around
-        // the new outstanding header; it cannot create more than one block.
-        syncer.apply_starfish_rbc_dag_application_assigned(first);
-        let second = syncer
-            .rbc_dag_pending_application
-            .expect("round-two application must become the sole outstanding header");
-        assert_eq!(second.round, 2);
-        assert_ne!(second, first);
-        assert_eq!(syncer.core.last_proposed(), 2);
-        assert_eq!(syncer.signals.new_block_ready_count, 2);
-        assert!(!syncer.try_new_block(BlockCreationReason::CertificateEvent));
-        assert_eq!(syncer.core.last_proposed(), 2);
-
-        // A duplicate acknowledgement for the old header is stale and must
-        // neither release nor replace the current gate.
-        syncer.apply_starfish_rbc_dag_application_assigned(first);
-        assert_eq!(syncer.rbc_dag_pending_application, Some(second));
-        assert_eq!(syncer.core.last_proposed(), 2);
-
-        // With no round-three quorum, the exact second acknowledgement simply
-        // clears the gate. A later duplicate is harmless and leaves it clear.
-        syncer.apply_starfish_rbc_dag_application_assigned(second);
-        assert_eq!(syncer.rbc_dag_pending_application, None);
-        assert_eq!(syncer.core.last_proposed(), 2);
-        syncer.apply_starfish_rbc_dag_application_assigned(second);
-        assert_eq!(syncer.rbc_dag_pending_application, None);
-        assert_eq!(syncer.signals.new_block_ready_count, 2);
-
-        shadow_service.shutdown().await.unwrap();
-        shadow_task.await.unwrap();
-        shadow_event_drain.await.unwrap();
     }
 
     #[test]

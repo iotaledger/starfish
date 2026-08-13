@@ -94,16 +94,6 @@ impl<T: Ord + AddAssign + DivUsize + Copy + Default> PreciseHistogram<T> {
         self.points.clear();
     }
 
-    /// Reset both the current distribution and its lifetime aggregates.
-    /// Used only when a benchmark establishes a new explicit observation
-    /// epoch; periodic reporting continues to use `clear` and preserves its
-    /// historical running totals.
-    pub fn reset(&mut self) {
-        self.points.clear();
-        self.sum = T::default();
-        self.count = 0;
-    }
-
     fn pct1000_index(&self, pct1000: usize) -> usize {
         debug_assert!(pct1000 < 1000);
         self.points.len() * pct1000 / 1000

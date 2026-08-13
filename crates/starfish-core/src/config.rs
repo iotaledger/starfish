@@ -414,11 +414,7 @@ impl NodePrivateConfig {
 
     pub fn starfish_rbc_dag_autonomous_clock_wal(&self) -> PathBuf {
         self.storage_path
-            // V4 promotes the proved optimistic ECHO predicate from planning
-            // into authoritative RBC delivery while retaining the separate
-            // Q-READY certificate latch. Older traces must not be reinterpreted
-            // under the stronger output semantics.
-            .join("starfish-rbc-dag-autonomous-clock-v4.wal")
+            .join("starfish-rbc-dag-autonomous-clock-v1.wal")
     }
 
     pub fn starfish_rbc_dag_shadow_buffered_benchmark_wal(&self) -> PathBuf {
@@ -428,7 +424,7 @@ impl NodePrivateConfig {
 
     pub fn starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal(&self) -> PathBuf {
         self.storage_path
-            .join("starfish-rbc-dag-autonomous-clock-buffered-benchmark-v3.wal")
+            .join("starfish-rbc-dag-autonomous-clock-buffered-benchmark-v1.wal")
     }
 }
 
@@ -503,7 +499,7 @@ mod tests {
             private_config.starfish_rbc_dag_autonomous_clock_wal(),
             Path::new("benchmark")
                 .join("storage-0")
-                .join("starfish-rbc-dag-autonomous-clock-v4.wal")
+                .join("starfish-rbc-dag-autonomous-clock-v1.wal")
         );
     }
 }

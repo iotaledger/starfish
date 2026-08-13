@@ -10,7 +10,6 @@ edition = "2021"
 clap = { workspace = true }
 color-eyre = { workspace = true }
 eyre = { workspace = true }
-futures = { workspace = true }
 prettytable-rs = "0.10"
 starfish-core = { path = "../starfish-core" }
 tokio = { workspace = true }

@@ -9,7 +9,6 @@
 //! evaluates the explicit vote/no-vote evidence committed by those vertices.
 
 use std::{
-    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
@@ -57,27 +56,6 @@ pub enum ProjectionDecisionV1 {
     },
 }
 
-/// Immutable level-two evidence that allows an honest author to create the
-/// next consensus vertex through the optimistic C1 pacemaker condition.
-///
-/// Every returned reference is from consensus round `c - 1` and there is at
-/// most one reference per author. A vote witness contains quorum stake voting
-/// for one exact leader at `c - 2`, plus any caller-required own/leader parent
-/// that is not already in that proof. A skip witness is the deterministic
-/// union of the per-candidate negative-choice quorums required by the
-/// direct-skip evaluator and those same required parents.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum C1StrongParentWitnessV1 {
-    Vote {
-        leader: ConsensusVertexReference,
-        parents: Vec<ConsensusVertexReference>,
-    },
-    DirectSkip {
-        slot: LeaderSlotV1,
-        parents: Vec<ConsensusVertexReference>,
-    },
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CertifiedProjectionError {
     CommitteeMismatch,
@@ -111,10 +89,16 @@ pub enum CertifiedProjectionError {
         required: Option<BlockReference>,
         actual: Option<BlockReference>,
     },
+    FrontierRegressesCommitted {
+        authority: AuthorityIndex,
+        committed: Option<BlockReference>,
+        actual: Option<BlockReference>,
+    },
     StakeOverflow,
     InvalidLeaderSlot(LeaderSlotV1),
     MultipleCertifiedLeaderValues(LeaderSlotV1),
     ConflictingDirectDecision(LeaderSlotV1),
+    AnchorNotCommitted(ConsensusVertexReference),
     AnchorTooEarly {
         slot: LeaderSlotV1,
         anchor: ConsensusVertexReference,
@@ -257,12 +241,6 @@ impl CertifiedProjectionModel {
         Ok(())
     }
 
-    pub(crate) fn is_data_available(&self, reference: BlockReference) -> bool {
-        self.carriers
-            .get(&reference)
-            .is_some_and(|state| state.data_available)
-    }
-
     pub fn carrier_is_stored(&self, reference: BlockReference) -> bool {
         self.carriers.contains_key(&reference)
     }
@@ -325,15 +303,6 @@ impl CertifiedProjectionModel {
         self.vertices.len()
     }
 
-    pub(crate) fn projected_stake_at_round(&self, round: RoundNumber) -> Stake {
-        self.vertices_at_round(round)
-            .map(|(reference, _)| reference.author())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter_map(|authority| self.committee.get_stake(authority))
-            .fold(0, Stake::saturating_add)
-    }
-
     pub fn slot_values(
         &self,
         author: AuthorityIndex,
@@ -358,122 +327,6 @@ impl CertifiedProjectionModel {
         self.vertices
             .get(&reference)
             .map(|projected| projected.vertex.leader_choice())
-    }
-
-    /// Return the exact C1 witness for creating consensus round `c`.
-    ///
-    /// Exact-vote witnesses consider every projected equivocation, then select
-    /// one deterministic matching value per author. Direct-skip witnesses use
-    /// one deterministic representative per author so their per-candidate
-    /// negative quorums have one compatible immutable union. Returning `None`
-    /// means C1 is not ready and the caller must wait or use a separately
-    /// justified C2/C3 fallback.
-    pub(crate) fn c1_strong_parent_witness(
-        &self,
-        consensus_round: RoundNumber,
-        required_parents: &[ConsensusVertexReference],
-    ) -> Result<Option<C1StrongParentWitnessV1>, CertifiedProjectionError> {
-        if consensus_round < 3 {
-            return Ok(None);
-        }
-        let voting_round = consensus_round - 1;
-        let slot = self.leader_slot(consensus_round - 2);
-        let representatives = self.deterministic_round_values(voting_round);
-
-        let mut votes = BTreeMap::<
-            ConsensusVertexReference,
-            BTreeMap<AuthorityIndex, ConsensusVertexReference>,
-        >::new();
-        for (reference, _) in self.vertices_at_round(voting_round) {
-            if let Some(LeaderChoiceV1::Vote { leader }) = self.leader_choice(reference) {
-                votes
-                    .entry(leader)
-                    .or_default()
-                    .entry(reference.author())
-                    .or_insert(reference);
-            }
-        }
-        let mut vote_witnesses = Vec::new();
-        for (leader, voters) in votes {
-            if let Some(parents) =
-                self.frontier_fresh_quorum(voters.into_values(), required_parents)?
-            {
-                vote_witnesses.push((leader, parents));
-            }
-        }
-        if vote_witnesses.len() > 1 {
-            return Err(CertifiedProjectionError::MultipleCertifiedLeaderValues(
-                slot,
-            ));
-        }
-        if let Some((leader, parents)) = vote_witnesses.pop() {
-            return Ok(Some(C1StrongParentWitnessV1::Vote { leader, parents }));
-        }
-
-        let candidates = self.slot_values(slot.author, slot.round);
-        let mut union = BTreeMap::new();
-        if candidates.is_empty() {
-            let Some(parents) =
-                self.frontier_fresh_quorum(representatives.values().copied(), required_parents)?
-            else {
-                return Ok(None);
-            };
-            for reference in parents {
-                union.insert(reference.author(), reference);
-            }
-        } else {
-            for candidate in candidates {
-                let negative = representatives.values().copied().filter(|reference| {
-                    self.leader_choice(*reference)
-                        .is_some_and(|choice| match choice {
-                            LeaderChoiceV1::Vote { leader } => leader != candidate,
-                            LeaderChoiceV1::NoVote { .. } => true,
-                        })
-                });
-                let Some(parents) = self.lexicographic_quorum(negative)? else {
-                    return Ok(None);
-                };
-                for reference in parents {
-                    union.insert(reference.author(), reference);
-                }
-            }
-            if !self.extend_with_required_parents(&mut union, required_parents) {
-                return Ok(None);
-            }
-        }
-        Ok(Some(C1StrongParentWitnessV1::DirectSkip {
-            slot,
-            parents: union.into_values().collect(),
-        }))
-    }
-
-    /// Componentwise join of the exact effective frontiers inherited through
-    /// one immutable strong-parent set. Callers extend only their own
-    /// component from this base; copying the globally freshest closed
-    /// frontier would make every consensus vertex wait for unrelated
-    /// all-author delivery tails.
-    pub(crate) fn joined_strong_parent_frontier(
-        &self,
-        strong_parents: &[ConsensusVertexReference],
-    ) -> Result<DeliveryFrontierV1, CertifiedProjectionError> {
-        let mut parent_frontiers = Vec::with_capacity(strong_parents.len());
-        for parent in strong_parents {
-            if parent.consensus_round() == 0 {
-                if parent.carrier() != carrier_genesis_reference(parent.author()) {
-                    return Err(CertifiedProjectionError::InvalidGenesisStrongParent(
-                        *parent,
-                    ));
-                }
-                parent_frontiers.push(vec![None; self.committee.len()]);
-                continue;
-            }
-            let projected = self
-                .vertices
-                .get(parent)
-                .ok_or(CertifiedProjectionError::MissingStrongParent(*parent))?;
-            parent_frontiers.push(projected.effective_frontier.clone());
-        }
-        self.join_frontiers(&parent_frontiers)
     }
 
     /// Project one optional consensus vertex if every stateful eligibility
@@ -636,44 +489,34 @@ impl CertifiedProjectionModel {
         }
     }
 
-    /// Record an externally selected committed anchor and return the monotone
-    /// componentwise join of every committed anchor frontier. Consecutive
-    /// Starfish leaders need not be ancestors of one another, so their exact
-    /// frontiers may advance different authority components concurrently.
-    /// Logical anchor membership is therefore independent of whether this
-    /// particular anchor advances the accumulated output frontier.
+    /// Record an externally selected committed anchor while enforcing exact
+    /// componentwise frontier monotonicity. The runtime committer remains out
+    /// of scope for this model.
     pub fn record_committed_anchor(
         &mut self,
         anchor: ConsensusVertexReference,
-    ) -> Result<DeliveryFrontierV1, CertifiedProjectionError> {
+    ) -> Result<(), CertifiedProjectionError> {
         let projected = self
             .vertices
             .get(&anchor)
             .ok_or(CertifiedProjectionError::MissingStrongParent(anchor))?;
         let frontier = projected.effective_frontier.clone();
-        let accumulated = self.committed_frontier.clone();
-        let joined = self.join_frontiers(&[accumulated, frontier])?;
-        self.committed_frontier.clone_from(&joined);
+        self.ensure_dominates_committed(&frontier)?;
+        self.committed_frontier = frontier;
         self.committed_anchors.insert(anchor);
-        Ok(joined)
+        Ok(())
     }
 
-    /// Decide an older leader from a later projected anchor selected by the
-    /// ordered committer. A reachable certifying-round vertex with a QC yields
-    /// commit; absence yields skip.
-    ///
-    /// The anchor's frontier is deliberately not required to have been
-    /// applied yet. The committer first derives the finalized leader sequence
-    /// from newest to oldest, then applies committed frontiers in the opposite
-    /// (oldest-to-newest) order.
+    /// Decide an older leader from a later committed anchor. A reachable
+    /// certifying-round vertex with a QC yields commit; absence yields skip.
     pub fn indirect_decision(
         &self,
         slot: LeaderSlotV1,
         anchor: ConsensusVertexReference,
     ) -> Result<ProjectionDecisionV1, CertifiedProjectionError> {
         self.validate_leader_slot(slot)?;
-        if !self.vertices.contains_key(&anchor) {
-            return Err(CertifiedProjectionError::MissingStrongParent(anchor));
+        if !self.committed_anchors.contains(&anchor) {
+            return Err(CertifiedProjectionError::AnchorNotCommitted(anchor));
         }
         let minimum_anchor_round = slot.round.saturating_add(3);
         if anchor.consensus_round() < minimum_anchor_round {
@@ -795,65 +638,31 @@ impl CertifiedProjectionModel {
         Ok(())
     }
 
+    fn ensure_dominates_committed(
+        &self,
+        frontier: &[Option<BlockReference>],
+    ) -> Result<(), CertifiedProjectionError> {
+        for (index, (committed, actual)) in self
+            .committed_frontier
+            .iter()
+            .copied()
+            .zip(frontier.iter().copied())
+            .enumerate()
+        {
+            if !self.is_exact_extension(committed, actual) {
+                return Err(CertifiedProjectionError::FrontierRegressesCommitted {
+                    authority: index as AuthorityIndex,
+                    committed,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// True iff `descendant` is the same exact prefix tip as `base`, or an
     /// exact self-chain extension whose intermediate carrier headers are known.
     fn is_exact_extension(
-        &self,
-        base: Option<BlockReference>,
-        descendant: Option<BlockReference>,
-    ) -> bool {
-        self.exact_extension_on_closed_prefix(base, descendant)
-            .unwrap_or_else(|| self.is_exact_extension_by_chain(base, descendant))
-    }
-
-    /// Resolve comparisons whose answer is already encoded by the exact
-    /// per-author closed prefix. Returning `None` preserves the historical
-    /// header-chain walk for staged forks and incomplete/non-closed tails.
-    fn exact_extension_on_closed_prefix(
-        &self,
-        base: Option<BlockReference>,
-        descendant: Option<BlockReference>,
-    ) -> Option<bool> {
-        let Some(descendant) = descendant else {
-            return Some(base.is_none());
-        };
-        if base.is_some_and(|base| base.authority != descendant.authority) {
-            return Some(false);
-        }
-        let base_round = base.map_or(0, |reference| reference.round);
-        if descendant.round < base_round {
-            return Some(false);
-        }
-        if base == Some(descendant) {
-            return Some(true);
-        }
-        if descendant.round == base_round {
-            return Some(match base {
-                Some(_) => false,
-                None => descendant == carrier_genesis_reference(descendant.authority),
-            });
-        }
-        if !self.is_exact_closed_prefix_reference(descendant) {
-            return None;
-        }
-        match base {
-            None => Some(true),
-            Some(base) if self.is_exact_closed_prefix_reference(base) => Some(true),
-            Some(_) => None,
-        }
-    }
-
-    fn is_exact_closed_prefix_reference(&self, reference: BlockReference) -> bool {
-        if reference.round == 0 {
-            return reference == carrier_genesis_reference(reference.authority);
-        }
-        self.closed_prefixes
-            .get(reference.authority as usize)
-            .and_then(|prefix| prefix.get((reference.round - 1) as usize))
-            .is_some_and(|closed| *closed == reference)
-    }
-
-    fn is_exact_extension_by_chain(
         &self,
         base: Option<BlockReference>,
         descendant: Option<BlockReference>,
@@ -906,215 +715,6 @@ impl CertifiedProjectionModel {
                     .get(reference)
                     .map(|projected| (*reference, projected))
             })
-    }
-
-    fn deterministic_round_values(
-        &self,
-        round: RoundNumber,
-    ) -> BTreeMap<AuthorityIndex, ConsensusVertexReference> {
-        let mut by_author = BTreeMap::new();
-        for (reference, _) in self.vertices_at_round(round) {
-            by_author.entry(reference.author()).or_insert(reference);
-        }
-        by_author
-    }
-
-    fn lexicographic_quorum(
-        &self,
-        references: impl Iterator<Item = ConsensusVertexReference>,
-    ) -> Result<Option<Vec<ConsensusVertexReference>>, CertifiedProjectionError> {
-        let mut stake = 0u64;
-        let mut selected = Vec::new();
-        for reference in references {
-            let author_stake = self
-                .committee
-                .get_stake(reference.author())
-                .ok_or(CertifiedProjectionError::StakeOverflow)?;
-            stake = stake
-                .checked_add(author_stake)
-                .ok_or(CertifiedProjectionError::StakeOverflow)?;
-            selected.push(reference);
-            if stake >= self.committee.quorum_threshold() {
-                return Ok(Some(selected));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Choose quorum evidence that maximizes new exact-prefix coverage without
-    /// increasing the parent budget of the former canonical-prefix selector.
-    ///
-    /// The baseline is the lexicographic quorum unioned with every required
-    /// parent. The greedy candidate set may use at most that many references.
-    /// Each choice must leave enough remaining slots to complete weighted
-    /// quorum stake; if freshness selection cannot do so, the known-valid
-    /// baseline is returned. Required references count toward proof stake only
-    /// when they are exact members of `references`.
-    pub(crate) fn frontier_fresh_quorum(
-        &self,
-        references: impl IntoIterator<Item = ConsensusVertexReference>,
-        required: &[ConsensusVertexReference],
-    ) -> Result<Option<Vec<ConsensusVertexReference>>, CertifiedProjectionError> {
-        let mut candidates = BTreeMap::<AuthorityIndex, ConsensusVertexReference>::new();
-        for reference in references {
-            candidates
-                .entry(reference.author())
-                .and_modify(|existing| *existing = (*existing).min(reference))
-                .or_insert(reference);
-        }
-
-        let Some(baseline_proof) = self.lexicographic_quorum(candidates.values().copied())? else {
-            return Ok(None);
-        };
-        let mut baseline = baseline_proof
-            .into_iter()
-            .map(|reference| (reference.author(), reference))
-            .collect::<BTreeMap<_, _>>();
-        if !self.extend_with_required_parents(&mut baseline, required) {
-            return Ok(None);
-        }
-        let parent_budget = baseline.len();
-
-        let mut selected = BTreeMap::new();
-        if !self.extend_with_required_parents(&mut selected, required) {
-            return Ok(None);
-        }
-        let mut proof_stake = selected
-            .iter()
-            .filter(|(author, reference)| candidates.get(author) == Some(reference))
-            .try_fold(0u64, |stake, (author, _)| {
-                stake
-                    .checked_add(
-                        self.committee
-                            .get_stake(*author)
-                            .ok_or(CertifiedProjectionError::StakeOverflow)?,
-                    )
-                    .ok_or(CertifiedProjectionError::StakeOverflow)
-            })?;
-        let quorum = self.committee.quorum_threshold();
-        let tie_origin: RoundNumber = candidates
-            .values()
-            .next()
-            .map_or(0, |reference| reference.consensus_round())
-            % u32::try_from(self.committee.len())
-                .unwrap_or(u32::MAX)
-                .max(1);
-
-        while proof_stake < quorum && selected.len() < parent_budget {
-            let selected_references = selected.values().copied().collect::<Vec<_>>();
-            let base = match self.joined_strong_parent_frontier(&selected_references) {
-                Ok(base) => base,
-                Err(_) => return Ok(Some(baseline.into_values().collect())),
-            };
-            let remaining_slots = parent_budget.saturating_sub(selected.len() + 1);
-            let mut best = None;
-            for (author, reference) in &candidates {
-                if selected.contains_key(author) {
-                    continue;
-                }
-                let Some(projected) = self.vertices.get(reference) else {
-                    continue;
-                };
-                if self
-                    .join_frontiers(&[base.clone(), projected.effective_frontier.clone()])
-                    .is_err()
-                {
-                    continue;
-                }
-                let author_stake = self
-                    .committee
-                    .get_stake(*author)
-                    .ok_or(CertifiedProjectionError::StakeOverflow)?;
-                let candidate_stake = proof_stake
-                    .checked_add(author_stake)
-                    .ok_or(CertifiedProjectionError::StakeOverflow)?;
-                let mut remaining_stakes: Vec<Stake> = candidates
-                    .keys()
-                    .filter(|candidate_author| {
-                        **candidate_author != *author && !selected.contains_key(*candidate_author)
-                    })
-                    .map(|candidate_author| {
-                        self.committee
-                            .get_stake(*candidate_author)
-                            .ok_or(CertifiedProjectionError::StakeOverflow)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                remaining_stakes.sort_unstable_by(|left: &Stake, right: &Stake| right.cmp(left));
-                let maximum_completion = remaining_stakes
-                    .into_iter()
-                    .take(remaining_slots)
-                    .try_fold(candidate_stake, |stake: Stake, next: Stake| {
-                        stake
-                            .checked_add(next)
-                            .ok_or(CertifiedProjectionError::StakeOverflow)
-                    })?;
-                if maximum_completion < quorum {
-                    continue;
-                }
-
-                let (advanced_components, round_advance) = base
-                    .iter()
-                    .zip(&projected.effective_frontier)
-                    .fold((0usize, 0u64), |(components, advance), (base, tip)| {
-                        let base_round = base.map_or(0, |reference| reference.round);
-                        let tip_round = tip.map_or(0, |reference| reference.round);
-                        let delta = tip_round.saturating_sub(base_round);
-                        (
-                            components.saturating_add(usize::from(delta != 0)),
-                            advance.saturating_add(u64::from(delta)),
-                        )
-                    });
-                let committee_size = u32::try_from(self.committee.len())
-                    .unwrap_or(u32::MAX)
-                    .max(1);
-                let rotating_rank =
-                    u32::from(*author).wrapping_add(committee_size - tie_origin) % committee_size;
-                let score = (
-                    advanced_components,
-                    round_advance,
-                    Reverse(rotating_rank),
-                    Reverse(*reference),
-                );
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_score, _, _)| score > *best_score)
-                {
-                    best = Some((score, *author, *reference));
-                }
-            }
-            let Some((_, author, reference)) = best else {
-                return Ok(Some(baseline.into_values().collect()));
-            };
-            selected.insert(author, reference);
-            proof_stake = proof_stake
-                .checked_add(
-                    self.committee
-                        .get_stake(author)
-                        .ok_or(CertifiedProjectionError::StakeOverflow)?,
-                )
-                .ok_or(CertifiedProjectionError::StakeOverflow)?;
-        }
-
-        if proof_stake < quorum {
-            return Ok(Some(baseline.into_values().collect()));
-        }
-        Ok(Some(selected.into_values().collect()))
-    }
-
-    fn extend_with_required_parents(
-        &self,
-        selected: &mut BTreeMap<AuthorityIndex, ConsensusVertexReference>,
-        required: &[ConsensusVertexReference],
-    ) -> bool {
-        for reference in required {
-            if selected
-                .insert(reference.author(), *reference)
-                .is_some_and(|existing| existing != *reference)
-            {
-                return false;
-            }
-        }
-        true
     }
 
     fn voter_authors(
@@ -1213,7 +813,7 @@ impl CertifiedProjectionModel {
     }
 
     #[cfg(test)]
-    pub(crate) fn inject_projected_for_test(
+    fn inject_projected_for_test(
         &mut self,
         reference: ConsensusVertexReference,
         strong_parents: Vec<ConsensusVertexReference>,
@@ -1240,139 +840,6 @@ impl CertifiedProjectionModel {
             .entry((reference.author(), reference.consensus_round()))
             .or_default()
             .insert(reference);
-    }
-}
-
-/// Independent planning-only projection over promised, data-available carrier
-/// prefixes.
-///
-/// This wrapper deliberately exposes no decision, committed-anchor, or
-/// committed-frontier API. Its inner model reuses the exact carrier-chain,
-/// strong-parent, and frontier validation of the certified projection, but
-/// interprets that private plane's delivery latch as `DeliveryPromised`.
-/// Consequently its contiguous prefixes and projected vertices can run ahead
-/// of certification without becoming output authority.
-#[derive(Clone)]
-pub(crate) struct PromisedProjectionModel {
-    inner: CertifiedProjectionModel,
-}
-
-impl PromisedProjectionModel {
-    pub(crate) fn from_committee_context(committee: RbcDagCommitteeContextV1) -> Self {
-        Self {
-            inner: CertifiedProjectionModel::from_committee_context(committee),
-        }
-    }
-
-    pub(crate) fn stage_carrier(
-        &mut self,
-        candidate: CandidateCarrierV1,
-    ) -> Result<(), CertifiedProjectionError> {
-        self.inner.stage_carrier(candidate)
-    }
-
-    /// Mark one exact carrier promised. This advances only the planner's
-    /// private contiguous prefix once local DA is also established.
-    pub(crate) fn mark_promised(
-        &mut self,
-        reference: BlockReference,
-    ) -> Result<(), CertifiedProjectionError> {
-        self.inner.mark_delivered(reference)
-    }
-
-    pub(crate) fn mark_data_available(
-        &mut self,
-        reference: BlockReference,
-    ) -> Result<(), CertifiedProjectionError> {
-        self.inner.mark_data_available(reference)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_data_available(&self, reference: BlockReference) -> bool {
-        self.inner.is_data_available(reference)
-    }
-
-    pub(crate) fn carrier_is_stored(&self, reference: BlockReference) -> bool {
-        self.inner.carrier_is_stored(reference)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn promised_tip(&self, authority: AuthorityIndex) -> Option<BlockReference> {
-        self.inner.closed_tip(authority)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_projected(&self, reference: ConsensusVertexReference) -> bool {
-        self.inner.is_projected(reference)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn projected_vertex(
-        &self,
-        reference: ConsensusVertexReference,
-    ) -> Option<&ConsensusVertexV1> {
-        self.inner.projected_vertex(reference)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn effective_frontier(
-        &self,
-        reference: ConsensusVertexReference,
-    ) -> Option<&[Option<BlockReference>]> {
-        self.inner.effective_frontier(reference)
-    }
-
-    pub(crate) fn projected_values_at_round(
-        &self,
-        round: RoundNumber,
-    ) -> Vec<ConsensusVertexReference> {
-        self.inner.projected_values_at_round(round)
-    }
-
-    pub(crate) fn projected_stake_at_round(&self, round: RoundNumber) -> Stake {
-        self.inner.projected_stake_at_round(round)
-    }
-
-    pub(crate) fn c1_strong_parent_witness(
-        &self,
-        consensus_round: RoundNumber,
-        required_parents: &[ConsensusVertexReference],
-    ) -> Result<Option<C1StrongParentWitnessV1>, CertifiedProjectionError> {
-        self.inner
-            .c1_strong_parent_witness(consensus_round, required_parents)
-    }
-
-    pub(crate) fn frontier_fresh_quorum(
-        &self,
-        references: impl IntoIterator<Item = ConsensusVertexReference>,
-        required: &[ConsensusVertexReference],
-    ) -> Result<Option<Vec<ConsensusVertexReference>>, CertifiedProjectionError> {
-        self.inner.frontier_fresh_quorum(references, required)
-    }
-
-    pub(crate) fn joined_strong_parent_frontier(
-        &self,
-        strong_parents: &[ConsensusVertexReference],
-    ) -> Result<DeliveryFrontierV1, CertifiedProjectionError> {
-        self.inner.joined_strong_parent_frontier(strong_parents)
-    }
-
-    pub(crate) fn try_project(
-        &mut self,
-        carrier_reference: BlockReference,
-    ) -> Result<ConsensusVertexReference, CertifiedProjectionError> {
-        self.inner.try_project(carrier_reference)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_projected_for_test(
-        &mut self,
-        reference: ConsensusVertexReference,
-        strong_parents: Vec<ConsensusVertexReference>,
-        leader_choice: LeaderChoiceV1,
-    ) {
-        self.inner
-            .inject_projected_for_test(reference, strong_parents, leader_choice);
     }
 }
 
@@ -1454,57 +921,6 @@ mod tests {
         model.mark_delivered(reference).unwrap();
         model.mark_data_available(reference).unwrap();
         reference
-    }
-
-    fn close_author_history(
-        model: &mut CertifiedProjectionModel,
-        author: AuthorityIndex,
-        rounds: RoundNumber,
-    ) -> Vec<BlockReference> {
-        let mut result = Vec::with_capacity(rounds as usize);
-        let mut own_previous = carrier_genesis_reference(author);
-        for round in 1..=rounds {
-            let previous = model
-                .committee
-                .authorities()
-                .map(|authority| {
-                    if authority == author {
-                        own_previous
-                    } else if round == 1 {
-                        carrier_genesis_reference(authority)
-                    } else {
-                        reference(
-                            authority,
-                            round - 1,
-                            (authority as u8).wrapping_mul(31).wrapping_add(round as u8),
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            let carrier = candidate(
-                &model.committee,
-                author,
-                round,
-                &previous,
-                None,
-                (author as u8).wrapping_mul(53).wrapping_add(round as u8),
-            );
-            own_previous = clean(model, carrier);
-            result.push(own_previous);
-        }
-        result
-    }
-
-    fn assert_exact_extension_matches_chain_oracle(
-        model: &CertifiedProjectionModel,
-        base: Option<BlockReference>,
-        descendant: Option<BlockReference>,
-    ) {
-        assert_eq!(
-            model.is_exact_extension(base, descendant),
-            model.is_exact_extension_by_chain(base, descendant),
-            "base={base:?}, descendant={descendant:?}",
-        );
     }
 
     fn first_consensus_round(
@@ -1591,229 +1007,6 @@ mod tests {
         assert_eq!(effective[0], Some(child_carrier));
         let expected: Vec<_> = carriers[1..].iter().copied().map(Some).collect();
         assert_eq!(&effective[1..], expected.as_slice());
-    }
-
-    #[test]
-    fn closed_prefix_exact_extension_fast_path_matches_chain_oracle() {
-        const LAST_ROUND: RoundNumber = 512;
-
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut model = CertifiedProjectionModel::new(committee).unwrap();
-        let closed = close_author_history(&mut model, 0, LAST_ROUND);
-        let genesis = carrier_genesis_reference(0);
-        let closed_samples = [closed[0], closed[16], closed[255], closed[511]];
-
-        assert_eq!(
-            model.exact_extension_on_closed_prefix(None, Some(closed[511])),
-            Some(true)
-        );
-        assert_eq!(
-            model.exact_extension_on_closed_prefix(Some(closed[16]), Some(closed[511])),
-            Some(true)
-        );
-        for base in [None, Some(genesis)]
-            .into_iter()
-            .chain(closed_samples.into_iter().map(Some))
-        {
-            for descendant in [None, Some(genesis)]
-                .into_iter()
-                .chain(closed_samples.into_iter().map(Some))
-            {
-                assert_exact_extension_matches_chain_oracle(&model, base, descendant);
-            }
-        }
-
-        let same_round_fork = reference(0, LAST_ROUND, 0xF1);
-        let cross_author = reference(1, LAST_ROUND, 0xF2);
-        let missing_descendant = reference(0, LAST_ROUND + 4, 0xF3);
-        let invalid_genesis = reference(0, 0, 0xF4);
-        for (base, descendant) in [
-            (Some(closed[511]), Some(same_round_fork)),
-            (Some(closed[16]), Some(same_round_fork)),
-            (Some(closed[16]), Some(cross_author)),
-            (Some(closed[511]), Some(missing_descendant)),
-            (None, Some(invalid_genesis)),
-            (Some(closed[511]), None),
-            (None, None),
-        ] {
-            assert_exact_extension_matches_chain_oracle(&model, base, descendant);
-        }
-
-        // A fully staged non-closed tail remains an exact known extension and
-        // therefore exercises the historical chain-walk fallback.
-        let staged_previous = model
-            .committee
-            .authorities()
-            .map(|authority| {
-                if authority == 0 {
-                    closed[511]
-                } else {
-                    reference(authority, LAST_ROUND, 0xA0 + authority as u8)
-                }
-            })
-            .collect::<Vec<_>>();
-        let staged = candidate(
-            &model.committee,
-            0,
-            LAST_ROUND + 1,
-            &staged_previous,
-            None,
-            0xF5,
-        );
-        let staged_reference = staged.reference();
-        model.stage_carrier(staged).unwrap();
-        let mut staged_child_previous = staged_previous;
-        staged_child_previous[0] = staged_reference;
-        for (authority, previous) in staged_child_previous.iter_mut().enumerate().skip(1) {
-            *previous = reference(
-                authority as AuthorityIndex,
-                LAST_ROUND + 1,
-                0xB0 + authority as u8,
-            );
-        }
-        let staged_child = candidate(
-            &model.committee,
-            0,
-            LAST_ROUND + 2,
-            &staged_child_previous,
-            None,
-            0xF6,
-        );
-        let staged_child_reference = staged_child.reference();
-        model.stage_carrier(staged_child).unwrap();
-        assert_eq!(
-            model
-                .exact_extension_on_closed_prefix(Some(closed[511]), Some(staged_child_reference),),
-            None
-        );
-        assert_exact_extension_matches_chain_oracle(
-            &model,
-            Some(closed[511]),
-            Some(staged_child_reference),
-        );
-        assert!(model.is_exact_extension(Some(closed[511]), Some(staged_child_reference)));
-
-        // A staged descendant whose intermediate own-prev is absent also
-        // falls back, then rejects exactly as the prior implementation did.
-        let missing_previous = reference(0, LAST_ROUND + 2, 0xF7);
-        let missing_chain_previous = model
-            .committee
-            .authorities()
-            .map(|authority| {
-                if authority == 0 {
-                    missing_previous
-                } else {
-                    reference(authority, LAST_ROUND + 2, 0xC0 + authority as u8)
-                }
-            })
-            .collect::<Vec<_>>();
-        let missing_chain = candidate(
-            &model.committee,
-            0,
-            LAST_ROUND + 3,
-            &missing_chain_previous,
-            None,
-            0xF8,
-        );
-        let missing_chain_reference = missing_chain.reference();
-        model.stage_carrier(missing_chain).unwrap();
-        assert_exact_extension_matches_chain_oracle(
-            &model,
-            Some(closed[511]),
-            Some(missing_chain_reference),
-        );
-        assert!(!model.is_exact_extension(Some(closed[511]), Some(missing_chain_reference)));
-    }
-
-    #[test]
-    fn closed_prefix_fast_path_preserves_join_dominance_and_committed_frontiers() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut model = CertifiedProjectionModel::new(committee).unwrap();
-        let histories = (0..4)
-            .map(|authority| close_author_history(&mut model, authority, 32))
-            .collect::<Vec<_>>();
-        let first = vec![
-            Some(histories[0][7]),
-            None,
-            Some(histories[2][11]),
-            Some(histories[3][3]),
-        ];
-        let second = vec![
-            Some(histories[0][15]),
-            Some(histories[1][5]),
-            Some(histories[2][2]),
-            None,
-        ];
-        let joined = vec![
-            Some(histories[0][15]),
-            Some(histories[1][5]),
-            Some(histories[2][11]),
-            Some(histories[3][3]),
-        ];
-
-        assert_eq!(
-            model
-                .join_frontiers(&[first.clone(), second.clone()])
-                .unwrap(),
-            joined
-        );
-        model.ensure_dominates_parent(&joined, &first).unwrap();
-        model.ensure_dominates_parent(&joined, &second).unwrap();
-        assert!(matches!(
-            model.ensure_dominates_parent(&first, &second),
-            Err(CertifiedProjectionError::FrontierDoesNotDominateParent { authority: 0, .. })
-        ));
-
-        let first_anchor = consensus_reference(0, 40, 0xD1);
-        let second_anchor = consensus_reference(1, 41, 0xD2);
-        for anchor in [first_anchor, second_anchor] {
-            model.inject_projected_for_test(
-                anchor,
-                Vec::new(),
-                LeaderChoiceV1::NoVote {
-                    leader_author: 0,
-                    leader_round: 39,
-                },
-            );
-        }
-        model
-            .vertices
-            .get_mut(&first_anchor)
-            .unwrap()
-            .effective_frontier
-            .clone_from(&first);
-        model
-            .vertices
-            .get_mut(&second_anchor)
-            .unwrap()
-            .effective_frontier
-            .clone_from(&second);
-        assert_eq!(
-            model
-                .joined_strong_parent_frontier(&[first_anchor, second_anchor])
-                .unwrap(),
-            joined
-        );
-        assert_eq!(model.record_committed_anchor(first_anchor).unwrap(), first);
-        assert_eq!(
-            model.record_committed_anchor(second_anchor).unwrap(),
-            joined
-        );
-        assert!(model.committed_frontier_dominates(&first));
-        assert!(model.committed_frontier_dominates(&second));
-        assert!(model.committed_frontier_dominates(&joined));
-
-        let fork = Some(reference(2, histories[2][11].round, 0xD3));
-        let mut forked = joined.clone();
-        forked[2] = fork;
-        assert!(matches!(
-            model.join_frontiers(&[joined.clone(), forked.clone()]),
-            Err(CertifiedProjectionError::ParentFrontierFork { authority: 2, .. })
-        ));
-        assert!(!model.committed_frontier_dominates(&forked));
-        let mut beyond_commit = joined;
-        beyond_commit[3] = Some(histories[3][31]);
-        assert!(!model.committed_frontier_dominates(&beyond_commit));
     }
 
     #[test]
@@ -1913,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_committed_anchor_frontiers_accumulate_by_exact_component_join() {
+    fn late_vertex_remains_visible_but_cannot_become_a_regressing_anchor() {
         let committee = Committee::new_test(vec![1; 4]);
         let mut model = CertifiedProjectionModel::new(committee).unwrap();
         let (carriers, parents) = first_consensus_round(&mut model);
@@ -1945,23 +1138,12 @@ mod tests {
         let regressing_carrier = clean(&mut model, regressing);
         let regressing_vertex = model.try_project(regressing_carrier).unwrap();
         assert!(model.is_projected(regressing_vertex));
-        let accumulated = model.record_committed_anchor(regressing_vertex).unwrap();
-        assert_eq!(
-            accumulated,
-            vec![
-                Some(anchor_carrier),
-                Some(carriers[1]),
-                Some(regressing_carrier),
-                Some(carriers[3]),
-            ]
-        );
-        assert!(model.is_committed_anchor(anchor_vertex));
-        assert!(model.is_committed_anchor(regressing_vertex));
+        assert!(matches!(
+            model.record_committed_anchor(regressing_vertex),
+            Err(CertifiedProjectionError::FrontierRegressesCommitted { authority: 0, .. })
+        ));
         assert!(
-            model.committed_frontier_dominates(model.effective_frontier(anchor_vertex).unwrap())
-        );
-        assert!(
-            model
+            !model
                 .committed_frontier_dominates(model.effective_frontier(regressing_vertex).unwrap())
         );
     }
@@ -2238,348 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn c1_waits_for_an_exact_vote_quorum_and_returns_only_its_witness() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut model = CertifiedProjectionModel::new(committee).unwrap();
-        let (round_one_carriers, round_one_vertices) = first_consensus_round(&mut model);
-        let slot = model.leader_slot(1);
-        let leader = round_one_vertices[slot.author as usize];
-        let frontier = round_one_carriers
-            .iter()
-            .copied()
-            .map(Some)
-            .collect::<Vec<_>>();
-
-        let choices = [
-            LeaderChoiceV1::Vote { leader },
-            LeaderChoiceV1::Vote { leader },
-            LeaderChoiceV1::Vote { leader },
-            LeaderChoiceV1::NoVote {
-                leader_author: slot.author,
-                leader_round: slot.round,
-            },
-        ];
-        let mut projected = BTreeMap::new();
-        for author in [0, 1, 3] {
-            let parents = if author == 3 {
-                round_one_vertices
-                    .iter()
-                    .copied()
-                    .filter(|parent| parent.author() != slot.author)
-                    .collect()
-            } else {
-                round_one_vertices.clone()
-            };
-            let carrier = candidate(
-                &model.committee,
-                author,
-                2,
-                &round_one_carriers,
-                Some(ConsensusVertexV1::new(
-                    2,
-                    parents,
-                    frontier.clone(),
-                    choices[author as usize],
-                )),
-                0xD0 + author as u8,
-            );
-            let carrier = clean(&mut model, carrier);
-            projected.insert(author, model.try_project(carrier).unwrap());
-        }
-        assert_eq!(model.c1_strong_parent_witness(3, &[]).unwrap(), None);
-
-        let author = 2;
-        let carrier = candidate(
-            &model.committee,
-            author,
-            2,
-            &round_one_carriers,
-            Some(ConsensusVertexV1::new(
-                2,
-                round_one_vertices,
-                frontier,
-                choices[author as usize],
-            )),
-            0xD0 + author as u8,
-        );
-        let carrier = clean(&mut model, carrier);
-        projected.insert(author, model.try_project(carrier).unwrap());
-
-        let witness = model
-            .c1_strong_parent_witness(3, &[])
-            .unwrap()
-            .expect("the third exact vote completes C1");
-        assert_eq!(
-            witness,
-            C1StrongParentWitnessV1::Vote {
-                leader,
-                parents: [0, 1, 2]
-                    .into_iter()
-                    .map(|author| projected[&author])
-                    .collect(),
-            }
-        );
-        let C1StrongParentWitnessV1::Vote { parents, .. } = witness else {
-            panic!("the exact vote quorum must return a vote witness");
-        };
-        assert!(!parents.iter().any(|parent| parent.author() == 3));
-    }
-
-    #[test]
-    fn c1_exact_vote_witness_is_not_hidden_by_a_smaller_byzantine_equivocation() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut model = CertifiedProjectionModel::new(committee).unwrap();
-        let (_, round_one_vertices) = first_consensus_round(&mut model);
-        let slot = model.leader_slot(1);
-        let leader = round_one_vertices[slot.author as usize];
-        let no_vote = LeaderChoiceV1::NoVote {
-            leader_author: slot.author,
-            leader_round: slot.round,
-        };
-
-        let byzantine_no_vote = consensus_reference(0, 2, 0x10);
-        let byzantine_vote = consensus_reference(0, 2, 0xF0);
-        assert!(byzantine_no_vote < byzantine_vote);
-        model.inject_projected_for_test(byzantine_no_vote, Vec::new(), no_vote);
-        model.inject_projected_for_test(
-            byzantine_vote,
-            Vec::new(),
-            LeaderChoiceV1::Vote { leader },
-        );
-
-        let voter_one = consensus_reference(1, 2, 0x21);
-        let voter_two = consensus_reference(2, 2, 0x22);
-        let non_voter = consensus_reference(3, 2, 0x23);
-        for voter in [voter_one, voter_two] {
-            model.inject_projected_for_test(voter, Vec::new(), LeaderChoiceV1::Vote { leader });
-        }
-        model.inject_projected_for_test(non_voter, Vec::new(), no_vote);
-
-        assert_eq!(
-            model.c1_strong_parent_witness(3, &[]).unwrap(),
-            Some(C1StrongParentWitnessV1::Vote {
-                leader,
-                parents: vec![byzantine_vote, voter_one, voter_two],
-            })
-        );
-    }
-
-    #[test]
-    fn joined_parent_frontier_omits_unrelated_fresh_closed_tips() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mut model = CertifiedProjectionModel::new(committee).unwrap();
-        let (carriers, vertices) = first_consensus_round(&mut model);
-        assert_eq!(
-            model.closed_frontier(),
-            carriers.iter().copied().map(Some).collect::<Vec<_>>()
-        );
-
-        let joined = model.joined_strong_parent_frontier(&vertices[..3]).unwrap();
-        assert_eq!(
-            joined,
-            vec![
-                Some(carriers[0]),
-                Some(carriers[1]),
-                Some(carriers[2]),
-                None
-            ]
-        );
-    }
-
-    #[test]
-    fn frontier_fresh_quorum_preserves_weighted_stake_and_parent_budget() {
-        let committee = Committee::new_test(vec![4, 3, 2, 1, 1]);
-        let mut model = CertifiedProjectionModel::new(Arc::clone(&committee)).unwrap();
-        let previous = previous_carriers(&committee, 0);
-        let mut vertices = Vec::new();
-        for author in committee.authorities() {
-            let carrier = candidate(&committee, author, 1, &previous, None, 0x70 + author as u8);
-            let carrier_reference = carrier.reference();
-            model.stage_carrier(carrier).unwrap();
-            let vertex = ConsensusVertexReference::new(carrier_reference, 1);
-            model.inject_projected_for_test(
-                vertex,
-                Vec::new(),
-                LeaderChoiceV1::NoVote {
-                    leader_author: 0,
-                    leader_round: 0,
-                },
-            );
-            model.vertices.get_mut(&vertex).unwrap().effective_frontier[author as usize] =
-                Some(carrier_reference);
-            vertices.push(vertex);
-        }
-
-        // The previous lexicographic proof used authors 0, 1, and 2; adding
-        // required author 4 gave a four-parent hard budget.
-        let selected = model
-            .frontier_fresh_quorum(vertices.iter().copied(), &[vertices[4]])
-            .unwrap()
-            .unwrap();
-        let selected_stake = selected
-            .iter()
-            .map(|reference| committee.get_stake(reference.author()).unwrap())
-            .sum::<Stake>();
-        assert!(selected_stake >= committee.quorum_threshold());
-        assert!(selected.contains(&vertices[4]));
-        assert!(selected.len() <= 4);
-        assert_eq!(
-            selected
-                .iter()
-                .map(|reference| reference.author())
-                .collect::<BTreeSet<_>>()
-                .len(),
-            selected.len(),
-            "one equivocating author must never contribute stake twice"
-        );
-    }
-
-    fn simulated_parent_frontier_inclusion_lags(frontier_fresh: bool) -> Vec<Vec<RoundNumber>> {
-        const N: usize = 10;
-        const ROUNDS: RoundNumber = 30;
-
-        let committee = Committee::new_test(vec![1; N]);
-        let mut model = CertifiedProjectionModel::new(Arc::clone(&committee)).unwrap();
-        let mut previous = previous_carriers(&committee, 0);
-        let mut vertices_by_round = vec![Vec::new(); ROUNDS as usize + 1];
-
-        for round in 1..=ROUNDS {
-            let mut carriers = Vec::with_capacity(N);
-            for author in committee.authorities() {
-                let marker = ((round as usize * 17 + author as usize) % 251) as u8;
-                let carrier = candidate(&committee, author, round, &previous, None, marker);
-                let reference = carrier.reference();
-                model.stage_carrier(carrier).unwrap();
-                carriers.push(reference);
-            }
-
-            let mut round_vertices = Vec::with_capacity(N);
-            for author in committee.authorities() {
-                let mut effective_frontier = vec![None; N];
-                if round > 1 {
-                    let parent_values = &vertices_by_round[round as usize - 1];
-                    let leader = parent_values[committee.elect_leader(round - 1) as usize];
-                    let own = parent_values[author as usize];
-                    let required = [own, leader];
-                    let strong_parents = if frontier_fresh {
-                        model
-                            .frontier_fresh_quorum(parent_values.iter().copied(), &required)
-                            .unwrap()
-                            .unwrap()
-                    } else {
-                        let mut selected = BTreeMap::new();
-                        if round >= 3 {
-                            let mut proof_stake = 0;
-                            for parent in parent_values {
-                                selected.insert(parent.author(), *parent);
-                                proof_stake += committee.get_stake(parent.author()).unwrap();
-                                if proof_stake >= committee.quorum_threshold() {
-                                    break;
-                                }
-                            }
-                            for parent in required {
-                                selected.insert(parent.author(), parent);
-                            }
-                        } else {
-                            for parent in required {
-                                selected.insert(parent.author(), parent);
-                            }
-                            let mut stake = selected
-                                .keys()
-                                .map(|authority| committee.get_stake(*authority).unwrap())
-                                .sum::<Stake>();
-                            for parent in parent_values {
-                                if stake >= committee.quorum_threshold() {
-                                    break;
-                                }
-                                if selected.insert(parent.author(), *parent).is_none() {
-                                    stake += committee.get_stake(parent.author()).unwrap();
-                                }
-                            }
-                        }
-                        selected.into_values().collect()
-                    };
-                    effective_frontier = model
-                        .joined_strong_parent_frontier(&strong_parents)
-                        .unwrap();
-                }
-                effective_frontier[author as usize] = Some(carriers[author as usize]);
-                let vertex = ConsensusVertexReference::new(carriers[author as usize], round);
-                model.inject_projected_for_test(
-                    vertex,
-                    Vec::new(),
-                    LeaderChoiceV1::NoVote {
-                        leader_author: committee.elect_leader(round.saturating_sub(1)),
-                        leader_round: round.saturating_sub(1),
-                    },
-                );
-                model.vertices.get_mut(&vertex).unwrap().effective_frontier = effective_frontier;
-                round_vertices.push(vertex);
-            }
-            vertices_by_round[round as usize] = round_vertices;
-            previous = carriers;
-        }
-
-        let mut lags = vec![Vec::new(); N];
-        // Leave a complete leader rotation at the tail so the intentionally
-        // biased baseline also has time to include every high-index author.
-        for application_round in 3..=ROUNDS - 12 {
-            for author in committee.authorities() {
-                let first_anchor = (application_round..=ROUNDS - 2)
-                    .find(|anchor_round| {
-                        let leader = vertices_by_round[*anchor_round as usize]
-                            [committee.elect_leader(*anchor_round) as usize];
-                        model.effective_frontier(leader).unwrap()[author as usize]
-                            .is_some_and(|tip| tip.round >= application_round)
-                    })
-                    .expect("every healthy application prefix must reach a committed leader");
-                lags[author as usize].push(first_anchor - application_round);
-            }
-        }
-        lags
-    }
-
-    #[test]
-    fn frontier_fresh_quorums_remove_lexicographic_author_inclusion_tail() {
-        let lexicographic = simulated_parent_frontier_inclusion_lags(false);
-        let low_author_average = lexicographic[..7]
-            .iter()
-            .flatten()
-            .copied()
-            .map(u64::from)
-            .sum::<u64>() as f64
-            / lexicographic[..7].iter().map(Vec::len).sum::<usize>() as f64;
-        let high_author_average = lexicographic[7..]
-            .iter()
-            .flatten()
-            .copied()
-            .map(u64::from)
-            .sum::<u64>() as f64
-            / lexicographic[7..].iter().map(Vec::len).sum::<usize>() as f64;
-        assert!(
-            high_author_average > low_author_average + 2.0,
-            "the regression fixture must expose the former 0..6/7..9 tail"
-        );
-
-        let fresh = simulated_parent_frontier_inclusion_lags(true);
-        let maximum_lag = fresh.iter().flatten().copied().max().unwrap();
-        assert!(
-            maximum_lag <= 2,
-            "a healthy n=10 frontier should enter a leader within two logical rounds, got {fresh:?}"
-        );
-        let per_author_average = fresh
-            .iter()
-            .map(|lags| lags.iter().copied().map(u64::from).sum::<u64>() as f64 / lags.len() as f64)
-            .collect::<Vec<_>>();
-        let minimum = per_author_average.iter().copied().reduce(f64::min).unwrap();
-        let maximum = per_author_average.iter().copied().reduce(f64::max).unwrap();
-        assert!(
-            maximum - minimum < 1.0,
-            "author skew remains: {per_author_average:?}"
-        );
-    }
-
-    #[test]
     fn direct_skip_uses_clean_projected_explicit_negative_choices() {
         let committee = Committee::new_test(vec![1; 4]);
         let mut model = CertifiedProjectionModel::new(committee).unwrap();
@@ -2606,7 +1446,7 @@ mod tests {
             leader_round: slot.round,
         };
         let voter_choices = vec![no_vote, LeaderChoiceV1::Vote { leader }, no_vote, no_vote];
-        let (_, voters) = project_complete_round(
+        project_complete_round(
             &mut model,
             2,
             &round_one_carriers,
@@ -2618,13 +1458,6 @@ mod tests {
         assert_eq!(
             model.direct_decision(slot).unwrap(),
             ProjectionDecisionV1::DirectSkip { slot }
-        );
-        assert_eq!(
-            model.c1_strong_parent_witness(3, &[]).unwrap(),
-            Some(C1StrongParentWitnessV1::DirectSkip {
-                slot,
-                parents: [voters[0], voters[2], voters[3]].to_vec(),
-            })
         );
     }
 
@@ -2768,11 +1601,12 @@ mod tests {
         );
         let anchor_carrier = clean(&mut model, anchor_carrier);
         let anchor = model.try_project(anchor_carrier).unwrap();
+        model.record_committed_anchor(anchor).unwrap();
         (model, slot, leader, anchor)
     }
 
     #[test]
-    fn later_selected_anchor_drives_indirect_commit_or_skip_before_frontier_application() {
+    fn later_committed_anchor_drives_indirect_commit_or_skip() {
         let (commit_model, slot, leader, commit_anchor) = indirect_graph(true);
         assert_eq!(
             commit_model.indirect_decision(slot, commit_anchor).unwrap(),
@@ -2789,63 +1623,6 @@ mod tests {
                 slot,
                 anchor: skip_anchor,
             }
-        );
-    }
-
-    #[test]
-    fn already_dominated_anchor_identity_remains_usable_for_indirect_decision() {
-        let (mut model, slot, leader, anchor) = indirect_graph(true);
-        let anchor_frontier = model.effective_frontier(anchor).unwrap().to_vec();
-        let anchor_previous = model
-            .carriers
-            .get(&anchor.carrier())
-            .unwrap()
-            .candidate
-            .header()
-            .own_prev();
-        let previous = model
-            .committee
-            .authorities()
-            .map(|authority| {
-                if authority == anchor.author() {
-                    anchor_previous
-                } else {
-                    model.closed_tip(authority).unwrap()
-                }
-            })
-            .collect::<Vec<_>>();
-        let extension = candidate(&model.committee, 1, 4, &previous, None, 0xB0);
-        let extension = clean(&mut model, extension);
-
-        let dominating = consensus_reference(1, 5, 0xB1);
-        model.inject_projected_for_test(
-            dominating,
-            Vec::new(),
-            LeaderChoiceV1::NoVote {
-                leader_author: model.committee.elect_leader(4),
-                leader_round: 4,
-            },
-        );
-        let mut dominating_frontier = anchor_frontier;
-        dominating_frontier[1] = Some(extension);
-        model
-            .vertices
-            .get_mut(&dominating)
-            .unwrap()
-            .effective_frontier
-            .clone_from(&dominating_frontier);
-        assert_eq!(
-            model.record_committed_anchor(dominating).unwrap(),
-            dominating_frontier
-        );
-        assert_eq!(
-            model.record_committed_anchor(anchor).unwrap(),
-            dominating_frontier
-        );
-        assert!(model.is_committed_anchor(anchor));
-        assert_eq!(
-            model.indirect_decision(slot, anchor).unwrap(),
-            ProjectionDecisionV1::IndirectCommit { leader, anchor }
         );
     }
 }

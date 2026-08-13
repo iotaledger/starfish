@@ -4,24 +4,22 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fmt,
-    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicU32, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use ahash::{AHashMap, AHashSet};
-use futures::{FutureExt, future::join_all};
+use futures::future::join_all;
 use rand::seq::SliceRandom;
 use reed_solomon_simd::ReedSolomonEncoder;
 use tokio::time::Instant;
 use tokio::{
     select,
-    sync::{Notify, Semaphore, mpsc, watch},
+    sync::{Notify, mpsc},
 };
 
 use crate::{
@@ -37,14 +35,10 @@ use crate::{
     },
     core::Core,
     core_thread::CoreThreadDispatcher,
-    crypto::{Blake3Hasher, BlsSigner, MacKey, TransactionsCommitment},
+    crypto::{Blake3Hasher, BlsSigner, MacKey},
     dag_state::{ConsensusProtocol, DagState, DataSource},
     data::Data,
-    metrics::{
-        Metrics, RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD,
-        RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD, RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
-        UtilizationTimerVecExt,
-    },
+    metrics::{Metrics, UtilizationTimerVecExt},
     network::{BlockBatch, Connection, Network, NetworkMessage, ShardPayload},
     runtime::{Handle, JoinError, JoinHandle, sleep},
     sailfish_service::{
@@ -53,20 +47,16 @@ use crate::{
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader, RbcCommitteeId, RbcProtocolInstanceId},
     starfish_rbc_dag::{
-        CandidateCarrierV1, MAX_CARRIER_CONTENT_SIZE_V1, RbcDagCommitteeContextV1, RbcDagContextV1,
-        RbcDagProtocolInstanceId, projection::ProjectionDecisionV1, storage::ShadowWalSyncPolicyV1,
+        RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
+        projection::ProjectionDecisionV1, storage::ShadowWalSyncPolicyV1,
     },
     starfish_rbc_dag_shadow::{
-        CommittedApplicationDiagnosticV1, CommittedFrontierDeltaV1, ShadowAuthorizerV1,
-        ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
+        ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
     },
     starfish_rbc_dag_shadow_service::{
-        ShadowApplicationAuthorizationBasisV1, ShadowServiceErrorV1, ShadowServiceEventV1,
-        StarfishRbcDagShadowServiceHandleV1,
-        start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1,
-        start_starfish_rbc_dag_autonomous_clock_service_paused_with_metrics_v1,
-        start_starfish_rbc_dag_autonomous_clock_service_with_metrics_v1,
-        start_starfish_rbc_dag_shadow_service_with_metrics_v1,
+        ShadowServiceErrorV1, ShadowServiceEventV1, StarfishRbcDagShadowServiceHandleV1,
+        start_starfish_rbc_dag_autonomous_clock_service_v1,
+        start_starfish_rbc_dag_shadow_service_v1,
     },
     starfish_rbc_service::{
         RbcInitialAuthenticator, RbcPhaseAuthorityV1, RbcServiceEvent, RbcServiceHandle,
@@ -76,7 +66,7 @@ use crate::{
     types::{
         AuthorityIndex, AuthoritySet, BlockAuthentication, BlockAuthenticationScheme, BlockDigest,
         BlockReference, PartialSig, PartialSigKind, ProvableShard, ReconstructedTransactionData,
-        RoundNumber, TimestampNs, TransactionData, VerifiedBlock, format_authority_index,
+        RoundNumber, TransactionData, VerifiedBlock, format_authority_index,
     },
 };
 
@@ -85,524 +75,8 @@ const SAILFISH_CERT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 const SAILFISH_CERT_BATCH_MAX_LEN: usize = 256;
 const STARFISH_RBC_HEADER_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const STARFISH_RBC_DAG_CONTROL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-const STARFISH_RBC_DAG_CORE_CONTROL_CAPACITY: usize = 64;
-const STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY: usize = 64;
-// Priority entries contain at most one carrier or application payload plus a
-// bounded authentication/frame reserve. Proactive carriers may contain both.
-// Count and byte accounting are independent so a future wire-size regression
-// cannot turn the fixed key caps into an unbounded memory reservoir.
-const STARFISH_RBC_DAG_OUTBOUND_FRAME_RESERVE: usize = 128 * 1024;
-const STARFISH_RBC_DAG_OUTBOUND_PRIORITY_ENTRY_BYTES: usize =
-    MAX_CARRIER_CONTENT_SIZE_V1 + STARFISH_RBC_DAG_OUTBOUND_FRAME_RESERVE;
-const STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_ENTRY_BYTES: usize =
-    MAX_CARRIER_CONTENT_SIZE_V1 * 2 + STARFISH_RBC_DAG_OUTBOUND_FRAME_RESERVE;
-const STARFISH_RBC_DAG_OUTBOUND_PRIORITY_BYTES: usize =
-    STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY * MAX_CARRIER_CONTENT_SIZE_V1;
-const STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_BYTES: usize =
-    STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY * MAX_CARRIER_CONTENT_SIZE_V1;
 const STARFISH_RBC_DAG_AUTONOMOUS_INSTANCE_CONTEXT: &str =
     "STARFISH_RBC_DAG_AUTONOMOUS_CLOCK_V1_PROTOCOL_INSTANCE";
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum RbcDagOutboundKeyV1 {
-    Proactive(BlockReference),
-    CarrierRequest(BlockReference),
-    CarrierResponse(BlockReference),
-    SyncRequest(AuthorityIndex, RoundNumber),
-    SyncResponse(AuthorityIndex, RoundNumber),
-    ApplicationPayloadRequest(BlockReference),
-    ApplicationPayloadResponse(BlockReference),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RbcDagOutboundClassV1 {
-    Priority,
-    Proactive,
-}
-
-impl RbcDagOutboundClassV1 {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Priority => "priority",
-            Self::Proactive => "proactive",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RbcDagOutboundEnqueueV1 {
-    Added,
-    Coalesced,
-}
-
-#[derive(Debug)]
-enum RbcDagOutboundMailboxErrorV1 {
-    Unsupported,
-    InvalidProactive(String),
-    Serialization(String),
-    EntryTooLarge {
-        class: RbcDagOutboundClassV1,
-        actual: usize,
-        maximum: usize,
-    },
-    KeyCapacity {
-        class: RbcDagOutboundClassV1,
-        capacity: usize,
-    },
-    ByteCapacity {
-        class: RbcDagOutboundClassV1,
-        attempted: usize,
-        capacity: usize,
-    },
-    ConflictingDuplicate {
-        class: RbcDagOutboundClassV1,
-        key: RbcDagOutboundKeyV1,
-    },
-    DownstreamSaturated(RbcDagOutboundClassV1),
-    DownstreamClosed,
-    Failed(String),
-}
-
-impl fmt::Display for RbcDagOutboundMailboxErrorV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unsupported => write!(formatter, "unsupported non-RBC-DAG outbound message"),
-            Self::InvalidProactive(error) => {
-                write!(formatter, "invalid proactive carrier: {error}")
-            }
-            Self::Serialization(error) => {
-                write!(formatter, "outbound message serialization failed: {error}")
-            }
-            Self::EntryTooLarge {
-                class,
-                actual,
-                maximum,
-            } => write!(
-                formatter,
-                "{} outbound entry is {actual} bytes, maximum {maximum}",
-                class.label(),
-            ),
-            Self::KeyCapacity { class, capacity } => write!(
-                formatter,
-                "{} outbound key capacity {capacity} exhausted",
-                class.label(),
-            ),
-            Self::ByteCapacity {
-                class,
-                attempted,
-                capacity,
-            } => write!(
-                formatter,
-                "{} outbound byte capacity {capacity} exhausted by {attempted} bytes",
-                class.label(),
-            ),
-            Self::ConflictingDuplicate { class, key } => write!(
-                formatter,
-                "conflicting {} outbound duplicate for {key:?}",
-                class.label(),
-            ),
-            Self::DownstreamSaturated(class) => {
-                write!(
-                    formatter,
-                    "downstream {} network channel saturated",
-                    class.label()
-                )
-            }
-            Self::DownstreamClosed => write!(formatter, "downstream network sender closed"),
-            Self::Failed(reason) => write!(formatter, "outbound mailbox already failed: {reason}"),
-        }
-    }
-}
-
-struct RbcDagOutboundEntryV1 {
-    message: NetworkMessage,
-    framed_bytes: usize,
-}
-
-struct RbcDagOutboundLaneV1 {
-    order: VecDeque<RbcDagOutboundKeyV1>,
-    entries: AHashMap<RbcDagOutboundKeyV1, RbcDagOutboundEntryV1>,
-    bytes: usize,
-    key_capacity: usize,
-    byte_capacity: usize,
-    entry_byte_capacity: usize,
-}
-
-impl RbcDagOutboundLaneV1 {
-    fn new(key_capacity: usize, byte_capacity: usize, entry_byte_capacity: usize) -> Self {
-        Self {
-            order: VecDeque::new(),
-            entries: AHashMap::new(),
-            bytes: 0,
-            key_capacity,
-            byte_capacity,
-            entry_byte_capacity,
-        }
-    }
-
-    fn enqueue(
-        &mut self,
-        class: RbcDagOutboundClassV1,
-        key: RbcDagOutboundKeyV1,
-        entry: RbcDagOutboundEntryV1,
-    ) -> Result<RbcDagOutboundEnqueueV1, RbcDagOutboundMailboxErrorV1> {
-        if let Some(existing) = self.entries.get(&key) {
-            return if rbc_dag_outbound_messages_equal(&existing.message, &entry.message) {
-                Ok(RbcDagOutboundEnqueueV1::Coalesced)
-            } else {
-                Err(RbcDagOutboundMailboxErrorV1::ConflictingDuplicate { class, key })
-            };
-        }
-        if entry.framed_bytes > self.entry_byte_capacity {
-            return Err(RbcDagOutboundMailboxErrorV1::EntryTooLarge {
-                class,
-                actual: entry.framed_bytes,
-                maximum: self.entry_byte_capacity,
-            });
-        }
-        if self.entries.len() >= self.key_capacity {
-            return Err(RbcDagOutboundMailboxErrorV1::KeyCapacity {
-                class,
-                capacity: self.key_capacity,
-            });
-        }
-        let attempted = self.bytes.checked_add(entry.framed_bytes).ok_or(
-            RbcDagOutboundMailboxErrorV1::ByteCapacity {
-                class,
-                attempted: usize::MAX,
-                capacity: self.byte_capacity,
-            },
-        )?;
-        if attempted > self.byte_capacity {
-            return Err(RbcDagOutboundMailboxErrorV1::ByteCapacity {
-                class,
-                attempted,
-                capacity: self.byte_capacity,
-            });
-        }
-        self.bytes = attempted;
-        self.order.push_back(key);
-        assert!(self.entries.insert(key, entry).is_none());
-        Ok(RbcDagOutboundEnqueueV1::Added)
-    }
-
-    fn pop_front(&mut self) -> Option<NetworkMessage> {
-        let key = self.order.pop_front()?;
-        let entry = self
-            .entries
-            .remove(&key)
-            .expect("queued RBC-DAG outbound key retains its exact entry");
-        self.bytes = self
-            .bytes
-            .checked_sub(entry.framed_bytes)
-            .expect("RBC-DAG outbound byte accounting cannot underflow");
-        Some(entry.message)
-    }
-}
-
-struct RbcDagOutboundMailboxStateV1 {
-    priority: RbcDagOutboundLaneV1,
-    proactive: RbcDagOutboundLaneV1,
-    failure: Option<String>,
-}
-
-impl RbcDagOutboundMailboxStateV1 {
-    fn production() -> Self {
-        Self {
-            priority: RbcDagOutboundLaneV1::new(
-                STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-                STARFISH_RBC_DAG_OUTBOUND_PRIORITY_BYTES,
-                STARFISH_RBC_DAG_OUTBOUND_PRIORITY_ENTRY_BYTES,
-            ),
-            proactive: RbcDagOutboundLaneV1::new(
-                STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-                STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_BYTES,
-                STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_ENTRY_BYTES,
-            ),
-            failure: None,
-        }
-    }
-}
-
-struct RbcDagOutboundMailboxInnerV1 {
-    state: parking_lot::Mutex<RbcDagOutboundMailboxStateV1>,
-    notified: Notify,
-}
-
-#[derive(Clone)]
-struct RbcDagOutboundMailboxV1 {
-    inner: Arc<RbcDagOutboundMailboxInnerV1>,
-}
-
-impl RbcDagOutboundMailboxV1 {
-    fn new() -> Self {
-        Self::from_state(RbcDagOutboundMailboxStateV1::production())
-    }
-
-    fn from_state(state: RbcDagOutboundMailboxStateV1) -> Self {
-        Self {
-            inner: Arc::new(RbcDagOutboundMailboxInnerV1 {
-                state: parking_lot::Mutex::new(state),
-                notified: Notify::new(),
-            }),
-        }
-    }
-
-    fn enqueue(
-        &self,
-        message: NetworkMessage,
-        committee: &Committee,
-    ) -> Result<RbcDagOutboundEnqueueV1, RbcDagOutboundMailboxErrorV1> {
-        if let Some(reason) = self.inner.state.lock().failure.clone() {
-            return Err(RbcDagOutboundMailboxErrorV1::Failed(reason));
-        }
-        let (class, key) = match rbc_dag_outbound_classification(&message, committee) {
-            Ok(classification) => classification,
-            Err(error) => {
-                self.fail(&error);
-                return Err(error);
-            }
-        };
-        let framed_bytes = match bincode::serialized_size(&message)
-            .map_err(|error| RbcDagOutboundMailboxErrorV1::Serialization(error.to_string()))
-            .and_then(|size| {
-                usize::try_from(size)
-                    .ok()
-                    .and_then(|size| size.checked_add(4))
-                    .ok_or_else(|| {
-                        RbcDagOutboundMailboxErrorV1::Serialization(
-                            "framed size does not fit usize".to_owned(),
-                        )
-                    })
-            }) {
-            Ok(framed_bytes) => framed_bytes,
-            Err(error) => {
-                self.fail(&error);
-                return Err(error);
-            }
-        };
-        let entry = RbcDagOutboundEntryV1 {
-            message,
-            framed_bytes,
-        };
-        let mut state = self.inner.state.lock();
-        if let Some(reason) = state.failure.clone() {
-            return Err(RbcDagOutboundMailboxErrorV1::Failed(reason));
-        }
-        let result = match class {
-            RbcDagOutboundClassV1::Priority => state.priority.enqueue(class, key, entry),
-            RbcDagOutboundClassV1::Proactive => state.proactive.enqueue(class, key, entry),
-        };
-        match result {
-            Ok(outcome) => {
-                drop(state);
-                if outcome == RbcDagOutboundEnqueueV1::Added {
-                    self.inner.notified.notify_one();
-                }
-                Ok(outcome)
-            }
-            Err(error) => {
-                state.failure = Some(error.to_string());
-                drop(state);
-                self.inner.notified.notify_waiters();
-                Err(error)
-            }
-        }
-    }
-
-    fn fail(&self, error: &RbcDagOutboundMailboxErrorV1) {
-        let mut state = self.inner.state.lock();
-        state.failure.get_or_insert_with(|| error.to_string());
-        drop(state);
-        self.inner.notified.notify_waiters();
-    }
-
-    fn try_pop(&self) -> Option<(RbcDagOutboundClassV1, NetworkMessage)> {
-        let mut state = self.inner.state.lock();
-        if state.failure.is_some() {
-            return None;
-        }
-        state
-            .priority
-            .pop_front()
-            .map(|message| (RbcDagOutboundClassV1::Priority, message))
-            .or_else(|| {
-                state
-                    .proactive
-                    .pop_front()
-                    .map(|message| (RbcDagOutboundClassV1::Proactive, message))
-            })
-    }
-
-    async fn recv(&self) -> Option<(RbcDagOutboundClassV1, NetworkMessage)> {
-        loop {
-            let notified = self.inner.notified.notified();
-            if let Some(message) = self.try_pop() {
-                return Some(message);
-            }
-            if self.inner.state.lock().failure.is_some() {
-                return None;
-            }
-            notified.await;
-        }
-    }
-}
-
-fn rbc_dag_outbound_classification(
-    message: &NetworkMessage,
-    committee: &Committee,
-) -> Result<(RbcDagOutboundClassV1, RbcDagOutboundKeyV1), RbcDagOutboundMailboxErrorV1> {
-    let priority = RbcDagOutboundClassV1::Priority;
-    match message {
-        NetworkMessage::RbcDagShadowCarrier(carrier) => {
-            let candidate =
-                CandidateCarrierV1::decode_wire(&carrier.canonical_carrier, committee, None)
-                    .map_err(|error| {
-                        RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string())
-                    })?;
-            let canonical = candidate.canonical_wire_bytes().map_err(|error| {
-                RbcDagOutboundMailboxErrorV1::InvalidProactive(error.to_string())
-            })?;
-            if canonical != carrier.canonical_carrier {
-                return Err(RbcDagOutboundMailboxErrorV1::InvalidProactive(
-                    "non-canonical carrier wire".to_owned(),
-                ));
-            }
-            Ok((
-                RbcDagOutboundClassV1::Proactive,
-                RbcDagOutboundKeyV1::Proactive(candidate.reference()),
-            ))
-        }
-        NetworkMessage::RbcDagShadowCarrierRequest(reference) => {
-            Ok((priority, RbcDagOutboundKeyV1::CarrierRequest(*reference)))
-        }
-        NetworkMessage::RbcDagShadowCarrierResponse(response) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::CarrierResponse(response.reference),
-        )),
-        NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::SyncRequest(request.author, request.round),
-        )),
-        NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::SyncResponse(response.author, response.round),
-        )),
-        NetworkMessage::RbcDagApplicationPayloadRequest(application) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::ApplicationPayloadRequest(*application),
-        )),
-        NetworkMessage::RbcDagApplicationPayloadResponse(response) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::ApplicationPayloadResponse(response.application),
-        )),
-        _ => Err(RbcDagOutboundMailboxErrorV1::Unsupported),
-    }
-}
-
-fn rbc_dag_outbound_messages_equal(left: &NetworkMessage, right: &NetworkMessage) -> bool {
-    match (left, right) {
-        (NetworkMessage::RbcDagShadowCarrier(left), NetworkMessage::RbcDagShadowCarrier(right)) => {
-            left == right
-        }
-        (
-            NetworkMessage::RbcDagShadowCarrierRequest(left),
-            NetworkMessage::RbcDagShadowCarrierRequest(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagShadowCarrierResponse(left),
-            NetworkMessage::RbcDagShadowCarrierResponse(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(left),
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagShadowCarrierSyncResponse(left),
-            NetworkMessage::RbcDagShadowCarrierSyncResponse(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagApplicationPayloadRequest(left),
-            NetworkMessage::RbcDagApplicationPayloadRequest(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagApplicationPayloadResponse(left),
-            NetworkMessage::RbcDagApplicationPayloadResponse(right),
-        ) => {
-            left.application == right.application
-                && left.transaction_data.transactions() == right.transaction_data.transactions()
-        }
-        _ => false,
-    }
-}
-
-fn current_timestamp_ns() -> TimestampNs {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .try_into()
-        .unwrap_or(TimestampNs::MAX)
-}
-
-fn latency_since_timestamps(
-    creation_times: impl IntoIterator<Item = TimestampNs>,
-    now_ns: TimestampNs,
-) -> (u64, u64, u64) {
-    creation_times.into_iter().fold(
-        (0u64, 0u64, 0u64),
-        |(total, samples, maximum), creation_time| {
-            let latency = now_ns.saturating_sub(creation_time);
-            (
-                total.saturating_add(latency),
-                samples.saturating_add(1),
-                maximum.max(latency),
-            )
-        },
-    )
-}
-
-#[derive(Default)]
-struct CommitRoundDistanceBatch {
-    physical_forward: (u64, u64, u64),
-    physical_backward: (u64, u64, u64),
-}
-
-impl CommitRoundDistanceBatch {
-    fn from_diagnostics(
-        diagnostics: impl IntoIterator<Item = CommittedApplicationDiagnosticV1>,
-    ) -> Self {
-        let mut batch = Self::default();
-        for diagnostic in diagnostics {
-            let aggregate = if diagnostic.physical_carrier_round_delta >= 0 {
-                &mut batch.physical_forward
-            } else {
-                &mut batch.physical_backward
-            };
-            let value = diagnostic.physical_carrier_round_delta.unsigned_abs();
-            aggregate.0 = aggregate.0.saturating_add(value);
-            aggregate.1 = aggregate.1.saturating_add(1);
-            aggregate.2 = aggregate.2.max(value);
-        }
-        batch
-    }
-
-    fn observe(self, metrics: &Metrics) {
-        for (kind, (total, samples, maximum)) in [
-            (
-                RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-                self.physical_forward,
-            ),
-            (
-                RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD,
-                self.physical_backward,
-            ),
-        ] {
-            metrics.observe_starfish_rbc_dag_commit_round_distance(kind, total, samples, maximum);
-        }
-    }
-}
 
 /// Recover the exact locally selected Starfish-RBC chain so the persisted
 /// non-authoritative shadow can reconcile a WAL that ended before the direct
@@ -673,12 +147,10 @@ fn recovered_local_rbc_headers<H: BlockHandler>(
 }
 
 fn shadow_transport_error_invalidates_run(error: &ShadowServiceErrorV1) -> bool {
-    match error {
-        ShadowServiceErrorV1::Stopped => true,
-        #[cfg(test)]
-        ShadowServiceErrorV1::Overloaded { .. } => true,
-        _ => false,
-    }
+    matches!(
+        error,
+        ShadowServiceErrorV1::Overloaded { .. } | ShadowServiceErrorV1::Stopped
+    )
 }
 
 fn invalidate_shadow_run(metrics: &Metrics) {
@@ -836,49 +308,6 @@ async fn send_network_message_reliably(
             let _ = sender.send(message).await;
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
-    }
-}
-
-async fn run_rbc_dag_outbound_worker(
-    mailbox: RbcDagOutboundMailboxV1,
-    proactive_sender: mpsc::Sender<NetworkMessage>,
-    priority_sender: mpsc::Sender<NetworkMessage>,
-    mut outbound_failure: watch::Receiver<Option<String>>,
-) -> Result<(), RbcDagOutboundMailboxErrorV1> {
-    loop {
-        if let Some(reason) = outbound_failure.borrow().clone() {
-            return Err(RbcDagOutboundMailboxErrorV1::Failed(reason));
-        }
-        let next = tokio::select! {
-            biased;
-            changed = outbound_failure.changed() => {
-                if changed.is_err() {
-                    return Err(RbcDagOutboundMailboxErrorV1::DownstreamClosed);
-                }
-                continue;
-            }
-            next = mailbox.recv() => next,
-        };
-        let Some((class, message)) = next else {
-            let state = mailbox.inner.state.lock();
-            return match &state.failure {
-                Some(reason) => Err(RbcDagOutboundMailboxErrorV1::Failed(reason.clone())),
-                None => Ok(()),
-            };
-        };
-        let result = match class {
-            RbcDagOutboundClassV1::Priority => priority_sender.try_send(message),
-            RbcDagOutboundClassV1::Proactive => proactive_sender.try_send(message),
-        };
-        match result {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                return Err(RbcDagOutboundMailboxErrorV1::DownstreamSaturated(class));
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(RbcDagOutboundMailboxErrorV1::DownstreamClosed);
-            }
-        }
     }
 }
 
@@ -1533,16 +962,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
 
         // Data requester is needed for Starfish protocols because of the practical
         // way we update the DAG known by other validators
-        if !self.inner.embedded_rbc_authority
-            && matches!(
-                self.consensus_protocol,
-                ConsensusProtocol::Starfish
-                    | ConsensusProtocol::StarfishRbc
-                    | ConsensusProtocol::StarfishSpeed
-                    | ConsensusProtocol::StarfishBls
-                    | ConsensusProtocol::SparseStarfishSpeed
-            )
-        {
+        if matches!(
+            self.consensus_protocol,
+            ConsensusProtocol::Starfish
+                | ConsensusProtocol::StarfishRbc
+                | ConsensusProtocol::StarfishSpeed
+                | ConsensusProtocol::StarfishBls
+                | ConsensusProtocol::SparseStarfishSpeed
+        ) {
             self.metrics
                 .tx_data_requests_received
                 .with_label_values(&[&self.peer_id.to_string()])
@@ -1559,35 +986,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 self.handle_subscribe(round).await;
             }
             NetworkMessage::Batch(blocks) => {
-                if self.inner.embedded_rbc_authority {
-                    tracing::warn!(
-                        peer = self.peer_id,
-                        "Rejected generic block batch while embedded RBC-DAG authority is active"
-                    );
-                } else {
-                    self.handle_batch(*blocks).await;
-                }
+                self.handle_batch(*blocks).await;
             }
             NetworkMessage::MissingParentsRequest(refs) => {
-                if self.inner.embedded_rbc_authority {
-                    tracing::debug!(
-                        peer = self.peer_id,
-                        count = refs.len(),
-                        "Ignored legacy missing-parent request in standalone RBC-DAG mode"
-                    );
-                    return true;
-                }
                 return self.handle_missing_parents_request(refs).await;
             }
             NetworkMessage::MissingTxDataRequest(refs) => {
-                if self.inner.embedded_rbc_authority {
-                    tracing::debug!(
-                        peer = self.peer_id,
-                        count = refs.len(),
-                        "Ignored legacy transaction-data request in standalone RBC-DAG mode"
-                    );
-                    return true;
-                }
                 return self.handle_missing_tx_data_request(refs).await;
             }
             NetworkMessage::PartialSig(sig) => {
@@ -1704,7 +1108,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::RbcDagShadowCarrier(envelope) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow.carrier_reliably(self.peer_id, envelope).await {
+                    if let Err(error) = shadow.carrier(self.peer_id, envelope) {
                         if shadow_transport_error_invalidates_run(&error) {
                             invalidate_shadow_run(&self.metrics);
                         }
@@ -1714,10 +1118,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::RbcDagShadowCarrierRequest(reference) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .carrier_request_reliably(self.peer_id, reference)
-                        .await
-                    {
+                    if let Err(error) = shadow.carrier_request(self.peer_id, reference) {
                         if shadow_transport_error_invalidates_run(&error) {
                             invalidate_shadow_run(&self.metrics);
                         }
@@ -1727,10 +1128,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::RbcDagShadowCarrierResponse(response) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .carrier_response_reliably(self.peer_id, response)
-                        .await
-                    {
+                    if let Err(error) = shadow.carrier_response(self.peer_id, response) {
                         if shadow_transport_error_invalidates_run(&error) {
                             invalidate_shadow_run(&self.metrics);
                         }
@@ -1740,10 +1138,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .carrier_sync_request_reliably(self.peer_id, request)
-                        .await
-                    {
+                    if let Err(error) = shadow.carrier_sync_request(self.peer_id, request) {
                         if shadow_transport_error_invalidates_run(&error) {
                             invalidate_shadow_run(&self.metrics);
                         }
@@ -1755,48 +1150,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
             }
             NetworkMessage::RbcDagShadowCarrierSyncResponse(response) => {
                 if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .carrier_sync_response_reliably(self.peer_id, response)
-                        .await
-                    {
+                    if let Err(error) = shadow.carrier_sync_response(self.peer_id, response) {
                         if shadow_transport_error_invalidates_run(&error) {
                             invalidate_shadow_run(&self.metrics);
                         }
                         tracing::warn!(
                             "Failed to forward RBC-DAG shadow carrier sync response: {error}"
-                        );
-                    }
-                }
-            }
-            NetworkMessage::RbcDagApplicationPayloadRequest(application) => {
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .application_payload_request_reliably(self.peer_id, application)
-                        .await
-                    {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
-                        }
-                        tracing::warn!(
-                            ?application,
-                            peer = self.peer_id,
-                            "Failed to forward RBC-DAG application-payload request: {error}"
-                        );
-                    }
-                }
-            }
-            NetworkMessage::RbcDagApplicationPayloadResponse(response) => {
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .application_payload_response_reliably(self.peer_id, response)
-                        .await
-                    {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
-                        }
-                        tracing::warn!(
-                            peer = self.peer_id,
-                            "Failed to forward RBC-DAG application-payload response: {error}"
                         );
                     }
                 }
@@ -1813,11 +1172,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                 peer: self.peer_id,
                 after_round: round,
             });
-        if self.inner.embedded_rbc_authority {
-            // Application headers and payloads are disseminated exclusively
-            // by authenticated carrier events in standalone mode.
-            return;
-        }
         if self.inner.dag_state.byzantine_strategy.is_some() {
             let round = 0;
             self.disseminator.disseminate_own_blocks(round).await;
@@ -2389,110 +1743,8 @@ pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     rbc_event_task: Option<JoinHandle<()>>,
     rbc_service_task: Option<JoinHandle<()>>,
     rbc_dag_shadow_event_task: Option<JoinHandle<()>>,
-    rbc_dag_core_control_task: Option<JoinHandle<()>>,
-    rbc_dag_assignment_task: Option<JoinHandle<()>>,
     rbc_dag_shadow_service_task: Option<JoinHandle<()>>,
-    rbc_dag_clock_bridge_state: Option<watch::Receiver<RbcDagClockBridgeStateV1>>,
     cordial_knowledge_task: JoinHandle<()>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RbcDagClockBridgeStateV1 {
-    Pending,
-    Failed,
-    Activated,
-}
-
-type RbcDagPayloadVerificationTaskV1 =
-    JoinHandle<Result<eyre::Result<ReconstructedTransactionData>, tokio::task::JoinError>>;
-
-enum RbcDagAuthorizedPayloadV1 {
-    None,
-    AlreadyAvailable(Option<Arc<TransactionData>>),
-    Verify(RbcDagPayloadVerificationTaskV1),
-}
-
-enum RbcDagCoreControlCommandV1 {
-    AuthorizedApplicationObserved {
-        carrier: BlockReference,
-        header: RbcCanonicalHeader,
-        authorization_basis: ShadowApplicationAuthorizationBasisV1,
-        payload: RbcDagAuthorizedPayloadV1,
-    },
-    Frontier(CommittedFrontierDeltaV1),
-    /// Every recovery application and frontier preceding this marker must be
-    /// fully applied before activation is legal.
-    Ready,
-    Activate,
-    /// Intentional end-of-stream marker. A sender disappearing without this
-    /// marker is an authoritative runtime failure.
-    Drain,
-}
-
-enum RbcDagApplicationAssignmentCommandV1 {
-    Assigned(BlockReference),
-    Drain,
-}
-
-#[derive(Default)]
-struct RbcDagCoreControlGateV1 {
-    startup_ready: bool,
-    clean_drain: bool,
-}
-
-impl RbcDagCoreControlGateV1 {
-    fn record_ready(&mut self) {
-        self.startup_ready = true;
-    }
-
-    fn activation_allowed(&self) -> bool {
-        self.startup_ready
-    }
-
-    fn record_clean_drain(&mut self) {
-        self.clean_drain = true;
-    }
-}
-
-async fn wait_for_rbc_dag_clock_bridge_activation(
-    bridge_state: &mut watch::Receiver<RbcDagClockBridgeStateV1>,
-) -> Result<(), String> {
-    loop {
-        match *bridge_state.borrow_and_update() {
-            RbcDagClockBridgeStateV1::Pending => {}
-            RbcDagClockBridgeStateV1::Failed => {
-                return Err(
-                    "RBC-DAG startup recovery was invalid before Core clock activation".to_string(),
-                );
-            }
-            RbcDagClockBridgeStateV1::Activated => return Ok(()),
-        }
-        bridge_state
-            .changed()
-            .await
-            .map_err(|_| "RBC-DAG event bridge stopped before Core clock activation".to_string())?;
-    }
-}
-
-fn fail_rbc_dag_clock_bridge(bridge_tx: Option<&watch::Sender<RbcDagClockBridgeStateV1>>) {
-    if let Some(bridge_tx) = bridge_tx {
-        // Failure is permanently terminal, including after a caller already
-        // observed activation. No later authority command may reach Core.
-        bridge_tx.send_if_modified(|state| {
-            if *state != RbcDagClockBridgeStateV1::Failed {
-                *state = RbcDagClockBridgeStateV1::Failed;
-                true
-            } else {
-                false
-            }
-        });
-    }
-}
-
-fn rbc_dag_clock_bridge_failed(
-    bridge_tx: Option<&watch::Sender<RbcDagClockBridgeStateV1>>,
-) -> bool {
-    bridge_tx.is_some_and(|bridge_tx| *bridge_tx.borrow() == RbcDagClockBridgeStateV1::Failed)
 }
 
 pub(crate) struct NetworkSyncSignals {
@@ -2522,21 +1774,11 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     /// another peer or the actor's local HeaderStaged/Delivered effects.
     rbc_peer_senders:
         parking_lot::RwLock<AHashMap<AuthorityIndex, mpsc::UnboundedSender<NetworkMessage>>>,
-    /// Bounded, keyed RBC-DAG transport mailboxes. Exact repair is admitted
-    /// independently of proactive carrier fan-out and drains first.
-    rbc_dag_peer_mailboxes: parking_lot::RwLock<AHashMap<AuthorityIndex, RbcDagOutboundMailboxV1>>,
     pub leader_timeout: Duration,
     pub soft_block_timeout: Duration,
-    metrics: Arc<Metrics>,
-    rbc_dag_clock_bridge_tx: Option<watch::Sender<RbcDagClockBridgeStateV1>>,
-    rbc_dag_shutdown_started: Arc<AtomicBool>,
     /// Sailfish++ service handle for sending control messages
     /// (timeout/no-vote). None for non-SailfishPlusPlus protocols.
     pub sailfish_handle: Option<SailfishServiceHandle>,
-    /// When true, only typed carrier-authorized application ingress may reach
-    /// the core. Peer-controlled block batches and legacy data-recovery paths
-    /// are rejected even if their serialized `DataSource` claims authority.
-    pub embedded_rbc_authority: bool,
     /// Central Starfish-RBC service. Connection workers only forward their
     /// trusted peer identity and wire payload into this single owner.
     pub(crate) starfish_rbc_service: Option<RbcServiceHandle>,
@@ -2547,509 +1789,6 @@ pub struct NetworkSyncerInner<H: BlockHandler, C: CommitObserver> {
     /// Byzantine strategies (e.g. RampUpWithholding) to ramp behavior
     /// over a fixed schedule.
     pub start_time: std::time::Instant,
-}
-
-struct RbcDagAppliedFrontierObservationV1 {
-    carrier_count: u64,
-    application_count: u64,
-    application_creation_times: Vec<TimestampNs>,
-    commit_round_distances: CommitRoundDistanceBatch,
-}
-
-trait RbcDagCoreControlTargetV1: Send + Sync {
-    async fn stage_authorized_application(
-        &self,
-        header: RbcCanonicalHeader,
-        authorization_basis: ShadowApplicationAuthorizationBasisV1,
-    ) -> Result<(), String>;
-
-    fn restore_available_application(
-        &self,
-        application: BlockReference,
-        payload: Option<Arc<TransactionData>>,
-    ) -> Result<(), String>;
-
-    async fn materialize_authorized_payload(
-        &self,
-        item: ReconstructedTransactionData,
-    ) -> Result<(), String>;
-
-    async fn apply_frontier(&self, delta: CommittedFrontierDeltaV1) -> Result<bool, String>;
-
-    async fn activate_authority(&self) -> Result<(), String>;
-
-    async fn apply_assignment(&self, reference: BlockReference) -> Result<(), String>;
-}
-
-impl<H: BlockHandler + 'static, C: CommitObserver + 'static> RbcDagCoreControlTargetV1
-    for NetworkSyncerInner<H, C>
-{
-    async fn stage_authorized_application(
-        &self,
-        header: RbcCanonicalHeader,
-        authorization_basis: ShadowApplicationAuthorizationBasisV1,
-    ) -> Result<(), String> {
-        let block_ref = header.reference();
-        let (missing_parents, _) = self.syncer.add_authorized_rbc_dag_header(header).await;
-        self.cordial_knowledge
-            .send(CordialKnowledgeMessage::DagParts {
-                headers: vec![block_ref],
-                shards: Vec::new(),
-            });
-        if !missing_parents.is_empty() {
-            tracing::debug!(
-                ?block_ref,
-                ?missing_parents,
-                ?authorization_basis,
-                "Authorized RBC-DAG application waits for parent materialization"
-            );
-        }
-        Ok(())
-    }
-
-    fn restore_available_application(
-        &self,
-        application: BlockReference,
-        payload: Option<Arc<TransactionData>>,
-    ) -> Result<(), String> {
-        // The actor is intentionally stopped before the authoritative FIFO is
-        // drained. Core already owns this data-available block, and restart
-        // recovery deterministically rehydrates the corresponding shadow
-        // state, so no actor callback is required while shutting down.
-        if self.rbc_dag_shutdown_started.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let shadow = self
-            .starfish_rbc_dag_shadow_service
-            .as_ref()
-            .ok_or_else(|| "authoritative payload callback target is unavailable".to_owned())?;
-        if let Some(payload) = payload {
-            shadow
-                .verified_application_payload(application, payload)
-                .map_err(|error| error.to_string())?;
-        }
-        shadow
-            .application_data_available(application)
-            .map_err(|error| error.to_string())
-    }
-
-    async fn materialize_authorized_payload(
-        &self,
-        item: ReconstructedTransactionData,
-    ) -> Result<(), String> {
-        let block_ref = item.block_reference;
-        self.cordial_knowledge
-            .send(CordialKnowledgeMessage::DagParts {
-                headers: Vec::new(),
-                shards: vec![block_ref],
-            });
-        if let Some(shard_tx) = self.shard_tx.lock().as_ref() {
-            let _ = shard_tx.send(vec![ShardMessage::FullBlock(block_ref)]);
-        }
-        let verified_payload = Arc::new(item.transaction_data.clone());
-        self.syncer.add_authorized_rbc_dag_payload(item).await;
-        // Core materialization is durable authority work and must complete
-        // before a queued frontier. The actor callback is ephemeral and the
-        // actor has already been stopped by the graceful shutdown protocol.
-        if self.rbc_dag_shutdown_started.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        self.starfish_rbc_dag_shadow_service
-            .as_ref()
-            .ok_or_else(|| "authoritative payload callback target is unavailable".to_owned())?
-            .verified_application_payload(block_ref, verified_payload)
-            .map_err(|error| error.to_string())
-    }
-
-    async fn apply_frontier(&self, delta: CommittedFrontierDeltaV1) -> Result<bool, String> {
-        self.syncer
-            .apply_starfish_rbc_dag_frontier(delta)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn activate_authority(&self) -> Result<(), String> {
-        self.syncer.activate_starfish_rbc_dag_authority().await;
-        Ok(())
-    }
-
-    async fn apply_assignment(&self, reference: BlockReference) -> Result<(), String> {
-        self.syncer
-            .apply_starfish_rbc_dag_application_assigned(reference)
-            .await;
-        Ok(())
-    }
-}
-
-impl RbcDagAppliedFrontierObservationV1 {
-    fn from_delta(delta: &CommittedFrontierDeltaV1) -> Self {
-        Self {
-            carrier_count: delta.carriers.len() as u64,
-            application_count: delta.applications.len() as u64,
-            application_creation_times: delta
-                .applications
-                .iter()
-                .map(RbcCanonicalHeader::meta_creation_time_ns)
-                .collect(),
-            commit_round_distances: CommitRoundDistanceBatch::from_diagnostics(
-                delta.application_diagnostics.iter().copied(),
-            ),
-        }
-    }
-
-    fn observe(self, metrics: &Metrics) {
-        let (total_ns, samples, max_ns) =
-            latency_since_timestamps(self.application_creation_times, current_timestamp_ns());
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
-            total_ns,
-            samples,
-            max_ns,
-        );
-        self.commit_round_distances.observe(metrics);
-        metrics.starfish_rbc_dag_frontier_applied();
-        metrics
-            .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["frontier", "committed"])
-            .inc();
-        metrics
-            .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["frontier", "carrier"])
-            .inc_by(self.carrier_count);
-        metrics
-            .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["frontier", "application"])
-            .inc_by(self.application_count);
-    }
-}
-
-fn fail_rbc_dag_authority(
-    metrics: &Metrics,
-    bridge_tx: Option<&watch::Sender<RbcDagClockBridgeStateV1>>,
-    reason: &str,
-) {
-    invalidate_shadow_run(metrics);
-    fail_rbc_dag_clock_bridge(bridge_tx);
-    tracing::error!(
-        reason,
-        "RBC-DAG authoritative Core-control worker failed closed"
-    );
-}
-
-fn fail_rbc_dag_outbound_transport(
-    metrics: &Metrics,
-    bridge_tx: Option<&watch::Sender<RbcDagClockBridgeStateV1>>,
-    embedded_rbc_authority: bool,
-    recipient: AuthorityIndex,
-    error: &RbcDagOutboundMailboxErrorV1,
-) {
-    metrics
-        .starfish_rbc_dag_shadow_inputs_total
-        .with_label_values(&["network", "overloaded"])
-        .inc();
-    if embedded_rbc_authority {
-        fail_rbc_dag_authority(
-            metrics,
-            bridge_tx,
-            &format!("RBC-DAG outbound mailbox for authority {recipient} failed: {error}"),
-        );
-    } else {
-        invalidate_shadow_run(metrics);
-        tracing::error!(
-            peer = recipient,
-            ?error,
-            "RBC-DAG observational outbound mailbox failed"
-        );
-    }
-}
-
-struct RbcDagEventRouterGuardV1 {
-    metrics: Arc<Metrics>,
-    bridge_tx: watch::Sender<RbcDagClockBridgeStateV1>,
-    clean_exit: bool,
-}
-
-impl RbcDagEventRouterGuardV1 {
-    fn new(metrics: Arc<Metrics>, bridge_tx: watch::Sender<RbcDagClockBridgeStateV1>) -> Self {
-        Self {
-            metrics,
-            bridge_tx,
-            clean_exit: false,
-        }
-    }
-
-    fn record_clean_exit(&mut self) {
-        self.clean_exit = true;
-    }
-}
-
-impl Drop for RbcDagEventRouterGuardV1 {
-    fn drop(&mut self) {
-        if !self.clean_exit {
-            fail_rbc_dag_authority(
-                &self.metrics,
-                Some(&self.bridge_tx),
-                "RBC-DAG authoritative event router stopped unexpectedly",
-            );
-        }
-    }
-}
-
-async fn drain_rbc_dag_authorized_payload(payload: RbcDagAuthorizedPayloadV1) {
-    if let RbcDagAuthorizedPayloadV1::Verify(payload_verification) = payload {
-        // Await rather than merely drop the JoinHandle: dropping detaches the
-        // verifier and could let Reed-Solomon work outlive Core shutdown.
-        let _ = payload_verification.await;
-    }
-}
-
-async fn drain_rbc_dag_control_command_payload(command: RbcDagCoreControlCommandV1) {
-    if let RbcDagCoreControlCommandV1::AuthorizedApplicationObserved { payload, .. } = command {
-        drain_rbc_dag_authorized_payload(payload).await;
-    }
-}
-
-async fn enqueue_rbc_dag_core_control(
-    sender: &mpsc::Sender<RbcDagCoreControlCommandV1>,
-    command: RbcDagCoreControlCommandV1,
-    metrics: &Metrics,
-    bridge_tx: Option<&watch::Sender<RbcDagClockBridgeStateV1>>,
-) -> bool {
-    let drain = matches!(command, RbcDagCoreControlCommandV1::Drain);
-    if !drain && rbc_dag_clock_bridge_failed(bridge_tx) {
-        drain_rbc_dag_control_command_payload(command).await;
-        return false;
-    }
-    match sender.send(command).await {
-        Ok(()) => return true,
-        Err(error) => drain_rbc_dag_control_command_payload(error.0).await,
-    }
-    fail_rbc_dag_authority(
-        metrics,
-        bridge_tx,
-        "bounded RBC-DAG Core-control channel closed unexpectedly",
-    );
-    false
-}
-
-async fn run_rbc_dag_core_control_worker<T: RbcDagCoreControlTargetV1 + 'static>(
-    target: Arc<T>,
-    metrics: Arc<Metrics>,
-    bridge_tx: watch::Sender<RbcDagClockBridgeStateV1>,
-    shutdown_started: Arc<AtomicBool>,
-    mut commands: mpsc::Receiver<RbcDagCoreControlCommandV1>,
-) {
-    let mut gate = RbcDagCoreControlGateV1::default();
-    while let Some(command) = commands.recv().await {
-        if matches!(command, RbcDagCoreControlCommandV1::Drain) {
-            gate.record_clean_drain();
-            break;
-        }
-        if rbc_dag_clock_bridge_failed(Some(&bridge_tx)) {
-            drain_rbc_dag_control_command_payload(command).await;
-            continue;
-        }
-        if !shutdown_started.load(Ordering::Acquire)
-            && metrics.starfish_rbc_dag_shadow_clock_valid.get() == 0
-        {
-            fail_rbc_dag_authority(
-                &metrics,
-                Some(&bridge_tx),
-                "authoritative runtime validity was revoked",
-            );
-            drain_rbc_dag_control_command_payload(command).await;
-            continue;
-        }
-
-        match command {
-            RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier,
-                header,
-                authorization_basis,
-                payload,
-            } => {
-                let block_ref = header.reference();
-                if let Err(error) = target
-                    .stage_authorized_application(header, authorization_basis)
-                    .await
-                {
-                    fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        &format!("authorized header insertion failed for {block_ref}: {error}"),
-                    );
-                    drain_rbc_dag_authorized_payload(payload).await;
-                    continue;
-                }
-
-                let item = match payload {
-                    RbcDagAuthorizedPayloadV1::None => continue,
-                    RbcDagAuthorizedPayloadV1::AlreadyAvailable(payload) => {
-                        if !shutdown_started.load(Ordering::Acquire) {
-                            if let Err(error) =
-                                target.restore_available_application(block_ref, payload)
-                            {
-                                fail_rbc_dag_authority(
-                                    &metrics,
-                                    Some(&bridge_tx),
-                                    &format!(
-                                        "materialized payload callback failed for {block_ref}: {error}"
-                                    ),
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    RbcDagAuthorizedPayloadV1::Verify(payload_verification) => {
-                        match payload_verification.await {
-                            Ok(Ok(Ok(item))) => item,
-                            // Payload bytes remain untrusted even when their
-                            // enclosing header is authorized. Reject only this
-                            // observation so another holder can recover it.
-                            Ok(Ok(Err(error))) => {
-                                tracing::warn!(
-                                    ?carrier,
-                                    ?block_ref,
-                                    ?authorization_basis,
-                                    ?error,
-                                    "Rejected RBC-DAG application payload"
-                                );
-                                continue;
-                            }
-                            Ok(Err(error)) | Err(error)
-                                if shutdown_started.load(Ordering::Acquire) =>
-                            {
-                                tracing::debug!(
-                                    ?block_ref,
-                                    ?error,
-                                    "RBC-DAG payload verifier stopped during shutdown"
-                                );
-                                continue;
-                            }
-                            Ok(Err(error)) | Err(error) => {
-                                fail_rbc_dag_authority(
-                                    &metrics,
-                                    Some(&bridge_tx),
-                                    &format!(
-                                        "authorized payload verifier stopped for {block_ref} in carrier {carrier}: {error}"
-                                    ),
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                };
-                if rbc_dag_clock_bridge_failed(Some(&bridge_tx)) {
-                    continue;
-                }
-                if let Err(error) = target.materialize_authorized_payload(item).await {
-                    fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        &format!("verified payload callback failed for {block_ref}: {error}"),
-                    );
-                }
-            }
-            RbcDagCoreControlCommandV1::Frontier(delta) => {
-                let observation = RbcDagAppliedFrontierObservationV1::from_delta(&delta);
-                match target.apply_frontier(delta).await {
-                    Ok(true) => observation.observe(&metrics),
-                    // Exact replay is an idempotent Core acknowledgment. It
-                    // must not double-count application or frontier effects.
-                    Ok(false) => {}
-                    Err(error) => fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        &format!("authoritative frontier was rejected: {error}"),
-                    ),
-                }
-            }
-            RbcDagCoreControlCommandV1::Ready => gate.record_ready(),
-            RbcDagCoreControlCommandV1::Activate => {
-                if !gate.activation_allowed() {
-                    fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        "clock activation arrived before the startup recovery barrier",
-                    );
-                    continue;
-                }
-                if let Err(error) = target.activate_authority().await {
-                    fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        &format!("Core authority activation failed: {error}"),
-                    );
-                    continue;
-                }
-                if rbc_dag_clock_bridge_failed(Some(&bridge_tx)) {
-                    continue;
-                }
-                metrics.starfish_rbc_dag_shadow_clock_valid.set(1);
-                bridge_tx.send_if_modified(|state| {
-                    if *state == RbcDagClockBridgeStateV1::Pending {
-                        *state = RbcDagClockBridgeStateV1::Activated;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            RbcDagCoreControlCommandV1::Drain => unreachable!("drain handled above"),
-        }
-    }
-
-    if !gate.clean_drain {
-        fail_rbc_dag_authority(
-            &metrics,
-            Some(&bridge_tx),
-            "RBC-DAG Core-control sender disappeared before a graceful drain",
-        );
-    }
-}
-
-async fn run_rbc_dag_application_assignment_worker<T: RbcDagCoreControlTargetV1 + 'static>(
-    target: Arc<T>,
-    metrics: Arc<Metrics>,
-    bridge_tx: watch::Sender<RbcDagClockBridgeStateV1>,
-    shutdown_started: Arc<AtomicBool>,
-    mut assignments: mpsc::Receiver<RbcDagApplicationAssignmentCommandV1>,
-) {
-    let mut clean_drain = false;
-    while let Some(command) = assignments.recv().await {
-        match command {
-            RbcDagApplicationAssignmentCommandV1::Drain => {
-                clean_drain = true;
-                break;
-            }
-            RbcDagApplicationAssignmentCommandV1::Assigned(reference) => {
-                // Assignments release an ephemeral producer gate. The local
-                // application was already durably fixed before this event, so
-                // creating a fresh Core block while the shadow actor is
-                // stopped is both unnecessary and unsafe.
-                if shutdown_started.load(Ordering::Acquire) {
-                    continue;
-                }
-                if rbc_dag_clock_bridge_failed(Some(&bridge_tx)) {
-                    continue;
-                }
-                if let Err(error) = target.apply_assignment(reference).await {
-                    fail_rbc_dag_authority(
-                        &metrics,
-                        Some(&bridge_tx),
-                        &format!("Core application-assignment acknowledgment failed: {error}"),
-                    );
-                }
-            }
-        }
-    }
-    if !clean_drain && !shutdown_started.load(Ordering::Acquire) {
-        fail_rbc_dag_authority(
-            &metrics,
-            Some(&bridge_tx),
-            "RBC-DAG assignment sender disappeared unexpectedly",
-        );
-    }
 }
 
 impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C> {
@@ -3063,29 +1802,18 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         partial_sig_outbox_rx: Option<mpsc::UnboundedReceiver<PartialSig>>,
         bls_cert_aggregator: Option<BlsCertificateAggregator>,
         bls_signer: Option<BlsSigner>,
-        rbc_dag_clock_start_paused: bool,
     ) -> Self {
         let handle = Handle::current();
         let block_ready_notify = Arc::new(Notify::new());
         let proposal_round_notify = Arc::new(Notify::new());
-        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
-        let (committed, committed_leaders_count) =
-            core.take_recovered_committed(embedded_rbc_authority);
+        let (committed, committed_leaders_count) = core.take_recovered_committed();
         commit_observer.recover_committed(committed, committed_leaders_count);
         let committee = core.committee().clone();
         let mac_keys = core.mac_keys();
         let dag_state = core.dag_state().clone();
-        let rbc_dag_frontier_recovery_cursor = embedded_rbc_authority
-            .then(|| core.rbc_dag_frontier_recovery_cursor())
-            .flatten();
         let recovered_shadow_local_headers = if node_parameters.starfish_rbc_dag_shadow {
             match recovered_local_rbc_headers(&core) {
                 Ok(headers) => Some(headers),
-                Err(error) if embedded_rbc_authority => {
-                    panic!(
-                        "embedded RBC-DAG authority cannot start without reconcilable local history: {error}"
-                    );
-                }
                 Err(error) => {
                     // A partial local history would make delivery comparisons
                     // meaningless in mirror mode and make autonomous local
@@ -3130,7 +1858,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .as_ref()
             .map(|tx| SailfishServiceHandle::new(tx.clone()));
         let (starfish_rbc_service, rbc_event_rx, rbc_service_task) =
-            if dag_state.consensus_protocol.is_starfish_rbc() && !embedded_rbc_authority {
+            if dag_state.consensus_protocol.is_starfish_rbc() {
                 let protocol_instance = node_parameters
                 .starfish_rbc_protocol_instance
                 .and_then(|bytes| RbcProtocolInstanceId::new(bytes).ok())
@@ -3218,48 +1946,26 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     } else {
                         ShadowWalSyncPolicyV1::EveryBatch
                     };
-                    if embedded_rbc_authority {
-                        start_starfish_rbc_dag_authoritative_clock_service_with_metrics_v1(
-                            starfish_rbc_dag_shadow_wal,
-                            committee_context,
-                            dag_state.get_own_authority_index(),
-                            context,
-                            authorizer,
-                            recovered_local_headers,
-                            // The idle carrier pacemaker deliberately shares the
-                            // resolved Starfish leader timeout. Application and
-                            // embedded RBC phase carriers remain event-driven.
-                            node_parameters.leader_timeout,
-                            wal_sync_policy,
-                            Arc::clone(&metrics),
-                            rbc_dag_frontier_recovery_cursor,
-                            !rbc_dag_clock_start_paused,
-                        )
-                    } else {
-                        let start = if rbc_dag_clock_start_paused {
-                            start_starfish_rbc_dag_autonomous_clock_service_paused_with_metrics_v1
-                        } else {
-                            start_starfish_rbc_dag_autonomous_clock_service_with_metrics_v1
-                        };
-                        start(
-                            starfish_rbc_dag_shadow_wal,
-                            committee_context,
-                            dag_state.get_own_authority_index(),
-                            context,
-                            authorizer,
-                            recovered_local_headers,
-                            node_parameters.leader_timeout,
-                            wal_sync_policy,
-                            Arc::clone(&metrics),
-                        )
-                    }
+                    start_starfish_rbc_dag_autonomous_clock_service_v1(
+                        starfish_rbc_dag_shadow_wal,
+                        committee_context,
+                        dag_state.get_own_authority_index(),
+                        context,
+                        authorizer,
+                        recovered_local_headers,
+                        // The idle carrier pacemaker deliberately shares the
+                        // resolved Starfish leader timeout. Application and
+                        // embedded RBC phase carriers remain event-driven.
+                        node_parameters.leader_timeout,
+                        wal_sync_policy,
+                    )
                 } else {
                     let wal_sync_policy = if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
                         ShadowWalSyncPolicyV1::OnShutdown
                     } else {
                         ShadowWalSyncPolicyV1::EveryBatch
                     };
-                    start_starfish_rbc_dag_shadow_service_with_metrics_v1(
+                    start_starfish_rbc_dag_shadow_service_v1(
                         starfish_rbc_dag_shadow_wal,
                         committee_context,
                         dag_state.get_own_authority_index(),
@@ -3267,14 +1973,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         authorizer,
                         recovered_local_headers,
                         wal_sync_policy,
-                        Arc::clone(&metrics),
                     )
                 };
                 match started {
                     Ok((service, events, task)) => (Some(service), Some(events), Some(task)),
-                    Err(error) if embedded_rbc_authority => {
-                        panic!("embedded RBC-DAG authority failed to start: {error}");
-                    }
                     Err(error) => {
                         invalidate_shadow_run(&metrics);
                         tracing::error!("Disabling Starfish-RBC-DAG runtime: {error}");
@@ -3284,6 +1986,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             } else {
                 (None, None, None)
             };
+        let embedded_rbc_authority = node_parameters.starfish_rbc_dag_embedded_rbc_authority;
         let syncer = Syncer::new(
             core,
             NetworkSyncSignals {
@@ -3300,11 +2003,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         );
         let initial_round = syncer.core().next_block_round();
         let syncer = CoreThreadDispatcher::start(syncer);
-        if !embedded_rbc_authority {
-            // Embedded authority production is released by the ordered Ready
-            // bridge only after replayed frontier receipts are durable.
-            syncer.force_new_block(initial_round).await;
-        }
+        // Await the initial command while the async RBC actor remains
+        // schedulable. The command itself runs on the dedicated core thread,
+        // where synchronous local-INIT selection is safe.
+        syncer.force_new_block(initial_round).await;
         let (stop_sender, stop_receiver) = mpsc::channel(1);
         // Occupy the only available permit, so that all other
         // calls to send() will block.
@@ -3348,17 +2050,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         dag_state.attach_cordial_knowledge(cordial_knowledge_handle.clone());
         let cordial_knowledge_task = handle.spawn(cordial_knowledge_actor.run());
 
-        let (rbc_dag_clock_bridge_tx, rbc_dag_clock_bridge_state) = if node_parameters
-            .starfish_rbc_dag_autonomous_clock
-            && starfish_rbc_dag_shadow_service.is_some()
-        {
-            let (tx, rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-        let rbc_dag_shutdown_started = Arc::new(AtomicBool::new(false));
-
         let inner = Arc::new(NetworkSyncerInner {
             block_ready_notify,
             dag_state: dag_state.clone(),
@@ -3374,14 +2065,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             cordial_knowledge: cordial_knowledge_handle,
             peer_senders: parking_lot::RwLock::new(AHashMap::new()),
             rbc_peer_senders: parking_lot::RwLock::new(AHashMap::new()),
-            rbc_dag_peer_mailboxes: parking_lot::RwLock::new(AHashMap::new()),
             leader_timeout: node_parameters.leader_timeout,
             soft_block_timeout: node_parameters.soft_block_timeout,
-            metrics: metrics.clone(),
-            rbc_dag_clock_bridge_tx: rbc_dag_clock_bridge_tx.clone(),
-            rbc_dag_shutdown_started: rbc_dag_shutdown_started.clone(),
             sailfish_handle: sf_handle_for_inner,
-            embedded_rbc_authority,
             starfish_rbc_service: starfish_rbc_service.clone(),
             starfish_rbc_dag_shadow_service: starfish_rbc_dag_shadow_service.clone(),
             start_time: std::time::Instant::now(),
@@ -3483,6 +2169,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .syncer
                                 .add_transaction_data(vec![item], DataSource::StarfishRbcPayload)
                                 .await;
+                            if let Some(ref shadow) =
+                                event_inner.starfish_rbc_dag_shadow_service
+                            {
+                                if let Err(error) = shadow.application_data_available(block_ref) {
+                                    invalidate_shadow_run(&rbc_metrics);
+                                    tracing::warn!(
+                                        ?block_ref,
+                                        "Failed to record RBC-DAG application availability: {error}"
+                                    );
+                                }
+                            }
                         }
                         RbcServiceEvent::Delivered(header) => {
                             if let Some(ref shadow) =
@@ -3530,129 +2227,43 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             RbcCommitteeId::derive(&inner.committee)
                 .expect("validated direct RBC committee must retain a stable identifier")
         });
-        let (rbc_dag_core_control_tx, rbc_dag_core_control_task) = if embedded_rbc_authority {
-            let (control_tx, control_rx) = mpsc::channel(STARFISH_RBC_DAG_CORE_CONTROL_CAPACITY);
-            let worker_inner = inner.clone();
-            let worker_metrics = metrics.clone();
-            let worker_bridge_tx = rbc_dag_clock_bridge_tx
-                .as_ref()
-                .expect("embedded authority must supervise clock activation")
-                .clone();
-            let panic_metrics = metrics.clone();
-            let panic_bridge_tx = worker_bridge_tx.clone();
-            let worker_shutdown_started = rbc_dag_shutdown_started.clone();
-            let task = handle.spawn(async move {
-                if AssertUnwindSafe(run_rbc_dag_core_control_worker(
-                    worker_inner,
-                    worker_metrics,
-                    worker_bridge_tx,
-                    worker_shutdown_started,
-                    control_rx,
-                ))
-                .catch_unwind()
-                .await
-                .is_err()
-                {
-                    fail_rbc_dag_authority(
-                        &panic_metrics,
-                        Some(&panic_bridge_tx),
-                        "RBC-DAG Core-control worker panicked",
-                    );
-                }
-            });
-            (Some(control_tx), Some(task))
-        } else {
-            (None, None)
-        };
-        let (rbc_dag_assignment_tx, rbc_dag_assignment_task) = if embedded_rbc_authority {
-            // Capacity one plus the single in-flight dispatcher call preserves
-            // assignment order with a strict two-item bound, independently of
-            // remote payload verification in the authority FIFO.
-            let (assignment_tx, assignment_rx) = mpsc::channel(1);
-            let assignment_inner = inner.clone();
-            let assignment_metrics = metrics.clone();
-            let assignment_bridge_tx = rbc_dag_clock_bridge_tx
-                .as_ref()
-                .expect("embedded authority must supervise assignments")
-                .clone();
-            let assignment_shutdown_started = rbc_dag_shutdown_started.clone();
-            let panic_metrics = metrics.clone();
-            let panic_bridge_tx = assignment_bridge_tx.clone();
-            let task = handle.spawn(async move {
-                if AssertUnwindSafe(run_rbc_dag_application_assignment_worker(
-                    assignment_inner,
-                    assignment_metrics,
-                    assignment_bridge_tx,
-                    assignment_shutdown_started,
-                    assignment_rx,
-                ))
-                .catch_unwind()
-                .await
-                .is_err()
-                {
-                    fail_rbc_dag_authority(
-                        &panic_metrics,
-                        Some(&panic_bridge_tx),
-                        "RBC-DAG assignment worker panicked",
-                    );
-                }
-            });
-            (Some(assignment_tx), Some(task))
-        } else {
-            (None, None)
-        };
         let rbc_dag_shadow_event_task = rbc_dag_shadow_event_rx.map(|mut event_rx| {
             let event_inner = inner.clone();
             let shadow_metrics = metrics.clone();
-            let rbc_dag_clock_bridge_tx = rbc_dag_clock_bridge_tx.clone();
-            let rbc_dag_core_control_tx = rbc_dag_core_control_tx;
-            let rbc_dag_assignment_tx = rbc_dag_assignment_tx;
-            let rbc_dag_shutdown_started = rbc_dag_shutdown_started;
             handle.spawn(async move {
-                let mut router_guard = embedded_rbc_authority.then(|| {
-                    RbcDagEventRouterGuardV1::new(
-                        shadow_metrics.clone(),
-                        rbc_dag_clock_bridge_tx
-                            .as_ref()
-                            .expect("embedded authority must supervise its event router")
-                            .clone(),
-                    )
-                });
-                // Keep expensive Reed-Solomon work off the carrier event
-                // router. Verification remains parallel, while the bounded
-                // Core-control worker awaits its handles in exact service
-                // order before applying a later frontier or activation.
-                let payload_verification_limit = Arc::new(Semaphore::new(4));
                 while let Some(event) = event_rx.recv().await {
                     match event {
                         ShadowServiceEventV1::Network { recipient, message } => {
-                            // The per-peer keyed mailbox bounds both proactive
-                            // history and exact-repair traffic. Distinct-key
-                            // saturation is a transport failure: no proactive
-                            // item is silently evicted to make room for a
-                            // newer one.
-                            let mailbox = event_inner
-                                .rbc_dag_peer_mailboxes
-                                .read()
-                                .get(&recipient)
-                                .cloned();
-                            if let Some(mailbox) = mailbox {
-                                match mailbox.enqueue(message, &event_inner.committee) {
-                                    Ok(RbcDagOutboundEnqueueV1::Added) => shadow_metrics
+                            let sender = event_inner.peer_senders.read().get(&recipient).cloned();
+                            if let Some(sender) = sender {
+                                match sender.try_send(message) {
+                                    Ok(()) => shadow_metrics
                                         .starfish_rbc_dag_shadow_inputs_total
                                         .with_label_values(&["network", "sent"])
                                         .inc(),
-                                    Ok(RbcDagOutboundEnqueueV1::Coalesced) => shadow_metrics
-                                        .starfish_rbc_dag_shadow_inputs_total
-                                        .with_label_values(&["network", "coalesced"])
-                                        .inc(),
-                                    Err(error) => fail_rbc_dag_outbound_transport(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        embedded_rbc_authority,
-                                        recipient,
-                                        &error,
-                                    ),
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        // The shadow is observational. It must
+                                        // shed work instead of backpressuring
+                                        // the authoritative network path.
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_inputs_total
+                                            .with_label_values(&["network", "dropped_backpressure"])
+                                            .inc();
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_comparison_valid
+                                            .set(0);
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_inputs_total
+                                            .with_label_values(&["network", "disconnected"])
+                                            .inc();
+                                        shadow_metrics
+                                            .starfish_rbc_dag_shadow_comparison_valid
+                                            .set(0);
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                    }
                                 }
                             } else {
                                 shadow_metrics
@@ -3690,181 +2301,34 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 ) {
                                     Ok(_) => {}
                                     Err(error) => {
-                                        fail_rbc_dag_authority(
-                                            &shadow_metrics,
-                                            rbc_dag_clock_bridge_tx.as_ref(),
-                                            &format!(
-                                                "embedded carrier {carrier:?} delivered an invalid application header: {error}"
-                                            ),
+                                        shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
+                                        tracing::error!(
+                                            ?carrier,
+                                            ?error,
+                                            "Embedded RBC delivered an invalid application header"
                                         );
                                     }
                                 }
                             }
                         }
-                        ShadowServiceEventV1::AuthorizedApplicationObserved {
-                            carrier,
-                            header,
-                            payload,
-                            authorization_basis,
-                        } => {
-                            if !embedded_rbc_authority {
-                                tracing::debug!(
-                                    ?carrier,
-                                    ?authorization_basis,
-                                    "Ignoring standalone application event outside embedded authority mode"
-                                );
-                                continue;
-                            }
-                            // Once authority has failed, do not even start a
-                            // new payload verifier. Commands already accepted
-                            // by the bounded FIFO are joined by its worker.
-                            if rbc_dag_clock_bridge_failed(rbc_dag_clock_bridge_tx.as_ref()) {
-                                continue;
-                            }
-                            let pinned = match PinnedRbcHeader::validate_with_committee_id(
-                                header,
-                                &event_inner.committee,
-                                embedded_rbc_committee_id
-                                    .expect("embedded authority must cache its committee ID"),
-                            ) {
-                                Ok(pinned) => pinned,
-                                Err(error) => {
-                                    fail_rbc_dag_authority(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        &format!(
-                                            "carrier {carrier:?} emitted an invalid authorized application header ({authorization_basis:?}): {error}"
-                                        ),
-                                    );
-                                    continue;
-                                }
-                            };
-                            let canonical = pinned.header().clone();
-                            let block_ref = canonical.reference();
-                            let control_payload = if event_inner
-                                .dag_state
-                                .is_data_available(&block_ref)
-                            {
-                                let Some(block) =
-                                    event_inner.dag_state.get_storage_block(block_ref)
-                                else {
-                                    fail_rbc_dag_authority(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        &format!(
-                                            "data-available application {block_ref} has no storage block"
-                                        ),
-                                    );
-                                    continue;
-                                };
-                                let transaction_data = block.transaction_data().cloned();
-                                if transaction_data.is_none()
-                                    && canonical.transactions_commitment()
-                                        != TransactionsCommitment::default()
-                                {
-                                    fail_rbc_dag_authority(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        &format!(
-                                            "data-available application {block_ref} has no transaction payload"
-                                        ),
-                                    );
-                                    continue;
-                                }
-                                // Empty committed transaction sets are
-                                // data-available without a TransactionData
-                                // allocation. The ordered availability callback
-                                // remains required, but there is no payload to
-                                // verify or cache.
-                                RbcDagAuthorizedPayloadV1::AlreadyAvailable(
-                                    transaction_data.map(Arc::new),
-                                )
-                            } else if let Some(transaction_data) = payload {
-                                let payload_verification_limit =
-                                    payload_verification_limit.clone();
-                                let committee = event_inner.committee.clone();
-                                let mac_keys = event_inner.mac_keys.clone();
-                                let own_id = event_inner.dag_state.get_own_authority_index();
-                                let authentication_scheme =
-                                    event_inner.dag_state.block_authentication_scheme;
-                                let verification_header = canonical.clone();
-                                let task = tokio::spawn(async move {
-                                let permit = payload_verification_limit
-                                    .acquire_owned()
-                                    .await
-                                    .expect("RBC-DAG payload semaphore remains open");
-                                    tokio::task::spawn_blocking(move || {
-                                    let _permit = permit;
-                                    let mut encoder = ReedSolomonEncoder::new(2, 4, 2)
-                                        .expect("RBC-DAG payload encoder should be created");
-                                    verify_starfish_rbc_transaction_payload(
-                                            &verification_header,
-                                        transaction_data,
-                                        &committee,
-                                        own_id,
-                                        block_ref.authority,
-                                        &mut encoder,
-                                        authentication_scheme,
-                                        &mac_keys,
-                                    )
-                                })
-                                    .await
-                                });
-                                RbcDagAuthorizedPayloadV1::Verify(task)
-                            } else {
-                                RbcDagAuthorizedPayloadV1::None
-                            };
-                            if let Some(ref control_tx) = rbc_dag_core_control_tx {
-                                enqueue_rbc_dag_core_control(
-                                    control_tx,
-                                    RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                                        carrier,
-                                        header: canonical,
-                                        authorization_basis,
-                                        payload: control_payload,
-                                    },
-                                    &shadow_metrics,
-                                    rbc_dag_clock_bridge_tx.as_ref(),
-                                )
-                                .await;
-                            }
-                        }
-                        ShadowServiceEventV1::ApplicationAssigned(reference) => {
-                            if let Some(ref assignment_tx) = rbc_dag_assignment_tx {
-                                if rbc_dag_clock_bridge_failed(rbc_dag_clock_bridge_tx.as_ref()) {
-                                    continue;
-                                }
-                                // Assignment releases the one-outstanding
-                                // producer gate and has no frontier/recovery
-                                // dependency. Keep it off the payload-heavy
-                                // FIFO; capacity one preserves exact order
-                                // without spawning unbounded tasks.
-                                if assignment_tx
-                                    .send(RbcDagApplicationAssignmentCommandV1::Assigned(
-                                        reference,
-                                    ))
-                                    .await
-                                    .is_err()
-                                {
-                                    fail_rbc_dag_authority(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        "bounded RBC-DAG assignment channel closed unexpectedly",
-                                    );
-                                }
-                            }
-                        }
                         ShadowServiceEventV1::FrontierCommitted(delta) => {
-                            if let Some(ref control_tx) = rbc_dag_core_control_tx {
-                                enqueue_rbc_dag_core_control(
-                                    control_tx,
-                                    RbcDagCoreControlCommandV1::Frontier(delta),
-                                    &shadow_metrics,
-                                    rbc_dag_clock_bridge_tx.as_ref(),
-                                )
-                                .await;
-                            } else {
-                                shadow_metrics.starfish_rbc_dag_frontier_ignored();
+                            if embedded_rbc_authority {
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "committed"])
+                                    .inc();
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "carrier"])
+                                    .inc_by(delta.carriers.len() as u64);
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_inputs_total
+                                    .with_label_values(&["frontier", "application"])
+                                    .inc_by(delta.applications.len() as u64);
+                                event_inner
+                                    .syncer
+                                    .apply_starfish_rbc_dag_frontier(delta)
+                                    .await;
                             }
                         }
                         ShadowServiceEventV1::VertexProjected(reference) => {
@@ -3952,43 +2416,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             }
                         }
                         ShadowServiceEventV1::Ready { autonomous_clock } => {
-                            if autonomous_clock && embedded_rbc_authority {
-                                if let Some(ref control_tx) = rbc_dag_core_control_tx {
-                                    // FIFO placement makes this a barrier over
-                                    // every recovered header, payload, and
-                                    // committed frontier emitted before Ready.
-                                    enqueue_rbc_dag_core_control(
-                                        control_tx,
-                                        RbcDagCoreControlCommandV1::Ready,
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                    )
-                                    .await;
-                                }
+                            let verdict = if autonomous_clock {
+                                &shadow_metrics.starfish_rbc_dag_shadow_clock_valid
                             } else {
-                                let verdict =
-                                    &shadow_metrics.starfish_rbc_dag_shadow_comparison_valid;
-                                if verdict.get() != 0 {
-                                    verdict.set(1);
-                                }
-                            }
-                        }
-                        ShadowServiceEventV1::ClockActivated => {
-                            if let Some(ref control_tx) = rbc_dag_core_control_tx {
-                                enqueue_rbc_dag_core_control(
-                                    control_tx,
-                                    RbcDagCoreControlCommandV1::Activate,
-                                    &shadow_metrics,
-                                    rbc_dag_clock_bridge_tx.as_ref(),
-                                )
-                                .await;
-                            } else if shadow_metrics.starfish_rbc_dag_shadow_clock_valid.get() == 0 {
-                                fail_rbc_dag_clock_bridge(rbc_dag_clock_bridge_tx.as_ref());
-                            } else {
-                                shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(1);
-                                if let Some(ref bridge_tx) = rbc_dag_clock_bridge_tx {
-                                    bridge_tx.send_replace(RbcDagClockBridgeStateV1::Activated);
-                                }
+                                &shadow_metrics.starfish_rbc_dag_shadow_comparison_valid
+                            };
+                            if verdict.get() != 0 {
+                                verdict.set(1);
                             }
                         }
                         ShadowServiceEventV1::ClockState {
@@ -4032,17 +2466,10 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                         ShadowServiceEventV1::Rejected { peer, error } => {
                             if peer.is_none() {
-                                if embedded_rbc_authority {
-                                    fail_rbc_dag_authority(
-                                        &shadow_metrics,
-                                        rbc_dag_clock_bridge_tx.as_ref(),
-                                        &format!(
-                                            "RBC-DAG actor rejected authoritative runtime input: {error}"
-                                        ),
-                                    );
-                                } else {
-                                    invalidate_shadow_run(&shadow_metrics);
-                                }
+                                shadow_metrics
+                                    .starfish_rbc_dag_shadow_comparison_valid
+                                    .set(0);
+                                shadow_metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                             }
                             tracing::warn!(
                                 "Rejected RBC-DAG runtime input from {:?}: {}",
@@ -4052,39 +2479,14 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         }
                     }
                 }
-                if rbc_dag_shutdown_started.load(Ordering::Acquire) {
-                    if let Some(ref assignment_tx) = rbc_dag_assignment_tx {
-                        let _ = assignment_tx
-                            .send(RbcDagApplicationAssignmentCommandV1::Drain)
-                            .await;
-                    }
-                }
-                if let Some(ref control_tx) = rbc_dag_core_control_tx {
-                    if rbc_dag_shutdown_started.load(Ordering::Acquire) {
-                        enqueue_rbc_dag_core_control(
-                            control_tx,
-                            RbcDagCoreControlCommandV1::Drain,
-                            &shadow_metrics,
-                            rbc_dag_clock_bridge_tx.as_ref(),
-                        )
-                        .await;
-                    } else {
-                        fail_rbc_dag_authority(
-                            &shadow_metrics,
-                            rbc_dag_clock_bridge_tx.as_ref(),
-                            "RBC-DAG actor event stream closed unexpectedly",
-                        );
-                    }
-                }
-                if let Some(ref mut router_guard) = router_guard {
-                    router_guard.record_clean_exit();
-                }
             })
         });
 
         // Start bridge task that forwards reconstructed transaction data to core
+        let bridge_metrics = metrics.clone();
         let bridge_task = decoded_rx.map(|mut decoded_rx| {
             let bridge_inner = inner.clone();
+            let bridge_metrics = bridge_metrics.clone();
             handle.spawn(async move {
                 while let Some(items) = decoded_rx.recv().await {
                     // Reconstruction proves we now have the shard data for the
@@ -4103,6 +2505,17 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         .syncer
                         .add_transaction_data(items, DataSource::ShardReconstructor)
                         .await;
+                    if let Some(ref shadow) = bridge_inner.starfish_rbc_dag_shadow_service {
+                        for reference in shard_refs {
+                            if let Err(error) = shadow.application_data_available(reference) {
+                                invalidate_shadow_run(&bridge_metrics);
+                                tracing::warn!(
+                                    ?reference,
+                                    "Failed to record reconstructed RBC-DAG availability: {error}"
+                                );
+                            }
+                        }
+                    }
                 }
             })
         });
@@ -4371,170 +2784,15 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             rbc_event_task,
             rbc_service_task,
             rbc_dag_shadow_event_task,
-            rbc_dag_core_control_task,
-            rbc_dag_assignment_task,
             rbc_dag_shadow_service_task,
-            rbc_dag_clock_bridge_state,
             cordial_knowledge_task,
         }
     }
 
-    pub(crate) async fn activate_starfish_rbc_dag_clock(&self) -> Result<(), String> {
-        let shadow = self
-            .inner
-            .starfish_rbc_dag_shadow_service
-            .clone()
-            .ok_or_else(|| "RBC-DAG clock service is not running".to_string())?;
-        let mut bridge_state = self
-            .rbc_dag_clock_bridge_state
-            .clone()
-            .ok_or_else(|| "RBC-DAG autonomous event bridge is not running".to_string())?;
-        match *bridge_state.borrow() {
-            RbcDagClockBridgeStateV1::Pending => {}
-            RbcDagClockBridgeStateV1::Failed => {
-                return Err(
-                    "RBC-DAG startup recovery was invalid before clock activation".to_string(),
-                );
-            }
-            RbcDagClockBridgeStateV1::Activated => return Ok(()),
-        }
-
-        shadow
-            .activate_clock()
-            .await
-            .map_err(|error| format!("RBC-DAG clock activation failed: {error}"))?;
-        wait_for_rbc_dag_clock_bridge_activation(&mut bridge_state).await
-    }
-
-    pub(crate) async fn shutdown(self) -> Option<Syncer<H, NetworkSyncSignals, C>> {
+    pub(crate) async fn shutdown(self) -> Syncer<H, NetworkSyncSignals, C> {
         drop(self.stop);
-        // Stop new network/main ingress before asking the authoritative actor
-        // to close. The actor, ordered router, bounded workers, and Core must
-        // all remain alive until their already accepted work is drained.
+        // todo - wait for network shutdown as well
         self.main_task.await.ok();
-        self.inner
-            .rbc_dag_shutdown_started
-            .store(true, Ordering::Release);
-
-        let mut shadow_shutdown_timed_out = false;
-        if let Some(ref shadow) = self.inner.starfish_rbc_dag_shadow_service {
-            let shutdown_timeout = if self.inner.embedded_rbc_authority {
-                STARFISH_RBC_DAG_CONTROL_DRAIN_TIMEOUT
-            } else {
-                STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT
-            };
-            match tokio::time::timeout(shutdown_timeout, shadow.shutdown()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!("RBC-DAG runtime did not acknowledge shutdown: {error}");
-                    if self.inner.embedded_rbc_authority {
-                        fail_rbc_dag_authority(
-                            &self.inner.metrics,
-                            self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                            &format!("authoritative actor shutdown failed: {error}"),
-                        );
-                    }
-                }
-                Err(_) => {
-                    shadow_shutdown_timed_out = true;
-                    tracing::warn!("Timed out stopping RBC-DAG runtime");
-                    if self.inner.embedded_rbc_authority {
-                        fail_rbc_dag_authority(
-                            &self.inner.metrics,
-                            self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                            "authoritative actor shutdown timed out",
-                        );
-                    }
-                }
-            }
-        }
-
-        let mut rbc_dag_shadow_service_task = self.rbc_dag_shadow_service_task;
-        if let Some(mut actor_task) = rbc_dag_shadow_service_task.take() {
-            if shadow_shutdown_timed_out {
-                actor_task.abort();
-                actor_task.await.ok();
-            } else {
-                match tokio::time::timeout(STARFISH_RBC_DAG_CONTROL_DRAIN_TIMEOUT, &mut actor_task)
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        if self.inner.embedded_rbc_authority {
-                            fail_rbc_dag_authority(
-                                &self.inner.metrics,
-                                self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                                &format!(
-                                    "authoritative RBC-DAG actor supervisor failed during shutdown: {error}"
-                                ),
-                            );
-                        } else {
-                            tracing::warn!(
-                                "RBC-DAG actor supervisor failed during shutdown: {error}"
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        fail_rbc_dag_authority(
-                            &self.inner.metrics,
-                            self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                            "RBC-DAG actor supervisor did not stop after shutdown",
-                        );
-                        actor_task.abort();
-                        actor_task.await.ok();
-                    }
-                }
-            }
-        }
-
-        if let Some(mut router_task) = self.rbc_dag_shadow_event_task {
-            match tokio::time::timeout(STARFISH_RBC_DAG_CONTROL_DRAIN_TIMEOUT, &mut router_task)
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => fail_rbc_dag_authority(
-                    &self.inner.metrics,
-                    self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                    &format!("RBC-DAG event router failed during shutdown: {error}"),
-                ),
-                Err(_) => {
-                    fail_rbc_dag_authority(
-                        &self.inner.metrics,
-                        self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                        "RBC-DAG event router drain timed out",
-                    );
-                    router_task.abort();
-                    router_task.await.ok();
-                }
-            }
-        }
-
-        for (name, task) in [
-            ("assignment", self.rbc_dag_assignment_task),
-            ("Core-control", self.rbc_dag_core_control_task),
-        ] {
-            let Some(mut task) = task else {
-                continue;
-            };
-            match tokio::time::timeout(STARFISH_RBC_DAG_CONTROL_DRAIN_TIMEOUT, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => fail_rbc_dag_authority(
-                    &self.inner.metrics,
-                    self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                    &format!("RBC-DAG {name} worker failed during shutdown: {error}"),
-                ),
-                Err(_) => {
-                    fail_rbc_dag_authority(
-                        &self.inner.metrics,
-                        self.inner.rbc_dag_clock_bridge_tx.as_ref(),
-                        &format!("RBC-DAG {name} worker drain timed out"),
-                    );
-                    task.abort();
-                    task.await.ok();
-                }
-            }
-        }
-
         // Close the shard reconstructor channel so the bridge task can exit
         // and release its Arc reference.
         self.inner.shard_tx.lock().take();
@@ -4572,6 +2830,11 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             rbc_task.await.ok();
         }
         let rbc_service_task = self.rbc_service_task;
+        if let Some(shadow_task) = self.rbc_dag_shadow_event_task {
+            shadow_task.abort();
+            shadow_task.await.ok();
+        }
+        let rbc_dag_shadow_service_task = self.rbc_dag_shadow_service_task;
         // Stop the cordial knowledge actor.
         self.cordial_knowledge_task.abort();
         self.cordial_knowledge_task.await.ok();
@@ -4580,47 +2843,61 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         // observe `stopped()`. Give them a short window to drop their `Arc`s
         // before insisting on `try_unwrap`.
         let mut inner_arc = self.inner;
-        let unwrap_deadline = Instant::now() + Duration::from_secs(2);
+        let mut attempts = 0usize;
         let inner = loop {
             match Arc::try_unwrap(inner_arc) {
                 Ok(inner) => break inner,
                 Err(arc) => {
-                    if Instant::now() >= unwrap_deadline {
-                        tracing::error!(
-                            "Validator shutdown timed out waiting for auxiliary network workers"
+                    attempts += 1;
+                    if attempts >= 100 {
+                        panic!(
+                            "Shutdown failed - not all resources are freed \
+                             after main task is completed"
                         );
-                        if let Some(task) = rbc_service_task {
-                            task.abort();
-                        }
-                        return None;
                     }
                     inner_arc = arc;
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    tokio::task::yield_now().await;
                 }
             }
         };
         // `inner` is now exclusive, so no auxiliary task can enqueue after
         // this FIFO barrier. Awaiting it keeps the runtime available to the
-        // RBC actor while any earlier core action completes. The barrier is
-        // fallible because the core thread may concurrently panic while the
-        // remaining workers still need deterministic cleanup.
-        let _ = inner.syncer.flush_for_shutdown().await;
-        let syncer = match inner.syncer.stop() {
-            Ok(syncer) => Some(syncer),
-            Err(_) => {
-                tracing::error!("Core thread terminated before validator shutdown completed");
-                None
+        // RBC actor while any earlier core action completes.
+        let _ = inner.syncer.missing_parent_references().await;
+        let mut shadow_shutdown_timed_out = false;
+        if let Some(ref shadow) = inner.starfish_rbc_dag_shadow_service {
+            match tokio::time::timeout(STARFISH_RBC_DAG_SHADOW_SHUTDOWN_TIMEOUT, shadow.shutdown())
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("RBC-DAG runtime did not acknowledge shutdown: {error}")
+                }
+                Err(_) => {
+                    shadow_shutdown_timed_out = true;
+                    tracing::warn!(
+                        "Timed out stopping RBC-DAG runtime; detaching it from validator shutdown"
+                    );
+                    if let Some(task) = rbc_dag_shadow_service_task.as_ref() {
+                        task.abort();
+                    }
+                }
             }
-        };
+        }
+        let syncer = inner.syncer.stop();
         if let Some(rbc_service_task) = rbc_service_task {
             rbc_service_task.abort();
             rbc_service_task.await.ok();
         }
+        if let Some(shadow_service_task) = rbc_dag_shadow_service_task {
+            match shadow_service_task.await {
+                Err(error) if !shadow_shutdown_timed_out => tracing::warn!(
+                    "Non-authoritative RBC-DAG shadow supervisor failed during shutdown: {error}"
+                ),
+                _ => {}
+            }
+        }
         syncer
-    }
-
-    pub(crate) fn is_finished(&self) -> bool {
-        self.main_task.is_finished() || self.inner.syncer.is_finished()
     }
 
     async fn run(
@@ -4641,11 +2918,7 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             None
         };
 
-        // Embedded RBC-DAG frontiers are the sole commit authority. The
-        // legacy 10 ms commit poll is a no-op in that mode and otherwise
-        // needlessly submits roughly 100 core-thread commands per second.
-        let commit_timeout_task = (!inner.embedded_rbc_authority)
-            .then(|| handle.spawn(Self::commit_timeout_task(inner.clone())));
+        let commit_timeout_task = handle.spawn(Self::commit_timeout_task(inner.clone()));
         let cleanup_task = handle.spawn(Self::cleanup_task(
             inner.clone(),
             bls_service.clone(),
@@ -4698,8 +2971,12 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         join_all(
             connections
                 .into_values()
-                .chain([leader_timeout_task, cleanup_task, missing_parent_pull_task])
-                .chain(commit_timeout_task)
+                .chain([
+                    leader_timeout_task,
+                    commit_timeout_task,
+                    cleanup_task,
+                    missing_parent_pull_task,
+                ])
                 .chain(soft_block_timeout_task)
                 .chain(cert_pull_task)
                 .chain(round_gap_pull_task),
@@ -4752,53 +3029,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
             .peer_senders
             .write()
             .insert(peer_id, connection.sender.clone());
-        let rbc_outbound_task = inner.starfish_rbc_service.is_some().then(|| {
+        let rbc_outbound_task = inner.starfish_rbc_service.as_ref().map(|_| {
             let (rbc_sender, mut rbc_receiver) = mpsc::unbounded_channel();
             inner.rbc_peer_senders.write().insert(peer_id, rbc_sender);
             let network_sender = connection.sender.clone();
             Handle::current().spawn(async move {
                 while let Some(message) = rbc_receiver.recv().await {
                     send_network_message_reliably(&network_sender, message).await;
-                }
-            })
-        });
-        let rbc_dag_outbound_task = inner.starfish_rbc_dag_shadow_service.is_some().then(|| {
-            let mailbox = RbcDagOutboundMailboxV1::new();
-            inner
-                .rbc_dag_peer_mailboxes
-                .write()
-                .insert(peer_id, mailbox.clone());
-            let proactive_sender = connection.rbc_dag_proactive_sender.clone();
-            let priority_sender = connection.rbc_dag_priority_sender.clone();
-            let outbound_failure = connection.outbound_failure.clone();
-            let worker_metrics = shadow_metrics.clone();
-            let worker_bridge_tx = inner.rbc_dag_clock_bridge_tx.clone();
-            let authoritative = inner.embedded_rbc_authority;
-            Handle::current().spawn(async move {
-                if let Err(error) = run_rbc_dag_outbound_worker(
-                    mailbox,
-                    proactive_sender,
-                    priority_sender,
-                    outbound_failure,
-                )
-                .await
-                {
-                    if authoritative {
-                        fail_rbc_dag_authority(
-                            &worker_metrics,
-                            worker_bridge_tx.as_ref(),
-                            &format!(
-                                "RBC-DAG outbound worker for authority {peer_id} failed: {error}"
-                            ),
-                        );
-                    } else {
-                        invalidate_shadow_run(&worker_metrics);
-                        tracing::error!(
-                            peer = peer_id,
-                            ?error,
-                            "RBC-DAG observational outbound worker failed"
-                        );
-                    }
                 }
             })
         });
@@ -4884,14 +3121,9 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         }
         inner.peer_senders.write().remove(&peer_id);
         inner.rbc_peer_senders.write().remove(&peer_id);
-        inner.rbc_dag_peer_mailboxes.write().remove(&peer_id);
         if let Some(rbc_outbound_task) = rbc_outbound_task {
             rbc_outbound_task.abort();
             rbc_outbound_task.await.ok();
-        }
-        if let Some(rbc_dag_outbound_task) = rbc_dag_outbound_task {
-            rbc_dag_outbound_task.abort();
-            rbc_dag_outbound_task.await.ok();
         }
         inner.syncer.authority_connection(peer_id, false).await;
         handler.shutdown().await;
@@ -5015,9 +3247,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
         inner: Arc<NetworkSyncerInner<H, C>>,
         metrics: Arc<Metrics>,
     ) -> Option<()> {
-        if inner.embedded_rbc_authority {
-            return None;
-        }
         const SCAN_INTERVAL: Duration = Duration::from_millis(500);
         const PEER_COUNT: usize = 2;
 
@@ -5276,396 +3505,14 @@ impl SyncerSignals for NetworkSyncSignals {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
-
-    use prometheus::Registry;
     use rand::{SeedableRng, rngs::StdRng};
-    use tokio::sync::oneshot;
 
     use super::*;
     use crate::{
-        crypto::{self, SignatureBytes},
+        crypto::{self, SignatureBytes, TransactionsCommitment},
         encoder::ShardEncoder,
-        network::{
-            RbcDagShadowCarrier, RbcDagShadowCarrierSyncRequest, RbcDagShadowCarrierSyncResponse,
-        },
-        starfish_rbc_dag::{
-            CarrierHeaderV1Args, ConsensusVertexReference, carrier_genesis_reference,
-        },
         types::{BaseTransaction, BlockReference, Transaction, TransactionData},
     };
-
-    fn rbc_dag_outbound_test_carrier(
-        committee: &Committee,
-        creation_time_ns: TimestampNs,
-    ) -> (BlockReference, NetworkMessage) {
-        let candidate = CandidateCarrierV1::try_new(
-            CarrierHeaderV1Args {
-                author: 0,
-                carrier_round: 1,
-                own_prev: carrier_genesis_reference(0),
-                weak_parents: vec![carrier_genesis_reference(1), carrier_genesis_reference(2)],
-                transactions_commitment: TransactionsCommitment::default(),
-                application_header: None,
-                data_acknowledgments: Vec::new(),
-                phase_batch: Vec::new(),
-                consensus_vertex: None,
-                creation_time_ns,
-            },
-            committee,
-        )
-        .unwrap();
-        let reference = candidate.reference();
-        (
-            reference,
-            NetworkMessage::RbcDagShadowCarrier(RbcDagShadowCarrier {
-                canonical_carrier: candidate.canonical_wire_bytes().unwrap(),
-                authentication_sidecar: vec![0xA5],
-                application_payload: None,
-            }),
-        )
-    }
-
-    fn rbc_dag_outbound_test_sync_request(round: RoundNumber) -> NetworkMessage {
-        NetworkMessage::RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest {
-            author: 1,
-            round,
-        })
-    }
-
-    fn rbc_dag_outbound_test_sync_response(round: RoundNumber, marker: u8) -> NetworkMessage {
-        NetworkMessage::RbcDagShadowCarrierSyncResponse(RbcDagShadowCarrierSyncResponse {
-            author: 1,
-            round,
-            canonical_carrier: vec![marker],
-            authentication_sidecar: vec![marker.wrapping_add(1)],
-        })
-    }
-
-    #[derive(Default)]
-    struct TestRbcDagCoreControlStateV1 {
-        staged: Vec<BlockReference>,
-        available: Vec<(BlockReference, bool)>,
-        materialized: Vec<BlockReference>,
-        assignments: Vec<BlockReference>,
-        frontier_results: VecDeque<Result<bool, String>>,
-        activations: usize,
-        events: Vec<&'static str>,
-    }
-
-    #[derive(Default)]
-    struct TestRbcDagCoreControlTargetV1 {
-        state: Mutex<TestRbcDagCoreControlStateV1>,
-        assignment_observed: Notify,
-    }
-
-    impl RbcDagCoreControlTargetV1 for TestRbcDagCoreControlTargetV1 {
-        async fn stage_authorized_application(
-            &self,
-            header: RbcCanonicalHeader,
-            _authorization_basis: ShadowApplicationAuthorizationBasisV1,
-        ) -> Result<(), String> {
-            let mut state = self.state.lock().unwrap();
-            state.staged.push(header.reference());
-            state.events.push("header");
-            Ok(())
-        }
-
-        fn restore_available_application(
-            &self,
-            application: BlockReference,
-            payload: Option<Arc<TransactionData>>,
-        ) -> Result<(), String> {
-            let mut state = self.state.lock().unwrap();
-            state.available.push((application, payload.is_some()));
-            state.events.push("available");
-            Ok(())
-        }
-
-        async fn materialize_authorized_payload(
-            &self,
-            item: ReconstructedTransactionData,
-        ) -> Result<(), String> {
-            let mut state = self.state.lock().unwrap();
-            state.materialized.push(item.block_reference);
-            state.events.push("payload");
-            Ok(())
-        }
-
-        async fn apply_frontier(&self, _delta: CommittedFrontierDeltaV1) -> Result<bool, String> {
-            let mut state = self.state.lock().unwrap();
-            state.events.push("frontier");
-            state.frontier_results.pop_front().unwrap_or(Ok(true))
-        }
-
-        async fn activate_authority(&self) -> Result<(), String> {
-            let mut state = self.state.lock().unwrap();
-            state.activations += 1;
-            state.events.push("activate");
-            Ok(())
-        }
-
-        async fn apply_assignment(&self, reference: BlockReference) -> Result<(), String> {
-            let mut state = self.state.lock().unwrap();
-            state.assignments.push(reference);
-            state.events.push("assignment");
-            drop(state);
-            self.assignment_observed.notify_waiters();
-            Ok(())
-        }
-    }
-
-    fn rbc_dag_worker_test_metrics() -> Arc<Metrics> {
-        let registry = Registry::new();
-        let (metrics, _) = Metrics::new(&registry, None, Some("starfish-rbc"), None);
-        metrics.starfish_rbc_dag_shadow_clock_valid.set(-1);
-        metrics
-    }
-
-    fn rbc_dag_worker_test_application() -> (RbcCanonicalHeader, ReconstructedTransactionData) {
-        let committee = Committee::new_test(vec![1; 4]);
-        let transactions = vec![BaseTransaction::Share(Transaction::new(vec![7; 64]))];
-        let mut commitment_encoder =
-            ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
-        let encoded = commitment_encoder.encode_transactions(
-            &transactions,
-            committee.info_length(),
-            committee.len() - committee.info_length(),
-        );
-        let (commitment, _) = TransactionsCommitment::new_from_encoded_transactions(&encoded, 1);
-        let canonical = RbcCanonicalHeader::try_new(
-            0,
-            1,
-            vec![
-                BlockReference::new_test(0, 0),
-                BlockReference::new_test(1, 0),
-                BlockReference::new_test(2, 0),
-            ],
-            Vec::new(),
-            11,
-            commitment,
-        )
-        .unwrap();
-        let mut verifier = ReedSolomonEncoder::new(2, 4, 2).expect("encoder should be created");
-        let item = verify_starfish_rbc_transaction_payload(
-            &canonical,
-            Arc::new(TransactionData::new(transactions)),
-            &committee,
-            1,
-            0,
-            &mut verifier,
-            BlockAuthenticationScheme::MacVector,
-            &[],
-        )
-        .unwrap();
-        (canonical, item)
-    }
-
-    fn rbc_dag_worker_test_delta() -> CommittedFrontierDeltaV1 {
-        let carrier = BlockReference::new_test(0, 1);
-        CommittedFrontierDeltaV1 {
-            output_sequence: 1,
-            anchor: ConsensusVertexReference::new(carrier, 1),
-            frontier: Vec::new(),
-            carriers: Vec::new(),
-            applications: Vec::new(),
-            application_diagnostics: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn rbc_dag_outbound_mailbox_coalesces_exact_duplicates_and_rejects_conflicts() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mailbox = RbcDagOutboundMailboxV1::new();
-        assert_eq!(
-            mailbox
-                .enqueue(rbc_dag_outbound_test_sync_response(7, 0xA1), &committee)
-                .unwrap(),
-            RbcDagOutboundEnqueueV1::Added
-        );
-        assert_eq!(
-            mailbox
-                .enqueue(rbc_dag_outbound_test_sync_response(7, 0xA1), &committee)
-                .unwrap(),
-            RbcDagOutboundEnqueueV1::Coalesced
-        );
-        assert!(matches!(
-            mailbox.enqueue(rbc_dag_outbound_test_sync_response(7, 0xB1), &committee),
-            Err(RbcDagOutboundMailboxErrorV1::ConflictingDuplicate {
-                class: RbcDagOutboundClassV1::Priority,
-                key: RbcDagOutboundKeyV1::SyncResponse(1, 7),
-            })
-        ));
-        let state = mailbox.inner.state.lock();
-        assert_eq!(state.priority.entries.len(), 1);
-        assert_eq!(state.priority.order.len(), 1);
-    }
-
-    #[test]
-    fn rbc_dag_outbound_mailbox_drains_priority_before_proactive() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mailbox = RbcDagOutboundMailboxV1::new();
-        let (reference, proactive) = rbc_dag_outbound_test_carrier(&committee, 11);
-        mailbox.enqueue(proactive, &committee).unwrap();
-        mailbox
-            .enqueue(rbc_dag_outbound_test_sync_request(9), &committee)
-            .unwrap();
-
-        let (class, first) = mailbox.try_pop().unwrap();
-        assert_eq!(class, RbcDagOutboundClassV1::Priority);
-        assert!(matches!(
-            first,
-            NetworkMessage::RbcDagShadowCarrierSyncRequest(RbcDagShadowCarrierSyncRequest {
-                author: 1,
-                round: 9,
-            })
-        ));
-        let (class, second) = mailbox.try_pop().unwrap();
-        assert_eq!(class, RbcDagOutboundClassV1::Proactive);
-        assert!(matches!(
-            rbc_dag_outbound_classification(&second, &committee).unwrap().1,
-            RbcDagOutboundKeyV1::Proactive(actual) if actual == reference
-        ));
-    }
-
-    #[test]
-    fn rbc_dag_outbound_mailbox_never_evicts_a_unique_proactive_reference() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mailbox = RbcDagOutboundMailboxV1::new();
-        let mut first_reference = None;
-        for marker in 1..=STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY {
-            let (reference, message) =
-                rbc_dag_outbound_test_carrier(&committee, marker as TimestampNs);
-            first_reference.get_or_insert(reference);
-            assert_eq!(
-                mailbox.enqueue(message, &committee).unwrap(),
-                RbcDagOutboundEnqueueV1::Added
-            );
-        }
-        let (_, overflow) = rbc_dag_outbound_test_carrier(
-            &committee,
-            STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as TimestampNs + 1,
-        );
-        assert!(matches!(
-            mailbox.enqueue(overflow, &committee),
-            Err(RbcDagOutboundMailboxErrorV1::KeyCapacity {
-                class: RbcDagOutboundClassV1::Proactive,
-                capacity: STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-            })
-        ));
-        let state = mailbox.inner.state.lock();
-        assert_eq!(
-            state.proactive.entries.len(),
-            STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY
-        );
-        assert!(
-            state
-                .proactive
-                .entries
-                .contains_key(&RbcDagOutboundKeyV1::Proactive(first_reference.unwrap()))
-        );
-    }
-
-    #[test]
-    fn rbc_dag_outbound_mailbox_bounds_distinct_priority_keys_and_bytes() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let mailbox = RbcDagOutboundMailboxV1::new();
-        for round in 1..=STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as RoundNumber {
-            mailbox
-                .enqueue(rbc_dag_outbound_test_sync_request(round), &committee)
-                .unwrap();
-        }
-        assert!(matches!(
-            mailbox.enqueue(
-                rbc_dag_outbound_test_sync_request(
-                    STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY as RoundNumber + 1,
-                ),
-                &committee,
-            ),
-            Err(RbcDagOutboundMailboxErrorV1::KeyCapacity {
-                class: RbcDagOutboundClassV1::Priority,
-                capacity: STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-            })
-        ));
-        assert_eq!(
-            mailbox.inner.state.lock().priority.entries.len(),
-            STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY
-        );
-
-        let first = rbc_dag_outbound_test_sync_request(1);
-        let framed_bytes = usize::try_from(bincode::serialized_size(&first).unwrap())
-            .unwrap()
-            .checked_add(4)
-            .unwrap();
-        let byte_bounded = RbcDagOutboundMailboxV1::from_state(RbcDagOutboundMailboxStateV1 {
-            priority: RbcDagOutboundLaneV1::new(
-                STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-                framed_bytes * 2 - 1,
-                framed_bytes,
-            ),
-            proactive: RbcDagOutboundLaneV1::new(
-                STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-                STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_BYTES,
-                STARFISH_RBC_DAG_OUTBOUND_PROACTIVE_ENTRY_BYTES,
-            ),
-            failure: None,
-        });
-        byte_bounded.enqueue(first, &committee).unwrap();
-        assert!(matches!(
-            byte_bounded.enqueue(rbc_dag_outbound_test_sync_request(2), &committee),
-            Err(RbcDagOutboundMailboxErrorV1::ByteCapacity {
-                class: RbcDagOutboundClassV1::Priority,
-                ..
-            })
-        ));
-        let state = byte_bounded.inner.state.lock();
-        assert_eq!(state.priority.entries.len(), 1);
-        assert_eq!(state.priority.bytes, framed_bytes);
-    }
-
-    #[test]
-    fn rbc_dag_outbound_saturation_fails_authority_or_observation_explicitly() {
-        let error = RbcDagOutboundMailboxErrorV1::KeyCapacity {
-            class: RbcDagOutboundClassV1::Proactive,
-            capacity: STARFISH_RBC_DAG_OUTBOUND_KEY_CAPACITY,
-        };
-        let authority_metrics = rbc_dag_worker_test_metrics();
-        let (authority_bridge, authority_state) =
-            watch::channel(RbcDagClockBridgeStateV1::Activated);
-        fail_rbc_dag_outbound_transport(
-            &authority_metrics,
-            Some(&authority_bridge),
-            true,
-            2,
-            &error,
-        );
-        assert_eq!(*authority_state.borrow(), RbcDagClockBridgeStateV1::Failed);
-        assert_eq!(
-            authority_metrics.starfish_rbc_dag_shadow_clock_valid.get(),
-            0
-        );
-
-        let observation_metrics = rbc_dag_worker_test_metrics();
-        let (observation_bridge, observation_state) =
-            watch::channel(RbcDagClockBridgeStateV1::Activated);
-        fail_rbc_dag_outbound_transport(
-            &observation_metrics,
-            Some(&observation_bridge),
-            false,
-            2,
-            &error,
-        );
-        assert_eq!(
-            *observation_state.borrow(),
-            RbcDagClockBridgeStateV1::Activated
-        );
-        assert_eq!(
-            observation_metrics
-                .starfish_rbc_dag_shadow_clock_valid
-                .get(),
-            0
-        );
-    }
 
     #[tokio::test]
     async fn proposal_round_signal_notifies_waiters() {
@@ -5679,475 +3526,6 @@ mod tests {
         let wait = proposal_round_notify.notified();
         signals.proposal_round_advanced(5);
         wait.await;
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_clock_bridge_activation_ack_is_fail_closed() {
-        let (bridge_tx, mut bridge_state) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        fail_rbc_dag_clock_bridge(Some(&bridge_tx));
-
-        let error = wait_for_rbc_dag_clock_bridge_activation(&mut bridge_state)
-            .await
-            .unwrap_err();
-        assert!(error.contains("startup recovery was invalid"));
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_clock_bridge_activation_ack_is_observable_without_a_lost_wakeup() {
-        let (bridge_tx, mut bridge_state) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        bridge_tx.send_replace(RbcDagClockBridgeStateV1::Activated);
-
-        wait_for_rbc_dag_clock_bridge_activation(&mut bridge_state)
-            .await
-            .unwrap();
-
-        // A caller that already observed activation remains returned, while
-        // every later observer and authority command sees permanent failure.
-        fail_rbc_dag_clock_bridge(Some(&bridge_tx));
-        assert_eq!(
-            *bridge_state.borrow_and_update(),
-            RbcDagClockBridgeStateV1::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_assignment_lane_is_not_delayed_by_payload_verification() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, _bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let shutdown_started = Arc::new(AtomicBool::new(false));
-        let (control_tx, control_rx) = mpsc::channel(1);
-        let (assignment_tx, assignment_rx) = mpsc::channel(1);
-        let control_task = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics.clone(),
-            bridge_tx.clone(),
-            shutdown_started.clone(),
-            control_rx,
-        ));
-        let assignment_task = tokio::spawn(run_rbc_dag_application_assignment_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            shutdown_started,
-            assignment_rx,
-        ));
-        let (release_payload, wait_for_payload) = oneshot::channel::<()>();
-        let payload_task = tokio::spawn(async move {
-            wait_for_payload.await.unwrap();
-            Ok(Err(eyre::eyre!("delayed untrusted payload")))
-        });
-        let (header, _) = rbc_dag_worker_test_application();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::Verify(payload_task),
-            })
-            .await
-            .unwrap();
-
-        let assignment = BlockReference::new_test(0, 3);
-        let observed = target.assignment_observed.notified();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Assigned(assignment))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_millis(100), observed)
-            .await
-            .expect("assignment must bypass the blocked payload FIFO");
-        assert_eq!(target.state.lock().unwrap().assignments, vec![assignment]);
-
-        release_payload.send(()).unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Drain)
-            .await
-            .unwrap();
-        control_task.await.unwrap();
-        assignment_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_router_fail_fast_blocks_assignment_while_payload_is_slow() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let shutdown_started = Arc::new(AtomicBool::new(false));
-        let (control_tx, control_rx) = mpsc::channel(1);
-        let (assignment_tx, assignment_rx) = mpsc::channel(1);
-        let control_task = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics.clone(),
-            bridge_tx.clone(),
-            shutdown_started.clone(),
-            control_rx,
-        ));
-        let assignment_task = tokio::spawn(run_rbc_dag_application_assignment_worker(
-            target.clone(),
-            metrics.clone(),
-            bridge_tx.clone(),
-            shutdown_started,
-            assignment_rx,
-        ));
-        let (release_payload, wait_for_payload) = oneshot::channel::<()>();
-        let (header, _) = rbc_dag_worker_test_application();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::Verify(tokio::spawn(async move {
-                    wait_for_payload.await.unwrap();
-                    Ok(Err(eyre::eyre!("slow untrusted payload")))
-                })),
-            })
-            .await
-            .unwrap();
-
-        // This models a router-known invalid header: failure is published
-        // synchronously instead of sitting behind the slow FIFO command.
-        fail_rbc_dag_authority(
-            &metrics,
-            Some(&bridge_tx),
-            "router rejected an invalid authoritative header",
-        );
-        let assignment = BlockReference::new_test(0, 3);
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Assigned(assignment))
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        assert_eq!(*bridge_rx.borrow(), RbcDagClockBridgeStateV1::Failed);
-        assert!(target.state.lock().unwrap().assignments.is_empty());
-
-        release_payload.send(()).unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Drain)
-            .await
-            .unwrap();
-        control_task.await.unwrap();
-        assignment_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_worker_failure_blocks_later_assignment_at_apply_boundary() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        target
-            .state
-            .lock()
-            .unwrap()
-            .frontier_results
-            .push_back(Err("rejected frontier".to_owned()));
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, mut bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let shutdown_started = Arc::new(AtomicBool::new(false));
-        let (control_tx, control_rx) = mpsc::channel(2);
-        let (assignment_tx, assignment_rx) = mpsc::channel(1);
-        let control_task = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics.clone(),
-            bridge_tx.clone(),
-            shutdown_started.clone(),
-            control_rx,
-        ));
-        let assignment_task = tokio::spawn(run_rbc_dag_application_assignment_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            shutdown_started,
-            assignment_rx,
-        ));
-
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Frontier(
-                rbc_dag_worker_test_delta(),
-            ))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_millis(100), async {
-            while *bridge_rx.borrow_and_update() != RbcDagClockBridgeStateV1::Failed {
-                bridge_rx.changed().await.unwrap();
-            }
-        })
-        .await
-        .expect("frontier rejection must fail authority promptly");
-
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Assigned(
-                BlockReference::new_test(0, 3),
-            ))
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Drain)
-            .await
-            .unwrap();
-        control_task.await.unwrap();
-        assignment_task.await.unwrap();
-
-        assert!(target.state.lock().unwrap().assignments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_bad_attached_payload_allows_later_valid_materialization() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let (control_tx, control_rx) = mpsc::channel(4);
-        let worker = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            Arc::new(AtomicBool::new(false)),
-            control_rx,
-        ));
-        let (header, valid_item) = rbc_dag_worker_test_application();
-        let application = header.reference();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header: header.clone(),
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::Verify(tokio::spawn(async {
-                    Ok(Err(eyre::eyre!("bad attached bytes")))
-                })),
-            })
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(2, 3),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::Verify(tokio::spawn(async move {
-                    Ok(Ok(valid_item))
-                })),
-            })
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        worker.await.unwrap();
-
-        assert_ne!(*bridge_rx.borrow(), RbcDagClockBridgeStateV1::Failed);
-        let state = target.state.lock().unwrap();
-        assert_eq!(state.staged, vec![application, application]);
-        assert_eq!(state.materialized, vec![application]);
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_exact_frontier_replay_has_no_applied_metric_or_effect() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        target
-            .state
-            .lock()
-            .unwrap()
-            .frontier_results
-            .push_back(Ok(false));
-        let metrics = rbc_dag_worker_test_metrics();
-        let applied_before = metrics
-            .starfish_rbc_dag_frontier_events_total
-            .with_label_values(&["applied"])
-            .get();
-        let (bridge_tx, _bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let (control_tx, control_rx) = mpsc::channel(2);
-        let worker = tokio::spawn(run_rbc_dag_core_control_worker(
-            target,
-            metrics.clone(),
-            bridge_tx,
-            Arc::new(AtomicBool::new(false)),
-            control_rx,
-        ));
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Frontier(
-                rbc_dag_worker_test_delta(),
-            ))
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        worker.await.unwrap();
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_frontier_events_total
-                .with_label_values(&["applied"])
-                .get(),
-            applied_before
-        );
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_graceful_drain_applies_queued_frontier_before_exit() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let (control_tx, control_rx) = mpsc::channel(4);
-        let worker = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            Arc::new(AtomicBool::new(true)),
-            control_rx,
-        ));
-        let (release_payload, wait_for_payload) = oneshot::channel::<()>();
-        let (header, item) = rbc_dag_worker_test_application();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::Verify(tokio::spawn(async move {
-                    wait_for_payload.await.unwrap();
-                    Ok(Ok(item))
-                })),
-            })
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Frontier(
-                rbc_dag_worker_test_delta(),
-            ))
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        assert!(!worker.is_finished());
-        release_payload.send(()).unwrap();
-        worker.await.unwrap();
-
-        assert_ne!(*bridge_rx.borrow(), RbcDagClockBridgeStateV1::Failed);
-        assert_eq!(
-            target.state.lock().unwrap().events,
-            vec!["header", "payload", "frontier"]
-        );
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_shutdown_skips_actor_callback_and_assignment_but_applies_frontier() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let shutdown_started = Arc::new(AtomicBool::new(true));
-        let (control_tx, control_rx) = mpsc::channel(3);
-        let (assignment_tx, assignment_rx) = mpsc::channel(1);
-        let control_task = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics.clone(),
-            bridge_tx.clone(),
-            shutdown_started.clone(),
-            control_rx,
-        ));
-        let assignment_task = tokio::spawn(run_rbc_dag_application_assignment_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            shutdown_started,
-            assignment_rx,
-        ));
-        let (header, _) = rbc_dag_worker_test_application();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::AlreadyAvailable(None),
-            })
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Frontier(
-                rbc_dag_worker_test_delta(),
-            ))
-            .await
-            .unwrap();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Assigned(
-                BlockReference::new_test(0, 3),
-            ))
-            .await
-            .unwrap();
-        control_tx
-            .send(RbcDagCoreControlCommandV1::Drain)
-            .await
-            .unwrap();
-        assignment_tx
-            .send(RbcDagApplicationAssignmentCommandV1::Drain)
-            .await
-            .unwrap();
-        control_task.await.unwrap();
-        assignment_task.await.unwrap();
-
-        assert_ne!(*bridge_rx.borrow(), RbcDagClockBridgeStateV1::Failed);
-        let state = target.state.lock().unwrap();
-        assert!(state.available.is_empty());
-        assert!(state.assignments.is_empty());
-        assert_eq!(state.events, vec!["header", "frontier"]);
-    }
-
-    #[tokio::test]
-    async fn rbc_dag_empty_available_application_precedes_ready_and_activation() {
-        let target = Arc::new(TestRbcDagCoreControlTargetV1::default());
-        let metrics = rbc_dag_worker_test_metrics();
-        let (bridge_tx, bridge_rx) = watch::channel(RbcDagClockBridgeStateV1::Pending);
-        let (control_tx, control_rx) = mpsc::channel(4);
-        let worker = tokio::spawn(run_rbc_dag_core_control_worker(
-            target.clone(),
-            metrics,
-            bridge_tx,
-            Arc::new(AtomicBool::new(false)),
-            control_rx,
-        ));
-        let header = RbcCanonicalHeader::try_new(
-            0,
-            1,
-            vec![
-                BlockReference::new_test(0, 0),
-                BlockReference::new_test(1, 0),
-                BlockReference::new_test(2, 0),
-            ],
-            Vec::new(),
-            11,
-            TransactionsCommitment::default(),
-        )
-        .unwrap();
-        let application = header.reference();
-        for command in [
-            RbcDagCoreControlCommandV1::AuthorizedApplicationObserved {
-                carrier: BlockReference::new_test(1, 2),
-                header,
-                authorization_basis: ShadowApplicationAuthorizationBasisV1::Delivered,
-                payload: RbcDagAuthorizedPayloadV1::AlreadyAvailable(None),
-            },
-            RbcDagCoreControlCommandV1::Ready,
-            RbcDagCoreControlCommandV1::Activate,
-            RbcDagCoreControlCommandV1::Drain,
-        ] {
-            control_tx.send(command).await.unwrap();
-        }
-        worker.await.unwrap();
-        assert_eq!(*bridge_rx.borrow(), RbcDagClockBridgeStateV1::Activated);
-        let state = target.state.lock().unwrap();
-        assert_eq!(state.available, vec![(application, false)]);
-        assert_eq!(state.events, vec!["header", "available", "activate"]);
     }
 
     #[test]

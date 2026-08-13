@@ -7,7 +7,7 @@ use std::{
     ops::AddAssign,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -26,52 +26,12 @@ use crate::{
     committee::Committee,
     data::{IN_MEMORY_BLOCKS, IN_MEMORY_BLOCKS_BYTES},
     runtime,
-    starfish_rbc_dag::model::{
-        EXECUTABLE_MODEL_ADMISSION_WINDOW_V1, EXECUTABLE_MODEL_BUFFER_WINDOW_V1,
-    },
     stat::{DivUsize, HistogramSender, PreciseHistogram, histogram},
     types::{AuthorityIndex, format_authority_index},
 };
 
 /// Metrics collected by the benchmark.
 pub const BENCHMARK_DURATION: &str = "benchmark_duration";
-
-/// One absolute submission window shared by every local-benchmark generator.
-/// The common epoch removes sequential-start and polling skew from offered
-/// load, cutoff counters, and latency samples.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BenchmarkTransactionWindow {
-    pub start: Instant,
-    pub end: Instant,
-}
-
-impl BenchmarkTransactionWindow {
-    pub fn new(start: Instant, end: Instant) -> Option<Self> {
-        (start < end).then_some(Self { start, end })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum BenchmarkGeneratorState {
-    Disabled = 0,
-    Waiting = 1,
-    Active = 2,
-    Finished = 3,
-    Failed = 4,
-}
-
-impl BenchmarkGeneratorState {
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Waiting,
-            2 => Self::Active,
-            3 => Self::Finished,
-            4 => Self::Failed,
-            _ => Self::Disabled,
-        }
-    }
-}
 
 pub const TRANSACTION_CERTIFIED_LATENCY: &str = "transaction_certified_latency";
 pub const TRANSACTION_CERTIFIED_LATENCY_SQUARED: &str = "latency_s";
@@ -89,25 +49,7 @@ pub const STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_ROUND_LAG: i64 = 4;
 /// while still detecting an actor that is no longer draining work.
 pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG: i64 = 4;
 pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR: i64 = 16;
-/// Per-remote-author capacity of authenticated future slots that are inside
-/// the executable retention window but outside its immediate admission
-/// window. This is an asynchronous safety bound, not a healthy-tail target.
-pub const STARFISH_RBC_DAG_AUTONOMOUS_BUFFERED_CAPACITY_PER_REMOTE: i64 =
-    EXECUTABLE_MODEL_BUFFER_WINDOW_V1 as i64 - EXECUTABLE_MODEL_ADMISSION_WINDOW_V1 as i64;
-/// With final honest round skew bounded by four and two future rounds admitted,
-/// at most two slots per remote author remain buffered in a settled run.
-pub const STARFISH_RBC_DAG_AUTONOMOUS_BUFFERED_SETTLED_PER_REMOTE: i64 =
-    STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG - EXECUTABLE_MODEL_ADMISSION_WINDOW_V1 as i64;
-
-pub const fn starfish_rbc_dag_autonomous_buffered_capacity_bound(committee_size: i64) -> i64 {
-    STARFISH_RBC_DAG_AUTONOMOUS_BUFFERED_CAPACITY_PER_REMOTE
-        .saturating_mul(committee_size.saturating_sub(1))
-}
-
-pub const fn starfish_rbc_dag_autonomous_buffered_settled_bound(committee_size: i64) -> i64 {
-    STARFISH_RBC_DAG_AUTONOMOUS_BUFFERED_SETTLED_PER_REMOTE
-        .saturating_mul(committee_size.saturating_sub(1))
-}
+pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR: i64 = 2;
 
 const LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES: &[&str] = &[
     "subscribe_broadcast",
@@ -133,34 +75,6 @@ const LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES: &[&str] = &[
     "rbc_dag_shadow_carrier_response",
     "rbc_dag_shadow_carrier_sync_request",
     "rbc_dag_shadow_carrier_sync_response",
-    "rbc_dag_application_payload_request",
-    "rbc_dag_application_payload_response",
-];
-
-pub(crate) const RBC_DAG_LATENCY_CREATION_TO_ASSIGNMENT: &str = "creation_to_assignment";
-pub(crate) const RBC_DAG_LATENCY_CREATION_TO_DELIVERY: &str = "creation_to_delivery";
-pub(crate) const RBC_DAG_LATENCY_CREATION_TO_FRONTIER_GENERATED: &str =
-    "creation_to_frontier_generated";
-pub(crate) const RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED: &str =
-    "creation_to_frontier_applied";
-
-const RBC_DAG_PIPELINE_LATENCY_STAGES: &[&str] = &[
-    RBC_DAG_LATENCY_CREATION_TO_ASSIGNMENT,
-    RBC_DAG_LATENCY_CREATION_TO_DELIVERY,
-    RBC_DAG_LATENCY_CREATION_TO_FRONTIER_GENERATED,
-    RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
-];
-pub(crate) const RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD: &str = "physical_forward";
-pub(crate) const RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD: &str = "physical_backward";
-const RBC_DAG_COMMIT_DISTANCE_KINDS: &[&str] = &[
-    RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-    RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD,
-];
-const RBC_DAG_PROJECTION_HOL_STATES: &[&str] = &[
-    "insufficient_lookahead",
-    "direct_evidence_pending",
-    "awaiting_indirect_anchor",
-    "ready",
 ];
 
 #[derive(Clone)]
@@ -170,10 +84,6 @@ pub struct Metrics {
     pub leader_timeout_total: IntCounter,
     pub proposal_wait_time_total_us: IntCounter,
     pub sequenced_transactions_total: IntCounter,
-    /// Transactions committed before the coordinated benchmark's exact
-    /// monotonic cutoff. The ordinary sequenced counter remains open through
-    /// the bounded drain to measure eventual active-window throughput.
-    pub sequenced_transactions_cutoff_total: IntCounter,
     pub sequenced_transactions_bytes: IntCounter,
     pub sailfish_rbc_fast_total: IntCounter,
     pub sailfish_rbc_slow_total: IntCounter,
@@ -290,40 +200,6 @@ pub struct Metrics {
     pub starfish_rbc_dag_shadow_buffered_authenticated: IntGauge,
     pub starfish_rbc_dag_projected_vertices_total: IntCounter,
     pub starfish_rbc_dag_projection_decisions_total: IntCounterVec,
-    /// Active-window application latency decomposed by one of four fixed
-    /// pipeline stages. Keeping sum/count/max avoids per-block labels and the
-    /// cost of a high-volume histogram on the carrier actor's hot path.
-    pub starfish_rbc_dag_pipeline_latency_ns_total: IntCounterVec,
-    pub starfish_rbc_dag_pipeline_latency_samples_total: IntCounterVec,
-    pub starfish_rbc_dag_pipeline_latency_ns_max: IntGaugeVec,
-    /// Diagnostic-only round distances for first-committed applications.
-    /// Physical deltas use separate forward/backward magnitude labels so
-    /// cross-author clock skew is not hidden by unsigned saturation.
-    pub starfish_rbc_dag_commit_distance_rounds_total: IntCounterVec,
-    pub starfish_rbc_dag_commit_distance_samples_total: IntCounterVec,
-    pub starfish_rbc_dag_commit_distance_rounds_max: IntGaugeVec,
-    /// Current and process-high-water queue depths, with the bounded labels
-    /// `local` and `projection`.
-    pub starfish_rbc_dag_pipeline_queue_depth: IntGaugeVec,
-    pub starfish_rbc_dag_pipeline_queue_depth_max: IntGaugeVec,
-    pub starfish_rbc_dag_highest_projected_consensus_round: IntGauge,
-    pub starfish_rbc_dag_next_undecided_consensus_round: IntGauge,
-    pub starfish_rbc_dag_next_undecided_projected_stake: IntGauge,
-    pub starfish_rbc_dag_last_committed_consensus_round: IntGauge,
-    /// One-hot current projection head-of-line state. The label vocabulary is
-    /// fixed in `set_starfish_rbc_dag_pipeline_state`.
-    pub starfish_rbc_dag_projection_hol_state: IntGaugeVec,
-    /// Frontier lifecycle counters plus the current/high-water number created
-    /// by the synchronous carrier actor but not yet applied by the core
-    /// dispatcher.
-    pub starfish_rbc_dag_frontier_events_total: IntCounterVec,
-    pub starfish_rbc_dag_frontiers_inflight: IntGauge,
-    pub starfish_rbc_dag_frontiers_inflight_max: IntGauge,
-    /// Sequenced-transaction total observed by the frontier bridge only after
-    /// it records the corresponding final application-latency samples. The
-    /// local benchmark uses this release/acquire acknowledgement before
-    /// closing its post-cutoff transaction-observation gate.
-    starfish_rbc_dag_frontier_applied_sequenced_transactions: Arc<AtomicU64>,
 
     // subscription tracking
     pub subscribed_to_peers: IntGauge,
@@ -359,22 +235,11 @@ pub struct Metrics {
 
     /// True iff the validator is inside the active transaction-submission
     /// window. Outside this window — during the warmup before the first
-    /// transaction is generated, and after the generator stops — protocol
-    /// throughput/latency metrics and the `benchmark_duration` clock are
-    /// skipped. Transaction commits use `transaction_metrics_active` so the
-    /// offered window can be followed through a bounded drain.
+    /// transaction is generated, and after the generator stops — every
+    /// rate-relevant metric update (latency observations, sequenced /
+    /// committed counters, the `benchmark_duration` clock) is skipped, so
+    /// reported TPS / BPS / p50 latency reflect only the steady-state window.
     pub metrics_active: Arc<AtomicBool>,
-    /// Transaction and application-pipeline observations remain enabled
-    /// during the bounded post-window drain, while all ordinary
-    /// protocol/window metrics close exactly at the shared cutoff. This makes
-    /// active-window latency uncensored without charging drain traffic to
-    /// block/RBC throughput.
-    pub transaction_metrics_active: Arc<AtomicBool>,
-    /// Runtime-only coordinated generator lifecycle for local benchmarks.
-    pub benchmark_generator_state: Arc<AtomicU8>,
-    /// Common benchmark cutoff expressed in microseconds since this
-    /// validator's `validator_start`; zero outside coordinated benchmarks.
-    pub benchmark_transaction_cutoff_micros: Arc<AtomicU64>,
     /// Wall-clock instant the validator's metrics were first activated, in
     /// microseconds since `validator_start`. Used by the
     /// `benchmark_duration` Prometheus counter so its denominator counts
@@ -414,38 +279,6 @@ pub struct AutonomousClockBenchmarkBaseline {
     carrier_round: i64,
 }
 
-/// Immutable per-validator RBC-DAG state sampled at the common transaction
-/// cutoff. The bounded post-window transaction drain may improve or worsen
-/// live gauges, but it must never rewrite the verdict for the measured
-/// interval.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AutonomousClockBenchmarkSnapshot {
-    accepted_heartbeats: u64,
-    accepted_application_carriers: u64,
-    delivered_carriers: u64,
-    delivered_applications: u64,
-    committed_frontiers: u64,
-    frontier_applications: u64,
-    projected_vertices: u64,
-    projection_decisions: u64,
-    wal_batches: u64,
-    wal_records: u64,
-    clock_valid: i64,
-    carrier_round: i64,
-    phase_backlog: i64,
-    admitted_authors: i64,
-    admitted_stake: i64,
-    buffered_authenticated: i64,
-    pending_recovery: i64,
-}
-
-impl AutonomousClockBenchmarkSnapshot {
-    fn accepted_local_carriers(self) -> u64 {
-        self.accepted_heartbeats
-            .saturating_add(self.accepted_application_carriers)
-    }
-}
-
 /// Per-validator cumulative counters sampled at the exact start of a local
 /// benchmark's active transaction window. Rates subtract this snapshot so
 /// connection warmup and shadow-WAL replay are not charged to the protocol.
@@ -456,20 +289,6 @@ pub struct LocalBenchmarkCounterBaseline {
     bytes_sent: u64,
     bytes_received: u64,
     outbound_messages: Vec<(u64, u64)>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct LocalBenchmarkTransactionOutcome {
-    /// Exact successful sends across all honest local generators in the
-    /// shared active window. Byzantine generators are disabled by the local
-    /// harness, so this is the global set every honest validator must drain.
-    pub offered_transactions: u64,
-    /// Mean per-honest-validator commits observed at the common cutoff.
-    pub cutoff_committed_transactions: u64,
-    /// Mean per-honest-validator commits after the bounded drain.
-    pub eventual_committed_transactions: u64,
-    pub drain_elapsed: Duration,
-    pub drain_complete: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -502,134 +321,200 @@ fn summarize_autonomous_clock_benchmark(
     metrics: &[Arc<Metrics>],
     committee_size: usize,
     baselines: Option<&[AutonomousClockBenchmarkBaseline]>,
-    cutoff_snapshots: Option<&[AutonomousClockBenchmarkSnapshot]>,
     embedded_rbc_authority: bool,
 ) -> AutonomousClockBenchmarkSummary {
     let committee_size = i64::try_from(committee_size).unwrap_or(i64::MAX);
     let maximum_phase_backlog_bound =
         STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR.saturating_mul(committee_size);
     let maximum_buffered_authenticated_bound =
-        starfish_rbc_dag_autonomous_buffered_settled_bound(committee_size);
+        STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR.saturating_mul(committee_size);
 
-    // A supplied cutoff vector is authoritative. Missing entries fail closed
-    // to the all-zero default rather than falling back to mutable drain-time
-    // gauges and accidentally turning an invalid measured run into VALID.
-    let observations = metrics
+    let valid_nodes = metrics
         .iter()
-        .enumerate()
-        .map(|(index, metrics)| match cutoff_snapshots {
-            Some(snapshots) => snapshots.get(index).copied().unwrap_or_default(),
-            None => metrics.autonomous_clock_benchmark_snapshot(),
-        })
-        .collect::<Vec<_>>();
-
-    let valid_nodes = observations
-        .iter()
-        .filter(|snapshot| snapshot.clock_valid == 1)
+        .filter(|metrics| metrics.starfish_rbc_dag_shadow_clock_valid.get() == 1)
         .count();
-    let progress_nodes = observations
+    let progress_nodes = metrics
         .iter()
         .enumerate()
-        .filter(|(index, snapshot)| {
+        .filter(|(index, metrics)| {
             let baseline = baselines
                 .and_then(|baselines| baselines.get(*index))
                 .copied()
                 .unwrap_or_default();
-            snapshot.accepted_local_carriers() > baseline.accepted_local_carriers
-                && snapshot.delivered_carriers > baseline.delivered_carriers
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .get()
+                .saturating_add(
+                    metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["application_carrier", "accepted"])
+                        .get(),
+                )
+                > baseline.accepted_local_carriers
+                && metrics
+                    .starfish_rbc_dag_shadow_inputs_total
+                    .with_label_values(&["delivery", "shadow"])
+                    .get()
+                    > baseline.delivered_carriers
                 && (!embedded_rbc_authority
-                    || snapshot.delivered_applications > baseline.delivered_applications
-                        && snapshot.committed_frontiers > baseline.committed_frontiers
-                        && snapshot.frontier_applications > baseline.frontier_applications)
-                && snapshot.projected_vertices > baseline.projected_vertices
-                && snapshot.projection_decisions > baseline.projection_decisions
-                && snapshot.wal_batches > baseline.wal_batches
-                && snapshot.wal_records > baseline.wal_records
-                && snapshot.carrier_round > baseline.carrier_round
+                    || metrics
+                        .starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["delivery", "embedded_application"])
+                        .get()
+                        > baseline.delivered_applications
+                        && metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "committed"])
+                            .get()
+                            > baseline.committed_frontiers
+                        && metrics
+                            .starfish_rbc_dag_shadow_inputs_total
+                            .with_label_values(&["frontier", "application"])
+                            .get()
+                            > baseline.frontier_applications)
+                && metrics.starfish_rbc_dag_projected_vertices_total.get()
+                    > baseline.projected_vertices
+                && metrics
+                    .starfish_rbc_dag_projection_decisions_total
+                    .with_label_values(&["direct_commit"])
+                    .get()
+                    > baseline.projection_decisions
+                && metrics
+                    .starfish_rbc_dag_shadow_wal_appended_batches_total
+                    .get()
+                    > baseline.wal_batches
+                && metrics
+                    .starfish_rbc_dag_shadow_wal_appended_records_total
+                    .get()
+                    > baseline.wal_records
+                && metrics.starfish_rbc_dag_shadow_carrier_round.get() > baseline.carrier_round
         })
         .count();
-    let bounded_nodes = observations
+    let bounded_nodes = metrics
         .iter()
-        .filter(|snapshot| {
-            snapshot.phase_backlog >= 0
-                && snapshot.phase_backlog <= maximum_phase_backlog_bound
-                && snapshot.admitted_authors >= 0
-                && snapshot.admitted_authors <= committee_size
-                && snapshot.admitted_stake >= 0
-                && snapshot.buffered_authenticated >= 0
-                && snapshot.buffered_authenticated <= maximum_buffered_authenticated_bound
-                && snapshot.pending_recovery == 0
+        .filter(|metrics| {
+            let phase_backlog = metrics.starfish_rbc_dag_shadow_phase_backlog.get();
+            let admitted_authors = metrics.starfish_rbc_dag_shadow_admitted_authors.get();
+            let admitted_stake = metrics.starfish_rbc_dag_shadow_admitted_stake.get();
+            let buffered = metrics.starfish_rbc_dag_shadow_buffered_authenticated.get();
+            phase_backlog >= 0
+                && phase_backlog <= maximum_phase_backlog_bound
+                && admitted_authors >= 0
+                && admitted_authors <= committee_size
+                && admitted_stake >= 0
+                && buffered >= 0
+                && buffered <= maximum_buffered_authenticated_bound
+                && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
         })
         .count();
 
-    let accepted_heartbeats = observations
+    let accepted_heartbeats = metrics
         .iter()
-        .map(|snapshot| snapshot.accepted_heartbeats)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["heartbeat", "accepted"])
+                .get()
+        })
         .sum();
-    let delivered_carriers = observations
+    let delivered_carriers = metrics
         .iter()
-        .map(|snapshot| snapshot.delivered_carriers)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "shadow"])
+                .get()
+        })
         .sum();
-    let delivered_applications = observations
+    let delivered_applications = metrics
         .iter()
-        .map(|snapshot| snapshot.delivered_applications)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["delivery", "embedded_application"])
+                .get()
+        })
         .sum();
-    let committed_frontiers = observations
+    let committed_frontiers = metrics
         .iter()
-        .map(|snapshot| snapshot.committed_frontiers)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "committed"])
+                .get()
+        })
         .sum();
-    let frontier_applications = observations
+    let frontier_applications = metrics
         .iter()
-        .map(|snapshot| snapshot.frontier_applications)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_inputs_total
+                .with_label_values(&["frontier", "application"])
+                .get()
+        })
         .sum();
-    let projected_vertices = observations
+    let projected_vertices = metrics
         .iter()
-        .map(|snapshot| snapshot.projected_vertices)
+        .map(|metrics| metrics.starfish_rbc_dag_projected_vertices_total.get())
         .sum();
-    let projection_decisions = observations
+    let projection_decisions = metrics
         .iter()
-        .map(|snapshot| snapshot.projection_decisions)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_projection_decisions_total
+                .with_label_values(&["direct_commit"])
+                .get()
+        })
         .sum();
-    let wal_batches = observations
+    let wal_batches = metrics
         .iter()
-        .map(|snapshot| snapshot.wal_batches)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                .get()
+        })
         .sum();
-    let wal_records = observations
+    let wal_records = metrics
         .iter()
-        .map(|snapshot| snapshot.wal_records)
+        .map(|metrics| {
+            metrics
+                .starfish_rbc_dag_shadow_wal_appended_records_total
+                .get()
+        })
         .sum();
-    let pending_recovery = observations
+    let pending_recovery = metrics
         .iter()
-        .map(|snapshot| snapshot.pending_recovery)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_pending_recovery.get())
         .sum();
-    let minimum_round = observations
+    let minimum_round = metrics
         .iter()
-        .map(|snapshot| snapshot.carrier_round)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_carrier_round.get())
         .min()
         .unwrap_or_default();
-    let maximum_round = observations
+    let maximum_round = metrics
         .iter()
-        .map(|snapshot| snapshot.carrier_round)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_carrier_round.get())
         .max()
         .unwrap_or_default();
-    let maximum_phase_backlog = observations
+    let maximum_phase_backlog = metrics
         .iter()
-        .map(|snapshot| snapshot.phase_backlog)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_phase_backlog.get())
         .max()
         .unwrap_or_default();
-    let maximum_admitted_authors = observations
+    let maximum_admitted_authors = metrics
         .iter()
-        .map(|snapshot| snapshot.admitted_authors)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_admitted_authors.get())
         .max()
         .unwrap_or_default();
-    let maximum_admitted_stake = observations
+    let maximum_admitted_stake = metrics
         .iter()
-        .map(|snapshot| snapshot.admitted_stake)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_admitted_stake.get())
         .max()
         .unwrap_or_default();
-    let maximum_buffered_authenticated = observations
+    let maximum_buffered_authenticated = metrics
         .iter()
-        .map(|snapshot| snapshot.buffered_authenticated)
+        .map(|metrics| metrics.starfish_rbc_dag_shadow_buffered_authenticated.get())
         .max()
         .unwrap_or_default();
     let round_lag = maximum_round.saturating_sub(minimum_round);
@@ -678,176 +563,18 @@ pub struct VecHistogramReporter<T> {
     gauge: IntGaugeVec,
 }
 
-fn set_gauge_max(gauge: &IntGauge, value: i64) {
-    if value > gauge.get() {
-        gauge.set(value);
-    }
-}
-
-fn format_rbc_dag_round_distance(total: u64, samples: u64, maximum: i64) -> String {
-    let average = if samples == 0 {
-        0.0
-    } else {
-        total as f64 / samples as f64
-    };
-    format!("{average:.2}/{maximum} rounds (n={samples})")
-}
-
 impl Metrics {
-    pub(crate) fn observe_starfish_rbc_dag_pipeline_latency_ns(
-        &self,
-        stage: &'static str,
-        total_ns: u64,
-        samples: u64,
-        max_ns: u64,
-    ) {
-        debug_assert!(RBC_DAG_PIPELINE_LATENCY_STAGES.contains(&stage));
-        // These stages follow the finite set of applications offered during
-        // the common transaction window. Keep them open through the bounded
-        // drain so delivery/frontier latency is not right-censored at the
-        // submission cutoff. Protocol rates and round-distance observations
-        // remain scoped by `metrics_active` below.
-        if samples == 0 || !self.transaction_metrics_active.load(Ordering::Relaxed) {
-            return;
-        }
-        self.starfish_rbc_dag_pipeline_latency_ns_total
-            .with_label_values(&[stage])
-            .inc_by(total_ns);
-        self.starfish_rbc_dag_pipeline_latency_samples_total
-            .with_label_values(&[stage])
-            .inc_by(samples);
-        set_gauge_max(
-            &self
-                .starfish_rbc_dag_pipeline_latency_ns_max
-                .with_label_values(&[stage]),
-            i64::try_from(max_ns).unwrap_or(i64::MAX),
-        );
-    }
-
-    pub(crate) fn observe_starfish_rbc_dag_commit_round_distance(
-        &self,
-        kind: &'static str,
-        total_rounds: u64,
-        samples: u64,
-        max_rounds: u64,
-    ) {
-        debug_assert!(RBC_DAG_COMMIT_DISTANCE_KINDS.contains(&kind));
-        if samples == 0 || !self.metrics_active.load(Ordering::Relaxed) {
-            return;
-        }
-        self.starfish_rbc_dag_commit_distance_rounds_total
-            .with_label_values(&[kind])
-            .inc_by(total_rounds);
-        self.starfish_rbc_dag_commit_distance_samples_total
-            .with_label_values(&[kind])
-            .inc_by(samples);
-        set_gauge_max(
-            &self
-                .starfish_rbc_dag_commit_distance_rounds_max
-                .with_label_values(&[kind]),
-            i64::try_from(max_rounds).unwrap_or(i64::MAX),
-        );
-    }
-
-    pub(crate) fn set_starfish_rbc_dag_pipeline_state(
-        &self,
-        pending_local: usize,
-        pending_projection: usize,
-        highest_projected_round: u32,
-        next_undecided_round: u32,
-        next_undecided_projected_stake: u64,
-        last_committed_round: u32,
-        hol_state: &'static str,
-    ) {
-        debug_assert!(RBC_DAG_PROJECTION_HOL_STATES.contains(&hol_state));
-        for (queue, depth) in [("local", pending_local), ("projection", pending_projection)] {
-            let depth = i64::try_from(depth).unwrap_or(i64::MAX);
-            self.starfish_rbc_dag_pipeline_queue_depth
-                .with_label_values(&[queue])
-                .set(depth);
-            set_gauge_max(
-                &self
-                    .starfish_rbc_dag_pipeline_queue_depth_max
-                    .with_label_values(&[queue]),
-                depth,
-            );
-        }
-        self.starfish_rbc_dag_highest_projected_consensus_round
-            .set(i64::from(highest_projected_round));
-        self.starfish_rbc_dag_next_undecided_consensus_round
-            .set(i64::from(next_undecided_round));
-        self.starfish_rbc_dag_next_undecided_projected_stake
-            .set(i64::try_from(next_undecided_projected_stake).unwrap_or(i64::MAX));
-        self.starfish_rbc_dag_last_committed_consensus_round
-            .set(i64::from(last_committed_round));
-        for state in RBC_DAG_PROJECTION_HOL_STATES {
-            self.starfish_rbc_dag_projection_hol_state
-                .with_label_values(&[state])
-                .set(i64::from(*state == hol_state));
-        }
-    }
-
-    pub(crate) fn starfish_rbc_dag_frontier_generated(&self) {
-        self.starfish_rbc_dag_frontier_events_total
-            .with_label_values(&["generated"])
-            .inc();
-        self.starfish_rbc_dag_frontiers_inflight.inc();
-        set_gauge_max(
-            &self.starfish_rbc_dag_frontiers_inflight_max,
-            self.starfish_rbc_dag_frontiers_inflight.get(),
-        );
-    }
-
-    pub(crate) fn starfish_rbc_dag_frontier_applied(&self) {
-        self.starfish_rbc_dag_frontier_events_total
-            .with_label_values(&["applied"])
-            .inc();
-        if self.starfish_rbc_dag_frontiers_inflight.get() > 0 {
-            self.starfish_rbc_dag_frontiers_inflight.dec();
-        }
-        // `RbcDagAppliedFrontierObservationV1::observe` calls this only after
-        // recording creation-to-frontier-applied latency. Publishing the
-        // sequenced count last gives the benchmark an ordered drain barrier,
-        // without confusing application samples (blocks) with transactions.
-        self.starfish_rbc_dag_frontier_applied_sequenced_transactions
-            .store(self.sequenced_transactions_total.get(), Ordering::Release);
-    }
-
-    pub(crate) fn starfish_rbc_dag_frontier_ignored(&self) {
-        self.starfish_rbc_dag_frontier_events_total
-            .with_label_values(&["ignored"])
-            .inc();
-        if self.starfish_rbc_dag_frontiers_inflight.get() > 0 {
-            self.starfish_rbc_dag_frontiers_inflight.dec();
-        }
-    }
-
     pub fn autonomous_clock_benchmark_baseline(&self) -> AutonomousClockBenchmarkBaseline {
-        let snapshot = self.autonomous_clock_benchmark_snapshot();
         AutonomousClockBenchmarkBaseline {
-            accepted_local_carriers: snapshot.accepted_local_carriers(),
-            delivered_carriers: snapshot.delivered_carriers,
-            delivered_applications: snapshot.delivered_applications,
-            committed_frontiers: snapshot.committed_frontiers,
-            frontier_applications: snapshot.frontier_applications,
-            projected_vertices: snapshot.projected_vertices,
-            projection_decisions: snapshot.projection_decisions,
-            wal_batches: snapshot.wal_batches,
-            wal_records: snapshot.wal_records,
-            carrier_round: snapshot.carrier_round,
-        }
-    }
-
-    pub fn autonomous_clock_benchmark_snapshot(&self) -> AutonomousClockBenchmarkSnapshot {
-        AutonomousClockBenchmarkSnapshot {
-            accepted_heartbeats: self
+            accepted_local_carriers: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["heartbeat", "accepted"])
-                .get(),
-            accepted_application_carriers: self
-                .starfish_rbc_dag_shadow_inputs_total
-                .with_label_values(&["application_carrier", "accepted"])
-                .get(),
+                .get()
+                .saturating_add(
+                    self.starfish_rbc_dag_shadow_inputs_total
+                        .with_label_values(&["application_carrier", "accepted"])
+                        .get(),
+                ),
             delivered_carriers: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
@@ -875,28 +602,8 @@ impl Metrics {
             wal_records: self
                 .starfish_rbc_dag_shadow_wal_appended_records_total
                 .get(),
-            clock_valid: self.starfish_rbc_dag_shadow_clock_valid.get(),
             carrier_round: self.starfish_rbc_dag_shadow_carrier_round.get(),
-            phase_backlog: self.starfish_rbc_dag_shadow_phase_backlog.get(),
-            admitted_authors: self.starfish_rbc_dag_shadow_admitted_authors.get(),
-            admitted_stake: self.starfish_rbc_dag_shadow_admitted_stake.get(),
-            buffered_authenticated: self.starfish_rbc_dag_shadow_buffered_authenticated.get(),
-            pending_recovery: self.starfish_rbc_dag_shadow_pending_recovery.get(),
         }
-    }
-
-    /// Number of offered applications whose authoritative RBC-DAG frontier
-    /// has been applied locally and whose final pipeline-latency sample has
-    /// therefore already been recorded.
-    pub fn starfish_rbc_dag_frontier_applied_latency_samples(&self) -> u64 {
-        self.starfish_rbc_dag_pipeline_latency_samples_total
-            .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED])
-            .get()
-    }
-
-    pub fn starfish_rbc_dag_frontier_applied_sequenced_transactions(&self) -> u64 {
-        self.starfish_rbc_dag_frontier_applied_sequenced_transactions
-            .load(Ordering::Acquire)
     }
 
     pub fn local_benchmark_counter_baseline(&self) -> LocalBenchmarkCounterBaseline {
@@ -1363,122 +1070,6 @@ impl Metrics {
                     registry,
                 )
                 .unwrap(),
-            starfish_rbc_dag_pipeline_latency_ns_total:
-                register_int_counter_vec_with_registry!(
-                    "starfish_rbc_dag_pipeline_latency_ns_total",
-                    "Active-window application latency nanoseconds accumulated by bounded RBC-DAG pipeline stage",
-                    &["stage"],
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_pipeline_latency_samples_total:
-                register_int_counter_vec_with_registry!(
-                    "starfish_rbc_dag_pipeline_latency_samples_total",
-                    "Active-window application latency sample count by bounded RBC-DAG pipeline stage",
-                    &["stage"],
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_pipeline_latency_ns_max: register_int_gauge_vec_with_registry!(
-                "starfish_rbc_dag_pipeline_latency_ns_max",
-                "Maximum active-window application latency nanoseconds by bounded RBC-DAG pipeline stage",
-                &["stage"],
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_commit_distance_rounds_total:
-                register_int_counter_vec_with_registry!(
-                    "starfish_rbc_dag_commit_distance_rounds_total",
-                    "Active-window round-distance magnitude accumulated for first-committed RBC-DAG applications",
-                    &["kind"],
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_commit_distance_samples_total:
-                register_int_counter_vec_with_registry!(
-                    "starfish_rbc_dag_commit_distance_samples_total",
-                    "Active-window first-committed RBC-DAG application sample count by round-distance kind",
-                    &["kind"],
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_commit_distance_rounds_max:
-                register_int_gauge_vec_with_registry!(
-                    "starfish_rbc_dag_commit_distance_rounds_max",
-                    "Maximum active-window first-committed RBC-DAG application round-distance magnitude",
-                    &["kind"],
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_pipeline_queue_depth: register_int_gauge_vec_with_registry!(
-                "starfish_rbc_dag_pipeline_queue_depth",
-                "Current RBC-DAG pipeline queue depth by bounded queue name",
-                &["queue"],
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_pipeline_queue_depth_max: register_int_gauge_vec_with_registry!(
-                "starfish_rbc_dag_pipeline_queue_depth_max",
-                "Process-high-water RBC-DAG pipeline queue depth by bounded queue name",
-                &["queue"],
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_highest_projected_consensus_round:
-                register_int_gauge_with_registry!(
-                    "starfish_rbc_dag_highest_projected_consensus_round",
-                    "Highest clean consensus round projected by this RBC-DAG runtime",
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_next_undecided_consensus_round:
-                register_int_gauge_with_registry!(
-                    "starfish_rbc_dag_next_undecided_consensus_round",
-                    "Oldest clean projected consensus round not yet decided",
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_next_undecided_projected_stake:
-                register_int_gauge_with_registry!(
-                    "starfish_rbc_dag_next_undecided_projected_stake",
-                    "Projected distinct-author stake at the oldest undecided consensus round",
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_last_committed_consensus_round:
-                register_int_gauge_with_registry!(
-                    "starfish_rbc_dag_last_committed_consensus_round",
-                    "Highest consensus round whose committed frontier was generated",
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_projection_hol_state: register_int_gauge_vec_with_registry!(
-                "starfish_rbc_dag_projection_hol_state",
-                "One-hot current certified-projection head-of-line state",
-                &["reason"],
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_frontier_events_total: register_int_counter_vec_with_registry!(
-                "starfish_rbc_dag_frontier_events_total",
-                "Committed RBC-DAG frontier lifecycle events by bounded stage",
-                &["stage"],
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_frontiers_inflight: register_int_gauge_with_registry!(
-                "starfish_rbc_dag_frontiers_inflight",
-                "Committed RBC-DAG frontiers generated but not yet applied or ignored",
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_frontiers_inflight_max: register_int_gauge_with_registry!(
-                "starfish_rbc_dag_frontiers_inflight_max",
-                "Process-high-water committed RBC-DAG frontiers awaiting event application",
-                registry,
-            )
-            .unwrap(),
-            starfish_rbc_dag_frontier_applied_sequenced_transactions: Arc::new(AtomicU64::new(0)),
             subscribed_to_peers: register_int_gauge_with_registry!(
                 "subscribed_to_peers",
                 "Number of peers this validator is subscribed to",
@@ -1575,12 +1166,6 @@ impl Metrics {
             sequenced_transactions_total: register_int_counter_with_registry!(
                 "sequenced_transactions_total",
                 "Total number of sequenced transactions",
-                registry,
-            )
-            .unwrap(),
-            sequenced_transactions_cutoff_total: register_int_counter_with_registry!(
-                "sequenced_transactions_cutoff_total",
-                "Transactions sequenced before the coordinated benchmark cutoff",
                 registry,
             )
             .unwrap(),
@@ -1930,11 +1515,6 @@ impl Metrics {
             // bound). The transaction generator overrides to false during
             // its warmup when the orchestrator sets a finite duration.
             metrics_active: Arc::new(AtomicBool::new(true)),
-            transaction_metrics_active: Arc::new(AtomicBool::new(true)),
-            benchmark_generator_state: Arc::new(AtomicU8::new(
-                BenchmarkGeneratorState::Disabled as u8,
-            )),
-            benchmark_transaction_cutoff_micros: Arc::new(AtomicU64::new(0)),
             active_start_micros: Arc::new(AtomicU64::new(0)),
             validator_start: tokio::time::Instant::now(),
         };
@@ -1951,10 +1531,7 @@ impl Metrics {
         starfish_rbc_dag_autonomous_clock_expected: bool,
         starfish_rbc_dag_embedded_rbc_authority_expected: bool,
         autonomous_clock_baselines: Option<Vec<AutonomousClockBenchmarkBaseline>>,
-        autonomous_clock_cutoffs: Option<Vec<AutonomousClockBenchmarkSnapshot>>,
         counter_baselines: Option<Vec<LocalBenchmarkCounterBaseline>>,
-        counter_cutoffs: Option<Vec<LocalBenchmarkCounterBaseline>>,
-        transaction_outcome: Option<LocalBenchmarkTransactionOutcome>,
     ) {
         let num_validators = metrics.len() as u64;
 
@@ -1973,27 +1550,19 @@ impl Metrics {
             })
             .sum::<u64>()
             / num_validators;
-        let cutoff_transactions = transaction_outcome
-            .map(|outcome| outcome.cutoff_committed_transactions)
-            .unwrap_or(average_transactions);
-        let average_tps = cutoff_transactions as f64 / duration_secs as f64;
+        let average_tps = average_transactions as f64 / duration_secs as f64;
 
         let average_blocks_submitted = metrics
             .iter()
             .enumerate()
             .map(|(index, metrics)| {
-                counter_cutoffs
-                    .as_ref()
-                    .and_then(|cutoffs| cutoffs.get(index))
-                    .map(|cutoff| cutoff.dag_state_entries)
-                    .unwrap_or_else(|| metrics.dag_state_entries.get())
-                    .saturating_sub(
-                        counter_baselines
-                            .as_ref()
-                            .and_then(|baselines| baselines.get(index))
-                            .map(|baseline| baseline.dag_state_entries)
-                            .unwrap_or_default(),
-                    )
+                metrics.dag_state_entries.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.dag_state_entries)
+                        .unwrap_or_default(),
+                )
             })
             .sum::<u64>()
             / num_validators;
@@ -2003,18 +1572,13 @@ impl Metrics {
             .iter()
             .enumerate()
             .map(|(index, metrics)| {
-                counter_cutoffs
-                    .as_ref()
-                    .and_then(|cutoffs| cutoffs.get(index))
-                    .map(|cutoff| cutoff.bytes_sent)
-                    .unwrap_or_else(|| metrics.bytes_sent_total.get())
-                    .saturating_sub(
-                        counter_baselines
-                            .as_ref()
-                            .and_then(|baselines| baselines.get(index))
-                            .map(|baseline| baseline.bytes_sent)
-                            .unwrap_or_default(),
-                    )
+                metrics.bytes_sent_total.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.bytes_sent)
+                        .unwrap_or_default(),
+                )
             })
             .sum::<u64>()
             / num_validators;
@@ -2022,18 +1586,13 @@ impl Metrics {
             .iter()
             .enumerate()
             .map(|(index, metrics)| {
-                counter_cutoffs
-                    .as_ref()
-                    .and_then(|cutoffs| cutoffs.get(index))
-                    .map(|cutoff| cutoff.bytes_received)
-                    .unwrap_or_else(|| metrics.bytes_received_total.get())
-                    .saturating_sub(
-                        counter_baselines
-                            .as_ref()
-                            .and_then(|baselines| baselines.get(index))
-                            .map(|baseline| baseline.bytes_received)
-                            .unwrap_or_default(),
-                    )
+                metrics.bytes_received_total.get().saturating_sub(
+                    counter_baselines
+                        .as_ref()
+                        .and_then(|baselines| baselines.get(index))
+                        .map(|baseline| baseline.bytes_received)
+                        .unwrap_or_default(),
+                )
             })
             .sum::<u64>()
             / num_validators;
@@ -2120,43 +1679,13 @@ impl Metrics {
         table.add_row(row![bH2->""]);
         table.add_row(row![bH2->"Performance Metrics"]);
         table.add_row(
-            row![b->"p50 block latency:", format!("{:.2} millis", p50_block_committed_latency)],
+            row![b->"Average block latency:", format!("{:.2} millis", p50_block_committed_latency)],
         );
         table.add_row(row![
-            b->"p50 e2e latency:",
+            b->"Average e2e latency:",
             format!("{:.2} millis", p50_transaction_committed_latency)
         ]);
-        if let Some(outcome) = transaction_outcome {
-            table.add_row(row![
-                b->"Offered TPS:",
-                format!(
-                    "{:.2} tx/s ({} exact successful submissions)",
-                    outcome.offered_transactions as f64 / duration_secs as f64,
-                    outcome.offered_transactions,
-                )
-            ]);
-            table.add_row(row![
-                b->"Committed TPS at cutoff:",
-                format!("{:.2} tx/s", outcome.cutoff_committed_transactions as f64 / duration_secs as f64)
-            ]);
-            table.add_row(row![
-                b->"Eventual active-window TPS:",
-                format!(
-                    "{:.2} tx/s ({}, drain {:.2}s)",
-                    outcome.eventual_committed_transactions as f64 / duration_secs as f64,
-                    if outcome.drain_complete { "complete" } else { "INCOMPLETE" },
-                    outcome.drain_elapsed.as_secs_f64(),
-                )
-            ]);
-            table.add_row(row![
-                b->"Cutoff backlog:",
-                outcome
-                    .offered_transactions
-                    .saturating_sub(outcome.cutoff_committed_transactions)
-            ]);
-        } else {
-            table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
-        }
+        table.add_row(row![b->"Average TPS:", format!("{:.2} tx/s", average_tps)]);
         table.add_row(row![b->"Average BPS:", format!("{:.2} blocks/s", average_bps)]);
 
         // Network metrics
@@ -2180,17 +1709,10 @@ impl Metrics {
                     .iter()
                     .enumerate()
                     .map(|(validator_index, metrics)| {
-                        let current = counter_cutoffs
-                            .as_ref()
-                            .and_then(|cutoffs| cutoffs.get(validator_index))
-                            .and_then(|cutoff| cutoff.outbound_messages.get(message_index))
-                            .map(|(bytes, _)| *bytes)
-                            .unwrap_or_else(|| {
-                                metrics
-                                    .network_message_bytes_sent_total
-                                    .with_label_values(&[request_type])
-                                    .get()
-                            });
+                        let current = metrics
+                            .network_message_bytes_sent_total
+                            .with_label_values(&[request_type])
+                            .get();
                         let baseline = counter_baselines
                             .as_ref()
                             .and_then(|baselines| baselines.get(validator_index))
@@ -2208,17 +1730,10 @@ impl Metrics {
                     .iter()
                     .enumerate()
                     .map(|(validator_index, metrics)| {
-                        let current = counter_cutoffs
-                            .as_ref()
-                            .and_then(|cutoffs| cutoffs.get(validator_index))
-                            .and_then(|cutoff| cutoff.outbound_messages.get(message_index))
-                            .map(|(_, requests)| *requests)
-                            .unwrap_or_else(|| {
-                                metrics
-                                    .network_requests_sent_total
-                                    .with_label_values(&[request_type])
-                                    .get()
-                            });
+                        let current = metrics
+                            .network_requests_sent_total
+                            .with_label_values(&[request_type])
+                            .get();
                         let baseline = counter_baselines
                             .as_ref()
                             .and_then(|baselines| baselines.get(validator_index))
@@ -2250,14 +1765,8 @@ impl Metrics {
             }
         }
         let total_average_transactions = (average_tps * duration_secs as f64) as u64;
-        // Every honest validator sequences the same global offered set, so
-        // its bandwidth denominator is the aggregate submissions across all
-        // generators—not one generator's local share.
-        let offered_global = transaction_outcome
-            .map(|outcome| outcome.offered_transactions as f64)
-            .unwrap_or(total_average_transactions as f64);
-        let bandwidth_efficiency = if offered_global > 0.0 {
-            average_bytes_sent as f64 / offered_global / 512.0
+        let bandwidth_efficiency = if total_average_transactions > 0 {
+            average_bytes_sent as f64 / total_average_transactions as f64 / 512.0
         } else {
             0.0
         };
@@ -2268,7 +1777,6 @@ impl Metrics {
                 &metrics,
                 committee_size,
                 autonomous_clock_baselines.as_deref(),
-                autonomous_clock_cutoffs.as_deref(),
                 starfish_rbc_dag_embedded_rbc_authority_expected,
             );
             let round_lag = summary.maximum_round.saturating_sub(summary.minimum_round);
@@ -2282,7 +1790,7 @@ impl Metrics {
                 }
             ]);
             table.add_row(row![
-                b->"Cutoff clock verdict:",
+                b->"Clock verdict:",
                 if summary.verdict_valid {
                     "VALID".to_owned()
                 } else {
@@ -2290,7 +1798,7 @@ impl Metrics {
                 }
             ]);
             table.add_row(row![
-                b->"Cutoff valid/progress/bounded validators:",
+                b->"Valid/progress/bounded validators:",
                 format!(
                     "{}/{}, {}/{}, {}/{}",
                     summary.valid_nodes,
@@ -2302,7 +1810,7 @@ impl Metrics {
                 )
             ]);
             table.add_row(row![
-                b->"Cutoff clock/WAL progress:",
+                b->"Clock/WAL progress:",
                 format!(
                     "heartbeats={}, carrier deliveries={}, application deliveries={}, committed frontiers={}, frontier applications={}, projected vertices={}, projected commits={}, WAL batches={}, records={}, open rounds={}..{}",
                     summary.accepted_heartbeats,
@@ -2319,7 +1827,7 @@ impl Metrics {
                 )
             ]);
             table.add_row(row![
-                b->"Cutoff bounded state:",
+                b->"Bounded live state:",
                 format!(
                     "round skew={round_lag}/{}, max phase backlog={}/{}, admitted authors={}/{}, stake={}, max buffered={}/{}, pending recovery={}",
                     STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG,
@@ -2331,328 +1839,6 @@ impl Metrics {
                     summary.maximum_buffered_authenticated,
                     summary.maximum_buffered_authenticated_bound,
                     summary.pending_recovery,
-                )
-            ]);
-            let cutoff_per_validator_progress = metrics
-                .iter()
-                .enumerate()
-                .map(|(index, metrics)| {
-                    let baseline = autonomous_clock_baselines
-                        .as_deref()
-                        .and_then(|baselines| baselines.get(index))
-                        .copied()
-                        .unwrap_or_default();
-                    let snapshot = autonomous_clock_cutoffs
-                        .as_deref()
-                        .and_then(|snapshots| snapshots.get(index))
-                        .copied()
-                        .unwrap_or_else(|| metrics.autonomous_clock_benchmark_snapshot());
-                    let applications = snapshot
-                        .delivered_applications
-                        .saturating_sub(baseline.delivered_applications);
-                    let frontiers = snapshot
-                        .committed_frontiers
-                        .saturating_sub(baseline.committed_frontiers);
-                    format!(
-                        "{index}:r{}/a{applications}/f{frontiers}/v{}",
-                        snapshot.carrier_round, snapshot.clock_valid,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            table.add_row(row![
-                b->"Cutoff per-validator round/app/frontier/valid:",
-                cutoff_per_validator_progress,
-            ]);
-            let final_per_validator_state = metrics
-                .iter()
-                .enumerate()
-                .map(|(index, metrics)| {
-                    let snapshot = metrics.autonomous_clock_benchmark_snapshot();
-                    format!(
-                        "{index}:r{}/q{}/b{}/rec{}/v{}",
-                        snapshot.carrier_round,
-                        snapshot.phase_backlog,
-                        snapshot.buffered_authenticated,
-                        snapshot.pending_recovery,
-                        snapshot.clock_valid,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            table.add_row(row![
-                b->"Final/drain state (diagnostic only):",
-                final_per_validator_state,
-            ]);
-            let shadow_input_count = |kind: &str, outcome: &str| {
-                metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_shadow_inputs_total
-                            .with_label_values(&[kind, outcome])
-                            .get()
-                    })
-                    .sum::<u64>()
-            };
-            table.add_row(row![
-                b->"Carrier transport/ingress:",
-                format!(
-                    "network sent/disconnected/dropped={}/{}/{}, carriers authenticated/retained/rejected={}/{}/{}, sync requests sent/served={}/{}, sync responses authenticated/rejected={}/{}, subscriptions to/by peers={}..{}/{}..{}",
-                    shadow_input_count("network", "sent"),
-                    shadow_input_count("network", "disconnected"),
-                    shadow_input_count("network", "dropped_backpressure"),
-                    shadow_input_count("carrier", "authenticated"),
-                    shadow_input_count("carrier", "retained_unauthenticated"),
-                    shadow_input_count("carrier", "rejected"),
-                    shadow_input_count("carrier_sync_request", "sent"),
-                    shadow_input_count("carrier_sync_request", "served"),
-                    shadow_input_count("carrier_sync_response", "authenticated"),
-                    shadow_input_count("carrier_sync_response", "rejected"),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.subscribed_to_peers.get())
-                        .min()
-                        .unwrap_or_default(),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.subscribed_to_peers.get())
-                        .max()
-                        .unwrap_or_default(),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.subscribed_by_peers.get())
-                        .min()
-                        .unwrap_or_default(),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.subscribed_by_peers.get())
-                        .max()
-                        .unwrap_or_default(),
-                )
-            ]);
-            let stage_latency = RBC_DAG_PIPELINE_LATENCY_STAGES
-                .iter()
-                .map(|stage| {
-                    let total = metrics
-                        .iter()
-                        .map(|metrics| {
-                            metrics
-                                .starfish_rbc_dag_pipeline_latency_ns_total
-                                .with_label_values(&[stage])
-                                .get()
-                        })
-                        .sum::<u64>();
-                    let samples = metrics
-                        .iter()
-                        .map(|metrics| {
-                            metrics
-                                .starfish_rbc_dag_pipeline_latency_samples_total
-                                .with_label_values(&[stage])
-                                .get()
-                        })
-                        .sum::<u64>();
-                    let maximum = metrics
-                        .iter()
-                        .map(|metrics| {
-                            metrics
-                                .starfish_rbc_dag_pipeline_latency_ns_max
-                                .with_label_values(&[stage])
-                                .get()
-                        })
-                        .max()
-                        .unwrap_or_default();
-                    let average_ms = if samples == 0 {
-                        0.0
-                    } else {
-                        total as f64 / samples as f64 / 1_000_000.0
-                    };
-                    format!(
-                        "{}={average_ms:.1}/{:.1}ms(n={samples})",
-                        stage.strip_prefix("creation_to_").unwrap_or(stage),
-                        maximum as f64 / 1_000_000.0,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            table.add_row(row![
-                b->"Pipeline latency avg/max:",
-                stage_latency
-            ]);
-
-            let commit_distance = |kind: &str| {
-                let total = metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_commit_distance_rounds_total
-                            .with_label_values(&[kind])
-                            .get()
-                    })
-                    .sum::<u64>();
-                let samples = metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_commit_distance_samples_total
-                            .with_label_values(&[kind])
-                            .get()
-                    })
-                    .sum::<u64>();
-                let maximum = metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_commit_distance_rounds_max
-                            .with_label_values(&[kind])
-                            .get()
-                    })
-                    .max()
-                    .unwrap_or_default();
-                format_rbc_dag_round_distance(total, samples, maximum)
-            };
-            table.add_row(row![
-                b->"Commit distance avg/max:",
-                format!(
-                    "physical forward={}, backward={}",
-                    commit_distance(RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD),
-                    commit_distance(RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD),
-                )
-            ]);
-
-            let queue_depth = |queue: &str, maximum: bool| {
-                metrics
-                    .iter()
-                    .map(|metrics| {
-                        if maximum {
-                            metrics
-                                .starfish_rbc_dag_pipeline_queue_depth_max
-                                .with_label_values(&[queue])
-                                .get()
-                        } else {
-                            metrics
-                                .starfish_rbc_dag_pipeline_queue_depth
-                                .with_label_values(&[queue])
-                                .get()
-                        }
-                    })
-                    .max()
-                    .unwrap_or_default()
-            };
-            let highest_projected = metrics
-                .iter()
-                .map(|metrics| {
-                    metrics
-                        .starfish_rbc_dag_highest_projected_consensus_round
-                        .get()
-                })
-                .max()
-                .unwrap_or_default();
-            let next_undecided = metrics
-                .iter()
-                .map(|metrics| {
-                    metrics
-                        .starfish_rbc_dag_next_undecided_consensus_round
-                        .get()
-                })
-                .min()
-                .unwrap_or_default();
-            let next_undecided_stake = metrics
-                .iter()
-                .map(|metrics| {
-                    metrics
-                        .starfish_rbc_dag_next_undecided_projected_stake
-                        .get()
-                })
-                .min()
-                .unwrap_or_default();
-            let last_committed = metrics
-                .iter()
-                .map(|metrics| {
-                    metrics
-                        .starfish_rbc_dag_last_committed_consensus_round
-                        .get()
-                })
-                .min()
-                .unwrap_or_default();
-            let hol = RBC_DAG_PROJECTION_HOL_STATES
-                .iter()
-                .filter_map(|reason| {
-                    let nodes = metrics
-                        .iter()
-                        .filter(|metrics| {
-                            metrics
-                                .starfish_rbc_dag_projection_hol_state
-                                .with_label_values(&[reason])
-                                .get()
-                                == 1
-                        })
-                        .count();
-                    (nodes != 0).then(|| format!("{reason}:{nodes}"))
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            table.add_row(row![
-                b->"Projection/HOL state:",
-                format!(
-                    "pending local={}/{}, projection={}/{}, highest projected={highest_projected}, oldest undecided={next_undecided} (lag={}, projected stake={next_undecided_stake}), last committed={last_committed} (lag={}), HOL=[{hol}]",
-                    queue_depth("local", false),
-                    queue_depth("local", true),
-                    queue_depth("projection", false),
-                    queue_depth("projection", true),
-                    highest_projected.saturating_sub(next_undecided),
-                    highest_projected.saturating_sub(last_committed),
-                )
-            ]);
-            let decision_count = |outcome: &str| {
-                metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_projection_decisions_total
-                            .with_label_values(&[outcome])
-                            .get()
-                    })
-                    .sum::<u64>()
-            };
-            table.add_row(row![
-                b->"Projection decisions:",
-                format!(
-                    "direct commit/skip={}/{}, indirect commit/skip={}/{}, undecided={}",
-                    decision_count("direct_commit"),
-                    decision_count("direct_skip"),
-                    decision_count("indirect_commit"),
-                    decision_count("indirect_skip"),
-                    decision_count("undecided"),
-                )
-            ]);
-            let frontier_count = |stage: &str| {
-                metrics
-                    .iter()
-                    .map(|metrics| {
-                        metrics
-                            .starfish_rbc_dag_frontier_events_total
-                            .with_label_values(&[stage])
-                            .get()
-                    })
-                    .sum::<u64>()
-            };
-            table.add_row(row![
-                b->"Frontier event application:",
-                format!(
-                    "generated={}, applied={}, ignored={}, inflight current/max={}/{}",
-                    frontier_count("generated"),
-                    frontier_count("applied"),
-                    frontier_count("ignored"),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.starfish_rbc_dag_frontiers_inflight.get())
-                        .sum::<i64>(),
-                    metrics
-                        .iter()
-                        .map(|metrics| metrics.starfish_rbc_dag_frontiers_inflight_max.get())
-                        .max()
-                        .unwrap_or_default(),
                 )
             ]);
         } else if starfish_rbc_dag_shadow_expected {
@@ -3029,29 +2215,6 @@ impl MetricReporter {
         self.block_bundle_size_bytes.lock().clear_receive_all();
         self.connection_latency.lock().clear_receive_all();
     }
-
-    /// Discard every sample produced before a coordinated benchmark window.
-    /// `clear_receive_all` intentionally preserves newly received points for
-    /// periodic reporting; a benchmark reset needs the opposite order.
-    pub fn reset_for_benchmark_window(&self) {
-        fn drain_then_clear<T>(histogram: &mut PreciseHistogram<T>)
-        where
-            T: Ord + AddAssign + DivUsize + Copy + Default,
-        {
-            histogram.receive_all();
-            histogram.reset();
-        }
-
-        drain_then_clear(&mut self.transaction_committed_latency.lock().histogram);
-        drain_then_clear(&mut self.block_committed_latency.lock().histogram);
-        drain_then_clear(&mut self.proposed_block_size_bytes.lock().histogram);
-        drain_then_clear(&mut self.proposed_header_size_bytes.lock().histogram);
-        drain_then_clear(&mut self.proposed_transaction_size_bytes.lock().histogram);
-        drain_then_clear(&mut self.block_bundle_size_bytes.lock().histogram);
-        for (histogram, _) in &mut self.connection_latency.lock().histograms {
-            drain_then_clear(histogram);
-        }
-    }
 }
 
 pub fn print_network_address_table(addresses: &[SocketAddr]) {
@@ -3178,22 +2341,6 @@ mod tests {
             .starfish_rbc_dag_projection_decisions_total
             .with_label_values(&["direct_commit"])
             .inc();
-        metrics.metrics_active.store(true, Ordering::Relaxed);
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_ASSIGNMENT,
-            12,
-            2,
-            8,
-        );
-        metrics.observe_starfish_rbc_dag_commit_round_distance(
-            RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-            7,
-            2,
-            5,
-        );
-        metrics.set_starfish_rbc_dag_pipeline_state(2, 3, 9, 7, 3, 6, "awaiting_indirect_anchor");
-        metrics.starfish_rbc_dag_frontier_generated();
-        metrics.starfish_rbc_dag_frontier_applied();
 
         let gathered = registry.gather();
         for name in [
@@ -3218,216 +2365,12 @@ mod tests {
             "starfish_rbc_dag_shadow_buffered_authenticated",
             "starfish_rbc_dag_projected_vertices_total",
             "starfish_rbc_dag_projection_decisions_total",
-            "starfish_rbc_dag_pipeline_latency_ns_total",
-            "starfish_rbc_dag_pipeline_latency_samples_total",
-            "starfish_rbc_dag_pipeline_latency_ns_max",
-            "starfish_rbc_dag_commit_distance_rounds_total",
-            "starfish_rbc_dag_commit_distance_samples_total",
-            "starfish_rbc_dag_commit_distance_rounds_max",
-            "starfish_rbc_dag_pipeline_queue_depth",
-            "starfish_rbc_dag_pipeline_queue_depth_max",
-            "starfish_rbc_dag_highest_projected_consensus_round",
-            "starfish_rbc_dag_next_undecided_consensus_round",
-            "starfish_rbc_dag_next_undecided_projected_stake",
-            "starfish_rbc_dag_last_committed_consensus_round",
-            "starfish_rbc_dag_projection_hol_state",
-            "starfish_rbc_dag_frontier_events_total",
-            "starfish_rbc_dag_frontiers_inflight",
-            "starfish_rbc_dag_frontiers_inflight_max",
         ] {
             assert!(
                 gathered.iter().any(|family| family.get_name() == name),
                 "metric family {name} was not registered",
             );
         }
-    }
-
-    #[test]
-    fn rbc_dag_pipeline_latency_drains_while_protocol_distance_closes_at_cutoff() {
-        let registry = Registry::new();
-        let (metrics, _reporter) = Metrics::new(&registry, None, None, None);
-
-        metrics.metrics_active.store(false, Ordering::Relaxed);
-        metrics
-            .transaction_metrics_active
-            .store(false, Ordering::Relaxed);
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_DELIVERY,
-            99,
-            1,
-            99,
-        );
-        metrics.observe_starfish_rbc_dag_commit_round_distance(
-            RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-            99,
-            1,
-            99,
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_latency_samples_total
-                .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_DELIVERY])
-                .get(),
-            0
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_commit_distance_samples_total
-                .with_label_values(&[RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD])
-                .get(),
-            0
-        );
-
-        // The submission window is closed but application observation remains
-        // open for the bounded drain. Only application pipeline latency may
-        // advance; protocol round-distance rates stay frozen at cutoff.
-        metrics
-            .transaction_metrics_active
-            .store(true, Ordering::Relaxed);
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_DELIVERY,
-            11,
-            1,
-            11,
-        );
-        metrics.observe_starfish_rbc_dag_commit_round_distance(
-            RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-            99,
-            1,
-            99,
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_latency_samples_total
-                .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_DELIVERY])
-                .get(),
-            1
-        );
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_FRONTIER_APPLIED,
-            13,
-            1,
-            13,
-        );
-        assert_eq!(
-            metrics.starfish_rbc_dag_frontier_applied_latency_samples(),
-            1
-        );
-        assert_eq!(
-            metrics.starfish_rbc_dag_frontier_applied_sequenced_transactions(),
-            0,
-            "latency alone must not publish the ordered drain acknowledgement"
-        );
-        metrics.sequenced_transactions_total.inc_by(17);
-        metrics.starfish_rbc_dag_frontier_applied();
-        assert_eq!(
-            metrics.starfish_rbc_dag_frontier_applied_sequenced_transactions(),
-            17,
-            "frontier application must acknowledge all transactions sequenced before its final latency observation"
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_commit_distance_samples_total
-                .with_label_values(&[RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD])
-                .get(),
-            0
-        );
-
-        metrics.metrics_active.store(true, Ordering::Relaxed);
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_DELIVERY,
-            30,
-            2,
-            20,
-        );
-        metrics.observe_starfish_rbc_dag_pipeline_latency_ns(
-            RBC_DAG_LATENCY_CREATION_TO_DELIVERY,
-            4,
-            1,
-            4,
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_latency_ns_total
-                .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_DELIVERY])
-                .get(),
-            45
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_latency_samples_total
-                .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_DELIVERY])
-                .get(),
-            4
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_latency_ns_max
-                .with_label_values(&[RBC_DAG_LATENCY_CREATION_TO_DELIVERY])
-                .get(),
-            20
-        );
-
-        metrics.observe_starfish_rbc_dag_commit_round_distance(
-            RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD,
-            7,
-            2,
-            5,
-        );
-        metrics.observe_starfish_rbc_dag_commit_round_distance(
-            RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD,
-            3,
-            1,
-            3,
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_commit_distance_rounds_total
-                .with_label_values(&[RBC_DAG_COMMIT_DISTANCE_PHYSICAL_FORWARD])
-                .get(),
-            7
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_commit_distance_samples_total
-                .with_label_values(&[RBC_DAG_COMMIT_DISTANCE_PHYSICAL_BACKWARD])
-                .get(),
-            1
-        );
-        assert_eq!(
-            format_rbc_dag_round_distance(11, 2, 6),
-            "5.50/6 rounds (n=2)"
-        );
-
-        metrics.set_starfish_rbc_dag_pipeline_state(4, 5, 12, 10, 2, 8, "insufficient_lookahead");
-        metrics.set_starfish_rbc_dag_pipeline_state(1, 2, 13, 11, 4, 9, "ready");
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_pipeline_queue_depth_max
-                .with_label_values(&["local"])
-                .get(),
-            4
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_projection_hol_state
-                .with_label_values(&["ready"])
-                .get(),
-            1
-        );
-        assert_eq!(
-            metrics
-                .starfish_rbc_dag_projection_hol_state
-                .with_label_values(&["insufficient_lookahead"])
-                .get(),
-            0
-        );
-
-        metrics.starfish_rbc_dag_frontier_generated();
-        metrics.starfish_rbc_dag_frontier_generated();
-        metrics.starfish_rbc_dag_frontier_applied();
-        assert_eq!(metrics.starfish_rbc_dag_frontiers_inflight.get(), 1);
-        assert_eq!(metrics.starfish_rbc_dag_frontiers_inflight_max.get(), 2);
     }
 
     fn autonomous_clock_metrics(
@@ -3484,7 +2427,7 @@ mod tests {
             autonomous_clock_metrics(11, 6, 1),
         ];
 
-        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, None, false);
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
 
         assert!(summary.verdict_valid);
         assert_eq!(summary.valid_nodes, 4);
@@ -3499,39 +2442,6 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_clock_verdict_uses_cutoff_snapshot_not_drain_state() {
-        let metrics = vec![
-            autonomous_clock_metrics(8, 0, 0),
-            autonomous_clock_metrics(20, 0, 0),
-        ];
-        let invalid_cutoff = metrics
-            .iter()
-            .map(|metrics| metrics.autonomous_clock_benchmark_snapshot())
-            .collect::<Vec<_>>();
-
-        // A later drain-time convergence is useful diagnostic state, but it
-        // cannot repair the measured interval's twelve-round cutoff skew.
-        metrics[1].starfish_rbc_dag_shadow_carrier_round.set(9);
-        assert!(summarize_autonomous_clock_benchmark(&metrics, 2, None, None, false).verdict_valid);
-        assert!(
-            !summarize_autonomous_clock_benchmark(&metrics, 2, None, Some(&invalid_cutoff), false,)
-                .verdict_valid
-        );
-
-        let valid_cutoff = metrics
-            .iter()
-            .map(|metrics| metrics.autonomous_clock_benchmark_snapshot())
-            .collect::<Vec<_>>();
-        metrics[1].starfish_rbc_dag_shadow_clock_valid.set(0);
-        metrics[1].starfish_rbc_dag_shadow_pending_recovery.set(1);
-        assert!(
-            summarize_autonomous_clock_benchmark(&metrics, 2, None, Some(&valid_cutoff), false,)
-                .verdict_valid,
-            "drain-time invalidity must remain diagnostic rather than rewriting cutoff validity"
-        );
-    }
-
-    #[test]
     fn autonomous_clock_summary_requires_progress_after_the_benchmark_baseline() {
         let metrics = vec![
             autonomous_clock_metrics(8, 0, 0),
@@ -3543,7 +2453,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(
-            !summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), None, false)
+            !summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
                 .verdict_valid
         );
 
@@ -3577,7 +2487,7 @@ mod tests {
         }
 
         assert!(
-            summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), None, false)
+            summarize_autonomous_clock_benchmark(&metrics, 2, Some(&baselines), false)
                 .verdict_valid
         );
     }
@@ -3616,7 +2526,6 @@ mod tests {
                 &[Arc::clone(metrics)],
                 2,
                 Some(&baselines),
-                None,
                 true,
             )
             .verdict_valid
@@ -3639,7 +2548,6 @@ mod tests {
                 &[Arc::clone(metrics)],
                 2,
                 Some(&baselines),
-                None,
                 true,
             )
             .verdict_valid
@@ -3658,11 +2566,11 @@ mod tests {
         let unbounded = autonomous_clock_metrics(
             20,
             STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR * 4 + 1,
-            starfish_rbc_dag_autonomous_buffered_settled_bound(4) + 1,
+            STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR * 4 + 1,
         );
         let metrics = vec![no_progress, invalid_clock, unbounded];
 
-        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, None, false);
+        let summary = summarize_autonomous_clock_benchmark(&metrics, 4, None, false);
 
         assert!(!summary.verdict_valid);
         assert_eq!(summary.valid_nodes, 2);
