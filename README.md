@@ -48,11 +48,6 @@ acknowledgment references between validators.
 headers. ECHO and READY are recipient-authenticated with pairwise MACs; the author's INIT can use
 Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctness-oriented research
 prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
-**Starfish-RBC-DAG** is a design-only follow-up that pipelines all-carrier RBC through an optimistic
-carrier DAG while keeping certified Starfish consensus and ordering in a separate logical
-projection. Its provisional CLI name is `starfish-rbc-dag`, but that selector is not implemented
-yet. The full design and proof obligations are documented in the
-[protocol design](docs/starfish-rbc-dag-protocol.md).
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's
