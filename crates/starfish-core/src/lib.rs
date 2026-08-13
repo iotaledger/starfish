@@ -30,7 +30,6 @@ mod rocks_store;
 mod runtime;
 pub mod shard_reconstructor;
 pub mod starfish_rbc;
-pub mod starfish_rbc_dag;
 mod starfish_rbc_service;
 mod stat;
 mod state;
