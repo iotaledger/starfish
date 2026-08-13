@@ -35,7 +35,6 @@ use crate::{
     starfish_rbc_dag::{
         MAX_CARRIER_CONTENT_SIZE_V1, RbcDagCommitteeContextV1, RbcDagContextV1,
         model::{ModelEffect, ModelError},
-        storage::ShadowWalSyncPolicyV1,
     },
     starfish_rbc_dag_shadow::{
         ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
@@ -377,10 +376,9 @@ pub(crate) enum ShadowServiceEventV1 {
         kind: &'static str,
         outcome: &'static str,
     },
-    WalAppended {
+    WalDurable {
         batches: u64,
         records: u64,
-        durable: bool,
     },
     Recovered {
         batches: u64,
@@ -566,7 +564,6 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
     context: RbcDagContextV1,
     authorizer: ShadowAuthorizerV1,
     recovered_local_headers: Vec<RbcCanonicalHeader>,
-    wal_sync_policy: ShadowWalSyncPolicyV1,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -583,7 +580,6 @@ pub(crate) fn start_starfish_rbc_dag_shadow_service_v1(
         authorizer,
         recovered_local_headers,
         ShadowServiceModeV1::DirectMirror,
-        wal_sync_policy,
     )
 }
 
@@ -594,7 +590,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
     context: RbcDagContextV1,
     authorizer: ShadowAuthorizerV1,
     heartbeat_interval: Duration,
-    wal_sync_policy: ShadowWalSyncPolicyV1,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -614,7 +609,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
         authorizer,
         Vec::new(),
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
-        wal_sync_policy,
     )
 }
 
@@ -626,7 +620,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     authorizer: ShadowAuthorizerV1,
     recovered_local_headers: Vec<RbcCanonicalHeader>,
     mode: ShadowServiceModeV1,
-    wal_sync_policy: ShadowWalSyncPolicyV1,
 ) -> Result<
     (
         StarfishRbcDagShadowServiceHandleV1,
@@ -725,14 +718,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
     let actor_heartbeat_notification_pending = Arc::clone(&heartbeat_notification_pending);
     let task = tokio::spawn(async move {
         let opened = tokio::task::spawn_blocking(move || {
-            StarfishRbcDagShadowV1::open_with_wal_sync_policy(
-                path,
-                committee,
-                own_authority,
-                context,
-                authorizer,
-                wal_sync_policy,
-            )
+            StarfishRbcDagShadowV1::open(path, committee, own_authority, context, authorizer)
         })
         .await;
         let (core, open_report) = match opened {
@@ -857,7 +843,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
         let state = ShadowServiceStateV1 {
             core,
             mode,
-            wal_sync_policy,
             own_authority,
             committee_size,
             events: event_tx,
@@ -983,7 +968,6 @@ impl ShadowComparisonBacklogV1 {
 struct ShadowServiceStateV1 {
     core: StarfishRbcDagShadowV1,
     mode: ShadowServiceModeV1,
-    wal_sync_policy: ShadowWalSyncPolicyV1,
     own_authority: AuthorityIndex,
     committee_size: usize,
     events: mpsc::Sender<ShadowServiceEventV1>,
@@ -1172,11 +1156,7 @@ impl ShadowServiceStateV1 {
         let batches = after.0.saturating_sub(before.0);
         let records = after.1.saturating_sub(before.1);
         if batches != 0 || records != 0 {
-            self.emit(ShadowServiceEventV1::WalAppended {
-                batches,
-                records,
-                durable: self.wal_sync_policy == ShadowWalSyncPolicyV1::EveryBatch,
-            });
+            self.emit(ShadowServiceEventV1::WalDurable { batches, records });
         }
     }
 
@@ -2065,7 +2045,6 @@ mod tests {
                 self.context,
                 ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
                 recovered,
-                ShadowWalSyncPolicyV1::EveryBatch,
             )
             .unwrap()
         }
@@ -2090,23 +2069,6 @@ mod tests {
             mpsc::Receiver<ShadowServiceEventV1>,
             JoinHandle<()>,
         ) {
-            self.start_autonomous_with_policy(
-                authority,
-                heartbeat_interval,
-                ShadowWalSyncPolicyV1::EveryBatch,
-            )
-        }
-
-        fn start_autonomous_with_policy(
-            &self,
-            authority: AuthorityIndex,
-            heartbeat_interval: Duration,
-            wal_sync_policy: ShadowWalSyncPolicyV1,
-        ) -> (
-            StarfishRbcDagShadowServiceHandleV1,
-            mpsc::Receiver<ShadowServiceEventV1>,
-            JoinHandle<()>,
-        ) {
             start_starfish_rbc_dag_autonomous_clock_service_v1(
                 &self.paths[authority as usize],
                 self.committee.clone(),
@@ -2114,7 +2076,6 @@ mod tests {
                 self.context,
                 ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
                 heartbeat_interval,
-                wal_sync_policy,
             )
             .unwrap()
         }
@@ -2826,51 +2787,6 @@ mod tests {
                 break;
             }
         }
-        stop(restarted, restarted_events, restarted_task).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn buffered_wal_reports_append_without_durability_and_reopens_after_clean_shutdown() {
-        let harness = Harness::new();
-        let (handle, mut events, task) = harness.start_autonomous_with_policy(
-            0,
-            Duration::from_secs(60 * 60),
-            ShadowWalSyncPolicyV1::OnShutdown,
-        );
-        wait_ready(&mut events).await;
-        handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
-
-        loop {
-            if let ShadowServiceEventV1::WalAppended {
-                batches,
-                records,
-                durable,
-            } = next_event(&mut events).await
-            {
-                assert_eq!(batches, 1);
-                assert!(records > 0);
-                assert!(!durable);
-                break;
-            }
-        }
-        stop(handle, events, task).await;
-
-        let (restarted, mut restarted_events, restarted_task) = harness.start_autonomous(0);
-        let mut replayed = 0;
-        loop {
-            match next_event(&mut restarted_events).await {
-                ShadowServiceEventV1::Recovered { batches, .. } => replayed = batches,
-                ShadowServiceEventV1::Ready { autonomous_clock } => {
-                    assert!(autonomous_clock);
-                    break;
-                }
-                ShadowServiceEventV1::Rejected { error, .. } => {
-                    panic!("buffered WAL restart failed: {error}")
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(replayed, 1);
         stop(restarted, restarted_events, restarted_task).await;
     }
 

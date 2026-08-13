@@ -84,12 +84,10 @@ pub struct NodeParameters {
     /// totality. This must remain an explicit benchmark flag.
     #[serde(default)]
     pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
-    /// Benchmark-only profile that writes the framed shadow WAL in order but
-    /// calls `sync_all` only during clean shutdown. This removes persistence
-    /// pressure from latency experiments and deliberately forfeits the
-    /// shadow's crash-safety claim for that run.
-    #[serde(default)]
-    pub starfish_rbc_dag_shadow_buffered_wal: bool,
+    /// Maximum interval between autonomous Starfish-RBC-DAG heartbeat
+    /// carriers. The value is ignored unless the autonomous clock is enabled.
+    #[serde(default = "node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms")]
+    pub starfish_rbc_dag_heartbeat_interval_ms: u64,
     #[serde(default = "node_defaults::default_causal_push_shard_round_lag")]
     pub causal_push_shard_round_lag: RoundNumber,
     #[serde(
@@ -172,7 +170,8 @@ impl Default for NodeParameters {
             starfish_rbc_dag_shadow: false,
             starfish_rbc_dag_autonomous_clock: false,
             starfish_rbc_single_dag_echo_qc_fast_path: false,
-            starfish_rbc_dag_shadow_buffered_wal: false,
+            starfish_rbc_dag_heartbeat_interval_ms:
+                node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms(),
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
             enable_strong_vote_adaptive_acknowledgments:
                 node_defaults::default_enable_strong_vote_adaptive_acknowledgments(),
@@ -415,16 +414,6 @@ impl NodePrivateConfig {
         self.storage_path
             .join("starfish-rbc-dag-autonomous-clock-v1.wal")
     }
-
-    pub fn starfish_rbc_dag_shadow_buffered_benchmark_wal(&self) -> PathBuf {
-        self.storage_path
-            .join("starfish-rbc-dag-shadow-buffered-benchmark-v1.wal")
-    }
-
-    pub fn starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal(&self) -> PathBuf {
-        self.storage_path
-            .join("starfish-rbc-dag-autonomous-clock-buffered-benchmark-v1.wal")
-    }
 }
 
 impl ImportExport for NodePrivateConfig {}
@@ -442,7 +431,10 @@ mod tests {
         assert!(!parameters.starfish_rbc_dag_shadow);
         assert!(!parameters.starfish_rbc_dag_autonomous_clock);
         assert!(!parameters.starfish_rbc_single_dag_echo_qc_fast_path);
-        assert!(!parameters.starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(
+            parameters.starfish_rbc_dag_heartbeat_interval_ms,
+            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
+        );
         assert_eq!(
             parameters.starfish_rbc_dag_heartbeat_interval_ms,
             node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
@@ -460,7 +452,10 @@ mod tests {
         assert!(!decoded.starfish_rbc_dag_shadow);
         assert!(!decoded.starfish_rbc_dag_autonomous_clock);
         assert!(!decoded.starfish_rbc_single_dag_echo_qc_fast_path);
-        assert!(!decoded.starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(
+            decoded.starfish_rbc_dag_heartbeat_interval_ms,
+            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
+        );
         assert_eq!(
             decoded.starfish_rbc_dag_heartbeat_interval_ms,
             node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
@@ -473,7 +468,6 @@ mod tests {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
             starfish_rbc_dag_heartbeat_interval_ms: 125,
-            starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         };
 
@@ -481,7 +475,6 @@ mod tests {
         let decoded: NodeParameters = serde_yaml::from_str(&yaml).unwrap();
         assert!(decoded.starfish_rbc_dag_shadow);
         assert!(decoded.starfish_rbc_dag_autonomous_clock);
-        assert!(decoded.starfish_rbc_dag_shadow_buffered_wal);
         assert_eq!(decoded.starfish_rbc_dag_heartbeat_interval_ms, 125);
     }
 
@@ -493,14 +486,6 @@ mod tests {
         assert_ne!(
             private_config.starfish_rbc_dag_shadow_wal(),
             private_config.starfish_rbc_dag_autonomous_clock_wal()
-        );
-        assert_ne!(
-            private_config.starfish_rbc_dag_autonomous_clock_wal(),
-            private_config.starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal()
-        );
-        assert_ne!(
-            private_config.starfish_rbc_dag_shadow_buffered_benchmark_wal(),
-            private_config.starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal()
         );
         assert_eq!(
             private_config.starfish_rbc_dag_autonomous_clock_wal(),

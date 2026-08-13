@@ -91,15 +91,6 @@ impl Validator {
                 "Starfish-RBC-DAG shadow mode requires consensus 'starfish-rbc'"
             ));
         }
-        if public_config
-            .parameters
-            .starfish_rbc_dag_shadow_buffered_wal
-            && !public_config.parameters.starfish_rbc_dag_shadow
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG buffered benchmark WAL requires the RBC-DAG shadow"
-            ));
-        }
         if is_starfish_rbc {
             let protocol_instance = public_config
                 .parameters
@@ -243,22 +234,12 @@ impl Validator {
         } else {
             None
         };
-        let starfish_rbc_dag_shadow_wal = if public_config
-            .parameters
-            .starfish_rbc_dag_shadow_buffered_wal
-            && public_config.parameters.starfish_rbc_dag_autonomous_clock
-        {
-            private_config.starfish_rbc_dag_autonomous_clock_buffered_benchmark_wal()
-        } else if public_config
-            .parameters
-            .starfish_rbc_dag_shadow_buffered_wal
-        {
-            private_config.starfish_rbc_dag_shadow_buffered_benchmark_wal()
-        } else if public_config.parameters.starfish_rbc_dag_autonomous_clock {
-            private_config.starfish_rbc_dag_autonomous_clock_wal()
-        } else {
-            private_config.starfish_rbc_dag_shadow_wal()
-        };
+        let starfish_rbc_dag_shadow_wal =
+            if public_config.parameters.starfish_rbc_dag_autonomous_clock {
+                private_config.starfish_rbc_dag_autonomous_clock_wal()
+            } else {
+                private_config.starfish_rbc_dag_shadow_wal()
+            };
 
         let (core, bls_cert_aggregator) = Core::open(
             block_handler,
@@ -440,36 +421,6 @@ mod smoke_tests {
             error
                 .to_string()
                 .contains("autonomous clock requires the RBC-DAG shadow")
-        }));
-    }
-
-    #[tokio::test]
-    async fn buffered_shadow_wal_requires_shadow_mode() {
-        let committee_size = 4;
-        let committee = Committee::new_for_benchmarks(committee_size);
-        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
-        public_config
-            .parameters
-            .starfish_rbc_dag_shadow_buffered_wal = true;
-        let private_config =
-            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
-                .remove(0);
-
-        let result = Validator::start(
-            0,
-            committee,
-            public_config,
-            private_config,
-            Parameters::default(),
-            "honest".to_string(),
-            "starfish".to_string(),
-        )
-        .await;
-
-        assert!(result.is_err_and(|error| {
-            error
-                .to_string()
-                .contains("buffered benchmark WAL requires the RBC-DAG shadow")
         }));
     }
 

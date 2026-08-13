@@ -196,10 +196,9 @@ enum Operation {
         /// benchmark runs.
         #[clap(long, default_value_t = false)]
         starfish_rbc_single_dag_echo_qc_fast_path: bool,
-        /// Benchmark-only: write ordered shadow-WAL frames but force them to
-        /// stable storage only at clean shutdown. This run is not crash-safe.
-        #[clap(long, default_value_t = false)]
-        starfish_rbc_dag_shadow_buffered_wal: bool,
+        /// Maximum interval between autonomous RBC-DAG heartbeat carriers.
+        #[clap(long, value_name = "INT")]
+        starfish_rbc_dag_heartbeat_interval_ms: Option<u64>,
         #[clap(long, value_name = "INT", default_value_t = 600)]
         duration_secs: u64,
         /// Dissemination mode override:
@@ -313,7 +312,7 @@ async fn main() -> Result<()> {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_single_dag_echo_qc_fast_path,
-            starfish_rbc_dag_shadow_buffered_wal,
+            starfish_rbc_dag_heartbeat_interval_ms,
             duration_secs,
             dissemination_mode,
         } => {
@@ -328,8 +327,9 @@ async fn main() -> Result<()> {
             node_parameters.starfish_rbc_dag_autonomous_clock = starfish_rbc_dag_autonomous_clock;
             node_parameters.starfish_rbc_single_dag_echo_qc_fast_path =
                 starfish_rbc_single_dag_echo_qc_fast_path;
-            node_parameters.starfish_rbc_dag_shadow_buffered_wal =
-                starfish_rbc_dag_shadow_buffered_wal;
+            if let Some(interval_ms) = starfish_rbc_dag_heartbeat_interval_ms {
+                node_parameters.starfish_rbc_dag_heartbeat_interval_ms = interval_ms;
+            }
             if is_starfish_rbc_selection(&consensus_protocol) {
                 node_parameters.refresh_starfish_rbc_protocol_instance();
             }
@@ -420,10 +420,6 @@ async fn local_benchmark(
     consensus_protocol: String,
     duration_secs: u64,
 ) -> Result<()> {
-    eyre::ensure!(
-        duration_secs > 0,
-        "benchmark duration must be greater than zero"
-    );
     println!("\n=== Benchmark Configuration ===");
     println!("Committee Size: {committee_size}");
     println!("Byzantine Nodes: {num_byzantine_nodes}");
@@ -443,16 +439,6 @@ async fn local_benchmark(
                 .unwrap_or("ed25519")
         }
     );
-    if node_parameters.starfish_rbc_dag_shadow {
-        println!(
-            "Shadow WAL: {}",
-            if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
-                "buffered benchmark profile (sync on clean shutdown; not crash-safe)"
-            } else {
-                "sync every transition (crash-safe reference profile)"
-            }
-        );
-    }
     if node_parameters.starfish_rbc_single_dag_echo_qc_fast_path {
         println!(
             "Single-DAG receiver-local quorum-ECHO: ENABLED (signature-free latency lower bound; Byzantine totality not provided)"
@@ -483,15 +469,15 @@ async fn local_benchmark(
     let ips = vec![IpAddr::V4(Ipv4Addr::LOCALHOST); committee_size];
     let committee = Committee::new_for_benchmarks(committee_size);
     load /= committee.len();
-    let mut parameters = Parameters::almost_default(load);
-    parameters.benchmark_duration = Some(Duration::from_secs(duration_secs));
+    let parameters = Parameters::almost_default(load);
     // Equivocating Byzantine strategies must not generate transactions.
-    let mut byzantine_parameters = parameters.clone();
-    if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
+    let byzantine_parameters = if ByzantineStrategy::from_strategy_str(&byzantine_strategy)
         .is_some_and(|s| s.is_equivocating())
     {
-        byzantine_parameters.load = 0;
-    }
+        Parameters::almost_default(0)
+    } else {
+        parameters.clone()
+    };
     let public_config = NodePublicConfig::new_for_benchmarks(ips, Some(node_parameters.clone()));
     let starfish_rbc_dag_shadow_expected = node_parameters.starfish_rbc_dag_shadow;
     let starfish_rbc_dag_autonomous_clock_expected =
@@ -622,36 +608,12 @@ async fn local_benchmark(
         }
     }
 
-    // `duration_secs` is an active transaction-submission window, not a
-    // process-lifetime cutoff. Every finite generator holds metrics inactive
-    // through connection warmup, then opens this latch immediately before its
-    // first batch. Start the benchmark only after every honest validator has
-    // crossed that boundary.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if metrics_of_honest_validators
-                .iter()
-                .all(|metrics| metrics.metrics_active.load(Ordering::Relaxed))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .wrap_err("transaction generators did not open the active benchmark window")?;
-    println!("Active transaction window started ({duration_secs} seconds)");
-
     let autonomous_clock_baselines = starfish_rbc_dag_autonomous_clock_expected.then(|| {
         metrics_of_honest_validators
             .iter()
             .map(|metrics| metrics.autonomous_clock_benchmark_baseline())
             .collect::<Vec<_>>()
     });
-    let counter_baselines = metrics_of_honest_validators
-        .iter()
-        .map(|metrics| metrics.local_benchmark_counter_baseline())
-        .collect::<Vec<_>>();
 
     // Run for specified duration
     tokio::select! {
@@ -669,7 +631,6 @@ async fn local_benchmark(
                 starfish_rbc_dag_shadow_expected,
                 starfish_rbc_dag_autonomous_clock_expected,
                 autonomous_clock_baselines.clone(),
-                Some(counter_baselines.clone()),
             );
 
             // Abort all tasks
@@ -697,7 +658,6 @@ async fn local_benchmark(
                 starfish_rbc_dag_shadow_expected,
                 starfish_rbc_dag_autonomous_clock_expected,
                 autonomous_clock_baselines,
-                Some(counter_baselines),
             );
             fs::remove_dir_all(base_dir)?;
             eyre::bail!("All validators completed before the requested benchmark duration")
@@ -1067,7 +1027,8 @@ mod tests {
             "--starfish-rbc-dag-shadow",
             "--starfish-rbc-dag-autonomous-clock",
             "--starfish-rbc-single-dag-echo-qc-fast-path",
-            "--starfish-rbc-dag-shadow-buffered-wal",
+            "--starfish-rbc-dag-heartbeat-interval-ms",
+            "125",
         ])
         .unwrap();
 
@@ -1077,7 +1038,7 @@ mod tests {
             starfish_rbc_dag_shadow,
             starfish_rbc_dag_autonomous_clock,
             starfish_rbc_single_dag_echo_qc_fast_path,
-            starfish_rbc_dag_shadow_buffered_wal,
+            starfish_rbc_dag_heartbeat_interval_ms,
             ..
         } = args.operation
         else {
@@ -1088,7 +1049,7 @@ mod tests {
         assert!(starfish_rbc_dag_shadow);
         assert!(starfish_rbc_dag_autonomous_clock);
         assert!(starfish_rbc_single_dag_echo_qc_fast_path);
-        assert!(starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(starfish_rbc_dag_heartbeat_interval_ms, Some(125));
     }
 
     #[test]

@@ -46,10 +46,7 @@ use crate::{
     },
     shard_reconstructor::{DecodedBlocks, ShardMessage, start_shard_reconstructor},
     starfish_rbc::{RbcCanonicalHeader, RbcProtocolInstanceId},
-    starfish_rbc_dag::{
-        RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId,
-        storage::ShadowWalSyncPolicyV1,
-    },
+    starfish_rbc_dag::{RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagProtocolInstanceId},
     starfish_rbc_dag_shadow::{
         ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
     },
@@ -1945,11 +1942,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                     metrics.starfish_rbc_dag_shadow_clock_valid.set(0);
                 }
                 let started = if node_parameters.starfish_rbc_dag_autonomous_clock {
-                    let wal_sync_policy = if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
-                        ShadowWalSyncPolicyV1::OnShutdown
-                    } else {
-                        ShadowWalSyncPolicyV1::EveryBatch
-                    };
                     start_starfish_rbc_dag_autonomous_clock_service_v1(
                         starfish_rbc_dag_shadow_wal,
                         committee_context,
@@ -1959,14 +1951,8 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         Duration::from_millis(
                             node_parameters.starfish_rbc_dag_heartbeat_interval_ms,
                         ),
-                        wal_sync_policy,
                     )
                 } else {
-                    let wal_sync_policy = if node_parameters.starfish_rbc_dag_shadow_buffered_wal {
-                        ShadowWalSyncPolicyV1::OnShutdown
-                    } else {
-                        ShadowWalSyncPolicyV1::EveryBatch
-                    };
                     start_starfish_rbc_dag_shadow_service_v1(
                         starfish_rbc_dag_shadow_wal,
                         committee_context,
@@ -1974,7 +1960,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                         context,
                         authorizer,
                         recovered_local_headers,
-                        wal_sync_policy,
                     )
                 };
                 match started {
@@ -2313,25 +2298,13 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                                 .with_label_values(&[kind, outcome])
                                 .inc();
                         }
-                        ShadowServiceEventV1::WalAppended {
-                            batches,
-                            records,
-                            durable,
-                        } => {
+                        ShadowServiceEventV1::WalDurable { batches, records } => {
                             shadow_metrics
-                                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                                .starfish_rbc_dag_shadow_wal_durable_batches_total
                                 .inc_by(batches);
                             shadow_metrics
-                                .starfish_rbc_dag_shadow_wal_appended_records_total
+                                .starfish_rbc_dag_shadow_wal_durable_records_total
                                 .inc_by(records);
-                            if durable {
-                                shadow_metrics
-                                    .starfish_rbc_dag_shadow_wal_durable_batches_total
-                                    .inc_by(batches);
-                                shadow_metrics
-                                    .starfish_rbc_dag_shadow_wal_durable_records_total
-                                    .inc_by(records);
-                            }
                         }
                         ShadowServiceEventV1::Ready { autonomous_clock } => {
                             let verdict = if autonomous_clock {

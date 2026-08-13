@@ -116,8 +116,6 @@ pub struct BenchmarkRunSummary {
     #[serde(default)]
     pub shadow_delivery_ambiguous: usize,
     #[serde(default)]
-    pub shadow_wal_appended_records: usize,
-    #[serde(default)]
     pub shadow_wal_durable_records: usize,
     #[serde(default)]
     pub shadow_pending_recovery: usize,
@@ -175,7 +173,7 @@ impl BenchmarkRunSummary {
          shadow_comparison_valid_nodes,shadow_direct_deliveries,shadow_deliveries,\
          shadow_delivery_matches,\
          shadow_delivery_mismatches,shadow_delivery_ambiguous,\
-         shadow_wal_appended_records,shadow_wal_durable_records,shadow_pending_recovery,\
+         shadow_wal_durable_records,shadow_pending_recovery,\
          shadow_unpaired_direct,shadow_unpaired_shadow,\
          shadow_unpaired_max_round_lag,\
          shadow_autonomous_clock_enabled,shadow_autonomous_clock_valid,\
@@ -227,7 +225,6 @@ impl BenchmarkRunSummary {
             self.shadow_delivery_matches.to_string(),
             self.shadow_delivery_mismatches.to_string(),
             self.shadow_delivery_ambiguous.to_string(),
-            self.shadow_wal_appended_records.to_string(),
             self.shadow_wal_durable_records.to_string(),
             self.shadow_pending_recovery.to_string(),
             self.shadow_unpaired_direct.to_string(),
@@ -856,7 +853,6 @@ pub mod test {
     #[test]
     fn benchmark_csv_includes_autonomous_clock_verdict_and_state() {
         let summary = BenchmarkRunSummary {
-            shadow_wal_appended_records: 9,
             shadow_autonomous_clock_enabled: true,
             shadow_autonomous_clock_valid: true,
             shadow_autonomous_clock_valid_nodes: 4,
@@ -877,7 +873,6 @@ pub mod test {
         assert_eq!(headers.len(), values.len());
 
         for (header, expected) in [
-            ("shadow_wal_appended_records", "9"),
             ("shadow_autonomous_clock_enabled", "true"),
             ("shadow_autonomous_clock_valid", "true"),
             ("shadow_autonomous_clock_valid_nodes", "4"),

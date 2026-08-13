@@ -286,9 +286,7 @@ impl Measurement {
                 }
                 x if matches!(
                     x.as_str(),
-                    "starfish_rbc_dag_shadow_wal_appended_batches_total"
-                        | "starfish_rbc_dag_shadow_wal_appended_records_total"
-                        | "starfish_rbc_dag_shadow_wal_durable_batches_total"
+                    "starfish_rbc_dag_shadow_wal_durable_batches_total"
                         | "starfish_rbc_dag_shadow_wal_durable_records_total"
                         | "starfish_rbc_dag_shadow_wal_discarded_tail_bytes_total"
                 ) =>
@@ -1024,8 +1022,6 @@ impl MeasurementsCollection {
             .sum_count_bucket_increments("starfish_rbc_dag_shadow_inputs_total", "delivery,shadow");
         let shadow_wal_durable_records =
             self.sum_scalar_counter_increments("starfish_rbc_dag_shadow_wal_durable_records_total");
-        let shadow_wal_appended_records = self
-            .sum_scalar_counter_increments("starfish_rbc_dag_shadow_wal_appended_records_total");
         let shadow_pending_recovery =
             self.sum_latest_scalar_as_usize("starfish_rbc_dag_shadow_pending_recovery");
         let shadow_unpaired_direct =
@@ -1072,7 +1068,7 @@ impl MeasurementsCollection {
                 *scraper_id,
                 "delivery,shadow",
             ) && self.scalar_counter_is_monotonic_and_positive(
-                "starfish_rbc_dag_shadow_wal_appended_records_total",
+                "starfish_rbc_dag_shadow_wal_durable_records_total",
                 *scraper_id,
             ) && self.latest_scalar_equals(
                 "starfish_rbc_dag_shadow_pending_recovery",
@@ -1154,10 +1150,10 @@ impl MeasurementsCollection {
                         *scraper_id,
                         "delivery,shadow",
                     ) && self.scalar_counter_increased(
-                        "starfish_rbc_dag_shadow_wal_appended_batches_total",
+                        "starfish_rbc_dag_shadow_wal_durable_batches_total",
                         *scraper_id,
                     ) && self.scalar_counter_increased(
-                        "starfish_rbc_dag_shadow_wal_appended_records_total",
+                        "starfish_rbc_dag_shadow_wal_durable_records_total",
                         *scraper_id,
                     ) && self.scalar_gauge_increased(
                         "starfish_rbc_dag_shadow_carrier_round",
@@ -1236,7 +1232,6 @@ impl MeasurementsCollection {
             shadow_delivery_matches,
             shadow_delivery_mismatches,
             shadow_delivery_ambiguous,
-            shadow_wal_appended_records,
             shadow_wal_durable_records,
             shadow_pending_recovery,
             shadow_unpaired_direct,
@@ -1305,7 +1300,7 @@ impl MeasurementsCollection {
                 b->"RBC-DAG shadow:",
                 format!(
                     "valid={} ({}/{} validators), direct={}, shadow={}, matches={}, \
-                     mismatches={}, ambiguous={}, WAL appended/durable records={}/{}, pending recovery={}, \
+                     mismatches={}, ambiguous={}, WAL records={}, pending recovery={}, \
                      unpaired direct/shadow={}/{}, max unpaired lag={} rounds",
                     summary.shadow_comparison_valid,
                     summary.shadow_comparison_valid_nodes,
@@ -1315,7 +1310,6 @@ impl MeasurementsCollection {
                     summary.shadow_delivery_matches,
                     summary.shadow_delivery_mismatches,
                     summary.shadow_delivery_ambiguous,
-                    summary.shadow_wal_appended_records,
                     summary.shadow_wal_durable_records,
                     summary.shadow_pending_recovery,
                     summary.shadow_unpaired_direct,
@@ -1329,7 +1323,7 @@ impl MeasurementsCollection {
                 b->"RBC-DAG autonomous clock:",
                 format!(
                     "valid={} ({}/{} validators), carrier rounds={}..={}, embedded deliveries={}, phase backlog={}, \
-                     admitted authors/stake min={}/{}, buffered authenticated={}, WAL appended/durable records={}/{}, \
+                     admitted authors/stake min={}/{}, buffered authenticated={}, WAL records={}, \
                      pending recovery={}",
                     summary.shadow_autonomous_clock_valid,
                     summary.shadow_autonomous_clock_valid_nodes,
@@ -1341,7 +1335,6 @@ impl MeasurementsCollection {
                     summary.shadow_autonomous_clock_admitted_authors_min,
                     summary.shadow_autonomous_clock_admitted_stake_min,
                     summary.shadow_autonomous_clock_buffered_authenticated_total,
-                    summary.shadow_wal_appended_records,
                     summary.shadow_wal_durable_records,
                     summary.shadow_pending_recovery,
                 )
@@ -1488,15 +1481,6 @@ mod test {
         );
         collection.add(
             scraper_id,
-            "starfish_rbc_dag_shadow_wal_appended_records_total".to_owned(),
-            Measurement {
-                count: wal_durable_records,
-                scalar: wal_durable_records as f64,
-                ..Measurement::default()
-            },
-        );
-        collection.add(
-            scraper_id,
             "starfish_rbc_dag_shadow_wal_durable_records_total".to_owned(),
             Measurement {
                 count: wal_durable_records,
@@ -1594,26 +1578,6 @@ mod test {
                     ("delivery,shadow".to_owned(), wal_durable_records),
                 ]),
                 count: wal_durable_records.saturating_mul(2),
-                ..Measurement::default()
-            },
-        );
-        collection.add(
-            scraper_id,
-            "starfish_rbc_dag_shadow_wal_appended_batches_total".to_owned(),
-            Measurement {
-                timestamp,
-                count: wal_durable_records,
-                scalar: wal_durable_records as f64,
-                ..Measurement::default()
-            },
-        );
-        collection.add(
-            scraper_id,
-            "starfish_rbc_dag_shadow_wal_appended_records_total".to_owned(),
-            Measurement {
-                timestamp,
-                count: wal_durable_records,
-                scalar: wal_durable_records as f64,
                 ..Measurement::default()
             },
         );
@@ -1810,8 +1774,6 @@ starfish_rbc_dag_shadow_delivery_comparisons_total{node="node-0",outcome="ambigu
 # TYPE starfish_rbc_dag_shadow_inputs_total counter
 starfish_rbc_dag_shadow_inputs_total{kind="delivery",node="node-0",outcome="shadow"} 7
 starfish_rbc_dag_shadow_inputs_total{kind="delivery",node="node-0",outcome="direct"} 7
-# TYPE starfish_rbc_dag_shadow_wal_appended_records_total counter
-starfish_rbc_dag_shadow_wal_appended_records_total{node="node-0"} 42
 # TYPE starfish_rbc_dag_shadow_wal_durable_records_total counter
 starfish_rbc_dag_shadow_wal_durable_records_total{node="node-0"} 42
 # TYPE starfish_rbc_dag_shadow_wal_replayed_batches gauge
@@ -1840,10 +1802,6 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
             7
         );
         assert_eq!(
-            measurements["starfish_rbc_dag_shadow_wal_appended_records_total"].scalar,
-            42.0
-        );
-        assert_eq!(
             measurements["starfish_rbc_dag_shadow_wal_durable_records_total"].scalar,
             42.0
         );
@@ -1867,7 +1825,6 @@ starfish_rbc_dag_shadow_unpaired_max_round_lag{node="node-0"} 1
         assert_eq!(summary.shadow_direct_deliveries, 7);
         assert_eq!(summary.shadow_deliveries, 7);
         assert_eq!(summary.shadow_delivery_matches, 7);
-        assert_eq!(summary.shadow_wal_appended_records, 42);
         assert_eq!(summary.shadow_wal_durable_records, 42);
         assert_eq!(summary.shadow_unpaired_direct, 2);
         assert_eq!(summary.shadow_unpaired_shadow, 1);
@@ -1940,24 +1897,6 @@ starfish_rbc_dag_shadow_buffered_authenticated 2
     }
 
     #[test]
-    fn autonomous_clock_buffered_wal_uses_appended_progress_without_claiming_durability() {
-        let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
-        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
-        add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 10, 0, 1, 1, 0, 5);
-        collection
-            .data
-            .remove("starfish_rbc_dag_shadow_wal_durable_batches_total");
-        collection
-            .data
-            .remove("starfish_rbc_dag_shadow_wal_durable_records_total");
-
-        let summary = collection.benchmark_run_summary();
-        assert!(summary.shadow_autonomous_clock_valid);
-        assert_eq!(summary.shadow_wal_appended_records, 5);
-        assert_eq!(summary.shadow_wal_durable_records, 0);
-    }
-
-    #[test]
     fn missing_final_autonomous_scrape_invalidates_only_clock_verdict() {
         let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
         add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 7, 0, 5);
@@ -2015,7 +1954,7 @@ starfish_rbc_dag_shadow_buffered_authenticated 2
     }
 
     #[test]
-    fn autonomous_clock_valid_gauge_without_wal_progress_is_invalid() {
+    fn autonomous_clock_valid_gauge_without_durable_progress_is_invalid() {
         let mut collection = MeasurementsCollection::new(autonomous_shadow_benchmark_parameters(1));
         add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);
         add_autonomous_clock_snapshot(&mut collection, 0, 1.0, 8, 0, 1, 1, 0, 3);

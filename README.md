@@ -60,11 +60,8 @@ authoritative in both modes, and shadow failures or results cannot affect propos
 output as protocol state. Shadow traffic still shares the validator's network socket and bandwidth,
 so it can perturb timing, and it must be enabled only on a homogeneous new-binary committee; there
 is no rolling-upgrade capability negotiation. The provisional `starfish-rbc-dag` selector is not
-implemented yet. The default shadow uses per-transition fsync and a clone-based reference reducer,
-so it is a correctness instrument, not a fair performance baseline, and carries no safety or
-liveness claim. Benchmark runs may add `--starfish-rbc-dag-shadow-buffered-wal`; this preserves the
-ordered checksummed log and syncs it on clean shutdown, but deliberately gives up crash safety for
-that run. Appended and durably synchronized WAL records are reported separately.
+implemented yet. The shadow uses per-transition fsync and a clone-based reference reducer, so it is
+a correctness instrument, not a fair performance baseline, and carries no safety or liveness claim.
 Its WAL can reopen the shadow actor, but this is not full validator crash recovery: authoritative
 direct Starfish-RBC phase and delivery locks are not durable yet, so that baseline remains fail-stop
 across process restart. The design and proof obligations are documented in the
@@ -75,31 +72,19 @@ observational path was disabled or shed work and the comparison must be discarde
 production retains a short embedded-RBC pipeline tail, so benchmark validation uses bounded
 unpaired-count and oldest-round-lag gauges rather than requiring instantaneous equality between
 the cumulative direct and shadow delivery counters. Autonomous runs instead require
-`starfish_rbc_dag_shadow_clock_valid == 1`, heartbeat/WAL progress, advancing carrier rounds,
+`starfish_rbc_dag_shadow_clock_valid == 1`, durable heartbeat progress, advancing carrier rounds,
 in-window embedded-RBC delivery, and bounded clock-state gauges. The current queue budget supports
 at most 60 validators in mirror mode and 20 in autonomous mode.
 
-A matched 10-validator, 60-second-active-window local A/B on 2026-08-11 used the AWS RTT emulator,
-nominal 1,000 tx/s load, MAC authentication, and a 250 ms autonomous heartbeat.
-
-| Profile | Verdict | TPS | Block latency | E2E latency | Outbound BW |
-|---|---:|---:|---:|---:|---:|
-| Direct Starfish-RBC, shadow off | n/a | 972.25 | 1,508.0 ms | 1,724.0 ms | 0.53 MB/s |
-| Autonomous RBC-DAG, buffered WAL | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
-
-Every shadow validator reached carrier round 275 with zero skew and pending recovery; the run
-recorded 2,749 heartbeats, 27,180 embedded-RBC deliveries, and 27,424 WAL batches. Thus this
-prototype's carrier/RBC work had no measurable latency penalty in this run; the extra shadow
-traffic cost about 0.05 MB/s outbound. The result is not yet application latency through RBC-DAG
-because direct Starfish-RBC remains authoritative.
-
-The same 250 ms experiment with the default crash-safe, per-transition-fsync WAL shed shadow work
-and ended `INVALID` (9/10 valid validators); its authoritative path slowed to 2,569.1 ms block and
-3,067.4 ms end-to-end latency. This isolates synchronous shadow persistence as the prior observer
-effect, rather than a carrier-DAG latency regression. Use the buffered profile for protocol
-benchmarks and the default profile for crash/replay tests; do not cite an `INVALID` run as a
-protocol result. The local harness now starts its timer after transaction-generator warmup,
-subtracts warmup counters, and drains the final latency samples.
+An exploratory 10-validator, 60-second local run with the AWS RTT emulator, nominal 1,000 tx/s
+load, MAC authentication, and a 250 ms autonomous heartbeat completed with a `VALID` clock
+verdict on 2026-08-11. All validators reached carrier round 196 with zero skew and zero pending
+recovery; the run recorded 1,959 heartbeats and 19,280 embedded-RBC deliveries. The authoritative
+direct Starfish-RBC path reported 776.50 tx/s, 3,378.4 ms p50 block latency, 3,953.8 ms p50
+end-to-end latency, and 0.45 MB/s average outbound bandwidth. This is a prototype continuity
+result, not a fair performance comparison: the 60-second cutoff includes the local generator
+warmup, and the control-only shadow still performs per-transition fsync/reference-model work while
+sharing the authoritative socket.
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's
@@ -306,19 +291,6 @@ cargo run --release --bin starfish -- local-benchmark \
 
 Additional flags: `--dissemination-mode`, `--adversarial-latency`,
 `--uniform-latency-ms`.
-
-For the non-authoritative autonomous RBC-DAG benchmark profile:
-
-```bash
-cargo run --release --bin starfish -- local-benchmark \
-        --committee-size 10 --load 1000 --consensus starfish-rbc \
-        --block-authentication mac --mimic-extra-latency \
-        --starfish-rbc-dag-shadow --starfish-rbc-dag-autonomous-clock \
-        --starfish-rbc-dag-heartbeat-interval-ms 250 \
-        --starfish-rbc-dag-shadow-buffered-wal --duration-secs 60
-```
-
-The buffered WAL is benchmark-only and is not crash-safe.
 
 ### Local dryrun with monitoring and dashboard
 

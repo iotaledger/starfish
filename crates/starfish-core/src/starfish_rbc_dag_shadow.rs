@@ -29,7 +29,7 @@ use crate::{
         model::{ModelEffect, ModelError, ModelInputRecord, ModelTraceEvent, RbcDagModel},
         storage::{
             MAX_SHADOW_WAL_RECORD_SIZE_V1, ShadowWalErrorV1, ShadowWalNamespaceV1,
-            ShadowWalSummaryV1, ShadowWalSyncPolicyV1, ShadowWalV1,
+            ShadowWalSummaryV1, ShadowWalV1,
         },
     },
     types::{
@@ -489,7 +489,6 @@ pub(crate) struct StarfishRbcDagShadowV1 {
 }
 
 impl StarfishRbcDagShadowV1 {
-    #[cfg(test)]
     pub(crate) fn open(
         path: impl AsRef<Path>,
         committee: RbcDagCommitteeContextV1,
@@ -497,27 +496,9 @@ impl StarfishRbcDagShadowV1 {
         context: RbcDagContextV1,
         authorizer: ShadowAuthorizerV1,
     ) -> Result<(Self, ShadowOpenReportV1), ShadowErrorV1> {
-        Self::open_with_wal_sync_policy(
-            path,
-            committee,
-            own_authority,
-            context,
-            authorizer,
-            ShadowWalSyncPolicyV1::EveryBatch,
-        )
-    }
-
-    pub(crate) fn open_with_wal_sync_policy(
-        path: impl AsRef<Path>,
-        committee: RbcDagCommitteeContextV1,
-        own_authority: AuthorityIndex,
-        context: RbcDagContextV1,
-        authorizer: ShadowAuthorizerV1,
-        wal_sync_policy: ShadowWalSyncPolicyV1,
-    ) -> Result<(Self, ShadowOpenReportV1), ShadowErrorV1> {
         validate_configuration(&committee, own_authority, context, &authorizer)?;
         let namespace = ShadowWalNamespaceV1::new(context, own_authority);
-        let (wal, recovery) = ShadowWalV1::open_with_sync_policy(path, namespace, wal_sync_policy)?;
+        let (wal, recovery) = ShadowWalV1::open(path, namespace)?;
         let replayed_batches = recovery.batch_count();
         let discarded_tail_bytes = recovery.discarded_tail_bytes();
 

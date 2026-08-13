@@ -6,11 +6,9 @@
 //! The storage layer deliberately does not encode [`super::journal::JournalEventV1`].
 //! A later integration layer owns that versioned codec and the recovery of
 //! opaque authentication capabilities. This module supplies the durability
-//! boundary underneath it: one batch is one checksummed frame. The default
-//! [`ShadowWalSyncPolicyV1::EveryBatch`] policy allows a caller to expose the
-//! corresponding effects only after [`ShadowWalV1::append_batch`] returns.
-//! The explicit benchmark-only `OnShutdown` policy preserves ordered replay
-//! on a clean stop but does not provide that crash-durability boundary.
+//! boundary underneath it: one batch is one checksummed frame, and a caller
+//! may expose the corresponding effects only after [`ShadowWalV1::append_batch`]
+//! returns successfully.
 //!
 //! Recovery discards only a physically short final frame. A fully present
 //! frame with a bad header, commit marker, or checksum is reported as
@@ -260,18 +258,6 @@ impl From<io::Error> for ShadowWalErrorV1 {
     }
 }
 
-/// Persistence boundary used by the non-authoritative shadow WAL.
-///
-/// `EveryBatch` is the proof-facing crash-safe mode. `OnShutdown` is an
-/// explicit benchmark profile: frames are still written and checksummed in
-/// order, but effects may become visible before the kernel has forced those
-/// bytes to stable storage. It must never be used to claim crash safety.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShadowWalSyncPolicyV1 {
-    EveryBatch,
-    OnShutdown,
-}
-
 pub struct ShadowWalV1 {
     path: PathBuf,
     file: File,
@@ -279,8 +265,6 @@ pub struct ShadowWalV1 {
     durable_file_len: u64,
     batch_count: u64,
     record_count: u64,
-    sync_policy: ShadowWalSyncPolicyV1,
-    batch_sync_count: u64,
     poisoned: bool,
 }
 
@@ -294,14 +278,6 @@ impl ShadowWalV1 {
     pub fn open(
         path: impl AsRef<Path>,
         namespace: ShadowWalNamespaceV1,
-    ) -> Result<(Self, ShadowWalRecoveryV1), ShadowWalErrorV1> {
-        Self::open_with_sync_policy(path, namespace, ShadowWalSyncPolicyV1::EveryBatch)
-    }
-
-    pub(crate) fn open_with_sync_policy(
-        path: impl AsRef<Path>,
-        namespace: ShadowWalNamespaceV1,
-        sync_policy: ShadowWalSyncPolicyV1,
     ) -> Result<(Self, ShadowWalRecoveryV1), ShadowWalErrorV1> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = nonempty_parent(&path) {
@@ -344,8 +320,6 @@ impl ShadowWalV1 {
             durable_file_len: recovery.durable_file_len,
             batch_count: recovery.batch_count(),
             record_count: recovery.record_count,
-            sync_policy,
-            batch_sync_count: 0,
             poisoned: false,
         };
         Ok((wal, recovery))
@@ -375,13 +349,7 @@ impl ShadowWalV1 {
         self.poisoned
     }
 
-    #[cfg(test)]
-    fn batch_sync_count(&self) -> u64 {
-        self.batch_sync_count
-    }
-
-    /// Append one atomic record batch, forcing it to stable storage before
-    /// returning only under [`ShadowWalSyncPolicyV1::EveryBatch`].
+    /// Append and fsync one atomic record batch before returning.
     ///
     /// Any seek, write, or fsync failure poisons this handle because the commit
     /// result may be ambiguous. Drop it and reopen the WAL; recovery will
@@ -422,20 +390,14 @@ impl ShadowWalV1 {
             .checked_add(frame_len)
             .ok_or(ShadowWalErrorV1::LengthOverflow)?;
 
-        let result = self
+        if let Err(error) = self
             .file
             .seek(SeekFrom::Start(start_offset))
             .and_then(|_| self.file.write_all(&frame))
-            .and_then(|_| match self.sync_policy {
-                ShadowWalSyncPolicyV1::EveryBatch => self.file.sync_all(),
-                ShadowWalSyncPolicyV1::OnShutdown => Ok(()),
-            });
-        if let Err(error) = result {
+            .and_then(|_| self.file.sync_all())
+        {
             self.poisoned = true;
             return Err(ShadowWalErrorV1::Io(error));
-        }
-        if self.sync_policy == ShadowWalSyncPolicyV1::EveryBatch {
-            self.batch_sync_count = self.batch_sync_count.saturating_add(1);
         }
 
         self.durable_file_len = end_offset;
@@ -1398,29 +1360,6 @@ mod tests {
         assert_eq!(wal.batch_count(), 0);
         assert!(!wal.is_poisoned());
         wal.shutdown().unwrap();
-    }
-
-    #[test]
-    fn buffered_benchmark_policy_skips_per_batch_sync_and_reopens_cleanly() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = wal_path(&directory);
-        let namespace = namespace(0xB1, 0);
-        let (mut buffered, _) =
-            ShadowWalV1::open_with_sync_policy(&path, namespace, ShadowWalSyncPolicyV1::OnShutdown)
-                .unwrap();
-        buffered.append_batch(&[b"one".to_vec()]).unwrap();
-        buffered.append_batch(&[b"two".to_vec()]).unwrap();
-        assert_eq!(buffered.batch_sync_count(), 0);
-        buffered.shutdown().unwrap();
-
-        let (mut durable, recovery) = ShadowWalV1::open(&path, namespace).unwrap();
-        assert_eq!(
-            recovery.records(),
-            vec![b"one".as_slice(), b"two".as_slice()]
-        );
-        durable.append_batch(&[b"three".to_vec()]).unwrap();
-        assert_eq!(durable.batch_sync_count(), 1);
-        durable.shutdown().unwrap();
     }
 
     #[test]

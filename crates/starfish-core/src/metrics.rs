@@ -51,32 +51,6 @@ pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_ROUND_LAG: i64 = 4;
 pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_PHASE_BACKLOG_FACTOR: i64 = 16;
 pub const STARFISH_RBC_DAG_AUTONOMOUS_MAX_BUFFERED_FACTOR: i64 = 2;
 
-const LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES: &[&str] = &[
-    "subscribe_broadcast",
-    "batch",
-    "missing_parents",
-    "missing_tx_data",
-    "partial_sig",
-    "cert_echo",
-    "cert_vote",
-    "cert_ready",
-    "cert_batch",
-    "sailfish_timeout",
-    "sailfish_no_vote",
-    "unprovable_cert_request",
-    "round_gap_request",
-    "rbc_initial",
-    "rbc_echo",
-    "rbc_ready",
-    "rbc_header_request",
-    "rbc_header_response",
-    "rbc_dag_shadow_carrier",
-    "rbc_dag_shadow_carrier_request",
-    "rbc_dag_shadow_carrier_response",
-    "rbc_dag_shadow_carrier_sync_request",
-    "rbc_dag_shadow_carrier_sync_response",
-];
-
 #[derive(Clone)]
 pub struct Metrics {
     pub benchmark_duration: IntCounter,
@@ -181,8 +155,6 @@ pub struct Metrics {
     // consensus state.
     pub starfish_rbc_dag_shadow_inputs_total: IntCounterVec,
     pub starfish_rbc_dag_shadow_delivery_comparisons_total: IntCounterVec,
-    pub starfish_rbc_dag_shadow_wal_appended_batches_total: IntCounter,
-    pub starfish_rbc_dag_shadow_wal_appended_records_total: IntCounter,
     pub starfish_rbc_dag_shadow_wal_durable_batches_total: IntCounter,
     pub starfish_rbc_dag_shadow_wal_durable_records_total: IntCounter,
     pub starfish_rbc_dag_shadow_wal_replayed_batches: IntGauge,
@@ -272,18 +244,6 @@ pub struct AutonomousClockBenchmarkBaseline {
     carrier_round: i64,
 }
 
-/// Per-validator cumulative counters sampled at the exact start of a local
-/// benchmark's active transaction window. Rates subtract this snapshot so
-/// connection warmup and shadow-WAL replay are not charged to the protocol.
-#[derive(Clone, Debug, Default)]
-pub struct LocalBenchmarkCounterBaseline {
-    sequenced_transactions: u64,
-    dag_state_entries: u64,
-    bytes_sent: u64,
-    bytes_received: u64,
-    outbound_messages: Vec<(u64, u64)>,
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct AutonomousClockBenchmarkSummary {
     valid_nodes: usize,
@@ -339,11 +299,11 @@ fn summarize_autonomous_clock_benchmark(
                     .get()
                     > baseline.delivered_carriers
                 && metrics
-                    .starfish_rbc_dag_shadow_wal_appended_batches_total
+                    .starfish_rbc_dag_shadow_wal_durable_batches_total
                     .get()
                     > baseline.wal_batches
                 && metrics
-                    .starfish_rbc_dag_shadow_wal_appended_records_total
+                    .starfish_rbc_dag_shadow_wal_durable_records_total
                     .get()
                     > baseline.wal_records
                 && metrics.starfish_rbc_dag_shadow_carrier_round.get() > baseline.carrier_round
@@ -389,7 +349,7 @@ fn summarize_autonomous_clock_benchmark(
         .iter()
         .map(|metrics| {
             metrics
-                .starfish_rbc_dag_shadow_wal_appended_batches_total
+                .starfish_rbc_dag_shadow_wal_durable_batches_total
                 .get()
         })
         .sum();
@@ -397,7 +357,7 @@ fn summarize_autonomous_clock_benchmark(
         .iter()
         .map(|metrics| {
             metrics
-                .starfish_rbc_dag_shadow_wal_appended_records_total
+                .starfish_rbc_dag_shadow_wal_durable_records_total
                 .get()
         })
         .sum();
@@ -487,35 +447,9 @@ impl Metrics {
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
                 .get(),
-            wal_batches: self
-                .starfish_rbc_dag_shadow_wal_appended_batches_total
-                .get(),
-            wal_records: self
-                .starfish_rbc_dag_shadow_wal_appended_records_total
-                .get(),
+            wal_batches: self.starfish_rbc_dag_shadow_wal_durable_batches_total.get(),
+            wal_records: self.starfish_rbc_dag_shadow_wal_durable_records_total.get(),
             carrier_round: self.starfish_rbc_dag_shadow_carrier_round.get(),
-        }
-    }
-
-    pub fn local_benchmark_counter_baseline(&self) -> LocalBenchmarkCounterBaseline {
-        LocalBenchmarkCounterBaseline {
-            sequenced_transactions: self.sequenced_transactions_total.get(),
-            dag_state_entries: self.dag_state_entries.get(),
-            bytes_sent: self.bytes_sent_total.get(),
-            bytes_received: self.bytes_received_total.get(),
-            outbound_messages: LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES
-                .iter()
-                .map(|request_type| {
-                    (
-                        self.network_message_bytes_sent_total
-                            .with_label_values(&[request_type])
-                            .get(),
-                        self.network_requests_sent_total
-                            .with_label_values(&[request_type])
-                            .get(),
-                    )
-                })
-                .collect(),
         }
     }
 
@@ -842,29 +776,15 @@ impl Metrics {
                     registry,
                 )
                 .unwrap(),
-            starfish_rbc_dag_shadow_wal_appended_batches_total:
-                register_int_counter_with_registry!(
-                    "starfish_rbc_dag_shadow_wal_appended_batches_total",
-                    "Starfish-RBC-DAG shadow WAL batches appended to the framed log",
-                    registry,
-                )
-                .unwrap(),
-            starfish_rbc_dag_shadow_wal_appended_records_total:
-                register_int_counter_with_registry!(
-                    "starfish_rbc_dag_shadow_wal_appended_records_total",
-                    "Starfish-RBC-DAG shadow WAL records appended to the framed log",
-                    registry,
-                )
-                .unwrap(),
             starfish_rbc_dag_shadow_wal_durable_batches_total: register_int_counter_with_registry!(
                 "starfish_rbc_dag_shadow_wal_durable_batches_total",
-                "Starfish-RBC-DAG shadow WAL batches synchronized before event exposure",
+                "Starfish-RBC-DAG shadow WAL batches durably synchronized",
                 registry,
             )
             .unwrap(),
             starfish_rbc_dag_shadow_wal_durable_records_total: register_int_counter_with_registry!(
                 "starfish_rbc_dag_shadow_wal_durable_records_total",
-                "Starfish-RBC-DAG shadow WAL records synchronized before event exposure",
+                "Starfish-RBC-DAG shadow WAL records durably synchronized",
                 registry,
             )
             .unwrap(),
@@ -1407,69 +1327,32 @@ impl Metrics {
         starfish_rbc_dag_shadow_expected: bool,
         starfish_rbc_dag_autonomous_clock_expected: bool,
         autonomous_clock_baselines: Option<Vec<AutonomousClockBenchmarkBaseline>>,
-        counter_baselines: Option<Vec<LocalBenchmarkCounterBaseline>>,
     ) {
         let num_validators = metrics.len() as u64;
 
         // Calculate overall statistics
         let average_transactions: u64 = metrics
             .iter()
-            .enumerate()
-            .map(|(index, metrics)| {
-                metrics.sequenced_transactions_total.get().saturating_sub(
-                    counter_baselines
-                        .as_ref()
-                        .and_then(|baselines| baselines.get(index))
-                        .map(|baseline| baseline.sequenced_transactions)
-                        .unwrap_or_default(),
-                )
-            })
+            .map(|m| m.sequenced_transactions_total.get())
             .sum::<u64>()
             / num_validators;
         let average_tps = average_transactions as f64 / duration_secs as f64;
 
         let average_blocks_submitted = metrics
             .iter()
-            .enumerate()
-            .map(|(index, metrics)| {
-                metrics.dag_state_entries.get().saturating_sub(
-                    counter_baselines
-                        .as_ref()
-                        .and_then(|baselines| baselines.get(index))
-                        .map(|baseline| baseline.dag_state_entries)
-                        .unwrap_or_default(),
-                )
-            })
+            .map(|m| m.dag_state_entries.get())
             .sum::<u64>()
             / num_validators;
         let average_bps = average_blocks_submitted as f64 / duration_secs as f64;
 
         let average_bytes_sent: u64 = metrics
             .iter()
-            .enumerate()
-            .map(|(index, metrics)| {
-                metrics.bytes_sent_total.get().saturating_sub(
-                    counter_baselines
-                        .as_ref()
-                        .and_then(|baselines| baselines.get(index))
-                        .map(|baseline| baseline.bytes_sent)
-                        .unwrap_or_default(),
-                )
-            })
+            .map(|m| m.bytes_sent_total.get())
             .sum::<u64>()
             / num_validators;
         let average_bytes_received: u64 = metrics
             .iter()
-            .enumerate()
-            .map(|(index, metrics)| {
-                metrics.bytes_received_total.get().saturating_sub(
-                    counter_baselines
-                        .as_ref()
-                        .and_then(|baselines| baselines.get(index))
-                        .map(|baseline| baseline.bytes_received)
-                        .unwrap_or_default(),
-                )
-            })
+            .map(|m| m.bytes_received_total.get())
             .sum::<u64>()
             / num_validators;
         let average_reconstructed_sent_to_core: u64 = metrics
@@ -1512,21 +1395,6 @@ impl Metrics {
             .map(|m| m.shard_reconstruction_pending_decoded_blocks.get())
             .sum::<i64>()
             / num_validators as i64;
-
-        // The periodic reporter drains every ten seconds. Pull the final tail
-        // synchronously so a benchmark cutoff never drops its last samples.
-        for reporter in &reporters {
-            reporter
-                .block_committed_latency
-                .lock()
-                .histogram
-                .receive_all();
-            reporter
-                .transaction_committed_latency
-                .lock()
-                .histogram
-                .receive_all();
-        }
 
         let p50_block_committed_latency = reporters
             .iter()
@@ -1577,25 +1445,41 @@ impl Metrics {
             b->"Average bandwidth in:",
             format!("{:.2} MB/s", bw_in)
         ]);
-        let outbound_message_breakdown = LOCAL_BENCHMARK_NETWORK_MESSAGE_TYPES
+        const NETWORK_MESSAGE_TYPES: &[&str] = &[
+            "subscribe_broadcast",
+            "batch",
+            "missing_parents",
+            "missing_tx_data",
+            "partial_sig",
+            "cert_echo",
+            "cert_vote",
+            "cert_ready",
+            "cert_batch",
+            "sailfish_timeout",
+            "sailfish_no_vote",
+            "unprovable_cert_request",
+            "round_gap_request",
+            "rbc_initial",
+            "rbc_echo",
+            "rbc_ready",
+            "rbc_header_request",
+            "rbc_header_response",
+            "rbc_dag_shadow_carrier",
+            "rbc_dag_shadow_carrier_request",
+            "rbc_dag_shadow_carrier_response",
+            "rbc_dag_shadow_carrier_sync_request",
+            "rbc_dag_shadow_carrier_sync_response",
+        ];
+        let outbound_message_breakdown = NETWORK_MESSAGE_TYPES
             .iter()
-            .enumerate()
-            .filter_map(|(message_index, request_type)| {
+            .filter_map(|request_type| {
                 let average_bytes = metrics
                     .iter()
-                    .enumerate()
-                    .map(|(validator_index, metrics)| {
-                        let current = metrics
+                    .map(|metrics| {
+                        metrics
                             .network_message_bytes_sent_total
                             .with_label_values(&[request_type])
-                            .get();
-                        let baseline = counter_baselines
-                            .as_ref()
-                            .and_then(|baselines| baselines.get(validator_index))
-                            .and_then(|baseline| baseline.outbound_messages.get(message_index))
-                            .map(|(bytes, _)| *bytes)
-                            .unwrap_or_default();
-                        current.saturating_sub(baseline)
+                            .get()
                     })
                     .sum::<u64>() as f64
                     / num_validators as f64;
@@ -1604,19 +1488,11 @@ impl Metrics {
                 }
                 let average_requests = metrics
                     .iter()
-                    .enumerate()
-                    .map(|(validator_index, metrics)| {
-                        let current = metrics
+                    .map(|metrics| {
+                        metrics
                             .network_requests_sent_total
                             .with_label_values(&[request_type])
-                            .get();
-                        let baseline = counter_baselines
-                            .as_ref()
-                            .and_then(|baselines| baselines.get(validator_index))
-                            .and_then(|baseline| baseline.outbound_messages.get(message_index))
-                            .map(|(_, requests)| *requests)
-                            .unwrap_or_default();
-                        current.saturating_sub(baseline)
+                            .get()
                     })
                     .sum::<u64>() as f64
                     / num_validators as f64;
@@ -1679,7 +1555,7 @@ impl Metrics {
                 )
             ]);
             table.add_row(row![
-                b->"Clock/WAL progress:",
+                b->"Durable clock progress:",
                 format!(
                     "heartbeats={}, RBC deliveries={}, WAL batches={}, records={}, open rounds={}..{}",
                     summary.accepted_heartbeats,
@@ -2170,12 +2046,6 @@ mod tests {
             .with_label_values(&["match"])
             .inc();
         metrics
-            .starfish_rbc_dag_shadow_wal_appended_batches_total
-            .inc();
-        metrics
-            .starfish_rbc_dag_shadow_wal_appended_records_total
-            .inc_by(3);
-        metrics
             .starfish_rbc_dag_shadow_wal_durable_batches_total
             .inc();
         metrics
@@ -2205,8 +2075,6 @@ mod tests {
         for name in [
             "starfish_rbc_dag_shadow_inputs_total",
             "starfish_rbc_dag_shadow_delivery_comparisons_total",
-            "starfish_rbc_dag_shadow_wal_appended_batches_total",
-            "starfish_rbc_dag_shadow_wal_appended_records_total",
             "starfish_rbc_dag_shadow_wal_durable_batches_total",
             "starfish_rbc_dag_shadow_wal_durable_records_total",
             "starfish_rbc_dag_shadow_wal_replayed_batches",
@@ -2247,12 +2115,6 @@ mod tests {
             .with_label_values(&["delivery", "shadow"])
             .inc();
         metrics
-            .starfish_rbc_dag_shadow_wal_appended_batches_total
-            .inc();
-        metrics
-            .starfish_rbc_dag_shadow_wal_appended_records_total
-            .inc_by(2);
-        metrics
             .starfish_rbc_dag_shadow_wal_durable_batches_total
             .inc();
         metrics
@@ -2271,7 +2133,7 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_clock_summary_requires_every_node_to_make_bounded_wal_progress() {
+    fn autonomous_clock_summary_requires_every_node_to_make_bounded_durable_progress() {
         let metrics = vec![
             autonomous_clock_metrics(8, 3, 1),
             autonomous_clock_metrics(9, 4, 2),
@@ -2314,12 +2176,6 @@ mod tests {
             metrics
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
-                .inc();
-            metrics
-                .starfish_rbc_dag_shadow_wal_appended_batches_total
-                .inc();
-            metrics
-                .starfish_rbc_dag_shadow_wal_appended_records_total
                 .inc();
             metrics
                 .starfish_rbc_dag_shadow_wal_durable_batches_total
