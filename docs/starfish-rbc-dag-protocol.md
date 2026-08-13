@@ -19,9 +19,9 @@ only application-header certification authority with
 but direct ECHO, READY, and delivery are suppressed in that mode. Performance experiments may add
 `--starfish-rbc-dag-shadow-buffered-wal`; that profile is explicitly not crash-safe. Autonomous
 carriers now create durably locked logical consensus vertices and the clean projection produces
-Starfish commit/skip decisions. In embedded-authority mode, committed projected anchors now release
-deterministic exact carrier-frontier deltas and the legacy Starfish committer is disabled. The
-eventual protocol is new, not a transport option or a version-two alias for `starfish-rbc`.
+Starfish commit/skip decisions. Deterministic frontier output still uses the existing Starfish DAG
+until milestone seven. The eventual protocol is new, not a transport option or a version-two alias
+for `starfish-rbc`.
 
 The implemented [`starfish-rbc`](starfish-rbc-protocol.md) prototype remains the conservative
 baseline: it sends Bracha INIT/ECHO/READY as direct network messages, advances Starfish only through
@@ -64,14 +64,12 @@ the Starfish pacemaker (600 ms for Push/Starfish-RBC by default); application ca
 encodable ECHO/READY follow-ups are event-driven and do not wait for that timeout. Milestone six
 adds independently numbered consensus vertices, quorum strong parents, objective Vote/NoVote
 choices, exact contiguous delivery frontiers, durable local consensus locks, and a live committer
-that consumes only RBC-delivered, data-available projected vertices. Milestone seven persists and
-reconstructs the corresponding anchor/frontier state, applies exact closed-prefix deltas, and makes
-those deltas the sole application output authority.
+that consumes only RBC-delivered, data-available projected vertices.
 
-The current authoritative mode changes header certification and application ordering. Direct INIT
-is still the application-payload transport and is not a certification vote. Direct ECHO/READY and
-the legacy Starfish committer cannot certify or output applications in this mode; only the
-carrier-DAG projection's committed frontier deltas can do so.
+The current authoritative mode changes header certification and produces certified carrier-DAG
+leader decisions. Direct INIT is still the application-payload transport and is not a certification
+vote. The legacy Starfish DAG remains only as the temporary application-output scaffold; replacing
+its commit/output path with deterministic committed frontier deltas is milestone seven.
 
 Shadow restart coverage is deliberately scoped to reopening the actor and its WAL: mirror mode
 requires an identical recovered direct-header history, control-only autonomous history reopens
@@ -102,10 +100,8 @@ therefore forbidden until the worker has exited; process exit remains safe. A pr
 same-process restart path needs an operating-system file lock or a fully cancellable storage task.
 
 The shadow runtime is not a proof or a production performance implementation. Its default
-crash-safe profile intentionally fsyncs every accepted transition. The live fail-stop reducer now
-applies preflighted transitions and journal deltas in place, then exposes effects only after WAL
-append, avoiding the former full-history clone on every carrier. It still retains unbounded run
-history and performs synchronous reducer/storage work. A separate explicit benchmark profile writes the same ordered,
+crash-safe profile intentionally fsyncs every accepted transition, and its reference reducer clones
+retained model/journal history. A separate explicit benchmark profile writes the same ordered,
 checksummed frames but syncs them only on clean shutdown; it reports appended and durable records
 separately and makes no crash-safety claim. This removes the known persistence observer effect
 without changing the protocol reducer. The runtime also uses a fixed unsolicited-retention window
@@ -814,9 +810,8 @@ per peer. Requested historical slots remain recoverable beyond the benchmark-onl
 retention window.
 
 Autonomous benchmark validity is separate from delivery comparison validity.
-`starfish_rbc_dag_shadow_clock_valid` must remain `1`, the appended-WAL and local-carrier counters
-must progress, an idle heartbeat must have been observed, the carrier round and embedded-RBC
-delivery count must advance during the measured interval,
+`starfish_rbc_dag_shadow_clock_valid` must remain `1`, the appended-WAL and heartbeat counters must progress,
+the carrier round and embedded-RBC delivery count must advance during the measured interval,
 recovery must drain, and the reported clock-state/backlog and cross-node skew must remain within the
 configured empirical guards. These checks establish that the observational carrier plane stayed
 live and bounded; they are not a partial-synchrony proof.
@@ -897,10 +892,7 @@ minimum it must cover:
   proactive rounds, exact-slot synchronization with idempotent late responses and per-peer rate
   limiting, multi-round convergence after a validator falls behind, control-only WAL reopen,
   distinct authentication namespace, and an integration check that direct Starfish-RBC continues
-  committing while the observational carrier clock advances; and
-- composed frontier-authority runs in which every exact application header is embedded-RBC
-  delivered, all honest nodes release the same deterministic application order without duplicates,
-  the legacy committer is disabled, and the frontier/application/WAL progress gates remain valid.
+  committing while the observational carrier clock advances.
 
 Property tests should mutate every canonical field and verify carrier-reference binding, while
 golden tests freeze the version-one encoding and flat vector length.
@@ -945,7 +937,6 @@ samples.
 | Autonomous RBC-DAG, buffered WAL | VALID 10/10 | 971.37 | 1,498.9 ms | 1,714.0 ms | 0.58 MB/s |
 | Embedded RBC authoritative (milestone five) | VALID 10/10 | 861.92 | 3,539.3 ms | 5,477.5 ms | 0.52 MB/s |
 | Certified projection (milestone six) | VALID 10/10 | 799.07 | 5,102.9 ms | 8,650.9 ms | 0.50 MB/s |
-| Frontier output authority (milestone seven) | VALID 10/10 | 950.25 | 2,020.9 ms | 2,082.6 ms | 0.70 MB/s |
 | Autonomous RBC-DAG, per-transition fsync | INVALID 9/10 | 948.83 | 2,569.1 ms | 3,067.4 ms | 0.54 MB/s |
 
 The valid buffered run reached carrier round 275 at every validator, with 2,749 accepted
@@ -969,15 +960,6 @@ committer currently runs beside the legacy clean-predecessor/output path, so thi
 pays for both and its 5.1/8.7-second latency is a red flag rather than a protocol target. Milestone
 seven must make committed frontier deltas the sole ordering/output path before latency is compared
 as the complete RBC-DAG protocol.
-
-Milestone seven removes that legacy output gate. Its valid run reached carrier round 795 at every
-validator, delivered 79,035 application carriers, released 77,870 exact applications through 1,880
-committed frontiers, projected 19,000 vertices, and ended with zero pending recovery. The in-place
-fail-stop reducer, incremental projection indexes, and event-local delivery/data-availability paths
-also remove the prototype's history-wide hot-path scans. Block/E2E latency fell by 60.4%/75.9% from
-milestone six while throughput recovered to 950.25 tx/s. The remaining 2.02/2.08-second latency is
-not the target: follow-up profiling must shorten the certified consensus-round/frontier pipeline
-toward the roughly 600 ms unsafe Starfish-MAC reference without weakening RBC or frontier safety.
 
 ## 19. Contained implementation milestones
 
@@ -1008,11 +990,8 @@ Every milestone is committed separately.
    vertices, quorum strong parents, explicit timeout-bound leader choices, contiguous exact
    delivery frontiers, durable slot/choice locks, and a live clean-only direct committer. Malformed
    optional vertices do not poison their enclosing carrier.
-7. **Frontier linearizer and recovery (implemented within the actor's fail-stop scope):** commit
-   deterministic frontier deltas, reconstruct prefixes, decisions, and anchors from the ordered
-   WAL, disable the legacy application committer, and output exact application references once.
-   Full-validator crash recovery and proof-safe late-node state transfer remain deferred because
-   the direct payload-transport baseline does not yet persist its own proof-critical RBC state.
+7. **Frontier linearizer and recovery:** commit deterministic frontier deltas, persist/reconstruct
+   prefixes and anchors, and add late-node and crash/restart tests.
 8. **Benchmarks:** compare the complete protocol with direct `starfish-rbc`, unsafe `starfish-mac`,
    signature Starfish variants, and Sailfish++ before attempting tree dissemination.
 9. **Tree dissemination:** distribute vector sub-bundles with redundant routing and a direct timeout

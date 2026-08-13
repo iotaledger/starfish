@@ -1036,7 +1036,6 @@ pub struct WriteAheadJournalV1 {
 /// A transition checked against one exact journal prefix. Keeping only the
 /// newly appended events avoids cloning the complete durable history on every
 /// live shadow input.
-#[cfg(test)]
 pub(crate) struct ValidatedJournalBatchV1 {
     base_event_count: usize,
     base_snapshot: Arc<JournalSnapshotV1>,
@@ -1065,7 +1064,6 @@ impl WriteAheadJournalV1 {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn validate_batch(
         &self,
         events: Vec<JournalEventV1>,
@@ -1082,7 +1080,6 @@ impl WriteAheadJournalV1 {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn commit_validated_batch(
         &mut self,
         batch: ValidatedJournalBatchV1,
@@ -1097,21 +1094,6 @@ impl WriteAheadJournalV1 {
         }
         self.durable_events.extend(batch.events);
         self.snapshot = batch.snapshot;
-        Ok(())
-    }
-
-    /// Apply a batch to the volatile authority snapshot without cloning its
-    /// complete retained history. This is safe only for a fail-stop caller
-    /// that persists the corresponding raw records before exposing any
-    /// effects and permanently poisons itself on a subsequent WAL failure.
-    pub(crate) fn apply_batch_unpublished(
-        &mut self,
-        events: Vec<JournalEventV1>,
-    ) -> Result<(), JournalErrorV1> {
-        for event in events {
-            Arc::make_mut(&mut self.snapshot).apply(&event)?;
-            self.durable_events.push(event);
-        }
         Ok(())
     }
 

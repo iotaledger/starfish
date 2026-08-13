@@ -140,7 +140,6 @@ pub struct CertifiedProjectionModel {
     delivered_slots: BTreeMap<(AuthorityIndex, RoundNumber), BlockReference>,
     closed_prefixes: Vec<Vec<BlockReference>>,
     vertices: BTreeMap<ConsensusVertexReference, ProjectedVertex>,
-    vertices_by_round: BTreeMap<RoundNumber, BTreeSet<ConsensusVertexReference>>,
     consensus_slots: BTreeMap<(AuthorityIndex, RoundNumber), BTreeSet<ConsensusVertexReference>>,
     committed_frontier: DeliveryFrontierV1,
     committed_anchors: BTreeSet<ConsensusVertexReference>,
@@ -166,7 +165,6 @@ impl CertifiedProjectionModel {
             delivered_slots: BTreeMap::new(),
             closed_prefixes: vec![Vec::new(); committee_size],
             vertices: BTreeMap::new(),
-            vertices_by_round: BTreeMap::new(),
             consensus_slots: BTreeMap::new(),
             committed_frontier: vec![None; committee_size],
             committed_anchors: BTreeSet::new(),
@@ -271,24 +269,6 @@ impl CertifiedProjectionModel {
         self.vertices
             .get(&reference)
             .map(|projected| &projected.vertex)
-    }
-
-    pub fn is_committed_anchor(&self, reference: ConsensusVertexReference) -> bool {
-        self.committed_anchors.contains(&reference)
-    }
-
-    /// Whether the current committed prefix already contains every carrier
-    /// named by `frontier`. This is used when a later anchor first resolves an
-    /// older slot: an intermediate leader can subsequently be decided as a
-    /// logical commit even though its entire payload frontier was already
-    /// output by that later anchor.
-    pub fn committed_frontier_dominates(&self, frontier: &[Option<BlockReference>]) -> bool {
-        frontier.len() == self.committed_frontier.len()
-            && frontier
-                .iter()
-                .copied()
-                .zip(self.committed_frontier.iter().copied())
-                .all(|(older, committed)| self.is_exact_extension(older, committed))
     }
 
     /// Current exact closed carrier-prefix frontier in authority order.
@@ -412,10 +392,6 @@ impl CertifiedProjectionModel {
                 effective_frontier,
             },
         );
-        self.vertices_by_round
-            .entry(vertex_reference.consensus_round())
-            .or_default()
-            .insert(vertex_reference);
         self.consensus_slots
             .entry((author, vertex_reference.consensus_round()))
             .or_default()
@@ -706,15 +682,10 @@ impl CertifiedProjectionModel {
         &self,
         round: RoundNumber,
     ) -> impl Iterator<Item = (ConsensusVertexReference, &ProjectedVertex)> {
-        self.vertices_by_round
-            .get(&round)
-            .into_iter()
-            .flatten()
-            .filter_map(|reference| {
-                self.vertices
-                    .get(reference)
-                    .map(|projected| (*reference, projected))
-            })
+        self.vertices
+            .iter()
+            .filter(move |(reference, _)| reference.consensus_round() == round)
+            .map(|(reference, projected)| (*reference, projected))
     }
 
     fn voter_authors(
@@ -832,10 +803,6 @@ impl CertifiedProjectionModel {
                 effective_frontier: vec![None; self.committee.len()],
             },
         );
-        self.vertices_by_round
-            .entry(reference.consensus_round())
-            .or_default()
-            .insert(reference);
         self.consensus_slots
             .entry((reference.author(), reference.consensus_round()))
             .or_default()
@@ -1121,11 +1088,6 @@ mod tests {
         let anchor_carrier = clean(&mut model, anchor);
         let anchor_vertex = model.try_project(anchor_carrier).unwrap();
         model.record_committed_anchor(anchor_vertex).unwrap();
-        assert!(
-            model.committed_frontier_dominates(
-                &carriers.iter().copied().map(Some).collect::<Vec<_>>()
-            )
-        );
 
         let regressing = second_round_candidate(
             &model,
@@ -1142,10 +1104,6 @@ mod tests {
             model.record_committed_anchor(regressing_vertex),
             Err(CertifiedProjectionError::FrontierRegressesCommitted { authority: 0, .. })
         ));
-        assert!(
-            !model
-                .committed_frontier_dominates(model.effective_frontier(regressing_vertex).unwrap())
-        );
     }
 
     #[test]

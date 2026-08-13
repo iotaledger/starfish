@@ -267,11 +267,9 @@ pub struct MetricReporter {
 /// and immediately before the measured local-benchmark interval begins.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AutonomousClockBenchmarkBaseline {
-    accepted_local_carriers: u64,
+    accepted_heartbeats: u64,
     delivered_carriers: u64,
     delivered_applications: u64,
-    committed_frontiers: u64,
-    frontier_applications: u64,
     projected_vertices: u64,
     projection_decisions: u64,
     wal_batches: u64,
@@ -299,8 +297,6 @@ struct AutonomousClockBenchmarkSummary {
     accepted_heartbeats: u64,
     delivered_carriers: u64,
     delivered_applications: u64,
-    committed_frontiers: u64,
-    frontier_applications: u64,
     projected_vertices: u64,
     projection_decisions: u64,
     wal_batches: u64,
@@ -345,13 +341,7 @@ fn summarize_autonomous_clock_benchmark(
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["heartbeat", "accepted"])
                 .get()
-                .saturating_add(
-                    metrics
-                        .starfish_rbc_dag_shadow_inputs_total
-                        .with_label_values(&["application_carrier", "accepted"])
-                        .get(),
-                )
-                > baseline.accepted_local_carriers
+                > baseline.accepted_heartbeats
                 && metrics
                     .starfish_rbc_dag_shadow_inputs_total
                     .with_label_values(&["delivery", "shadow"])
@@ -362,17 +352,7 @@ fn summarize_autonomous_clock_benchmark(
                         .starfish_rbc_dag_shadow_inputs_total
                         .with_label_values(&["delivery", "embedded_application"])
                         .get()
-                        > baseline.delivered_applications
-                        && metrics
-                            .starfish_rbc_dag_shadow_inputs_total
-                            .with_label_values(&["frontier", "committed"])
-                            .get()
-                            > baseline.committed_frontiers
-                        && metrics
-                            .starfish_rbc_dag_shadow_inputs_total
-                            .with_label_values(&["frontier", "application"])
-                            .get()
-                            > baseline.frontier_applications)
+                        > baseline.delivered_applications)
                 && metrics.starfish_rbc_dag_projected_vertices_total.get()
                     > baseline.projected_vertices
                 && metrics
@@ -433,24 +413,6 @@ fn summarize_autonomous_clock_benchmark(
             metrics
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "embedded_application"])
-                .get()
-        })
-        .sum();
-    let committed_frontiers = metrics
-        .iter()
-        .map(|metrics| {
-            metrics
-                .starfish_rbc_dag_shadow_inputs_total
-                .with_label_values(&["frontier", "committed"])
-                .get()
-        })
-        .sum();
-    let frontier_applications = metrics
-        .iter()
-        .map(|metrics| {
-            metrics
-                .starfish_rbc_dag_shadow_inputs_total
-                .with_label_values(&["frontier", "application"])
                 .get()
         })
         .sum();
@@ -534,8 +496,6 @@ fn summarize_autonomous_clock_benchmark(
         accepted_heartbeats,
         delivered_carriers,
         delivered_applications,
-        committed_frontiers,
-        frontier_applications,
         projected_vertices,
         projection_decisions,
         wal_batches,
@@ -566,15 +526,10 @@ pub struct VecHistogramReporter<T> {
 impl Metrics {
     pub fn autonomous_clock_benchmark_baseline(&self) -> AutonomousClockBenchmarkBaseline {
         AutonomousClockBenchmarkBaseline {
-            accepted_local_carriers: self
+            accepted_heartbeats: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["heartbeat", "accepted"])
-                .get()
-                .saturating_add(
-                    self.starfish_rbc_dag_shadow_inputs_total
-                        .with_label_values(&["application_carrier", "accepted"])
-                        .get(),
-                ),
+                .get(),
             delivered_carriers: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "shadow"])
@@ -582,14 +537,6 @@ impl Metrics {
             delivered_applications: self
                 .starfish_rbc_dag_shadow_inputs_total
                 .with_label_values(&["delivery", "embedded_application"])
-                .get(),
-            committed_frontiers: self
-                .starfish_rbc_dag_shadow_inputs_total
-                .with_label_values(&["frontier", "committed"])
-                .get(),
-            frontier_applications: self
-                .starfish_rbc_dag_shadow_inputs_total
-                .with_label_values(&["frontier", "application"])
                 .get(),
             projected_vertices: self.starfish_rbc_dag_projected_vertices_total.get(),
             projection_decisions: self
@@ -1812,12 +1759,10 @@ impl Metrics {
             table.add_row(row![
                 b->"Clock/WAL progress:",
                 format!(
-                    "heartbeats={}, carrier deliveries={}, application deliveries={}, committed frontiers={}, frontier applications={}, projected vertices={}, projected commits={}, WAL batches={}, records={}, open rounds={}..{}",
+                    "heartbeats={}, carrier deliveries={}, application deliveries={}, projected vertices={}, projected commits={}, WAL batches={}, records={}, open rounds={}..{}",
                     summary.accepted_heartbeats,
                     summary.delivered_carriers,
                     summary.delivered_applications,
-                    summary.committed_frontiers,
-                    summary.frontier_applications,
                     summary.projected_vertices,
                     summary.projection_decisions,
                     summary.wal_batches,
@@ -2502,7 +2447,7 @@ mod tests {
         let metrics = &metrics[0];
         metrics
             .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["application_carrier", "accepted"])
+            .with_label_values(&["heartbeat", "accepted"])
             .inc();
         metrics
             .starfish_rbc_dag_shadow_inputs_total
@@ -2534,14 +2479,6 @@ mod tests {
         metrics
             .starfish_rbc_dag_shadow_inputs_total
             .with_label_values(&["delivery", "embedded_application"])
-            .inc();
-        metrics
-            .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["frontier", "committed"])
-            .inc();
-        metrics
-            .starfish_rbc_dag_shadow_inputs_total
-            .with_label_values(&["frontier", "application"])
             .inc();
         assert!(
             summarize_autonomous_clock_benchmark(

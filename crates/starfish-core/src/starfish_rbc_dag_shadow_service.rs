@@ -40,9 +40,9 @@ use crate::{
         storage::ShadowWalSyncPolicyV1,
     },
     starfish_rbc_dag_shadow::{
-        CommittedFrontierDeltaV1, ShadowAuthorizerV1, ShadowDeliveryComparisonV1,
-        ShadowDeliveryIdentityV1, ShadowDeliverySlotV1, ShadowErrorV1, ShadowIngressDispositionV1,
-        ShadowOpenReportV1, ShadowOutboundEnvelopeV1, StarfishRbcDagShadowV1,
+        ShadowAuthorizerV1, ShadowDeliveryComparisonV1, ShadowDeliveryIdentityV1,
+        ShadowDeliverySlotV1, ShadowErrorV1, ShadowIngressDispositionV1, ShadowOpenReportV1,
+        ShadowOutboundEnvelopeV1, StarfishRbcDagShadowV1,
     },
     types::{AuthorityIndex, BlockAuthenticationScheme, BlockReference, RoundNumber, TimestampNs},
 };
@@ -408,7 +408,6 @@ pub(crate) enum ShadowServiceEventV1 {
     },
     VertexProjected(ConsensusVertexReference),
     LeaderDecided(ProjectionDecisionV1),
-    FrontierCommitted(CommittedFrontierDeltaV1),
     Comparison(ShadowDeliveryComparisonV1),
     Input {
         kind: &'static str,
@@ -984,7 +983,7 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             invalidated_by_overload: actor_invalidated_by_overload,
             pending_local,
             assigned_applications,
-            pending_data_availability: BTreeSet::new(),
+            available_applications: BTreeSet::new(),
             pending_recovery: BTreeMap::new(),
             recovery_last_attempt: BTreeMap::new(),
             sync_last_attempt: BTreeMap::new(),
@@ -1115,7 +1114,7 @@ struct ShadowServiceStateV1 {
     invalidated_by_overload: Arc<Mutex<Option<&'static str>>>,
     pending_local: BTreeMap<RoundNumber, ShadowLocalCarrierV1>,
     assigned_applications: BTreeSet<BlockReference>,
-    pending_data_availability: BTreeSet<BlockReference>,
+    available_applications: BTreeSet<BlockReference>,
     pending_recovery: BTreeMap<BlockReference, BTreeSet<AuthorityIndex>>,
     recovery_last_attempt: BTreeMap<(BlockReference, AuthorityIndex), Instant>,
     sync_last_attempt: BTreeMap<(AuthorityIndex, RoundNumber), Instant>,
@@ -1308,15 +1307,6 @@ impl ShadowServiceStateV1 {
         let carrier_round_advanced = effects
             .iter()
             .any(|effect| matches!(effect, ModelEffect::CarrierRoundAdvanced(_)));
-        let newly_delivered = effects
-            .iter()
-            .filter_map(|effect| match effect {
-                ModelEffect::Delivered(reference) => Some(*reference),
-                ModelEffect::NeedCarrier { .. }
-                | ModelEffect::PrefixAdvanced { .. }
-                | ModelEffect::CarrierRoundAdvanced(_) => None,
-            })
-            .collect::<Vec<_>>();
         if carrier_round_advanced {
             self.sync_catch_up = std::mem::take(&mut self.sync_used_in_open_round);
         }
@@ -1343,7 +1333,7 @@ impl ShadowServiceStateV1 {
             self.pending_recovery.len(),
         ));
         self.reconcile_data_availability();
-        self.report_new_shadow_deliveries(&newly_delivered);
+        self.report_new_shadow_deliveries();
         self.report_projection_progress();
         self.flush_carrier_sync_requests(false);
         self.emit_clock_state();
@@ -1353,14 +1343,9 @@ impl ShadowServiceStateV1 {
         if !self.mode.is_autonomous() {
             return;
         }
-        let incoming = std::mem::take(&mut *self.desired_available_applications.lock());
-        self.pending_data_availability.extend(incoming);
-        let pending = self
-            .pending_data_availability
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        for application in pending {
+        let mut desired = self.desired_available_applications.lock().clone();
+        desired.extend(self.core.intrinsically_available_applications());
+        for application in desired {
             let carriers = self.core.application_carriers(application);
             if carriers.is_empty() {
                 continue;
@@ -1385,7 +1370,7 @@ impl ShadowServiceStateV1 {
                 .iter()
                 .all(|carrier| self.core.carrier_data_available(*carrier))
             {
-                self.pending_data_availability.remove(&application);
+                self.available_applications.insert(application);
             }
         }
     }
@@ -1396,9 +1381,6 @@ impl ShadowServiceStateV1 {
         }
         for decision in self.core.drain_projection_decisions() {
             self.emit(ShadowServiceEventV1::LeaderDecided(decision));
-        }
-        for delta in self.core.drain_committed_frontiers() {
-            self.emit(ShadowServiceEventV1::FrontierCommitted(delta));
         }
     }
 
@@ -1882,42 +1864,41 @@ impl ShadowServiceStateV1 {
         }
     }
 
-    fn report_new_shadow_deliveries(&mut self, references: &[BlockReference]) {
-        for reference in references {
-            let identity = match self.core.delivery_identity(*reference) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    self.reject(None, error);
-                    return;
-                }
-            };
-            if !self.reported_shadow_deliveries.insert(identity) {
-                continue;
+    fn report_new_shadow_deliveries(&mut self) {
+        let identities: BTreeSet<_> = match self.core.delivered_identities() {
+            Ok(identities) => identities.into_iter().collect(),
+            Err(error) => {
+                self.reject(None, error);
+                return;
             }
-            let slot = delivery_slot(&identity);
+        };
+        let new_identities = identities
+            .difference(&self.reported_shadow_deliveries)
+            .copied()
+            .collect::<Vec<_>>();
+        self.reported_shadow_deliveries = identities;
+        for identity in &new_identities {
+            let slot = delivery_slot(identity);
             if !self.mode.is_autonomous() {
                 self.comparison_backlog.observe_epoch_shadow(slot);
             }
-            self.emit(ShadowServiceEventV1::Delivered(identity));
+            self.emit(ShadowServiceEventV1::Delivered(*identity));
             self.emit_slot_comparison(slot);
             self.emit_comparison_backlog();
-            match self.core.delivered_application_header(*reference) {
-                Ok(Some((carrier, header))) => {
-                    if self
-                        .reported_application_deliveries
-                        .insert(header.reference())
-                    {
-                        self.emit(ShadowServiceEventV1::EmbeddedApplicationDelivered {
-                            carrier,
-                            header,
-                        });
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.reject(None, error);
-                    return;
-                }
+        }
+        let applications = match self.core.delivered_application_headers() {
+            Ok(applications) => applications,
+            Err(error) => {
+                self.reject(None, error);
+                return;
+            }
+        };
+        for (carrier, header) in applications {
+            if self
+                .reported_application_deliveries
+                .insert(header.reference())
+            {
+                self.emit(ShadowServiceEventV1::EmbeddedApplicationDelivered { carrier, header });
             }
         }
     }
@@ -2266,7 +2247,10 @@ fn validate_wire_size(
 fn is_fatal_core_error(error: &ShadowErrorV1) -> bool {
     matches!(
         error,
-        ShadowErrorV1::Wal(_) | ShadowErrorV1::PostModelJournal(_) | ShadowErrorV1::Poisoned
+        ShadowErrorV1::Wal(_)
+            | ShadowErrorV1::PostDurabilityCommit(_)
+            | ShadowErrorV1::PostDurabilityJournal(_)
+            | ShadowErrorV1::Poisoned
     )
 }
 
@@ -2480,7 +2464,6 @@ mod tests {
         open_rounds: &mut [RoundNumber],
         deliveries: &mut [usize],
         application_deliveries: &mut [BTreeSet<BlockReference>],
-        committed_frontiers: &mut [Vec<CommittedFrontierDeltaV1>],
         sync_requests: &mut usize,
         projected_vertices: &mut usize,
         projected_decisions: &mut usize,
@@ -2547,9 +2530,6 @@ mod tests {
                             }
                             ShadowServiceEventV1::LeaderDecided(_) => {
                                 *projected_decisions = projected_decisions.saturating_add(1);
-                            }
-                            ShadowServiceEventV1::FrontierCommitted(delta) => {
-                                committed_frontiers[sender].push(delta);
                             }
                             ShadowServiceEventV1::Rejected { error, .. }
                                 if error.contains("FutureCarrierOutsideBuffer")
@@ -2809,7 +2789,6 @@ mod tests {
         let mut open_rounds = vec![1; n];
         let mut deliveries = vec![0; n];
         let mut application_deliveries = vec![BTreeSet::new(); n];
-        let mut committed_frontiers = vec![Vec::new(); n];
         let mut sync_requests = 0;
         let mut projected_vertices = 0;
         let mut projected_decisions = 0;
@@ -2830,7 +2809,6 @@ mod tests {
                 &mut open_rounds,
                 &mut deliveries,
                 &mut application_deliveries,
-                &mut committed_frontiers,
                 &mut sync_requests,
                 &mut projected_vertices,
                 &mut projected_decisions,
@@ -2845,12 +2823,6 @@ mod tests {
         );
         assert!(open_rounds.iter().all(|round| *round >= 19));
         assert!(projected_vertices >= n * 3);
-        assert!(
-            committed_frontiers
-                .iter()
-                .all(|commits| !commits.is_empty()),
-            "every node must commit at least one certified frontier: {committed_frontiers:?}"
-        );
         assert!(
             projected_decisions > 0,
             "clean projection did not decide: vertices={projected_vertices}, rounds={open_rounds:?}"
@@ -2933,7 +2905,6 @@ mod tests {
         let mut open_rounds = vec![1; N];
         let mut deliveries = vec![0; N];
         let mut application_deliveries = vec![BTreeSet::new(); N];
-        let mut committed_frontiers = vec![Vec::new(); N];
         let mut sync_requests = 0;
         let mut projected_vertices = 0;
         let mut projected_decisions = 0;
@@ -2943,34 +2914,12 @@ mod tests {
             &mut open_rounds,
             &mut deliveries,
             &mut application_deliveries,
-            &mut committed_frontiers,
             &mut sync_requests,
             &mut projected_vertices,
             &mut projected_decisions,
             5,
         )
         .await;
-        // The first directly committed consensus frontier may predate the
-        // round-one application deliveries. Advance enough certified carrier
-        // rounds for a later committed frontier to include that closed prefix.
-        for fixed_round in 5..=18 {
-            for handle in &handles {
-                handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
-            }
-            pump_autonomous_until_round(
-                &handles,
-                &mut events,
-                &mut open_rounds,
-                &mut deliveries,
-                &mut application_deliveries,
-                &mut committed_frontiers,
-                &mut sync_requests,
-                &mut projected_vertices,
-                &mut projected_decisions,
-                fixed_round + 1,
-            )
-            .await;
-        }
 
         assert!(
             application_deliveries
@@ -2980,35 +2929,12 @@ mod tests {
         );
         assert!(
             open_rounds.iter().all(|round| *round >= 5),
-            "the carrier DAG must keep advancing after application delivery"
+            "application-critical phase carriers must not wait for a heartbeat tick"
         );
         assert_eq!(sync_requests, 0);
         assert!(
             projected_vertices >= N,
             "empty embedded applications must not stall clean projection"
-        );
-        let committed_applications = committed_frontiers
-            .iter()
-            .map(|commits| {
-                commits
-                    .iter()
-                    .flat_map(|delta| delta.applications.iter().map(RbcCanonicalHeader::reference))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            committed_applications
-                .iter()
-                .all(|applications| applications == &committed_applications[0]),
-            "equal certified frontiers must output byte-identical application order: {committed_applications:?}"
-        );
-        assert_eq!(
-            committed_applications[0]
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>(),
-            expected,
-            "the committed frontier closure must output every exact application once; commits={committed_frontiers:?}"
         );
 
         drop(events);
@@ -3162,7 +3088,6 @@ mod tests {
         let mut open_rounds = vec![1; N];
         let mut deliveries = vec![0; N];
         let mut application_deliveries = vec![BTreeSet::new(); N];
-        let mut committed_frontiers = vec![Vec::new(); N];
         let mut sync_requests = 0;
         let mut projected_vertices = 0;
         let mut projected_decisions = 0;
@@ -3175,7 +3100,6 @@ mod tests {
             &mut open_rounds,
             &mut deliveries,
             &mut application_deliveries,
-            &mut committed_frontiers,
             &mut sync_requests,
             &mut projected_vertices,
             &mut projected_decisions,
@@ -3229,7 +3153,6 @@ mod tests {
             &mut open_rounds,
             &mut deliveries,
             &mut application_deliveries,
-            &mut committed_frontiers,
             &mut sync_requests,
             &mut projected_vertices,
             &mut projected_decisions,

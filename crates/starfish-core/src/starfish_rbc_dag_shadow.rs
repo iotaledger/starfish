@@ -24,7 +24,10 @@ use crate::{
         CarrierHeaderV1Args, ConsensusVertexReference, ConsensusVertexV1, LeaderChoiceV1,
         LocallyAuthenticatedCarrierV1, RbcDagCommitteeContextV1, RbcDagContextV1, RbcDagError,
         RbcPhaseStatementV1, carrier_genesis_reference,
-        journal::{IngressProvenanceV1, JournalErrorV1, JournalEventV1, WriteAheadJournalV1},
+        journal::{
+            IngressProvenanceV1, JournalErrorV1, JournalEventV1, ValidatedJournalBatchV1,
+            WriteAheadJournalV1,
+        },
         model::{ModelEffect, ModelError, ModelInputRecord, ModelTraceEvent, RbcDagModel},
         projection::{
             CertifiedProjectionError, CertifiedProjectionModel, LeaderSlotV1, ProjectionDecisionV1,
@@ -223,18 +226,6 @@ pub(crate) enum ShadowDeliveryComparisonV1 {
     },
 }
 
-/// Deterministic application output unlocked by one newly committed clean
-/// projected anchor. Carrier references remain available for audit while the
-/// application headers are already deduplicated and sorted by their carrier
-/// position in the exact committed frontier delta.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedFrontierDeltaV1 {
-    pub(crate) anchor: ConsensusVertexReference,
-    pub(crate) frontier: Vec<Option<BlockReference>>,
-    pub(crate) carriers: Vec<BlockReference>,
-    pub(crate) applications: Vec<RbcCanonicalHeader>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ShadowOpenReportV1 {
     replayed_batches: u64,
@@ -324,7 +315,8 @@ pub(crate) enum ShadowErrorV1 {
     },
     MissingOutboundCandidate(BlockReference),
     MissingDeliveredCandidate(BlockReference),
-    PostModelJournal(JournalErrorV1),
+    PostDurabilityCommit(ModelError),
+    PostDurabilityJournal(JournalErrorV1),
     Projection(CertifiedProjectionError),
     Poisoned,
 }
@@ -390,9 +382,13 @@ impl fmt::Display for ShadowErrorV1 {
             Self::MissingDeliveredCandidate(reference) => {
                 write!(formatter, "missing delivered shadow candidate {reference}")
             }
-            Self::PostModelJournal(error) => write!(
+            Self::PostDurabilityCommit(error) => write!(
                 formatter,
-                "shadow journal validation failed after the unpublished model transition: {error}"
+                "shadow model commit failed after WAL durability: {error}"
+            ),
+            Self::PostDurabilityJournal(error) => write!(
+                formatter,
+                "shadow journal commit failed after WAL durability: {error}"
             ),
             Self::Projection(error) => write!(formatter, "{error}"),
             Self::Poisoned => formatter.write_str("shadow core is poisoned"),
@@ -406,8 +402,8 @@ impl Error for ShadowErrorV1 {
             Self::Wal(error) => Some(error),
             Self::Codec(error) => Some(error),
             Self::Carrier(error) => Some(error),
-            Self::Model(error) => Some(error),
-            Self::Journal(error) | Self::PostModelJournal(error) => Some(error),
+            Self::Model(error) | Self::PostDurabilityCommit(error) => Some(error),
+            Self::Journal(error) | Self::PostDurabilityJournal(error) => Some(error),
             Self::Projection(error) => Some(error),
             _ => None,
         }
@@ -516,23 +512,16 @@ pub(crate) struct StarfishRbcDagShadowV1 {
     journal: WriteAheadJournalV1,
     wal: ShadowWalV1,
     candidates: BTreeMap<BlockReference, CandidateCarrierV1>,
-    application_carriers: BTreeMap<BlockReference, BTreeSet<BlockReference>>,
     delivered: BTreeSet<BlockReference>,
     authenticated_slots: BTreeMap<(AuthorityIndex, RoundNumber), BlockReference>,
     ordinarily_retained_slots: BTreeMap<(AuthorityIndex, RoundNumber), BlockReference>,
     slot_candidates: BTreeMap<(AuthorityIndex, RoundNumber), BTreeSet<BlockReference>>,
     requested_recoveries: BTreeMap<BlockReference, Vec<AuthorityIndex>>,
     projection: CertifiedProjectionModel,
-    pending_projection_candidates: BTreeSet<BlockReference>,
     projection_rejected: BTreeMap<BlockReference, CertifiedProjectionError>,
     projected_decisions: BTreeSet<ProjectionDecisionV1>,
-    included_applications: BTreeSet<BlockReference>,
-    highest_projected_consensus_round: RoundNumber,
-    next_undecided_consensus_round: RoundNumber,
-    next_local_consensus_round: RoundNumber,
     pending_projected_vertices: Vec<ConsensusVertexReference>,
     pending_projection_decisions: Vec<ProjectionDecisionV1>,
-    pending_committed_frontiers: Vec<CommittedFrontierDeltaV1>,
     poisoned: bool,
 }
 
@@ -569,8 +558,7 @@ impl StarfishRbcDagShadowV1 {
         let replayed_batches = recovery.batch_count();
         let discarded_tail_bytes = recovery.discarded_tail_bytes();
 
-        let mut model = RbcDagModel::new(committee.committee_arc(), own_authority, context)?;
-        model.enable_intrinsic_empty_data_availability();
+        let model = RbcDagModel::new(committee.committee_arc(), own_authority, context)?;
         let projection = CertifiedProjectionModel::from_committee_context(committee.clone());
         let journal = WriteAheadJournalV1::new(context, own_authority);
         let mut core = Self {
@@ -582,23 +570,16 @@ impl StarfishRbcDagShadowV1 {
             journal,
             wal,
             candidates: BTreeMap::new(),
-            application_carriers: BTreeMap::new(),
             delivered: BTreeSet::new(),
             authenticated_slots: BTreeMap::new(),
             ordinarily_retained_slots: BTreeMap::new(),
             slot_candidates: BTreeMap::new(),
             requested_recoveries: BTreeMap::new(),
             projection,
-            pending_projection_candidates: BTreeSet::new(),
             projection_rejected: BTreeMap::new(),
             projected_decisions: BTreeSet::new(),
-            included_applications: BTreeSet::new(),
-            highest_projected_consensus_round: 0,
-            next_undecided_consensus_round: 1,
-            next_local_consensus_round: 1,
             pending_projected_vertices: Vec::new(),
             pending_projection_decisions: Vec::new(),
-            pending_committed_frontiers: Vec::new(),
             poisoned: false,
         };
 
@@ -610,7 +591,6 @@ impl StarfishRbcDagShadowV1 {
         // not re-emitted as fresh runtime observations after restart.
         core.pending_projection_decisions.clear();
         core.pending_projected_vertices.clear();
-        core.pending_committed_frontiers.clear();
         let recovery_effects = core
             .requested_recoveries
             .iter()
@@ -700,10 +680,6 @@ impl StarfishRbcDagShadowV1 {
         std::mem::take(&mut self.pending_projected_vertices)
     }
 
-    pub(crate) fn drain_committed_frontiers(&mut self) -> Vec<CommittedFrontierDeltaV1> {
-        std::mem::take(&mut self.pending_committed_frontiers)
-    }
-
     /// Persist the external data-availability predicate for one exact
     /// application-bearing carrier. Control carriers are available by shape
     /// and never require this oracle.
@@ -723,10 +699,30 @@ impl StarfishRbcDagShadowV1 {
     }
 
     pub(crate) fn application_carriers(&self, application: BlockReference) -> Vec<BlockReference> {
-        self.application_carriers
-            .get(&application)
-            .map(|carriers| carriers.iter().copied().collect())
-            .unwrap_or_default()
+        self.candidates
+            .iter()
+            .filter_map(|(reference, candidate)| {
+                candidate
+                    .header()
+                    .application_header()
+                    .is_some_and(|header| header.reference() == application)
+                    .then_some(*reference)
+            })
+            .collect()
+    }
+
+    /// Application headers with the canonical empty commitment need no
+    /// transaction reconstruction. Their exact carrier bytes are therefore
+    /// sufficient data-availability evidence once the carrier is retained.
+    pub(crate) fn intrinsically_available_applications(&self) -> Vec<BlockReference> {
+        self.candidates
+            .values()
+            .filter_map(|candidate| candidate.header().application_header())
+            .filter(|header| header.transactions_commitment() == TransactionsCommitment::default())
+            .map(RbcCanonicalHeader::reference)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub(crate) fn carrier_data_available(&self, reference: BlockReference) -> bool {
@@ -922,7 +918,12 @@ impl StarfishRbcDagShadowV1 {
     }
 
     fn next_local_consensus_round(&self) -> RoundNumber {
-        self.next_local_consensus_round
+        let snapshot = self.journal.snapshot();
+        let mut round: RoundNumber = 1;
+        while snapshot.consensus_slot(round).is_some() {
+            round = round.saturating_add(1);
+        }
+        round
     }
 
     /// Verify and durably apply an authenticated network envelope for this
@@ -1183,23 +1184,18 @@ impl StarfishRbcDagShadowV1 {
     ) -> Result<Vec<ShadowDeliveryIdentityV1>, ShadowErrorV1> {
         self.delivered
             .iter()
-            .map(|reference| self.delivery_identity(*reference))
+            .map(|reference| {
+                let candidate = self
+                    .candidates
+                    .get(reference)
+                    .ok_or(ShadowErrorV1::MissingDeliveredCandidate(*reference))?;
+                Ok(ShadowDeliveryIdentityV1::new(
+                    candidate.header().author(),
+                    candidate.header().carrier_round(),
+                    candidate.header().transactions_commitment(),
+                ))
+            })
             .collect()
-    }
-
-    pub(crate) fn delivery_identity(
-        &self,
-        reference: BlockReference,
-    ) -> Result<ShadowDeliveryIdentityV1, ShadowErrorV1> {
-        let candidate = self
-            .candidates
-            .get(&reference)
-            .ok_or(ShadowErrorV1::MissingDeliveredCandidate(reference))?;
-        Ok(ShadowDeliveryIdentityV1::new(
-            candidate.header().author(),
-            candidate.header().carrier_round(),
-            candidate.header().transactions_commitment(),
-        ))
     }
 
     /// Exact application headers whose enclosing carriers reached embedded
@@ -1210,27 +1206,20 @@ impl StarfishRbcDagShadowV1 {
         self.delivered
             .iter()
             .filter_map(|carrier_reference| {
-                match self.delivered_application_header(*carrier_reference) {
-                    Ok(Some(application)) => Some(Ok(application)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
-                }
+                let candidate = match self.candidates.get(carrier_reference) {
+                    Some(candidate) => candidate,
+                    None => {
+                        return Some(Err(ShadowErrorV1::MissingDeliveredCandidate(
+                            *carrier_reference,
+                        )));
+                    }
+                };
+                candidate
+                    .header()
+                    .application_header()
+                    .map(|header| Ok((*carrier_reference, header.clone())))
             })
             .collect()
-    }
-
-    pub(crate) fn delivered_application_header(
-        &self,
-        carrier_reference: BlockReference,
-    ) -> Result<Option<(BlockReference, RbcCanonicalHeader)>, ShadowErrorV1> {
-        let candidate = self
-            .candidates
-            .get(&carrier_reference)
-            .ok_or(ShadowErrorV1::MissingDeliveredCandidate(carrier_reference))?;
-        Ok(candidate
-            .header()
-            .application_header()
-            .map(|header| (carrier_reference, header.clone())))
     }
 
     /// Compare protocol-independent delivery sets. Multiple transaction
@@ -1272,23 +1261,36 @@ impl StarfishRbcDagShadowV1 {
         loop {
             let mut advanced = false;
             let candidates = self
-                .pending_projection_candidates
+                .candidates
                 .iter()
-                .copied()
+                .filter_map(|(reference, candidate)| {
+                    candidate
+                        .header()
+                        .consensus_vertex()
+                        .is_some()
+                        .then_some(*reference)
+                })
                 .collect::<Vec<_>>();
             for reference in candidates {
+                let consensus_round = self
+                    .candidates
+                    .get(&reference)
+                    .and_then(|candidate| candidate.header().consensus_vertex())
+                    .expect("candidate list contains only consensus vertices")
+                    .consensus_round();
+                let vertex_reference = ConsensusVertexReference::new(reference, consensus_round);
+                if self.projection.is_projected(vertex_reference)
+                    || self.projection_rejected.contains_key(&reference)
+                {
+                    continue;
+                }
                 match self.projection.try_project(reference) {
                     Ok(projected) => {
-                        self.pending_projection_candidates.remove(&reference);
-                        self.highest_projected_consensus_round = self
-                            .highest_projected_consensus_round
-                            .max(projected.consensus_round());
                         self.pending_projected_vertices.push(projected);
                         advanced = true;
                     }
                     Err(error) if projection_error_is_pending(&error) => {}
                     Err(error) => {
-                        self.pending_projection_candidates.remove(&reference);
                         self.projection_rejected.insert(reference, error);
                     }
                 }
@@ -1298,125 +1300,32 @@ impl StarfishRbcDagShadowV1 {
             }
         }
 
-        self.drive_ordered_committer(self.highest_projected_consensus_round);
-    }
-
-    fn drive_ordered_committer(&mut self, highest_round: RoundNumber) {
-        let decidable_round = highest_round.saturating_sub(2);
-        loop {
-            while self.next_undecided_consensus_round <= decidable_round
-                && self.has_projection_decision(
-                    self.projection
-                        .leader_slot(self.next_undecided_consensus_round),
-                )
-            {
-                self.next_undecided_consensus_round =
-                    self.next_undecided_consensus_round.saturating_add(1);
-            }
-            if self.next_undecided_consensus_round > decidable_round {
-                return;
-            }
-            let round = self.next_undecided_consensus_round;
+        let highest_round = self
+            .candidates
+            .values()
+            .filter_map(|candidate| candidate.header().consensus_vertex())
+            .map(ConsensusVertexV1::consensus_round)
+            .max()
+            .unwrap_or_default();
+        for round in 1..=highest_round.saturating_sub(2) {
             let slot = self.projection.leader_slot(round);
+            if self
+                .projected_decisions
+                .iter()
+                .any(|decision| projection_decision_slot(*decision) == slot)
+            {
+                continue;
+            }
             let Ok(decision) = self.projection.direct_decision(slot) else {
-                return;
+                continue;
             };
-            match decision {
-                ProjectionDecisionV1::DirectCommit { leader } => {
-                    self.commit_projected_anchor(leader);
-                    self.record_projection_decision(decision);
-                    self.next_undecided_consensus_round = round.saturating_add(1);
-                }
-                ProjectionDecisionV1::DirectSkip { .. } => {
-                    self.record_projection_decision(decision);
-                    self.next_undecided_consensus_round = round.saturating_add(1);
-                }
-                ProjectionDecisionV1::Undecided { .. } => {
-                    let first_anchor_round = round.saturating_add(3);
-                    let later_anchor =
-                        (first_anchor_round..=decidable_round).find_map(|candidate| {
-                            let candidate_slot = self.projection.leader_slot(candidate);
-                            match self.projection.direct_decision(candidate_slot).ok()? {
-                                ProjectionDecisionV1::DirectCommit { leader } => Some(leader),
-                                ProjectionDecisionV1::DirectSkip { .. }
-                                | ProjectionDecisionV1::IndirectCommit { .. }
-                                | ProjectionDecisionV1::IndirectSkip { .. }
-                                | ProjectionDecisionV1::Undecided { .. } => None,
-                            }
-                        });
-                    let Some(anchor) = later_anchor else {
-                        return;
-                    };
-                    self.commit_projected_anchor(anchor);
-                    let indirect = self
-                        .projection
-                        .indirect_decision(slot, anchor)
-                        .expect("a clean committed later anchor must decide the older slot");
-                    self.record_projection_decision(indirect);
-                    self.record_projection_decision(ProjectionDecisionV1::DirectCommit {
-                        leader: anchor,
-                    });
-                    self.next_undecided_consensus_round = round.saturating_add(1);
-                }
-                ProjectionDecisionV1::IndirectCommit { .. }
-                | ProjectionDecisionV1::IndirectSkip { .. } => {
-                    unreachable!("direct decision returned an indirect result")
-                }
+            if matches!(decision, ProjectionDecisionV1::Undecided { .. }) {
+                continue;
+            }
+            if self.projected_decisions.insert(decision) {
+                self.pending_projection_decisions.push(decision);
             }
         }
-    }
-
-    fn has_projection_decision(&self, slot: LeaderSlotV1) -> bool {
-        self.projected_decisions
-            .iter()
-            .any(|decision| projection_decision_slot(*decision) == slot)
-    }
-
-    fn record_projection_decision(&mut self, decision: ProjectionDecisionV1) {
-        if self.projected_decisions.insert(decision) {
-            self.pending_projection_decisions.push(decision);
-        }
-    }
-
-    fn commit_projected_anchor(&mut self, anchor: ConsensusVertexReference) {
-        if self.projection.is_committed_anchor(anchor) {
-            return;
-        }
-        let frontier = self
-            .projection
-            .effective_frontier(anchor)
-            .expect("a committed anchor must be clean and projected")
-            .to_vec();
-        if let Err(error) = self.projection.record_committed_anchor(anchor) {
-            if self.projection.committed_frontier_dominates(&frontier) {
-                // The leader is logically committed, but a later anchor used
-                // for an indirect decision has already output its complete
-                // carrier prefix. Re-emitting it would regress the frontier.
-                return;
-            }
-            panic!("ordered clean anchors must be comparable exact frontiers: {error}");
-        }
-        let carriers = self
-            .model
-            .apply_frontier(&frontier)
-            .expect("projection and reducer closed prefixes must agree");
-        let applications = carriers
-            .iter()
-            .filter_map(|reference| {
-                self.candidates
-                    .get(reference)
-                    .and_then(|candidate| candidate.header().application_header())
-            })
-            .filter(|header| self.included_applications.insert(header.reference()))
-            .cloned()
-            .collect();
-        self.pending_committed_frontiers
-            .push(CommittedFrontierDeltaV1 {
-                anchor,
-                frontier,
-                carriers,
-                applications,
-            });
     }
 
     fn ensure_live(&self) -> Result<(), ShadowErrorV1> {
@@ -1460,28 +1369,20 @@ impl StarfishRbcDagShadowV1 {
     }
 
     fn apply_durable(&mut self, input: ShadowInputV1) -> Result<Vec<ModelEffect>, ShadowErrorV1> {
-        let (trace, effects) = self.model.apply_input_unpublished(input.model_input())?;
-        let records = match encode_batch(self.context, self.own_authority, &input, &trace) {
-            Ok(records) => records,
+        let plan = self.model.plan_input(input.model_input())?;
+        let records = encode_batch(self.context, self.own_authority, &input, plan.trace())?;
+        let journal_batch = validate_journal_transition(&self.journal, &input, plan.trace())?;
+        self.wal.append_batch(&records)?;
+        let effects = match self.model.commit_plan(plan) {
+            Ok(effects) => effects,
             Err(error) => {
                 self.poisoned = true;
-                return Err(error);
+                return Err(ShadowErrorV1::PostDurabilityCommit(error));
             }
         };
-        let journal_events = match journal_transition_events(&self.journal, &input, &trace) {
-            Ok(events) => events,
-            Err(error) => {
-                self.poisoned = true;
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.journal.apply_batch_unpublished(journal_events) {
+        if let Err(error) = self.journal.commit_validated_batch(journal_batch) {
             self.poisoned = true;
-            return Err(ShadowErrorV1::PostModelJournal(error));
-        }
-        if let Err(error) = self.wal.append_batch(&records) {
-            self.poisoned = true;
-            return Err(error.into());
+            return Err(ShadowErrorV1::PostDurabilityJournal(error));
         }
         self.record_committed_input(&input, &effects);
         Ok(effects)
@@ -1500,14 +1401,15 @@ impl StarfishRbcDagShadowV1 {
             self.own_authority,
             self.committee.committee().len(),
         )?;
-        let (trace, effects) = self.model.apply_input_unpublished(input.model_input())?;
-        if trace != recorded_trace {
+        let plan = self.model.plan_input(input.model_input())?;
+        if plan.trace() != recorded_trace {
             return Err(ShadowErrorV1::TraceMismatch { batch_sequence });
         }
-        let journal_events = journal_transition_events(&self.journal, &input, &trace)?;
-        if let Err(error) = self.journal.apply_batch_unpublished(journal_events) {
+        let journal_batch = validate_journal_transition(&self.journal, &input, plan.trace())?;
+        let effects = self.model.commit_plan(plan)?;
+        if let Err(error) = self.journal.commit_validated_batch(journal_batch) {
             self.poisoned = true;
-            return Err(ShadowErrorV1::PostModelJournal(error));
+            return Err(ShadowErrorV1::PostDurabilityJournal(error));
         }
         self.record_committed_input(&input, &effects);
         Ok(effects)
@@ -1587,26 +1489,10 @@ impl StarfishRbcDagShadowV1 {
         if let Some(candidate) = input.candidate().cloned() {
             let reference = candidate.reference();
             let slot = carrier_slot(reference);
-            if let Some(vertex) = candidate.header().consensus_vertex() {
-                self.pending_projection_candidates.insert(reference);
-                if input.is_local() {
-                    self.next_local_consensus_round = self
-                        .next_local_consensus_round
-                        .max(vertex.consensus_round().saturating_add(1));
-                }
-            }
-            if let Some(application) = candidate.header().application_header() {
-                self.application_carriers
-                    .entry(application.reference())
-                    .or_default()
-                    .insert(reference);
-            }
             self.projection
                 .stage_carrier(candidate.clone())
                 .expect("durably validated carrier must match projection committee");
-            if candidate.header().transactions_commitment() == TransactionsCommitment::default()
-                || input.is_local()
-            {
+            if candidate.header().application_header().is_none() || input.is_local() {
                 self.projection
                     .mark_data_available(reference)
                     .expect("staged control carrier is available");
@@ -1851,11 +1737,11 @@ fn decode_authentication(
     Ok(authentication)
 }
 
-fn journal_transition_events(
+fn validate_journal_transition(
     journal: &WriteAheadJournalV1,
     input: &ShadowInputV1,
     trace: &[ModelTraceEvent],
-) -> Result<Vec<JournalEventV1>, ShadowErrorV1> {
+) -> Result<ValidatedJournalBatchV1, ShadowErrorV1> {
     let mut events = Vec::new();
     let context = journal.snapshot().context();
     match input {
@@ -1981,7 +1867,7 @@ fn journal_transition_events(
             reference: authenticated.reference(),
         });
     }
-    Ok(events)
+    journal.validate_batch(events).map_err(Into::into)
 }
 
 fn encode_batch(
@@ -3029,64 +2915,6 @@ mod tests {
         assert!(!round_is_stale(65, 1));
         assert!(round_is_stale(66, 1));
         assert!(!round_is_stale(66, 2));
-    }
-
-    #[test]
-    fn rejected_far_future_ingress_does_not_poison_the_durable_actor() {
-        let mut network = TestNetwork::new();
-        let author = 1;
-        let previous = |authority: AuthorityIndex| BlockReference {
-            authority,
-            round: 5,
-            digest: BlockDigest::from([0x90 + authority as u8; 32]),
-        };
-        let candidate = CandidateCarrierV1::try_new_with_committee(
-            CarrierHeaderV1Args {
-                author,
-                carrier_round: 6,
-                own_prev: previous(author),
-                weak_parents: [0, 2].into_iter().map(previous).collect(),
-                transactions_commitment: TransactionsCommitment::default(),
-                application_header: None,
-                data_acknowledgments: Vec::new(),
-                phase_batch: Vec::new(),
-                consensus_vertex: None,
-                creation_time_ns: 1,
-            },
-            &network.committee,
-        )
-        .unwrap();
-        let authentication = network
-            .context
-            .authenticate_with_committee(
-                &candidate,
-                &network.committee,
-                CarrierAuthorizerV1::MacVector {
-                    authority: author,
-                    keys: &network.keyrings[author as usize],
-                },
-            )
-            .unwrap();
-
-        assert!(matches!(
-            network.nodes[0].receive_or_retain_from_peer(
-                &candidate.canonical_wire_bytes().unwrap(),
-                &authentication.canonical_wire_bytes(),
-                author,
-            ),
-            Err(ShadowErrorV1::Model(
-                ModelError::FutureCarrierOutsideBuffer {
-                    current: 1,
-                    maximum: 5,
-                    actual: 6,
-                }
-            ))
-        ));
-        assert_eq!(network.nodes[0].wal_counts(), (0, 0));
-        network.nodes[0]
-            .create_local_control_heartbeat(2, true)
-            .expect("a preflight rejection must leave the actor live");
-        assert_eq!(network.nodes[0].wal_counts().0, 1);
     }
 
     #[test]
