@@ -87,19 +87,32 @@ create a second physical round counter.
 - Recovery content must recompute to the exact requested `BlockReference`.
 - Frozen direct-RBC and carrier-DAG formats retain their old domains.
 
-### Explicit testbed ECHO-QC fast path
+### Receiver-local quorum-ECHO latency lower bound
 
 Finite benchmarks may opt into
 `--starfish-rbc-single-dag-echo-qc-fast-path`. In that mode a node delivers an
 exact header as soon as it has quorum locked ECHO statements, while still
-emitting the normal READY statement. Quorum intersection prevents two
-different headers from both obtaining such a certificate, so agreement is
-preserved. The current wire format does not carry the exact ECHO witness set,
-however: Byzantine ECHO senders can selectively reveal their statements so
-one honest node obtains quorum while another never can. Consequently the flag
-does **not** provide the normal RBC totality guarantee and is rejected for
-unbounded/production runs. The default V3 path continues to require quorum
-READY.
+emitting the normal READY statement. There is no portable QC object, witness
+vector, public signature, standalone phase message, or additional fast-path
+communication: each receiver acts only on ordinary DAG blocks that it
+authenticated directly with its recipient-specific MAC.
+
+Quorum intersection and the per-sender slot locks prevent two conflicting
+headers from both obtaining honest receiver-local quorums, so the experiment
+retains integrity and agreement/uniqueness. It does **not** provide normal RBC
+totality: Byzantine ECHO senders can selectively reveal their statements so
+one honest node obtains quorum and delivers while another honest node never
+can. Relaying header bytes does not transfer pairwise-MAC testimony. The flag
+is therefore a finite-testbed latency lower bound, is rejected for unbounded
+or production runs, and must not be described as a Byzantine-totality-safe
+RBC. The default V3 path continues to require quorum READY.
+
+Two attempted ways to make this fast-path evidence portable were removed. A
+public aggregate-signature certificate violated the signature-free design
+constraint. A complete per-recipient MAC vector plus exact witness references
+remained signature-free, but made proposals and certificates grow with the
+committee and overloaded the n=40 single-machine testbed. Neither proof format
+is part of the current V3 wire protocol.
 
 ## Required validation
 
@@ -110,19 +123,22 @@ withholding with bounded recovery, restart replay and deterministic Starfish
 commit order. Matched n=10 and n=40 zero/AWS runs must compare V3 against the
 frozen carrier baseline using identical load and duration.
 
-## Initial n=10 testbed checkpoint
+## Testbed checkpoint
 
-The first matched local runs used 1,000 offered transactions/s for 20 seconds
-with MAC authentication and the fixed 50 ms V3 round limiter:
+Matched local runs used 1,000 offered transactions/s for 20 seconds with MAC
+authentication and the fixed 50 ms V3 round limiter:
 
 | Protocol/profile | Network | p50 E2E | Eventual TPS | Outbound/node |
 | --- | ---: | ---: | ---: | ---: |
 | `starfish-rbc-single-dag` | zero | 498.3 ms | 1,000 | 0.79 MB/s |
 | `starfish-rbc-single-dag` | AWS table | 1,285.7 ms | 1,000 | 0.61 MB/s |
-| V3 + flagged ECHO-QC | AWS table | 961.0 ms | 1,000 | 0.61 MB/s |
-| V3 + flagged ECHO-QC, n=40 | AWS table | 977.35 ms | 1,000 | 3.04 MB/s |
+| V3 + receiver-local quorum-ECHO, n=10 | zero | 400.5 ms | 1,000 | 0.79 MB/s |
+| V3 + receiver-local quorum-ECHO, n=10 | AWS table | 956.0 ms | 1,000 | 0.61 MB/s |
+| V3 + receiver-local quorum-ECHO, n=40 | zero | 390.2 ms | 1,000 | 5.88 MB/s |
+| V3 + receiver-local quorum-ECHO, n=40 | AWS table | 968.2 ms | 1,000 | 3.07 MB/s |
 | `starfish-mac` lower bound | AWS table | 610.0 ms | 1,000 | 0.61 MB/s |
 
 All exact offered transactions committed during the bounded drain. These are
 single-machine research measurements, not production claims. In particular,
-both ECHO-QC rows carry the totality limitation above.
+the receiver-local rows preserve integrity and agreement but carry the
+Byzantine-totality limitation above.

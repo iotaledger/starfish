@@ -94,10 +94,11 @@ pub struct NodeParameters {
     /// Starfish finality proof shape.
     #[serde(default)]
     pub starfish_rbc_dag_vote_qc_fast_path: bool,
-    /// Testbed-only single-DAG RBC path: deliver an exact header after quorum
-    /// ECHO rather than quorum READY. Quorum intersection preserves a unique
-    /// value, but selective Byzantine ECHO withholding can violate totality;
-    /// this must remain an explicit benchmark flag.
+    /// Testbed-only receiver-local single-DAG RBC path: deliver an exact header
+    /// after locally observing quorum ECHO rather than quorum READY. Quorum
+    /// intersection preserves a unique value, but pairwise-MAC testimony is
+    /// not transferable and selective Byzantine withholding can violate
+    /// totality. This must remain an explicit benchmark flag.
     #[serde(default)]
     pub starfish_rbc_single_dag_echo_qc_fast_path: bool,
     /// Benchmark-only profile that writes the framed shadow WAL in order but

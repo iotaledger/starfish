@@ -706,6 +706,16 @@ impl RbcServiceState {
             return;
         }
         let Some(fetch) = self.pending_fetches.get(&block_ref) else {
+            // A quorum may answer the same content request concurrently. Once
+            // one response has pinned the exact header, later identical
+            // responses are benign rather than protocol rejections.
+            if self
+                .kernel
+                .pinned_header(block_ref)
+                .is_ok_and(|header| header.is_some())
+            {
+                return;
+            }
             self.reject(
                 Some(peer),
                 RbcServiceError::UnexpectedHeaderResponse(block_ref),
@@ -1599,6 +1609,9 @@ mod tests {
             ));
         }
 
+        // Another holder may have answered the same request concurrently.
+        // Once the exact header is pinned, that duplicate is idempotent.
+        handle.header_response(1, canonical).unwrap();
         handle.retry_headers().await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(20), events.recv())
