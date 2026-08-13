@@ -48,27 +48,12 @@ acknowledgment references between validators.
 headers. ECHO and READY are recipient-authenticated with pairwise MACs; the author's INIT can use
 Ed25519, ML-DSA-44, ML-DSA-65, or one recipient-specific MAC. It is a correctness-oriented research
 prototype with the limitations documented in its [protocol specification](docs/starfish-rbc-protocol.md).
-**Starfish-RBC-DAG** is a follow-up that pipelines all-carrier RBC through an optimistic carrier DAG
-while keeping certified Starfish consensus and ordering in a separate logical projection. Its
-canonical types, deterministic models, crash journal, and an opt-in persisted network shadow are
-implemented. Run the shadow with `--consensus starfish-rbc --starfish-rbc-dag-shadow`; direct
-Starfish-RBC remains solely authoritative and shadow failures or results cannot affect proposals,
-commits, or output as protocol state. Shadow traffic still shares the validator's network socket and
-bandwidth, so it can perturb timing, and it must be enabled only on a homogeneous new-binary
-committee; there is no rolling-upgrade capability negotiation. The provisional `starfish-rbc-dag`
-selector is not implemented yet. The shadow uses per-transition fsync and a clone-based reference
-reducer, so it is a correctness instrument, not a fair performance baseline, and carries no safety
-or liveness claim. Its WAL can reopen the shadow actor against matching recovered direct headers,
-but this is not full validator crash recovery: authoritative direct Starfish-RBC phase and delivery
-locks are not durable yet, so that baseline remains fail-stop across process restart. The design and
-proof obligations are documented in the
-[protocol design](docs/starfish-rbc-dag-protocol.md).
-For any shadow comparison,
-`starfish_rbc_dag_shadow_comparison_valid` must stay at `1`; a value of `0` means the bounded
-observational path was disabled or shed work and the comparison must be discarded. Healthy live
-production retains a short embedded-RBC pipeline tail, so benchmark validation uses bounded
-unpaired-count and oldest-round-lag gauges rather than requiring instantaneous equality between
-the cumulative direct and shadow delivery counters.
+**Starfish-RBC-DAG** is a codec-and-model-only follow-up that pipelines all-carrier RBC through an
+optimistic carrier DAG while keeping certified Starfish consensus and ordering in a separate
+logical projection. Its canonical types and deterministic executable models are implemented in
+isolation, but there is no network/runtime path and no safety or liveness claim. Its provisional CLI
+name is `starfish-rbc-dag`, but that selector is not implemented yet. The design, current boundary,
+and proof obligations are documented in the [protocol design](docs/starfish-rbc-dag-protocol.md).
 **Starfish-Speed** adds strong-vote optimistic sequencing for lower
 latency when validators share the leader's acknowledgments.
 **Sparse-Starfish-Speed** (work in progress) combines Bluestreak's

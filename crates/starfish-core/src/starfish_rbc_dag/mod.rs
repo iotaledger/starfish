@@ -4,14 +4,12 @@
 //! Canonical carrier types for the experimental embedded-RBC Starfish DAG.
 //!
 //! This module is deliberately independent from the implemented direct-message
-//! `starfish_rbc` protocol. An opt-in persisted shadow adapter consumes these
-//! types without influencing consensus; authoritative integration remains a
-//! later milestone.
+//! `starfish_rbc` protocol. Runtime and consensus integration are later
+//! milestones.
 
 pub mod journal;
 pub mod model;
 pub mod projection;
-pub mod storage;
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -68,11 +66,6 @@ const COMMITTEE_ID_DERIVE_CONTEXT: &str = "STARFISH_RBC_DAG_V1_COMMITTEE_ID";
 const CARRIER_AUTHENTICATION_KIND: u8 = 0;
 const AUTHENTICATION_BASE_SIZE: usize = 123;
 const AUTHENTICATION_MAC_SIZE: usize = AUTHENTICATION_BASE_SIZE + 2;
-
-#[cfg(test)]
-std::thread_local! {
-    static COMMITTEE_ID_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RbcPhaseStatementV1 {
@@ -410,59 +403,19 @@ pub struct CandidateCarrierV1 {
 }
 
 impl CandidateCarrierV1 {
-    /// Convenience constructor for tests and one-shot callers.
-    ///
-    /// Runtime code should build one [`RbcDagCommitteeContextV1`] and call
-    /// [`Self::try_new_with_committee`] so the committee's complete public-key
-    /// transcript is not rehashed for every carrier.
     pub fn try_new(args: CarrierHeaderV1Args, committee: &Committee) -> Result<Self, RbcDagError> {
-        Self::try_from_header_internal(CarrierHeaderV1::from_args(args), committee, None, None)
+        Self::try_from_header(CarrierHeaderV1::from_args(args), committee, None)
     }
 
-    pub fn try_new_with_committee(
-        args: CarrierHeaderV1Args,
-        committee: &RbcDagCommitteeContextV1,
-    ) -> Result<Self, RbcDagError> {
-        Self::try_from_header_internal(
-            CarrierHeaderV1::from_args(args),
-            committee.committee(),
-            Some(committee.committee_id()),
-            None,
-        )
-    }
-
-    /// Convenience constructor for tests and one-shot callers. Runtime code
-    /// should prefer [`Self::try_from_header_with_committee`].
     pub fn try_from_header(
-        header: CarrierHeaderV1,
-        committee: &Committee,
-        expected_reference: Option<BlockReference>,
-    ) -> Result<Self, RbcDagError> {
-        Self::try_from_header_internal(header, committee, None, expected_reference)
-    }
-
-    pub fn try_from_header_with_committee(
-        header: CarrierHeaderV1,
-        committee: &RbcDagCommitteeContextV1,
-        expected_reference: Option<BlockReference>,
-    ) -> Result<Self, RbcDagError> {
-        Self::try_from_header_internal(
-            header,
-            committee.committee(),
-            Some(committee.committee_id()),
-            expected_reference,
-        )
-    }
-
-    fn try_from_header_internal(
         mut header: CarrierHeaderV1,
         committee: &Committee,
-        cached_committee_id: Option<RbcDagCommitteeId>,
         expected_reference: Option<BlockReference>,
     ) -> Result<Self, RbcDagError> {
         normalize_acknowledgments(&mut header)?;
-        validate_outer_header(&header, committee, cached_committee_id.is_some())?;
+        validate_outer_header(&header, committee)?;
         let reference = carrier_reference(&header)?;
+        let committee_id = RbcDagCommitteeId::derive(committee)?;
         if let Some(expected) = expected_reference {
             if expected != reference {
                 return Err(RbcDagError::ReferenceMismatch {
@@ -471,10 +424,6 @@ impl CandidateCarrierV1 {
                 });
             }
         }
-        let committee_id = match cached_committee_id {
-            Some(committee_id) => committee_id,
-            None => RbcDagCommitteeId::derive(committee)?,
-        };
         Ok(Self {
             header: Arc::new(header),
             reference,
@@ -488,26 +437,7 @@ impl CandidateCarrierV1 {
         expected_reference: Option<BlockReference>,
     ) -> Result<Self, RbcDagError> {
         let header = decode_header(bytes, AckEncoding::Expanded)?;
-        let candidate =
-            Self::try_from_header_internal(header, committee, None, expected_reference)?;
-        if candidate.canonical_content_bytes()?.as_slice() != bytes {
-            return Err(RbcDagError::NonCanonicalAcknowledgments);
-        }
-        Ok(candidate)
-    }
-
-    pub fn decode_content_with_committee(
-        bytes: &[u8],
-        committee: &RbcDagCommitteeContextV1,
-        expected_reference: Option<BlockReference>,
-    ) -> Result<Self, RbcDagError> {
-        let header = decode_header(bytes, AckEncoding::Expanded)?;
-        let candidate = Self::try_from_header_internal(
-            header,
-            committee.committee(),
-            Some(committee.committee_id()),
-            expected_reference,
-        )?;
+        let candidate = Self::try_from_header(header, committee, expected_reference)?;
         if candidate.canonical_content_bytes()?.as_slice() != bytes {
             return Err(RbcDagError::NonCanonicalAcknowledgments);
         }
@@ -520,21 +450,7 @@ impl CandidateCarrierV1 {
         expected_reference: Option<BlockReference>,
     ) -> Result<Self, RbcDagError> {
         let header = decode_header(bytes, AckEncoding::Compressed)?;
-        Self::try_from_header_internal(header, committee, None, expected_reference)
-    }
-
-    pub fn decode_wire_with_committee(
-        bytes: &[u8],
-        committee: &RbcDagCommitteeContextV1,
-        expected_reference: Option<BlockReference>,
-    ) -> Result<Self, RbcDagError> {
-        let header = decode_header(bytes, AckEncoding::Compressed)?;
-        Self::try_from_header_internal(
-            header,
-            committee.committee(),
-            Some(committee.committee_id()),
-            expected_reference,
-        )
+        Self::try_from_header(header, committee, expected_reference)
     }
 
     pub fn header(&self) -> &CarrierHeaderV1 {
@@ -563,24 +479,6 @@ impl CandidateCarrierV1 {
     ) -> Result<Option<&ConsensusVertexV1>, RbcDagProjectionError> {
         let committee_id = RbcDagCommitteeId::derive(committee)
             .map_err(|_| RbcDagProjectionError::CommitteeMismatch)?;
-        self.validate_consensus_vertex_with_validated_committee(committee, committee_id)
-    }
-
-    pub fn validate_consensus_vertex_with_committee(
-        &self,
-        committee: &RbcDagCommitteeContextV1,
-    ) -> Result<Option<&ConsensusVertexV1>, RbcDagProjectionError> {
-        self.validate_consensus_vertex_with_validated_committee(
-            committee.committee(),
-            committee.committee_id(),
-        )
-    }
-
-    fn validate_consensus_vertex_with_validated_committee(
-        &self,
-        committee: &Committee,
-        committee_id: RbcDagCommitteeId,
-    ) -> Result<Option<&ConsensusVertexV1>, RbcDagProjectionError> {
         if committee_id != self.committee_id {
             return Err(RbcDagProjectionError::CommitteeMismatch);
         }
@@ -689,24 +587,8 @@ impl CarrierAuthenticationV1 {
         bytes
     }
 
-    /// Convenience decoder for one-shot callers. Runtime code should prefer
-    /// [`Self::decode_wire_with_committee`].
     pub fn decode_wire(bytes: &[u8], committee: &Committee) -> Result<Self, RbcDagError> {
         validate_committee(committee)?;
-        Self::decode_wire_with_validated_committee(bytes, committee)
-    }
-
-    pub fn decode_wire_with_committee(
-        bytes: &[u8],
-        committee: &RbcDagCommitteeContextV1,
-    ) -> Result<Self, RbcDagError> {
-        Self::decode_wire_with_validated_committee(bytes, committee.committee())
-    }
-
-    fn decode_wire_with_validated_committee(
-        bytes: &[u8],
-        committee: &Committee,
-    ) -> Result<Self, RbcDagError> {
         let mut decoder = Decoder::new(bytes);
         decoder.expect_marker(CONTENT_FORMAT_FIELD)?;
         let version = decoder.read_u8()?;
@@ -805,8 +687,6 @@ pub struct RbcDagCommitteeId([u8; COMMITTEE_ID_SIZE]);
 impl RbcDagCommitteeId {
     pub fn derive(committee: &Committee) -> Result<Self, RbcDagError> {
         validate_committee(committee)?;
-        #[cfg(test)]
-        COMMITTEE_ID_DERIVATIONS.with(|count| count.set(count.get().saturating_add(1)));
         let committee_size = u16::try_from(committee.len())
             .map_err(|_| RbcDagError::InvalidCommittee("committee too large"))?;
         let info_length = u16::try_from(committee.info_length())
@@ -856,51 +736,6 @@ impl fmt::Debug for RbcDagCommitteeId {
     }
 }
 
-/// Validated, reusable committee capability for the Starfish-RBC-DAG hot
-/// path.
-///
-/// Construction validates the committee and hashes its complete key
-/// transcript exactly once. Candidate decoding, authentication, and
-/// projection APIs that accept this capability perform only constant-time ID
-/// comparisons before using the retained committee.
-#[derive(Clone)]
-pub struct RbcDagCommitteeContextV1 {
-    committee: Arc<Committee>,
-    committee_id: RbcDagCommitteeId,
-}
-
-impl RbcDagCommitteeContextV1 {
-    pub fn new(committee: Arc<Committee>) -> Result<Self, RbcDagError> {
-        let committee_id = RbcDagCommitteeId::derive(&committee)?;
-        Ok(Self {
-            committee,
-            committee_id,
-        })
-    }
-
-    pub fn committee(&self) -> &Committee {
-        &self.committee
-    }
-
-    pub fn committee_arc(&self) -> Arc<Committee> {
-        Arc::clone(&self.committee)
-    }
-
-    pub fn committee_id(&self) -> RbcDagCommitteeId {
-        self.committee_id
-    }
-}
-
-impl fmt::Debug for RbcDagCommitteeContextV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RbcDagCommitteeContextV1")
-            .field("committee_id", &self.committee_id)
-            .field("committee_size", &self.committee.len())
-            .finish()
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RbcDagContextV1 {
     protocol_instance: RbcDagProtocolInstanceId,
@@ -909,8 +744,6 @@ pub struct RbcDagContextV1 {
 }
 
 impl RbcDagContextV1 {
-    /// Convenience constructor for one-shot callers. Runtime code should
-    /// prefer [`Self::new_with_committee`].
     pub fn new(
         protocol_instance: RbcDagProtocolInstanceId,
         committee: &Committee,
@@ -921,18 +754,6 @@ impl RbcDagContextV1 {
             committee_id: RbcDagCommitteeId::derive(committee)?,
             authentication_scheme,
         })
-    }
-
-    pub fn new_with_committee(
-        protocol_instance: RbcDagProtocolInstanceId,
-        committee: &RbcDagCommitteeContextV1,
-        authentication_scheme: BlockAuthenticationScheme,
-    ) -> Self {
-        Self {
-            protocol_instance,
-            committee_id: committee.committee_id(),
-            authentication_scheme,
-        }
     }
 
     pub fn protocol_instance(&self) -> RbcDagProtocolInstanceId {
@@ -947,40 +768,13 @@ impl RbcDagContextV1 {
         self.authentication_scheme
     }
 
-    /// Convenience authorizer for one-shot callers. Runtime code should
-    /// prefer [`Self::authenticate_with_committee`].
     pub fn authenticate(
         &self,
         candidate: &CandidateCarrierV1,
         committee: &Committee,
         authorizer: CarrierAuthorizerV1<'_>,
     ) -> Result<CarrierAuthenticationV1, RbcDagError> {
-        let committee_id = RbcDagCommitteeId::derive(committee)?;
-        self.authenticate_with_validated_committee(candidate, committee, committee_id, authorizer)
-    }
-
-    pub fn authenticate_with_committee(
-        &self,
-        candidate: &CandidateCarrierV1,
-        committee: &RbcDagCommitteeContextV1,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<CarrierAuthenticationV1, RbcDagError> {
-        self.authenticate_with_validated_committee(
-            candidate,
-            committee.committee(),
-            committee.committee_id(),
-            authorizer,
-        )
-    }
-
-    fn authenticate_with_validated_committee(
-        &self,
-        candidate: &CandidateCarrierV1,
-        committee: &Committee,
-        committee_id: RbcDagCommitteeId,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<CarrierAuthenticationV1, RbcDagError> {
-        self.ensure_committee_id(committee_id)?;
+        self.ensure_committee(committee)?;
         self.ensure_candidate(candidate)?;
         if authorizer.scheme() != self.authentication_scheme {
             return Err(RbcDagError::AuthenticationSchemeMismatch);
@@ -1056,9 +850,6 @@ impl RbcDagContextV1 {
     /// The returned capability has private fields so persistence and network
     /// adapters cannot substitute a freely constructed, same-scheme sidecar
     /// for the one produced by the configured authorizer.
-    ///
-    /// Convenience local authorizer for one-shot callers. Runtime code should
-    /// prefer [`Self::authenticate_local_with_committee`].
     pub fn authenticate_local(
         &self,
         candidate: CandidateCarrierV1,
@@ -1073,175 +864,6 @@ impl RbcDagContextV1 {
         })
     }
 
-    pub fn authenticate_local_with_committee(
-        &self,
-        candidate: CandidateCarrierV1,
-        committee: &RbcDagCommitteeContextV1,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<LocallyAuthenticatedCarrierV1, RbcDagError> {
-        let authentication = self.authenticate_with_committee(&candidate, committee, authorizer)?;
-        Ok(LocallyAuthenticatedCarrierV1 {
-            candidate,
-            authentication,
-            context: *self,
-        })
-    }
-
-    /// Recover the opaque local-authentication capability from an exact
-    /// persisted sidecar without regenerating it.
-    ///
-    /// Signature modes verify the persisted public proof and the configured
-    /// local signer's public key. MAC mode verifies every ordered vector entry
-    /// with the configured outbound keyring; checking only this node's entry
-    /// would not prove that the locally exposed full vector was generated
-    /// correctly.
-    ///
-    /// Convenience recovery verifier for one-shot callers. Runtime code
-    /// should prefer [`Self::verify_local_authentication_with_committee`].
-    pub fn verify_local_authentication(
-        &self,
-        candidate: CandidateCarrierV1,
-        authentication: CarrierAuthenticationV1,
-        committee: &Committee,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<LocallyAuthenticatedCarrierV1, RbcDagError> {
-        let committee_id = RbcDagCommitteeId::derive(committee)?;
-        self.verify_local_authentication_with_validated_committee(
-            candidate,
-            authentication,
-            committee,
-            committee_id,
-            authorizer,
-        )
-    }
-
-    pub fn verify_local_authentication_with_committee(
-        &self,
-        candidate: CandidateCarrierV1,
-        authentication: CarrierAuthenticationV1,
-        committee: &RbcDagCommitteeContextV1,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<LocallyAuthenticatedCarrierV1, RbcDagError> {
-        self.verify_local_authentication_with_validated_committee(
-            candidate,
-            authentication,
-            committee.committee(),
-            committee.committee_id(),
-            authorizer,
-        )
-    }
-
-    fn verify_local_authentication_with_validated_committee(
-        &self,
-        candidate: CandidateCarrierV1,
-        authentication: CarrierAuthenticationV1,
-        committee: &Committee,
-        committee_id: RbcDagCommitteeId,
-        authorizer: CarrierAuthorizerV1<'_>,
-    ) -> Result<LocallyAuthenticatedCarrierV1, RbcDagError> {
-        self.ensure_committee_id(committee_id)?;
-        self.ensure_candidate(&candidate)?;
-        if authentication.scheme() != self.authentication_scheme
-            || authorizer.scheme() != self.authentication_scheme
-        {
-            return Err(RbcDagError::AuthenticationSchemeMismatch);
-        }
-        let reference = candidate.reference;
-        if authorizer.authority() != reference.authority {
-            return Err(RbcDagError::AuthorizerAuthorityMismatch {
-                expected: reference.authority,
-                actual: authorizer.authority(),
-            });
-        }
-
-        match (authorizer, &authentication) {
-            (
-                CarrierAuthorizerV1::Ed25519 { signer, .. },
-                CarrierAuthenticationV1::Ed25519(signature),
-            ) => {
-                let expected = committee
-                    .get_public_key(reference.authority)
-                    .ok_or(RbcDagError::UnknownAuthority(reference.authority))?;
-                if &signer.public_key() != expected {
-                    return Err(RbcDagError::AuthorizerKeyMismatch);
-                }
-                expected
-                    .verify_digest_signature(
-                        &self.public_authentication_digest(reference),
-                        signature,
-                    )
-                    .map_err(|_| RbcDagError::InvalidAuthentication)?;
-            }
-            (
-                CarrierAuthorizerV1::MlDsa44 { signer, .. },
-                CarrierAuthenticationV1::MlDsa44(signature),
-            ) => {
-                let expected = committee
-                    .get_ml_dsa_44_public_key(reference.authority)
-                    .ok_or(RbcDagError::UnknownAuthority(reference.authority))?;
-                if &signer.public_key() != expected {
-                    return Err(RbcDagError::AuthorizerKeyMismatch);
-                }
-                let digest = BlockDigest::from(self.public_authentication_digest(reference));
-                expected
-                    .verify_digest_signature(&digest, signature)
-                    .map_err(|_| RbcDagError::InvalidAuthentication)?;
-            }
-            (
-                CarrierAuthorizerV1::MlDsa65 { signer, .. },
-                CarrierAuthenticationV1::MlDsa65(signature),
-            ) => {
-                let expected = committee
-                    .get_ml_dsa_65_public_key(reference.authority)
-                    .ok_or(RbcDagError::UnknownAuthority(reference.authority))?;
-                if &signer.public_key() != expected {
-                    return Err(RbcDagError::AuthorizerKeyMismatch);
-                }
-                let digest = BlockDigest::from(self.public_authentication_digest(reference));
-                expected
-                    .verify_digest_signature(&digest, signature)
-                    .map_err(|_| RbcDagError::InvalidAuthentication)?;
-            }
-            (
-                CarrierAuthorizerV1::MacVector { keys, .. },
-                CarrierAuthenticationV1::MacVector(vector),
-            ) => {
-                let expected_length = committee.len() * MAC_TAG_SIZE;
-                if vector.as_bytes().len() != expected_length {
-                    return Err(RbcDagError::InvalidMacVectorLength {
-                        expected: expected_length,
-                        actual: vector.as_bytes().len(),
-                    });
-                }
-                if keys.len() != committee.len() {
-                    return Err(RbcDagError::InvalidKeyringLength {
-                        expected: committee.len(),
-                        actual: keys.len(),
-                    });
-                }
-                for recipient in committee.authorities() {
-                    let expected = keys[recipient as usize]
-                        .compute_rbc_tag(&self.mac_authentication_statement(reference, recipient));
-                    let actual = vector
-                        .tag(recipient)
-                        .ok_or(RbcDagError::InvalidAuthentication)?;
-                    if actual != expected {
-                        return Err(RbcDagError::InvalidAuthentication);
-                    }
-                }
-            }
-            _ => return Err(RbcDagError::AuthenticationSchemeMismatch),
-        }
-
-        Ok(LocallyAuthenticatedCarrierV1 {
-            candidate,
-            authentication,
-            context: *self,
-        })
-    }
-
-    /// Convenience inbound verifier for one-shot callers. Runtime code should
-    /// prefer [`Self::verify_authentication_with_committee`].
     pub fn verify_authentication(
         &self,
         candidate: CandidateCarrierV1,
@@ -1250,45 +872,7 @@ impl RbcDagContextV1 {
         committee: &Committee,
         mac_keys: &[MacKey],
     ) -> Result<AuthenticatedCarrierV1, RbcDagError> {
-        let committee_id = RbcDagCommitteeId::derive(committee)?;
-        self.verify_authentication_with_validated_committee(
-            candidate,
-            authentication,
-            receiver,
-            committee,
-            committee_id,
-            mac_keys,
-        )
-    }
-
-    pub fn verify_authentication_with_committee(
-        &self,
-        candidate: CandidateCarrierV1,
-        authentication: CarrierAuthenticationV1,
-        receiver: AuthorityIndex,
-        committee: &RbcDagCommitteeContextV1,
-        mac_keys: &[MacKey],
-    ) -> Result<AuthenticatedCarrierV1, RbcDagError> {
-        self.verify_authentication_with_validated_committee(
-            candidate,
-            authentication,
-            receiver,
-            committee.committee(),
-            committee.committee_id(),
-            mac_keys,
-        )
-    }
-
-    fn verify_authentication_with_validated_committee(
-        &self,
-        candidate: CandidateCarrierV1,
-        authentication: CarrierAuthenticationV1,
-        receiver: AuthorityIndex,
-        committee: &Committee,
-        committee_id: RbcDagCommitteeId,
-        mac_keys: &[MacKey],
-    ) -> Result<AuthenticatedCarrierV1, RbcDagError> {
-        self.ensure_committee_id(committee_id)?;
+        self.ensure_committee(committee)?;
         self.ensure_candidate(&candidate)?;
         if !committee.known_authority(receiver) {
             return Err(RbcDagError::UnknownAuthority(receiver));
@@ -1385,7 +969,8 @@ impl RbcDagContextV1 {
         blake3::hash(&self.public_authentication_statement(reference)).into()
     }
 
-    fn ensure_committee_id(&self, actual: RbcDagCommitteeId) -> Result<(), RbcDagError> {
+    fn ensure_committee(&self, committee: &Committee) -> Result<(), RbcDagError> {
+        let actual = RbcDagCommitteeId::derive(committee)?;
         if actual != self.committee_id {
             return Err(RbcDagError::CommitteeIdMismatch);
         }
@@ -1584,11 +1169,8 @@ impl Error for RbcDagError {}
 fn validate_outer_header(
     header: &CarrierHeaderV1,
     committee: &Committee,
-    committee_is_validated: bool,
 ) -> Result<(), RbcDagError> {
-    if !committee_is_validated {
-        validate_committee(committee)?;
-    }
+    validate_committee(committee)?;
     if header.carrier_round == 0 {
         return Err(RbcDagError::GenesisCarrier);
     }
@@ -2893,361 +2475,6 @@ mod tests {
         assert!(matches!(
             candidate.validate_consensus_vertex(&other_committee),
             Err(RbcDagProjectionError::CommitteeMismatch)
-        ));
-    }
-
-    #[test]
-    fn cached_committee_context_hashes_the_key_transcript_once_across_hot_paths() {
-        COMMITTEE_ID_DERIVATIONS.with(|count| count.set(0));
-
-        let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(Arc::clone(&committee)).unwrap();
-        assert_eq!(COMMITTEE_ID_DERIVATIONS.with(std::cell::Cell::get), 1);
-
-        let candidate =
-            CandidateCarrierV1::try_new_with_committee(full_args(&committee), &committee_context)
-                .unwrap();
-        let content = candidate.canonical_content_bytes().unwrap();
-        let wire = candidate.canonical_wire_bytes().unwrap();
-        let decoded_content = CandidateCarrierV1::decode_content_with_committee(
-            &content,
-            &committee_context,
-            Some(candidate.reference()),
-        )
-        .unwrap();
-        let decoded_wire = CandidateCarrierV1::decode_wire_with_committee(
-            &wire,
-            &committee_context,
-            Some(candidate.reference()),
-        )
-        .unwrap();
-        assert_eq!(decoded_content, candidate);
-        assert_eq!(decoded_wire, candidate);
-
-        let context = RbcDagContextV1::new_with_committee(
-            RbcDagProtocolInstanceId::new([0xA5; 32]).unwrap(),
-            &committee_context,
-            BlockAuthenticationScheme::MacVector,
-        );
-        let keyrings = mac_keyrings_for_test(committee.len());
-        let authentication = context
-            .authenticate_with_committee(
-                &candidate,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            )
-            .unwrap();
-        let authentication_wire = authentication.canonical_wire_bytes();
-        let decoded_authentication = CarrierAuthenticationV1::decode_wire_with_committee(
-            &authentication_wire,
-            &committee_context,
-        )
-        .unwrap();
-        context
-            .verify_authentication_with_committee(
-                candidate.clone(),
-                decoded_authentication,
-                1,
-                &committee_context,
-                &keyrings[1],
-            )
-            .unwrap();
-        context
-            .verify_local_authentication_with_committee(
-                candidate.clone(),
-                authentication,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            )
-            .unwrap();
-        context
-            .authenticate_local_with_committee(
-                candidate.clone(),
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            )
-            .unwrap();
-        candidate
-            .validate_consensus_vertex_with_committee(&committee_context)
-            .unwrap();
-
-        let mut projection =
-            projection::CertifiedProjectionModel::from_committee_context(committee_context.clone());
-        projection.stage_carrier(candidate.clone()).unwrap();
-        assert!(matches!(
-            projection.try_project(candidate.reference()),
-            Err(projection::CertifiedProjectionError::CarrierNotDelivered(reference))
-                if reference == candidate.reference()
-        ));
-
-        assert_eq!(COMMITTEE_ID_DERIVATIONS.with(std::cell::Cell::get), 1);
-    }
-
-    #[test]
-    fn cached_committee_context_rejects_cross_committee_hot_path_use() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let other_committee = Committee::new_test(vec![1, 1, 1, 2]);
-        let committee_context = RbcDagCommitteeContextV1::new(Arc::clone(&committee)).unwrap();
-        let other_context = RbcDagCommitteeContextV1::new(Arc::clone(&other_committee)).unwrap();
-        let candidate =
-            CandidateCarrierV1::try_new_with_committee(full_args(&committee), &committee_context)
-                .unwrap();
-        let protocol_context = RbcDagContextV1::new_with_committee(
-            RbcDagProtocolInstanceId::new([0xB7; 32]).unwrap(),
-            &committee_context,
-            BlockAuthenticationScheme::MacVector,
-        );
-        let keyrings = mac_keyrings_for_test(committee.len());
-        let authentication = protocol_context
-            .authenticate_with_committee(
-                &candidate,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            )
-            .unwrap();
-
-        assert!(matches!(
-            protocol_context.authenticate_with_committee(
-                &candidate,
-                &other_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            ),
-            Err(RbcDagError::CommitteeIdMismatch)
-        ));
-        assert!(matches!(
-            protocol_context.verify_authentication_with_committee(
-                candidate.clone(),
-                authentication.clone(),
-                1,
-                &other_context,
-                &keyrings[1],
-            ),
-            Err(RbcDagError::CommitteeIdMismatch)
-        ));
-        assert!(matches!(
-            protocol_context.verify_local_authentication_with_committee(
-                candidate.clone(),
-                authentication,
-                &other_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: candidate.header().author(),
-                    keys: &keyrings[candidate.header().author() as usize],
-                },
-            ),
-            Err(RbcDagError::CommitteeIdMismatch)
-        ));
-        assert!(matches!(
-            candidate.validate_consensus_vertex_with_committee(&other_context),
-            Err(RbcDagProjectionError::CommitteeMismatch)
-        ));
-
-        let mut projection =
-            projection::CertifiedProjectionModel::from_committee_context(other_context);
-        assert_eq!(
-            projection.stage_carrier(candidate),
-            Err(projection::CertifiedProjectionError::CommitteeMismatch)
-        );
-    }
-
-    #[test]
-    fn persisted_ml_dsa_sidecar_recovers_exact_local_capability_and_rejects_tampering() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(Arc::clone(&committee)).unwrap();
-        let candidate =
-            CandidateCarrierV1::try_new_with_committee(full_args(&committee), &committee_context)
-                .unwrap();
-        let instance = RbcDagProtocolInstanceId::new([0xC8; 32]).unwrap();
-        let context = RbcDagContextV1::new_with_committee(
-            instance,
-            &committee_context,
-            BlockAuthenticationScheme::MlDsa65,
-        );
-        let signer = dummy_ml_dsa_65_signer();
-        let authentication = context
-            .authenticate_with_committee(
-                &candidate,
-                &committee_context,
-                CarrierAuthorizerV1::MlDsa65 {
-                    authority: candidate.header().author(),
-                    signer: &signer,
-                },
-            )
-            .unwrap();
-        let persisted_wire = authentication.canonical_wire_bytes();
-        let persisted_authentication = CarrierAuthenticationV1::decode_wire_with_committee(
-            &persisted_wire,
-            &committee_context,
-        )
-        .unwrap();
-        let recovered = context
-            .verify_local_authentication_with_committee(
-                candidate.clone(),
-                persisted_authentication,
-                &committee_context,
-                CarrierAuthorizerV1::MlDsa65 {
-                    authority: candidate.header().author(),
-                    signer: &signer,
-                },
-            )
-            .unwrap();
-        assert_eq!(recovered.authentication(), &authentication);
-        assert_eq!(
-            recovered.authentication().canonical_wire_bytes(),
-            persisted_wire
-        );
-
-        let CarrierAuthenticationV1::MlDsa65(signature) = &authentication else {
-            unreachable!()
-        };
-        let mut tampered_bytes = [0; ML_DSA_65_SIGNATURE_SIZE];
-        tampered_bytes.copy_from_slice(signature.as_ref());
-        tampered_bytes[0] ^= 1;
-        let tampered =
-            CarrierAuthenticationV1::MlDsa65(MlDsa65SignatureBytes::from_bytes(tampered_bytes));
-        assert!(matches!(
-            context.verify_local_authentication_with_committee(
-                candidate.clone(),
-                tampered,
-                &committee_context,
-                CarrierAuthorizerV1::MlDsa65 {
-                    authority: candidate.header().author(),
-                    signer: &signer,
-                },
-            ),
-            Err(RbcDagError::InvalidAuthentication)
-        ));
-        assert!(matches!(
-            context.verify_local_authentication_with_committee(
-                candidate.clone(),
-                authentication.clone(),
-                &committee_context,
-                CarrierAuthorizerV1::MlDsa65 {
-                    authority: 2,
-                    signer: &signer,
-                },
-            ),
-            Err(RbcDagError::AuthorizerAuthorityMismatch {
-                expected: 3,
-                actual: 2,
-            })
-        ));
-
-        let wrong_context = RbcDagContextV1::new_with_committee(
-            RbcDagProtocolInstanceId::new([0xC9; 32]).unwrap(),
-            &committee_context,
-            BlockAuthenticationScheme::MlDsa65,
-        );
-        assert!(matches!(
-            wrong_context.verify_local_authentication_with_committee(
-                candidate,
-                authentication,
-                &committee_context,
-                CarrierAuthorizerV1::MlDsa65 {
-                    authority: 3,
-                    signer: &signer,
-                },
-            ),
-            Err(RbcDagError::InvalidAuthentication)
-        ));
-    }
-
-    #[test]
-    fn persisted_local_mac_recovery_verifies_every_vector_entry_and_length() {
-        let committee = Committee::new_test(vec![1; 4]);
-        let committee_context = RbcDagCommitteeContextV1::new(Arc::clone(&committee)).unwrap();
-        let candidate =
-            CandidateCarrierV1::try_new_with_committee(full_args(&committee), &committee_context)
-                .unwrap();
-        let context = RbcDagContextV1::new_with_committee(
-            RbcDagProtocolInstanceId::new([0xD9; 32]).unwrap(),
-            &committee_context,
-            BlockAuthenticationScheme::MacVector,
-        );
-        let keyrings = mac_keyrings_for_test(committee.len());
-        let author = candidate.header().author() as usize;
-        let authentication = context
-            .authenticate_with_committee(
-                &candidate,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: author as AuthorityIndex,
-                    keys: &keyrings[author],
-                },
-            )
-            .unwrap();
-        context
-            .verify_local_authentication_with_committee(
-                candidate.clone(),
-                authentication.clone(),
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: author as AuthorityIndex,
-                    keys: &keyrings[author],
-                },
-            )
-            .unwrap();
-
-        let CarrierAuthenticationV1::MacVector(vector) = &authentication else {
-            unreachable!()
-        };
-        let mut poisoned_bytes = vector.as_bytes().to_vec();
-        poisoned_bytes[2 * MAC_TAG_SIZE] ^= 1;
-        let poisoned =
-            CarrierAuthenticationV1::MacVector(FlatMacVector::from_bytes(poisoned_bytes).unwrap());
-        context
-            .verify_authentication_with_committee(
-                candidate.clone(),
-                poisoned.clone(),
-                1,
-                &committee_context,
-                &keyrings[1],
-            )
-            .expect("a different recipient's entry remains valid");
-        assert!(matches!(
-            context.verify_local_authentication_with_committee(
-                candidate.clone(),
-                poisoned,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: author as AuthorityIndex,
-                    keys: &keyrings[author],
-                },
-            ),
-            Err(RbcDagError::InvalidAuthentication)
-        ));
-
-        let short = CarrierAuthenticationV1::MacVector(
-            FlatMacVector::from_bytes(
-                vector.as_bytes()[..vector.as_bytes().len() - MAC_TAG_SIZE].to_vec(),
-            )
-            .unwrap(),
-        );
-        assert!(matches!(
-            context.verify_local_authentication_with_committee(
-                candidate,
-                short,
-                &committee_context,
-                CarrierAuthorizerV1::MacVector {
-                    authority: author as AuthorityIndex,
-                    keys: &keyrings[author],
-                },
-            ),
-            Err(RbcDagError::InvalidMacVectorLength { .. })
         ));
     }
 

@@ -24,7 +24,6 @@ use crate::{
     runtime::timestamp_utc,
     sailfish_service::SailfishServiceMessage,
     starfish_rbc::{PinnedRbcHeader, RbcCanonicalHeader},
-    starfish_rbc_dag_shadow_service::StarfishRbcDagShadowServiceHandleV1,
     starfish_rbc_service::{RbcLocalHeader, RbcServiceHandle},
     types::{
         AuthorityIndex, BlockReference, PartialSig, PartialSigKind, ProvableShard,
@@ -80,7 +79,6 @@ pub struct Syncer<H: BlockHandler, S: SyncerSignals, C: CommitObserver> {
     bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
     sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
     starfish_rbc_service: Option<RbcServiceHandle>,
-    starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
 }
 
 pub trait SyncerSignals: Send + Sync {
@@ -113,7 +111,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
         bls_tx: Option<mpsc::UnboundedSender<BlsServiceMessage>>,
         sailfish_tx: Option<mpsc::UnboundedSender<SailfishServiceMessage>>,
         starfish_rbc_service: Option<RbcServiceHandle>,
-        starfish_rbc_dag_shadow_service: Option<StarfishRbcDagShadowServiceHandleV1>,
     ) -> Self {
         let committee_size = core.committee().len();
         let own_stake = core
@@ -135,7 +132,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
             bls_tx,
             sailfish_tx,
             starfish_rbc_service,
-            starfish_rbc_dag_shadow_service,
         }
     }
 
@@ -401,18 +397,6 @@ impl<H: BlockHandler, S: SyncerSignals, C: CommitObserver> Syncer<H, S, C> {
                     *block.reference(),
                     "RBC service selected a different local header reference"
                 );
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow.local_header(&canonical) {
-                        self.metrics.starfish_rbc_dag_shadow_comparison_valid.set(0);
-                        self.metrics
-                            .starfish_rbc_dag_shadow_inputs_total
-                            .with_label_values(&["local", "dropped"])
-                            .inc();
-                        tracing::warn!(
-                            "Failed to enqueue non-authoritative RBC-DAG shadow carrier; comparison is invalid: {error}"
-                        );
-                    }
-                }
             }
             if let Some(started_at) = self.proposal_wait_started_at.take() {
                 self.metrics
@@ -692,16 +676,7 @@ mod tests {
         assert_eq!(core.dag_state().proposal_round(), 3);
         assert_eq!(core.last_proposed(), 0);
 
-        let mut syncer = Syncer::new(
-            core,
-            false,
-            NoopCommitObserver,
-            metrics,
-            None,
-            None,
-            None,
-            None,
-        );
+        let mut syncer = Syncer::new(core, false, NoopCommitObserver, metrics, None, None, None);
         syncer.connected_authorities.extend([1, 2, 3]);
         syncer.subscribed_by_authorities.extend([1, 2, 3]);
         syncer.recompute_subscriber_stake();
@@ -796,7 +771,6 @@ mod tests {
             TestSignals::default(),
             NoopCommitObserver,
             metrics,
-            None,
             None,
             None,
             None,

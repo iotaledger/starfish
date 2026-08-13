@@ -22,7 +22,7 @@ use crate::{
 
 use super::{
     CandidateCarrierV1, ConsensusVertexReference, ConsensusVertexV1, LeaderChoiceV1,
-    RbcDagCommitteeContextV1, RbcDagProjectionError, carrier_genesis_reference,
+    RbcDagCommitteeId, RbcDagProjectionError, carrier_genesis_reference,
 };
 
 /// An indexed exact carrier-prefix frontier. `None` is the authority's virtual
@@ -135,7 +135,7 @@ struct ProjectedVertex {
 #[derive(Clone)]
 pub struct CertifiedProjectionModel {
     committee: Arc<Committee>,
-    committee_context: RbcDagCommitteeContextV1,
+    committee_id: RbcDagCommitteeId,
     carriers: BTreeMap<BlockReference, CarrierState>,
     delivered_slots: BTreeMap<(AuthorityIndex, RoundNumber), BlockReference>,
     closed_prefixes: Vec<Vec<BlockReference>>,
@@ -146,21 +146,13 @@ pub struct CertifiedProjectionModel {
 }
 
 impl CertifiedProjectionModel {
-    /// Convenience constructor that validates and hashes the committee once.
-    /// Runtime code that already owns the reusable capability should call
-    /// [`Self::from_committee_context`].
     pub fn new(committee: Arc<Committee>) -> Result<Self, CertifiedProjectionError> {
-        let committee = RbcDagCommitteeContextV1::new(committee)
+        let committee_id = RbcDagCommitteeId::derive(&committee)
             .map_err(|_| CertifiedProjectionError::CommitteeMismatch)?;
-        Ok(Self::from_committee_context(committee))
-    }
-
-    pub fn from_committee_context(committee: RbcDagCommitteeContextV1) -> Self {
-        let committee_size = committee.committee().len();
-        let committee_arc = committee.committee_arc();
-        Self {
-            committee: committee_arc,
-            committee_context: committee,
+        let committee_size = committee.len();
+        Ok(Self {
+            committee,
+            committee_id,
             carriers: BTreeMap::new(),
             delivered_slots: BTreeMap::new(),
             closed_prefixes: vec![Vec::new(); committee_size],
@@ -168,7 +160,7 @@ impl CertifiedProjectionModel {
             consensus_slots: BTreeMap::new(),
             committed_frontier: vec![None; committee_size],
             committed_anchors: BTreeSet::new(),
-        }
+        })
     }
 
     /// Retain a canonical carrier independently of optional-vertex validity.
@@ -176,7 +168,7 @@ impl CertifiedProjectionModel {
         &mut self,
         candidate: CandidateCarrierV1,
     ) -> Result<(), CertifiedProjectionError> {
-        if candidate.committee_id() != self.committee_context.committee_id() {
+        if candidate.committee_id() != self.committee_id {
             return Err(CertifiedProjectionError::CommitteeMismatch);
         }
         self.carriers
@@ -301,7 +293,7 @@ impl CertifiedProjectionModel {
 
         state
             .candidate
-            .validate_consensus_vertex_with_committee(&self.committee_context)
+            .validate_consensus_vertex(&self.committee)
             .map_err(CertifiedProjectionError::InvalidProjectionShape)?;
         if !state.delivered {
             return Err(CertifiedProjectionError::CarrierNotDelivered(

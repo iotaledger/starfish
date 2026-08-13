@@ -99,32 +99,6 @@ pub struct BenchmarkRunSummary {
     pub ready_nodes_at_boot: usize,
     #[serde(default)]
     pub metrics_contributors: usize,
-    #[serde(default)]
-    pub shadow_comparison_enabled: bool,
-    #[serde(default)]
-    pub shadow_comparison_valid: bool,
-    #[serde(default)]
-    pub shadow_comparison_valid_nodes: usize,
-    #[serde(default)]
-    pub shadow_direct_deliveries: usize,
-    #[serde(default)]
-    pub shadow_deliveries: usize,
-    #[serde(default)]
-    pub shadow_delivery_matches: usize,
-    #[serde(default)]
-    pub shadow_delivery_mismatches: usize,
-    #[serde(default)]
-    pub shadow_delivery_ambiguous: usize,
-    #[serde(default)]
-    pub shadow_wal_durable_records: usize,
-    #[serde(default)]
-    pub shadow_pending_recovery: usize,
-    #[serde(default)]
-    pub shadow_unpaired_direct: usize,
-    #[serde(default)]
-    pub shadow_unpaired_shadow: usize,
-    #[serde(default)]
-    pub shadow_unpaired_max_round_lag: usize,
 }
 
 impl BenchmarkRunSummary {
@@ -143,14 +117,7 @@ impl BenchmarkRunSummary {
          db_size_per_round_p25_bytes,db_size_per_round_p50_bytes,\
          db_size_per_round_p75_bytes,\
          block_sync_requests_sent_per_round_avg,block_header_size_avg_bytes,\
-         ready_nodes_at_boot,metrics_contributors,\
-         shadow_comparison_enabled,shadow_comparison_valid,\
-         shadow_comparison_valid_nodes,shadow_direct_deliveries,shadow_deliveries,\
-         shadow_delivery_matches,\
-         shadow_delivery_mismatches,shadow_delivery_ambiguous,\
-         shadow_wal_durable_records,shadow_pending_recovery,\
-         shadow_unpaired_direct,shadow_unpaired_shadow,\
-         shadow_unpaired_max_round_lag"
+         ready_nodes_at_boot,metrics_contributors"
     }
 
     pub fn csv_record(&self) -> String {
@@ -184,19 +151,6 @@ impl BenchmarkRunSummary {
             format!("{:.3}", self.block_header_size_avg_bytes),
             self.ready_nodes_at_boot.to_string(),
             self.metrics_contributors.to_string(),
-            self.shadow_comparison_enabled.to_string(),
-            self.shadow_comparison_valid.to_string(),
-            self.shadow_comparison_valid_nodes.to_string(),
-            self.shadow_direct_deliveries.to_string(),
-            self.shadow_deliveries.to_string(),
-            self.shadow_delivery_matches.to_string(),
-            self.shadow_delivery_mismatches.to_string(),
-            self.shadow_delivery_ambiguous.to_string(),
-            self.shadow_wal_durable_records.to_string(),
-            self.shadow_pending_recovery.to_string(),
-            self.shadow_unpaired_direct.to_string(),
-            self.shadow_unpaired_shadow.to_string(),
-            self.shadow_unpaired_max_round_lag.to_string(),
         ]
         .join(",")
     }
