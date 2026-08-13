@@ -207,10 +207,8 @@ pub(crate) struct RbcServiceHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RbcPhaseAuthorityV1 {
     Direct,
-    EmbeddedCarrierDag,
     EmbeddedSingleDag { echo_qc_fast_path: bool },
 }
-
 impl RbcServiceHandle {
     #[allow(dead_code)]
     pub(crate) async fn start_local_header(
@@ -359,6 +357,7 @@ pub(crate) fn start_starfish_rbc_service(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_starfish_rbc_service_with_phase_authority(
     committee: Arc<Committee>,
     own_authority: AuthorityIndex,
@@ -390,7 +389,7 @@ pub(crate) fn start_starfish_rbc_service_with_phase_authority(
 
     let echo_qc_fast_path = match phase_authority {
         RbcPhaseAuthorityV1::EmbeddedSingleDag { echo_qc_fast_path } => echo_qc_fast_path,
-        RbcPhaseAuthorityV1::Direct | RbcPhaseAuthorityV1::EmbeddedCarrierDag => false,
+        RbcPhaseAuthorityV1::Direct => false,
     };
     let kernel = StarfishRbcKernel::new_with_echo_qc_fast_path(
         committee.clone(),
@@ -506,11 +505,9 @@ impl RbcServiceState {
                 self.accept_direct_initial(peer, proposal);
             }
             RbcServiceMessage::Phase { peer, message } => {
-                if self.phase_authority == RbcPhaseAuthorityV1::Direct {
-                    match self.kernel.handle_phase(peer, message) {
-                        Ok(effects) => self.process_effects(effects),
-                        Err(error) => self.reject(Some(peer), error.into()),
-                    }
+                match self.kernel.handle_phase(peer, message) {
+                    Ok(effects) => self.process_effects(effects),
+                    Err(error) => self.reject(Some(peer), error.into()),
                 }
             }
             RbcServiceMessage::HeaderRequest { peer, block_ref } => {
@@ -786,9 +783,6 @@ impl RbcServiceState {
         for effect in effects {
             match effect {
                 RbcEffect::MulticastPhase { phase, block_ref } => {
-                    if self.phase_authority == RbcPhaseAuthorityV1::EmbeddedCarrierDag {
-                        continue;
-                    }
                     if matches!(
                         self.phase_authority,
                         RbcPhaseAuthorityV1::EmbeddedSingleDag { .. }
@@ -821,9 +815,6 @@ impl RbcServiceState {
                     self.note_pending_fetch(block_ref, holders);
                 }
                 RbcEffect::Deliver(header) => {
-                    if self.phase_authority == RbcPhaseAuthorityV1::EmbeddedCarrierDag {
-                        continue;
-                    }
                     self.pending_fetches.remove(&header.reference());
                     let _ = self.events.send(RbcServiceEvent::Delivered(header));
                 }
@@ -1046,27 +1037,6 @@ mod tests {
         .unwrap()
     }
 
-    fn start_embedded_phase_service() -> (
-        RbcServiceHandle,
-        mpsc::UnboundedReceiver<RbcServiceEvent>,
-        JoinHandle<()>,
-    ) {
-        let committee = Committee::new_test(vec![1; 4]);
-        let keyrings = mac_keyrings_for_test(4);
-        start_starfish_rbc_service_with_phase_authority(
-            committee,
-            0,
-            instance(),
-            BlockAuthenticationScheme::MacVector,
-            Arc::new(keyrings[0].clone()),
-            RbcInitialAuthenticator::Mac,
-            1,
-            Duration::from_secs(3_600),
-            RbcPhaseAuthorityV1::EmbeddedCarrierDag,
-        )
-        .unwrap()
-    }
-
     fn start_single_dag_service() -> (
         RbcServiceHandle,
         mpsc::UnboundedReceiver<RbcServiceEvent>,
@@ -1089,7 +1059,6 @@ mod tests {
         )
         .unwrap()
     }
-
     async fn next_event(events: &mut mpsc::UnboundedReceiver<RbcServiceEvent>) -> RbcServiceEvent {
         tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
@@ -1165,37 +1134,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_phase_authority_emits_init_but_no_direct_echo_or_delivery() {
-        let (handle, mut events, task) = start_embedded_phase_service();
-        let canonical = handle.start_local_header(local_header(1, 4)).await.unwrap();
-        let mut staged = false;
-        let mut initials = 0;
-        for _ in 0..4 {
-            match next_event(&mut events).await {
-                RbcServiceEvent::HeaderStaged(header) => {
-                    assert_eq!(header.reference(), canonical.reference());
-                    staged = true;
-                }
-                RbcServiceEvent::Network {
-                    message: NetworkMessage::RbcInitial(_),
-                    ..
-                } => initials += 1,
-                event => panic!("unexpected init-only event: {event:?}"),
-            }
-        }
-        assert!(staged);
-        assert_eq!(initials, 3);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), events.recv())
-                .await
-                .is_err(),
-            "direct ECHO/READY or delivery escaped the embedded authority boundary"
-        );
-        drop(handle);
-        task.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn single_dag_phase_authority_emits_typed_reference_not_phase_message() {
         let (handle, mut events, task) = start_single_dag_service();
         let mut header = local_header(1, 4);
@@ -1232,7 +1170,6 @@ mod tests {
         drop(handle);
         task.await.unwrap();
     }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_local_start_waits_for_kernel_selection_and_event_enqueue() {
         let (handle, mut events, task) = start_service(0, BlockAuthenticationScheme::Ed25519);

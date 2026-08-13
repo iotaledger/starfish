@@ -539,7 +539,7 @@ pub(crate) struct PinnedRbcHeader {
 }
 
 impl PinnedRbcHeader {
-    pub(crate) fn validate_with_committee_id(
+    fn validate_with_committee_id(
         header: RbcCanonicalHeader,
         committee: &Committee,
         committee_id: RbcCommitteeId,
@@ -745,7 +745,7 @@ impl fmt::Debug for RbcProtocolInstanceId {
 pub(crate) struct RbcCommitteeId([u8; COMMITTEE_ID_SIZE]);
 
 impl RbcCommitteeId {
-    pub(crate) fn derive(committee: &Committee) -> Result<Self, RbcError> {
+    fn derive(committee: &Committee) -> Result<Self, RbcError> {
         if committee.len() > MAX_COMMITTEE_SIZE as usize {
             return Err(RbcError::CommitteeTooLarge(committee.len()));
         }

@@ -77,11 +77,6 @@ pub struct NodeParameters {
     /// `starfish_rbc_dag_shadow`.
     #[serde(default)]
     pub starfish_rbc_dag_autonomous_clock: bool,
-    /// Use embedded carrier ECHO/READY delivery as the certification authority
-    /// for Starfish-RBC application headers. Direct RBC retains INIT/payload
-    /// transport but its phase messages cannot mark a block clean.
-    #[serde(default)]
-    pub starfish_rbc_dag_embedded_rbc_authority: bool,
     /// Testbed-only receiver-local single-DAG RBC path: deliver an exact header
     /// after locally observing quorum ECHO rather than quorum READY. Quorum
     /// intersection preserves a unique value, but pairwise-MAC testimony is
@@ -145,6 +140,10 @@ pub mod node_defaults {
         5
     }
 
+    pub fn default_starfish_rbc_dag_heartbeat_interval_ms() -> u64 {
+        250
+    }
+
     pub fn default_causal_push_shard_round_lag() -> RoundNumber {
         0
     }
@@ -172,7 +171,6 @@ impl Default for NodeParameters {
             starfish_rbc_protocol_instance: None,
             starfish_rbc_dag_shadow: false,
             starfish_rbc_dag_autonomous_clock: false,
-            starfish_rbc_dag_embedded_rbc_authority: false,
             starfish_rbc_single_dag_echo_qc_fast_path: false,
             starfish_rbc_dag_shadow_buffered_wal: false,
             causal_push_shard_round_lag: node_defaults::default_causal_push_shard_round_lag(),
@@ -433,9 +431,9 @@ impl ImportExport for NodePrivateConfig {}
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Duration};
+    use std::path::Path;
 
-    use super::{NodeParameters, NodePrivateConfig};
+    use super::{NodeParameters, NodePrivateConfig, node_defaults};
 
     #[test]
     fn starfish_rbc_protocol_instance_is_optional_and_roundtrips() {
@@ -445,6 +443,10 @@ mod tests {
         assert!(!parameters.starfish_rbc_dag_autonomous_clock);
         assert!(!parameters.starfish_rbc_single_dag_echo_qc_fast_path);
         assert!(!parameters.starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(
+            parameters.starfish_rbc_dag_heartbeat_interval_ms,
+            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
+        );
 
         let protocol_instance = parameters.refresh_starfish_rbc_protocol_instance();
         assert_ne!(protocol_instance, [0; 32]);
@@ -459,6 +461,10 @@ mod tests {
         assert!(!decoded.starfish_rbc_dag_autonomous_clock);
         assert!(!decoded.starfish_rbc_single_dag_echo_qc_fast_path);
         assert!(!decoded.starfish_rbc_dag_shadow_buffered_wal);
+        assert_eq!(
+            decoded.starfish_rbc_dag_heartbeat_interval_ms,
+            node_defaults::default_starfish_rbc_dag_heartbeat_interval_ms()
+        );
     }
 
     #[test]
@@ -466,7 +472,7 @@ mod tests {
         let parameters = NodeParameters {
             starfish_rbc_dag_shadow: true,
             starfish_rbc_dag_autonomous_clock: true,
-            leader_timeout: Duration::from_millis(125),
+            starfish_rbc_dag_heartbeat_interval_ms: 125,
             starfish_rbc_dag_shadow_buffered_wal: true,
             ..NodeParameters::default()
         };
@@ -476,7 +482,7 @@ mod tests {
         assert!(decoded.starfish_rbc_dag_shadow);
         assert!(decoded.starfish_rbc_dag_autonomous_clock);
         assert!(decoded.starfish_rbc_dag_shadow_buffered_wal);
-        assert_eq!(decoded.leader_timeout, Duration::from_millis(125));
+        assert_eq!(decoded.starfish_rbc_dag_heartbeat_interval_ms, 125);
     }
 
     #[test]

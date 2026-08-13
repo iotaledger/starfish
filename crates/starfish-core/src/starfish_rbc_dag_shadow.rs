@@ -18,7 +18,6 @@ use std::{
 
 use crate::{
     crypto::{MacKey, MlDsa44Signer, MlDsa65Signer, Signer, TransactionsCommitment},
-    starfish_rbc::RbcCanonicalHeader,
     starfish_rbc_dag::{
         AuthenticatedCarrierV1, CandidateCarrierV1, CarrierAuthenticationV1, CarrierAuthorizerV1,
         CarrierHeaderV1Args, LocallyAuthenticatedCarrierV1, RbcDagCommitteeContextV1,
@@ -121,15 +120,6 @@ pub(crate) struct ShadowOutboundEnvelopeV1 {
     reference: BlockReference,
     canonical_carrier_wire: Vec<u8>,
     authentication_sidecar: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LocalOutboundMetadataV1 {
-    pub(crate) round: RoundNumber,
-    pub(crate) transactions_commitment: TransactionsCommitment,
-    pub(crate) creation_time_ns: TimestampNs,
-    pub(crate) control_shape: bool,
-    pub(crate) application: Option<BlockReference>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,18 +574,6 @@ impl StarfishRbcDagShadowV1 {
         self.model.pending_phase_backlog_len()
     }
 
-    /// Whether the exact phase prefix encodable in the open carrier contains
-    /// work for an application-bearing carrier. This lets the prototype send
-    /// application-critical ECHO/READY promptly without turning control-only
-    /// carrier certification into an unpaced self-sustaining loop.
-    pub(crate) fn has_pending_application_phase_work(&self) -> bool {
-        self.model.pending_phase_batch().iter().any(|statement| {
-            self.candidates
-                .get(&statement.target())
-                .is_some_and(|candidate| candidate.header().application_header().is_some())
-        })
-    }
-
     pub(crate) fn admitted_reference(
         &self,
         authority: AuthorityIndex,
@@ -656,21 +634,6 @@ impl StarfishRbcDagShadowV1 {
         transactions_commitment: TransactionsCommitment,
         creation_time_ns: TimestampNs,
     ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
-        self.create_local_carrier_with_application(
-            round,
-            transactions_commitment,
-            None,
-            creation_time_ns,
-        )
-    }
-
-    fn create_local_carrier_with_application(
-        &mut self,
-        round: RoundNumber,
-        transactions_commitment: TransactionsCommitment,
-        application_header: Option<RbcCanonicalHeader>,
-        creation_time_ns: TimestampNs,
-    ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
         self.ensure_live()?;
         let (own_prev, weak_parents) = self.model.local_parent_set()?;
         let candidate = CandidateCarrierV1::try_new_with_committee(
@@ -680,7 +643,6 @@ impl StarfishRbcDagShadowV1 {
                 own_prev,
                 weak_parents,
                 transactions_commitment,
-                application_header,
                 data_acknowledgments: Vec::new(),
                 phase_batch: self.model.pending_phase_batch(),
                 consensus_vertex: None,
@@ -717,24 +679,6 @@ impl StarfishRbcDagShadowV1 {
     ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
         let round = self.model.local_carrier_round();
         self.create_local_carrier(round, TransactionsCommitment::default(), creation_time_ns)
-    }
-
-    /// Assign one exact direct application header to the currently open
-    /// independent carrier slot. The complete canonical header is committed
-    /// by the V2 carrier and is therefore recoverable from carrier content.
-    pub(crate) fn create_local_application_carrier(
-        &mut self,
-        application_header: RbcCanonicalHeader,
-        creation_time_ns: TimestampNs,
-    ) -> Result<(ShadowOutboundEnvelopeV1, Vec<ModelEffect>), ShadowErrorV1> {
-        let round = self.model.local_carrier_round();
-        let commitment = application_header.transactions_commitment();
-        self.create_local_carrier_with_application(
-            round,
-            commitment,
-            Some(application_header),
-            creation_time_ns,
-        )
     }
 
     /// Verify and durably apply an authenticated network envelope for this
@@ -965,7 +909,7 @@ impl StarfishRbcDagShadowV1 {
     /// payload and creation timestamp before accepting new observations.
     pub(crate) fn local_outbound_metadata(
         &self,
-    ) -> Result<Vec<LocalOutboundMetadataV1>, ShadowErrorV1> {
+    ) -> Result<Vec<(RoundNumber, TransactionsCommitment, TimestampNs, bool)>, ShadowErrorV1> {
         self.journal
             .snapshot()
             .retransmissions()
@@ -976,17 +920,13 @@ impl StarfishRbcDagShadowV1 {
                     .candidates
                     .get(&reference)
                     .ok_or(ShadowErrorV1::MissingOutboundCandidate(reference))?;
-                Ok(LocalOutboundMetadataV1 {
-                    round: candidate.header().carrier_round(),
-                    transactions_commitment: candidate.header().transactions_commitment(),
-                    creation_time_ns: candidate.header().creation_time_ns(),
-                    control_shape: candidate.header().data_acknowledgments().is_empty()
+                Ok((
+                    candidate.header().carrier_round(),
+                    candidate.header().transactions_commitment(),
+                    candidate.header().creation_time_ns(),
+                    candidate.header().data_acknowledgments().is_empty()
                         && candidate.header().consensus_vertex().is_none(),
-                    application: candidate
-                        .header()
-                        .application_header()
-                        .map(RbcCanonicalHeader::reference),
-                })
+                ))
             })
             .collect()
     }
@@ -1006,30 +946,6 @@ impl StarfishRbcDagShadowV1 {
                     candidate.header().carrier_round(),
                     candidate.header().transactions_commitment(),
                 ))
-            })
-            .collect()
-    }
-
-    /// Exact application headers whose enclosing carriers reached embedded
-    /// RBC delivery. Control-only carrier deliveries are intentionally absent.
-    pub(crate) fn delivered_application_headers(
-        &self,
-    ) -> Result<Vec<(BlockReference, RbcCanonicalHeader)>, ShadowErrorV1> {
-        self.delivered
-            .iter()
-            .filter_map(|carrier_reference| {
-                let candidate = match self.candidates.get(carrier_reference) {
-                    Some(candidate) => candidate,
-                    None => {
-                        return Some(Err(ShadowErrorV1::MissingDeliveredCandidate(
-                            *carrier_reference,
-                        )));
-                    }
-                };
-                candidate
-                    .header()
-                    .application_header()
-                    .map(|header| Ok((*carrier_reference, header.clone())))
             })
             .collect()
     }
@@ -2934,7 +2850,6 @@ mod tests {
                 own_prev: carrier_genesis_reference(author),
                 weak_parents,
                 transactions_commitment: TransactionsCommitment::from_bytes([marker; 32]),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch: Vec::new(),
                 consensus_vertex: None,
@@ -2971,7 +2886,6 @@ mod tests {
                 transactions_commitment: TransactionsCommitment::from_bytes(
                     [0xD0 + author as u8; 32],
                 ),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch: vec![statement],
                 consensus_vertex: None,

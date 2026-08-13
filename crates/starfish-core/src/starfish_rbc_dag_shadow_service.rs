@@ -97,13 +97,12 @@ impl ShadowServiceModeV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ShadowLocalCarrierV1 {
     author: AuthorityIndex,
     round: RoundNumber,
     transactions_commitment: crate::crypto::TransactionsCommitment,
     creation_time_ns: TimestampNs,
-    application_header: RbcCanonicalHeader,
 }
 
 impl ShadowLocalCarrierV1 {
@@ -113,7 +112,6 @@ impl ShadowLocalCarrierV1 {
             round: header.reference().round,
             transactions_commitment: header.transactions_commitment(),
             creation_time_ns: header.meta_creation_time_ns(),
-            application_header: header.clone(),
         }
     }
 }
@@ -182,6 +180,12 @@ impl StarfishRbcDagShadowServiceHandleV1 {
         &self,
         header: &RbcCanonicalHeader,
     ) -> Result<(), ShadowServiceErrorV1> {
+        if self.mode.is_autonomous() {
+            // The autonomous carrier clock is deliberately independent from
+            // direct consensus rounds. Direct headers continue through the
+            // authoritative path and cannot consume carrier slots.
+            return Ok(());
+        }
         self.send(ShadowServiceMessageV1::LocalCarrier(
             ShadowLocalCarrierV1::from_direct_header(header),
         ))
@@ -368,10 +372,6 @@ pub(crate) enum ShadowServiceEventV1 {
         message: NetworkMessage,
     },
     Delivered(ShadowDeliveryIdentityV1),
-    EmbeddedApplicationDelivered {
-        carrier: BlockReference,
-        header: RbcCanonicalHeader,
-    },
     Comparison(ShadowDeliveryComparisonV1),
     Input {
         kind: &'static str,
@@ -420,7 +420,7 @@ pub(crate) enum ShadowServiceErrorV1 {
     ConflictingLocalHeader(RoundNumber),
     MissingRecoveredLocalHeader(RoundNumber),
     RecoveredLocalHeaderMismatch(RoundNumber),
-    AutonomousWalContainsInvalidCarrier(RoundNumber),
+    AutonomousWalContainsApplicationCarrier(RoundNumber),
     LocalHeaderAuthority {
         expected: AuthorityIndex,
         actual: AuthorityIndex,
@@ -501,9 +501,9 @@ impl fmt::Display for ShadowServiceErrorV1 {
                 formatter,
                 "persisted shadow carrier and recovered direct header disagree at round {round}"
             ),
-            Self::AutonomousWalContainsInvalidCarrier(round) => write!(
+            Self::AutonomousWalContainsApplicationCarrier(round) => write!(
                 formatter,
-                "autonomous carrier-clock WAL contains an invalid local carrier at round {round}"
+                "autonomous carrier-clock WAL contains a non-heartbeat local carrier at round {round}"
             ),
             Self::LocalHeaderAuthority { expected, actual } => write!(
                 formatter,
@@ -593,7 +593,6 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
     own_authority: AuthorityIndex,
     context: RbcDagContextV1,
     authorizer: ShadowAuthorizerV1,
-    recovered_local_headers: Vec<RbcCanonicalHeader>,
     heartbeat_interval: Duration,
     wal_sync_policy: ShadowWalSyncPolicyV1,
 ) -> Result<
@@ -613,7 +612,7 @@ pub(crate) fn start_starfish_rbc_dag_autonomous_clock_service_v1(
         own_authority,
         context,
         authorizer,
-        recovered_local_headers,
+        Vec::new(),
         ShadowServiceModeV1::AutonomousClock { heartbeat_interval },
         wal_sync_policy,
     )
@@ -650,10 +649,9 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
                 actual: local.author,
             });
         }
-        let round = local.round;
-        if let Some(previous) = pending_local.insert(round, local.clone()) {
+        if let Some(previous) = pending_local.insert(local.round, local) {
             if previous != local {
-                return Err(ShadowServiceErrorV1::ConflictingLocalHeader(round));
+                return Err(ShadowServiceErrorV1::ConflictingLocalHeader(local.round));
             }
         }
     }
@@ -761,16 +759,8 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
         let persisted_local = match core.local_outbound_metadata() {
             Ok(metadata) => metadata
                 .into_iter()
-                .map(|metadata| {
-                    (
-                        metadata.round,
-                        (
-                            metadata.transactions_commitment,
-                            metadata.creation_time_ns,
-                            metadata.control_shape,
-                            metadata.application,
-                        ),
-                    )
+                .map(|(round, commitment, creation_time_ns, control_shape)| {
+                    (round, (commitment, creation_time_ns, control_shape))
                 })
                 .collect::<BTreeMap<_, _>>(),
             Err(error) => {
@@ -783,80 +773,29 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
                 return;
             }
         };
-        let mut assigned_applications = BTreeSet::new();
         let durable_round = core.local_carrier_round();
         if mode.is_autonomous() {
-            for (carrier_round, (commitment, _, control_shape, application)) in &persisted_local {
-                if !*control_shape {
-                    let _ = startup_events
-                        .send(ShadowServiceEventV1::Rejected {
-                            peer: None,
-                            error: ShadowServiceErrorV1::AutonomousWalContainsInvalidCarrier(
-                                *carrier_round,
-                            )
-                            .to_string(),
-                        })
-                        .await;
-                    return;
-                }
-                let Some(application) = application else {
-                    if *commitment != crate::crypto::TransactionsCommitment::default() {
-                        let _ = startup_events
-                            .send(ShadowServiceEventV1::Rejected {
-                                peer: None,
-                                error: ShadowServiceErrorV1::AutonomousWalContainsInvalidCarrier(
-                                    *carrier_round,
-                                )
-                                .to_string(),
-                            })
-                            .await;
-                        return;
-                    }
-                    continue;
-                };
-                let Some(recovered) = pending_local.get(&application.round) else {
-                    let _ = startup_events
-                        .send(ShadowServiceEventV1::Rejected {
-                            peer: None,
-                            error: ShadowServiceErrorV1::MissingRecoveredLocalHeader(
-                                application.round,
-                            )
-                            .to_string(),
-                        })
-                        .await;
-                    return;
-                };
-                if recovered.application_header.reference() != *application
-                    || recovered.transactions_commitment != *commitment
-                {
-                    let _ = startup_events
-                        .send(ShadowServiceEventV1::Rejected {
-                            peer: None,
-                            error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(
-                                application.round,
-                            )
-                            .to_string(),
-                        })
-                        .await;
-                    return;
-                }
-                assigned_applications.insert(*application);
+            if let Some((round, _)) =
+                persisted_local
+                    .iter()
+                    .find(|(_, (commitment, _, control_shape))| {
+                        *commitment != crate::crypto::TransactionsCommitment::default()
+                            || !*control_shape
+                    })
+            {
+                let _ = startup_events
+                    .send(ShadowServiceEventV1::Rejected {
+                        peer: None,
+                        error: ShadowServiceErrorV1::AutonomousWalContainsApplicationCarrier(
+                            *round,
+                        )
+                        .to_string(),
+                    })
+                    .await;
+                return;
             }
-            pending_local.retain(|_, local| {
-                !assigned_applications.contains(&local.application_header.reference())
-            });
         } else {
-            for (round, (commitment, creation_time_ns, _, application)) in &persisted_local {
-                if application.is_some() {
-                    let _ = startup_events
-                        .send(ShadowServiceEventV1::Rejected {
-                            peer: None,
-                            error: ShadowServiceErrorV1::RecoveredLocalHeaderMismatch(*round)
-                                .to_string(),
-                        })
-                        .await;
-                    return;
-                }
+            for (round, (commitment, creation_time_ns, _)) in &persisted_local {
                 let Some(recovered) = pending_local.get(round) else {
                     let _ = startup_events
                         .send(ShadowServiceEventV1::Rejected {
@@ -894,7 +833,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
                     .await;
                 return;
             }
-            pending_local.retain(|round, _| *round >= core.local_carrier_round());
         }
         let reported_shadow_deliveries = match core.delivered_identities() {
             Ok(identities) => identities.into_iter().collect::<BTreeSet<_>>(),
@@ -909,26 +847,12 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             }
         };
         let recovered_shadow_deliveries = reported_shadow_deliveries.clone();
-        let reported_application_deliveries = match core.delivered_application_headers() {
-            Ok(headers) => headers
-                .into_iter()
-                .map(|(_, header)| header.reference())
-                .collect(),
-            Err(error) => {
-                let _ = startup_events
-                    .send(ShadowServiceEventV1::Rejected {
-                        peer: None,
-                        error: error.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
         let reported_shadow_delivery_slots = reported_shadow_deliveries
             .iter()
             .map(delivery_slot)
             .collect();
         let comparison_backlog = ShadowComparisonBacklogV1::new(reported_shadow_delivery_slots);
+        pending_local.retain(|round, _| *round >= core.local_carrier_round());
         let sync_round = core.local_carrier_round();
         let state = ShadowServiceStateV1 {
             core,
@@ -943,7 +867,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             observed_topology: BTreeMap::new(),
             invalidated_by_overload: actor_invalidated_by_overload,
             pending_local,
-            assigned_applications,
             pending_recovery: BTreeMap::new(),
             recovery_last_attempt: BTreeMap::new(),
             sync_last_attempt: BTreeMap::new(),
@@ -956,7 +879,6 @@ fn start_starfish_rbc_dag_shadow_service_with_mode_v1(
             heartbeat_notification_pending: actor_heartbeat_notification_pending,
             direct_deliveries: BTreeSet::new(),
             reported_shadow_deliveries,
-            reported_application_deliveries,
             recovered_shadow_deliveries,
             comparison_backlog,
             reported_matches: BTreeSet::new(),
@@ -1071,7 +993,6 @@ struct ShadowServiceStateV1 {
     observed_topology: BTreeMap<AuthorityIndex, (bool, u64)>,
     invalidated_by_overload: Arc<Mutex<Option<&'static str>>>,
     pending_local: BTreeMap<RoundNumber, ShadowLocalCarrierV1>,
-    assigned_applications: BTreeSet<BlockReference>,
     pending_recovery: BTreeMap<BlockReference, BTreeSet<AuthorityIndex>>,
     recovery_last_attempt: BTreeMap<(BlockReference, AuthorityIndex), Instant>,
     sync_last_attempt: BTreeMap<(AuthorityIndex, RoundNumber), Instant>,
@@ -1084,7 +1005,6 @@ struct ShadowServiceStateV1 {
     heartbeat_notification_pending: Arc<AtomicBool>,
     direct_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
     reported_shadow_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
-    reported_application_deliveries: BTreeSet<BlockReference>,
     recovered_shadow_deliveries: BTreeSet<ShadowDeliveryIdentityV1>,
     comparison_backlog: ShadowComparisonBacklogV1,
     reported_matches: BTreeSet<ShadowDeliveryIdentityV1>,
@@ -1294,7 +1214,7 @@ impl ShadowServiceStateV1 {
         self.emit_clock_state();
     }
 
-    fn try_create_autonomous_carrier(&mut self) {
+    fn try_create_autonomous_heartbeat(&mut self) {
         if !self.mode.is_autonomous() || !self.core.can_create_carrier() {
             self.emit_clock_state();
             return;
@@ -1306,27 +1226,10 @@ impl ShadowServiceStateV1 {
             .try_into()
             .unwrap_or(TimestampNs::MAX);
         let before = self.core.wal_counts();
-        let application_round = self.pending_local.keys().next().copied();
-        let application = application_round.and_then(|round| self.pending_local.remove(&round));
-        let result = match &application {
-            Some(application) => self.core.create_local_application_carrier(
-                application.application_header.clone(),
-                creation_time_ns,
-            ),
-            None => self.core.create_local_control_heartbeat(creation_time_ns),
-        };
-        match result {
+        match self.core.create_local_control_heartbeat(creation_time_ns) {
             Ok((envelope, effects)) => {
-                if let Some(application) = application {
-                    self.assigned_applications
-                        .insert(application.application_header.reference());
-                }
                 self.emit(ShadowServiceEventV1::Input {
-                    kind: if application_round.is_some() {
-                        "application_carrier"
-                    } else {
-                        "heartbeat"
-                    },
+                    kind: "heartbeat",
                     outcome: "accepted",
                 });
                 self.report_wal_delta(before);
@@ -1334,9 +1237,6 @@ impl ShadowServiceStateV1 {
                 self.process_effects(effects);
             }
             Err(ShadowErrorV1::Model(ModelError::LocalRoundNotOpen(_))) => {
-                if let Some(application) = application {
-                    self.pending_local.insert(application.round, application);
-                }
                 // The local slot is open syntactically but cannot yet name a
                 // quorum of exact previous-round admitted parents. A later
                 // authenticated ingress or timer tick retries it.
@@ -1346,12 +1246,7 @@ impl ShadowServiceStateV1 {
                 });
                 self.emit_clock_state();
             }
-            Err(error) => {
-                if let Some(application) = application {
-                    self.pending_local.insert(application.round, application);
-                }
-                self.mark_fatal(error);
-            }
+            Err(error) => self.mark_fatal(error),
         }
     }
 
@@ -1363,7 +1258,7 @@ impl ShadowServiceStateV1 {
     fn drive_autonomous_catch_up(&mut self) {
         while self.sync_catch_up && self.core.can_create_carrier() && !self.fatal {
             let round_before = self.core.local_carrier_round();
-            self.try_create_autonomous_carrier();
+            self.try_create_autonomous_heartbeat();
             if self.core.local_carrier_round() == round_before {
                 break;
             }
@@ -1389,37 +1284,6 @@ impl ShadowServiceStateV1 {
                     actual: local.author,
                 },
             );
-            return;
-        }
-        if self.mode.is_autonomous() {
-            let application_reference = local.application_header.reference();
-            if self.assigned_applications.contains(&application_reference) {
-                self.emit(ShadowServiceEventV1::Input {
-                    kind: "application",
-                    outcome: "already_assigned",
-                });
-                return;
-            }
-            if let Some(existing) = self.pending_local.get(&local.round) {
-                if existing == &local {
-                    self.emit(ShadowServiceEventV1::Input {
-                        kind: "application",
-                        outcome: "duplicate",
-                    });
-                } else {
-                    self.reject(
-                        None,
-                        ShadowServiceErrorV1::ConflictingLocalHeader(local.round),
-                    );
-                }
-                return;
-            }
-            self.pending_local.insert(local.round, local);
-            self.emit(ShadowServiceEventV1::Input {
-                kind: "application",
-                outcome: "queued",
-            });
-            self.retry_pending_local();
             return;
         }
         let durable_round = self.core.local_carrier_round();
@@ -1460,19 +1324,6 @@ impl ShadowServiceStateV1 {
     /// advances the model; recovered historical headers below that clock are
     /// harmless idempotent replays.
     fn retry_pending_local(&mut self) {
-        if self.mode.is_autonomous() {
-            while (!self.pending_local.is_empty() || self.core.has_pending_application_phase_work())
-                && self.core.can_create_carrier()
-                && !self.fatal
-            {
-                let round_before = self.core.local_carrier_round();
-                self.try_create_autonomous_carrier();
-                if self.core.local_carrier_round() == round_before {
-                    break;
-                }
-            }
-            return;
-        }
         loop {
             let durable_round = self.core.local_carrier_round();
             self.pending_local
@@ -1739,7 +1590,6 @@ impl ShadowServiceStateV1 {
                 }
                 self.report_wal_delta(before);
                 self.process_effects(outcome.effects().to_vec());
-                self.retry_pending_local();
                 if self
                     .core
                     .admitted_reference(response.author, response.round)
@@ -1792,21 +1642,6 @@ impl ShadowServiceStateV1 {
             self.emit(ShadowServiceEventV1::Delivered(*identity));
             self.emit_slot_comparison(slot);
             self.emit_comparison_backlog();
-        }
-        let applications = match self.core.delivered_application_headers() {
-            Ok(applications) => applications,
-            Err(error) => {
-                self.reject(None, error);
-                return;
-            }
-        };
-        for (carrier, header) in applications {
-            if self
-                .reported_application_deliveries
-                .insert(header.reference())
-            {
-                self.emit(ShadowServiceEventV1::EmbeddedApplicationDelivered { carrier, header });
-            }
         }
     }
 
@@ -1881,9 +1716,10 @@ fn run_shadow_service(
         });
         state.emit_comparison_backlog();
         state.process_effects(open_report.recovery_effects().to_vec());
-        state.retry_pending_local();
         if state.mode.is_autonomous() {
             state.emit_clock_state();
+        } else {
+            state.retry_pending_local();
         }
     }
 
@@ -2078,7 +1914,7 @@ fn run_shadow_service(
                 state.flush_recovery_requests();
                 state.flush_carrier_sync_requests(false);
             }
-            ShadowServiceMessageV1::HeartbeatTick => state.try_create_autonomous_carrier(),
+            ShadowServiceMessageV1::HeartbeatTick => state.try_create_autonomous_heartbeat(),
             ShadowServiceMessageV1::Shutdown(_) => unreachable!("shutdown handled before dispatch"),
         }
         state.reconcile_topology();
@@ -2277,7 +2113,6 @@ mod tests {
                 authority,
                 self.context,
                 ShadowAuthorizerV1::MacVector(self.keyrings[authority as usize].clone()),
-                Vec::new(),
                 heartbeat_interval,
                 wal_sync_policy,
             )
@@ -2367,7 +2202,6 @@ mod tests {
         events: &mut [mpsc::Receiver<ShadowServiceEventV1>],
         open_rounds: &mut [RoundNumber],
         deliveries: &mut [usize],
-        application_deliveries: &mut [BTreeSet<BlockReference>],
         sync_requests: &mut usize,
         target_open_round: RoundNumber,
     ) {
@@ -2420,12 +2254,6 @@ mod tests {
                             }
                             ShadowServiceEventV1::Delivered(_) => {
                                 deliveries[sender] = deliveries[sender].saturating_add(1);
-                            }
-                            ShadowServiceEventV1::EmbeddedApplicationDelivered {
-                                header,
-                                ..
-                            } => {
-                                application_deliveries[sender].insert(header.reference());
                             }
                             ShadowServiceEventV1::Rejected { error, .. }
                                 if error.contains("FutureCarrierOutsideBuffer")
@@ -2595,7 +2423,6 @@ mod tests {
                 own_prev: carrier_genesis_reference(author),
                 weak_parents,
                 transactions_commitment: TransactionsCommitment::from_bytes([marker; 32]),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch: Vec::new(),
                 consensus_vertex: None,
@@ -2684,7 +2511,6 @@ mod tests {
 
         let mut open_rounds = vec![1; n];
         let mut deliveries = vec![0; n];
-        let mut application_deliveries = vec![BTreeSet::new(); n];
         let mut sync_requests = 0;
         for (authority, handle) in handles.iter().enumerate() {
             for peer in 0..n {
@@ -2702,7 +2528,6 @@ mod tests {
                 &mut events,
                 &mut open_rounds,
                 &mut deliveries,
-                &mut application_deliveries,
                 &mut sync_requests,
                 fixed_round + 1,
             )
@@ -2718,100 +2543,6 @@ mod tests {
             sync_requests, 0,
             "healthy proactive rounds must not trigger repair polling"
         );
-
-        drop(events);
-        for handle in &handles {
-            handle.shutdown().await.unwrap();
-        }
-        for task in tasks {
-            task.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn autonomous_application_header_wins_the_open_carrier_slot_and_uses_v2() {
-        let harness = Harness::new();
-        let (handle, mut events, task) = harness.start_autonomous(0);
-        wait_ready(&mut events).await;
-        let application = direct_header(0, 1, 0x6A);
-        handle.local_header(&application).unwrap();
-
-        let envelope = next_carrier(&mut events, 1).await;
-        let candidate = CandidateCarrierV1::decode_wire_with_committee(
-            &envelope.canonical_carrier,
-            &harness.committee,
-            None,
-        )
-        .unwrap();
-        assert_eq!(candidate.header().carrier_round(), 1);
-        assert_eq!(candidate.header().application_header(), Some(&application));
-        assert_eq!(
-            envelope.canonical_carrier[1],
-            crate::starfish_rbc_dag::CARRIER_WIRE_FORMAT_VERSION_V2
-        );
-
-        handle.shutdown().await.unwrap();
-        task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn embedded_rbc_delivers_every_application_header_from_the_carrier_dag() {
-        let harness = Harness::new();
-        let mut handles = Vec::new();
-        let mut events = Vec::new();
-        let mut tasks = Vec::new();
-        for authority in 0..N as AuthorityIndex {
-            let (handle, mut node_events, task) = harness.start_autonomous(authority);
-            wait_ready(&mut node_events).await;
-            handles.push(handle);
-            events.push(node_events);
-            tasks.push(task);
-        }
-        for (authority, handle) in handles.iter().enumerate() {
-            for peer in 0..N {
-                if peer != authority {
-                    handle.peer_connected(peer as AuthorityIndex).unwrap();
-                }
-            }
-        }
-
-        let applications = (0..N as AuthorityIndex)
-            .map(|authority| direct_header(authority, 1, 0x70 + authority as u8))
-            .collect::<Vec<_>>();
-        let expected = applications
-            .iter()
-            .map(RbcCanonicalHeader::reference)
-            .collect::<BTreeSet<_>>();
-        for (handle, application) in handles.iter().zip(&applications) {
-            handle.local_header(application).unwrap();
-        }
-
-        let mut open_rounds = vec![1; N];
-        let mut deliveries = vec![0; N];
-        let mut application_deliveries = vec![BTreeSet::new(); N];
-        let mut sync_requests = 0;
-        pump_autonomous_until_round(
-            &handles,
-            &mut events,
-            &mut open_rounds,
-            &mut deliveries,
-            &mut application_deliveries,
-            &mut sync_requests,
-            5,
-        )
-        .await;
-
-        assert!(
-            application_deliveries
-                .iter()
-                .all(|delivered| delivered == &expected),
-            "every node must deliver every exact embedded application: {application_deliveries:?}"
-        );
-        assert!(
-            open_rounds.iter().all(|round| *round >= 5),
-            "application-critical phase carriers must not wait for a heartbeat tick"
-        );
-        assert_eq!(sync_requests, 0);
 
         drop(events);
         for handle in &handles {
@@ -2963,7 +2694,6 @@ mod tests {
         }
         let mut open_rounds = vec![1; N];
         let mut deliveries = vec![0; N];
-        let mut application_deliveries = vec![BTreeSet::new(); N];
         let mut sync_requests = 0;
         for handle in &handles {
             handle.send(ShadowServiceMessageV1::HeartbeatTick).unwrap();
@@ -2973,7 +2703,6 @@ mod tests {
             &mut events,
             &mut open_rounds,
             &mut deliveries,
-            &mut application_deliveries,
             &mut sync_requests,
             2,
         )
@@ -3024,7 +2753,6 @@ mod tests {
             &mut events,
             &mut open_rounds,
             &mut deliveries,
-            &mut application_deliveries,
             &mut sync_requests,
             10,
         )
@@ -3102,86 +2830,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn autonomous_wal_restart_reconciles_and_replays_exact_application_origin() {
-        let harness = Harness::new();
-        let application = direct_header(0, 1, 0x7B);
-        let (handle, mut events, task) = harness.start_autonomous(0);
-        wait_ready(&mut events).await;
-        handle.local_header(&application).unwrap();
-        let original = next_carrier(&mut events, 1).await;
-        stop(handle, events, task).await;
-
-        let (restarted, mut restarted_events, restarted_task) =
-            start_starfish_rbc_dag_autonomous_clock_service_v1(
-                &harness.paths[0],
-                harness.committee.clone(),
-                0,
-                harness.context,
-                ShadowAuthorizerV1::MacVector(harness.keyrings[0].clone()),
-                vec![application.clone()],
-                Duration::from_secs(60 * 60),
-                ShadowWalSyncPolicyV1::EveryBatch,
-            )
-            .unwrap();
-        loop {
-            match next_event(&mut restarted_events).await {
-                ShadowServiceEventV1::Ready { autonomous_clock } => {
-                    assert!(autonomous_clock);
-                    break;
-                }
-                ShadowServiceEventV1::Rejected { error, .. } => {
-                    panic!("application WAL restart failed: {error}")
-                }
-                _ => {}
-            }
-        }
-        restarted.local_header(&application).unwrap();
-        restarted
-            .carrier_sync_request(
-                1,
-                RbcDagShadowCarrierSyncRequest {
-                    author: 0,
-                    round: 1,
-                },
-            )
-            .unwrap();
-        loop {
-            if let ShadowServiceEventV1::Network {
-                recipient: 1,
-                message: NetworkMessage::RbcDagShadowCarrierSyncResponse(response),
-            } = next_event(&mut restarted_events).await
-            {
-                assert_eq!(response.canonical_carrier, original.canonical_carrier);
-                assert_eq!(
-                    response.authentication_sidecar,
-                    original.authentication_sidecar
-                );
-                break;
-            }
-        }
-        stop(restarted, restarted_events, restarted_task).await;
-
-        let (_invalid, invalid_events, invalid_task) =
-            start_starfish_rbc_dag_autonomous_clock_service_v1(
-                &harness.paths[0],
-                harness.committee.clone(),
-                0,
-                harness.context,
-                ShadowAuthorizerV1::MacVector(harness.keyrings[0].clone()),
-                Vec::new(),
-                Duration::from_secs(60 * 60),
-                ShadowWalSyncPolicyV1::EveryBatch,
-            )
-            .unwrap();
-        assert!(
-            startup_rejection(invalid_events)
-                .await
-                .contains("no matching recovered direct header")
-        );
-        invalid_task.await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn buffered_wal_reports_append_without_durability_and_reopens_after_clean_shutdown() {
         let harness = Harness::new();
         let (handle, mut events, task) = harness.start_autonomous_with_policy(
@@ -3251,7 +2899,6 @@ mod tests {
                 transactions_commitment: TransactionsCommitment::from_bytes(
                     [0xB0 + author as u8; 32],
                 ),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch: vec![statement],
                 consensus_vertex: None,

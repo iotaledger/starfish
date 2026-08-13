@@ -61,16 +61,6 @@ impl Validator {
         }
         if public_config
             .parameters
-            .starfish_rbc_dag_embedded_rbc_authority
-            && (!public_config.parameters.starfish_rbc_dag_shadow
-                || !public_config.parameters.starfish_rbc_dag_autonomous_clock)
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG embedded RBC authority requires the autonomous RBC-DAG shadow"
-            ));
-        }
-        if public_config
-            .parameters
             .starfish_rbc_single_dag_echo_qc_fast_path
             && !protocol_config
                 .consensus_protocol
@@ -512,6 +502,41 @@ mod smoke_tests {
         }));
     }
 
+    #[tokio::test]
+    async fn autonomous_clock_rejects_zero_heartbeat_interval() {
+        let committee_size = 4;
+        let committee = Committee::new_for_benchmarks(committee_size);
+        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
+        public_config.parameters.starfish_rbc_dag_shadow = true;
+        public_config.parameters.starfish_rbc_dag_autonomous_clock = true;
+        public_config
+            .parameters
+            .starfish_rbc_dag_heartbeat_interval_ms = 0;
+        public_config
+            .parameters
+            .refresh_starfish_rbc_protocol_instance();
+        let private_config =
+            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
+                .remove(0);
+
+        let result = Validator::start(
+            0,
+            committee,
+            public_config,
+            private_config,
+            Parameters::default(),
+            "honest".to_string(),
+            "starfish-rbc".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("autonomous heartbeat interval must be greater than zero")
+        }));
+    }
+
     async fn run_commit_test(
         consensus: &str,
         block_authentication: Option<&str>,
@@ -532,7 +557,6 @@ mod smoke_tests {
             port_offset,
             starfish_rbc_dag_shadow,
             false,
-            false,
         )
         .await;
     }
@@ -543,7 +567,6 @@ mod smoke_tests {
         port_offset: u16,
         starfish_rbc_dag_shadow: bool,
         autonomous_clock: bool,
-        embedded_rbc_authority: bool,
     ) {
         let committee_size = 4;
         let committee = Committee::new_for_benchmarks(committee_size);
@@ -552,20 +575,17 @@ mod smoke_tests {
         public_config.parameters.block_authentication = block_authentication.map(str::to_string);
         public_config.parameters.starfish_rbc_dag_shadow = starfish_rbc_dag_shadow;
         public_config.parameters.starfish_rbc_dag_autonomous_clock = autonomous_clock;
-        public_config
-            .parameters
-            .starfish_rbc_dag_embedded_rbc_authority = embedded_rbc_authority;
+        if autonomous_clock {
+            public_config
+                .parameters
+                .starfish_rbc_dag_heartbeat_interval_ms = 50;
+        }
         if consensus == "starfish-rbc" {
             public_config
                 .parameters
                 .refresh_starfish_rbc_protocol_instance();
         }
-        let mut parameters = Parameters::default();
-        if autonomous_clock {
-            // Exercise the shared Starfish/carrier pacemaker contract without
-            // making the integration test wait for production timeouts.
-            parameters.leader_timeout = Some(Duration::from_millis(50));
-        }
+        let parameters = Parameters::default();
 
         let dir = TempDir::new().unwrap();
         let private_configs = NodePrivateConfig::new_for_benchmarks(dir.as_ref(), committee_size);
@@ -628,12 +648,6 @@ mod smoke_tests {
                                 .with_label_values(&["delivery", "shadow"])
                                 .get()
                                 > 0
-                            && (!embedded_rbc_authority
-                                || metrics
-                                    .starfish_rbc_dag_shadow_inputs_total
-                                    .with_label_values(&["delivery", "embedded_application"])
-                                    .get()
-                                    > 0)
                             && metrics.starfish_rbc_dag_shadow_pending_recovery.get() == 0
                     }) {
                         break;
@@ -653,32 +667,6 @@ mod smoke_tests {
                     0,
                     "autonomous mode must not claim direct-round comparison"
                 );
-                if embedded_rbc_authority {
-                    assert!(
-                        metrics
-                            .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_initial"])
-                            .get()
-                            > 0,
-                        "direct INIT remains the application/payload transport"
-                    );
-                    assert_eq!(
-                        metrics
-                            .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_echo"])
-                            .get(),
-                        0,
-                        "direct RBC ECHO must be disabled under embedded authority"
-                    );
-                    assert_eq!(
-                        metrics
-                            .network_message_bytes_sent_total
-                            .with_label_values(&["rbc_ready"])
-                            .get(),
-                        0,
-                        "direct RBC READY must be disabled under embedded authority"
-                    );
-                }
             }
         } else if starfish_rbc_dag_shadow {
             let maximum_unpaired = STARFISH_RBC_DAG_SHADOW_MAX_UNPAIRED_FACTOR
@@ -824,13 +812,7 @@ mod smoke_tests {
 
     #[tokio::test]
     async fn starfish_rbc_dag_autonomous_clock_advances_without_owning_consensus() {
-        run_commit_test_with_shadow_mode("starfish-rbc", Some("mac"), 1700, true, true, false)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn starfish_rbc_dag_embedded_rbc_is_the_only_phase_authority() {
-        run_commit_test_with_shadow_mode("starfish-rbc", Some("mac"), 1740, true, true, true).await;
+        run_commit_test_with_shadow_mode("starfish-rbc", Some("mac"), 1700, true, true).await;
     }
 
     #[tokio::test]

@@ -839,7 +839,6 @@ mod tests {
                 own_prev: previous[author as usize],
                 weak_parents,
                 transactions_commitment: TransactionsCommitment::from_bytes([marker; 32]),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch: Vec::new(),
                 consensus_vertex: vertex,

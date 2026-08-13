@@ -1459,7 +1459,6 @@ mod tests {
                 own_prev,
                 weak_parents,
                 transactions_commitment: TransactionsCommitment::default(),
-                application_header: None,
                 data_acknowledgments: Vec::new(),
                 phase_batch,
                 consensus_vertex: None,
