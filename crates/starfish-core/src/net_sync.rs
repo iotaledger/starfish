@@ -109,7 +109,6 @@ enum RbcDagOutboundKeyV1 {
     Proactive(BlockReference),
     CarrierRequest(BlockReference),
     CarrierResponse(BlockReference),
-    CarrierEnvelopeResponse(BlockReference),
     SyncRequest(AuthorityIndex, RoundNumber),
     SyncResponse(AuthorityIndex, RoundNumber),
     ApplicationPayloadRequest(BlockReference),
@@ -482,10 +481,6 @@ fn rbc_dag_outbound_classification(
             priority,
             RbcDagOutboundKeyV1::CarrierResponse(response.reference),
         )),
-        NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(response) => Ok((
-            priority,
-            RbcDagOutboundKeyV1::CarrierEnvelopeResponse(response.reference),
-        )),
         NetworkMessage::RbcDagShadowCarrierSyncRequest(request) => Ok((
             priority,
             RbcDagOutboundKeyV1::SyncRequest(request.author, request.round),
@@ -518,10 +513,6 @@ fn rbc_dag_outbound_messages_equal(left: &NetworkMessage, right: &NetworkMessage
         (
             NetworkMessage::RbcDagShadowCarrierResponse(left),
             NetworkMessage::RbcDagShadowCarrierResponse(right),
-        ) => left == right,
-        (
-            NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(left),
-            NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(right),
         ) => left == right,
         (
             NetworkMessage::RbcDagShadowCarrierSyncRequest(left),
@@ -1744,21 +1735,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> ConnectionHandler<H
                             invalidate_shadow_run(&self.metrics);
                         }
                         tracing::warn!("Failed to forward RBC-DAG shadow response: {error}");
-                    }
-                }
-            }
-            NetworkMessage::RbcDagShadowCarrierEnvelopeResponse(response) => {
-                if let Some(ref shadow) = self.starfish_rbc_dag_shadow_service {
-                    if let Err(error) = shadow
-                        .carrier_envelope_response_reliably(self.peer_id, response)
-                        .await
-                    {
-                        if shadow_transport_error_invalidates_run(&error) {
-                            invalidate_shadow_run(&self.metrics);
-                        }
-                        tracing::warn!(
-                            "Failed to forward RBC-DAG shadow envelope response: {error}"
-                        );
                     }
                 }
             }
@@ -3254,9 +3230,6 @@ impl<H: BlockHandler + 'static, C: CommitObserver + 'static> NetworkSyncer<H, C>
                             // resolved Starfish leader timeout. Application and
                             // embedded RBC phase carriers remain event-driven.
                             node_parameters.leader_timeout,
-                            node_parameters
-                                .starfish_rbc_dag_consensus_timeout
-                                .unwrap_or(node_parameters.leader_timeout),
                             wal_sync_policy,
                             Arc::clone(&metrics),
                             rbc_dag_frontier_recovery_cursor,

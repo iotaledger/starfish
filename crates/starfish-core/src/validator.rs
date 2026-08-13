@@ -95,25 +95,6 @@ impl Validator {
                 "Starfish-RBC-DAG autonomous clock requires the RBC-DAG shadow"
             ));
         }
-        if public_config
-            .parameters
-            .starfish_rbc_dag_consensus_timeout
-            .is_some_and(|timeout| timeout.is_zero())
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG logical consensus timeout must be nonzero"
-            ));
-        }
-        if public_config
-            .parameters
-            .starfish_rbc_dag_consensus_timeout
-            .is_some()
-            && !public_config.parameters.starfish_rbc_dag_autonomous_clock
-        {
-            return Err(eyre!(
-                "Starfish-RBC-DAG logical consensus timeout requires the autonomous clock"
-            ));
-        }
         if start_options.rbc_dag_clock_start_paused
             && (!public_config.parameters.starfish_rbc_dag_autonomous_clock
                 || !public_config
@@ -542,38 +523,6 @@ mod smoke_tests {
             error
                 .to_string()
                 .contains("autonomous clock requires the RBC-DAG shadow")
-        }));
-    }
-
-    #[tokio::test]
-    async fn logical_consensus_timeout_requires_autonomous_clock() {
-        let committee_size = 4;
-        let committee = Committee::new_for_benchmarks(committee_size);
-        let mut public_config = NodePublicConfig::new_for_tests(committee_size);
-        public_config.parameters.starfish_rbc_dag_consensus_timeout =
-            Some(Duration::from_millis(250));
-        public_config
-            .parameters
-            .refresh_starfish_rbc_protocol_instance();
-        let private_config =
-            NodePrivateConfig::new_for_benchmarks(TempDir::new().unwrap().as_ref(), committee_size)
-                .remove(0);
-
-        let result = Validator::start(
-            0,
-            committee,
-            public_config,
-            private_config,
-            Parameters::default(),
-            "honest".to_string(),
-            "starfish-rbc".to_string(),
-        )
-        .await;
-
-        assert!(result.is_err_and(|error| {
-            error
-                .to_string()
-                .contains("logical consensus timeout requires the autonomous clock")
         }));
     }
 

@@ -55,9 +55,6 @@ heartbeats use the resolved Starfish leader timeout (600 ms for Push/Starfish-RB
 application carriers and encodable phase follow-ups are event-driven. The V4 authoritative mode
 promotes the proved `O`-ECHO predicate to delivery authority; `Q` READY remains a distinct slower
 certification fact rather than a prerequisite for fast projection.
-The research harness may override the logical C2 fallback timeout independently for controlled
-latency experiments. This does not change the physical heartbeat, carrier pacing, C1/C3 rules, or
-wire format; absent an override, C2 continues to use the resolved Starfish leader timeout.
 
 Standalone authority is an end-to-end boundary. The direct Starfish-RBC actor is absent, generic
 block dissemination and legacy pull messages are rejected or ignored, and the legacy Starfish
@@ -364,16 +361,12 @@ may attach different vectors to the same content reference, including a vector w
 one recipient and garbage for another. Correctness therefore depends only on the local entry and on
 the embedded four-phase protocol, never on agreement about the vector bytes.
 
-Each node persists one exact vector variant with an authenticated carrier for restart and relay:
-the locally generated sidecar for its own carrier, otherwise the first inbound variant whose local
-entry verifies. The implementation never replaces that variant by arrival provenance and never
-merges entries from different vectors. Exact carrier recovery after phase evidence prefers a new,
-appended envelope-response message carrying the holder's persisted variant. If the requester's
-local entry verifies, the response follows the ordinary relayed-ingress predicate and may create
-authenticated admission, ECHO, and fast-clock stake. If the entry is absent, malformed, or invalid,
-the same canonical bytes retain the legacy content-only authority and can still unblock phase
-progress, authoritative delivery, and READY certification. The frozen content-only response remains
-accepted for compatibility. A failed MAC check assigns no blame to either carrier author or holder.
+Each node persists one exact vector variant with its carrier for restart and relay. The preference
+order is locally generated, directly author-received, then first relayed variant with a valid local
+entry. The implementation does not merge unverified entries from different vectors. Exact carrier
+recovery after phase evidence may return canonical content without a vector; that recovery can
+unblock phase progress, authoritative delivery, and READY certification, but it does not create
+authenticated carrier admission or fast-clock stake.
 
 Public-signature modes use the same context-bound carrier statement without a recipient field and
 the same embedded RBC/consensus logic. They exist for controlled performance comparison, not as
@@ -560,14 +553,12 @@ union of phase senders as candidate holders, and request the target from those h
 content is accepted only when canonical decoding recomputes the requested `BlockReference` and the
 context/committee checks succeed. Retention precedes any new local phase lock.
 
-Recovery request/response is out-of-band byte transfer, not quorum testimony or a new phase. A
-response can satisfy only an already allocated evidence obligation and cannot create one. A
-vector-bearing response additionally grants ordinary carrier admission only when the exact
-receiver-specific authenticator verifies under the same committee/context predicate as proactive
-relayed ingress; otherwise it is content-only. The prototype retries recorded holders after GST.
-Its separate carrier catch-up mechanism requests one exact `(author, round)` at a time and serves
-only retained locally authored outbound bytes; it does not transfer ranges, certificates,
-checkpoints, committed observer history, or arbitrary late state.
+Recovery request/response is out-of-band byte transfer, not quorum testimony, admission, or a new
+phase. A valid response can satisfy an already allocated evidence obligation but cannot create one.
+The prototype retries recorded holders after GST. Its separate carrier catch-up mechanism requests
+one exact `(author, round)` at a time and serves only retained locally authored outbound bytes; it
+does not transfer ranges, certificates, checkpoints, committed observer history, or arbitrary late
+state.
 
 ### 8.3 Batching and fairness
 
@@ -626,8 +617,7 @@ an authoritative optimistic delivery:
 - **C1:** create at `c` after the eligible leader at `c - 1` is present and the eligible projection
   contains either `Q` votes for an exact leader value or a valid explicit direct-skip pattern for
   the leader slot at `c - 2`;
-- **C2:** create after the logical consensus timeout, which defaults to the resolved Starfish
-  leader timeout; or
+- **C2:** create after the consensus leader timeout; or
 - **C3:** catch up and create after observing eligible distinct-author stake `Q` already at `c`.
 
 The strong-parent set chosen under C1 must itself contain the immutable L2 witness: the exact `Q`
@@ -967,13 +957,7 @@ The executable model and composed runtime tests should cover at minimum:
 - `M` ECHO to VOTE, `C` ECHO-or-VOTE to ACK, `C` ACK to READY, `O` authoritative delivery, and
   independent `Q`-READY certification;
 - evidence-before-content recovery from phase holders, including VOTE/ACK without local admission;
-- vector-bearing phase-holder recovery that grants normal relayed admission only for a valid local
-  authenticator entry, falls back without blame for poisoned variants, preserves the frozen
-  content-only response, and replays the exact relayed provenance and sidecar after restart;
 - zero application load with heartbeat-only RBC completion;
-- independent logical-C2 timeout scheduling without changing the physical heartbeat, plus
-  coalesced producer notification ordering in which an already-published application wins a newly
-  opened carrier round before queued phase-only work;
 - two-round admission, 64-round authenticated retention, and future carriers that cannot jump the
   local sequential clock;
 - `f` permanently missing weak parents without blocking honest carrier or consensus progress;
@@ -1018,15 +1002,10 @@ The first fair benchmark matrix includes:
 - Sailfish++ as a certified signature-free comparison.
 
 Hold committee, load, transaction size, topology, latency injection, dissemination fanout, duration,
-timeouts, and build constant. Report carrier, vector, ECHO, VOTE, ACK, READY, content-only recovery,
-vector-bearing recovery, payload, and synchronization bytes separately. Also report authentication CPU, fast-admission-to-delivery
+timeouts, and build constant. Report carrier, vector, ECHO, VOTE, ACK, READY, recovery, payload,
+and synchronization bytes separately. Also report authentication CPU, fast-admission-to-delivery
 latency, carrier/consensus round skew, prefix lag, commit latency, throughput, and peak retained
 state.
-
-The benchmark also separates logical-vertex outcomes by enclosing carrier kind. Application and
-control/phase carriers each report bootstrap, C1, C2, C3, or omitted without adding per-slot metric
-labels. This event-local diagnostic distinguishes pre-inclusion scheduling delay from later
-projection/decision latency without changing carrier, journal, or wire bytes.
 
 Batching can reduce the number of separately scheduled RBC control messages, but it does not remove
 their logical quorum evidence. Full-vector all-to-all transport sends `n` tags in each of `n - 1`
@@ -1118,9 +1097,8 @@ The following production choices remain unresolved and must be proved or measure
   admission lookahead `2`, retains at most `64` future rounds for temporarily descheduled peers,
   and discards farther unsolicited carriers before admission/retention; these are benchmark resource
   parameters rather than protocol safety constants);
-- whether the logical C2 timeout needs a separately proved adaptive low-load rule; the prototype
-  exposes an experimental override but intentionally does not introduce a second physical
-  heartbeat timeout;
+- whether the shared Starfish leader-timeout policy needs a separately proved adaptive low-load
+  rule; the prototype intentionally does not introduce a second heartbeat timeout;
 - a safe state-retirement, garbage-collection, and late-catch-up watermark;
 - whether all supported storage backends are required before authoritative mode;
 - quantitative shadow-promotion thresholds and acceptable latency/bandwidth regression; and
